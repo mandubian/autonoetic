@@ -3236,7 +3236,6 @@ impl GatewayExecutionService {
             let is_signal = crate::runtime::session_timeline::is_signal_delivered_chat(metadata);
             persist_session_context_turn(
                 &runtime.agent_dir,
-                &self.config,
                 self.gateway_store.as_deref(),
                 &resolved_session_id,
                 &resume_initial_message,
@@ -3800,7 +3799,6 @@ impl GatewayExecutionService {
 
         persist_session_context_turn(
             &runtime.agent_dir,
-            &self.config,
             self.gateway_store.as_deref(),
             &resolved_session_id,
             &initial_msg,
@@ -4557,71 +4555,58 @@ fn gateway_signal_turn_start_context(
     }
 }
 
-fn extract_facts_from_task_runs(
-    tasks: &[autonoetic_types::workflow::TaskRun],
-) -> (Vec<crate::runtime::session_context::SessionFact>, Option<String>) {
-    let mut facts = Vec::new();
-    let mut topic = None;
-
-    for task in tasks {
-        if task.status != autonoetic_types::workflow::TaskRunStatus::Succeeded {
-            continue;
-        }
-        let summary = match task.result_summary.as_ref() {
-            Some(s) => s,
-            None => continue,
-        };
-        let parsed: serde_json::Value = match serde_json::from_str(summary) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let installed = parsed.get("installed").and_then(|v| v.as_bool()) == Some(true)
-            || parsed.get("status").and_then(|v| v.as_str()) == Some("promoted");
-
-        if installed {
-            if let Some(agent_id) = parsed.get("agent_id").and_then(|v| v.as_str()) {
-                if !agent_id.is_empty() {
-                    facts.push(crate::runtime::session_context::SessionFact {
-                        label: "installed_agent".to_string(),
-                        value: agent_id.to_string(),
-                        source: "workflow".to_string(),
-                    });
-                    topic = Some(format!("{} (installed)", agent_id));
-                }
-            }
-        }
-    }
-
-    (facts, topic)
-}
-
-fn extract_workflow_facts(
-    config: &GatewayConfig,
+/// Extract durable facts about agents promoted in `root_session_id` (or its
+/// child sessions) from the authoritative `promotion_attempts` SQLite table.
+///
+/// Unlike `result_summary` (free-form assistant text), this table is written
+/// structurally on every `agent_revision_promote` outcome and carries the
+/// target `alias_id` + `revision_id` — exactly the antecedent the planner
+/// needs to resolve referents like "it" after an install.
+fn extract_promotion_facts(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     root_session_id: &str,
-) -> anyhow::Result<Option<(Vec<crate::runtime::session_context::SessionFact>, Option<String>)>> {
-    use crate::scheduler::workflow_store::{
-        list_task_runs_for_workflow, resolve_workflow_id_for_root_session,
+) -> Option<(Vec<crate::runtime::session_context::SessionFact>, Option<String>)> {
+    let store = store?;
+    let promoted = match store.list_promoted_agents_by_root_session(root_session_id) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                target: "execution",
+                error = %error,
+                root_session_id,
+                "Failed to read promotion_attempts for session-context facts"
+            );
+            return None;
+        }
     };
+    if promoted.is_empty() {
+        return None;
+    }
 
-    let wf_id = match resolve_workflow_id_for_root_session(config, root_session_id)? {
-        Some(id) => id,
-        None => return Ok(None),
-    };
-    let tasks = list_task_runs_for_workflow(config, store, &wf_id)?;
-    let (facts, topic) = extract_facts_from_task_runs(&tasks);
+    let mut facts = Vec::new();
+    // Rows are ordered oldest-first; track the latest as the current topic.
+    let mut latest_topic: Option<String> = None;
+    for agent in &promoted {
+        if agent.agent_id.is_empty() {
+            continue;
+        }
+        facts.push(crate::runtime::session_context::SessionFact {
+            label: "installed_agent".to_string(),
+            value: agent.agent_id.clone(),
+            source: "promotion".to_string(),
+        });
+        latest_topic = Some(format!("{} (installed)", agent.agent_id));
+    }
 
-    if facts.is_empty() && topic.is_none() {
-        Ok(None)
+    if facts.is_empty() {
+        None
     } else {
-        Ok(Some((facts, topic)))
+        Some((facts, latest_topic))
     }
 }
 
 fn persist_session_context_turn(
     agent_dir: &std::path::Path,
-    config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     session_id: &str,
     user_message: &str,
@@ -4634,7 +4619,7 @@ fn persist_session_context_turn(
 
         let root_session_id = crate::runtime::content_store::root_session_id(session_id);
         if session_id == root_session_id {
-            if let Some((facts, topic)) = extract_workflow_facts(config, store, session_id)? {
+            if let Some((facts, topic)) = extract_promotion_facts(store, session_id) {
                 for fact in facts {
                     context.add_fact(fact);
                 }
@@ -4865,11 +4850,9 @@ mod tests {
     #[test]
     fn test_persist_session_context_turn_writes_current_exchange() {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let config = GatewayConfig::default();
 
         persist_session_context_turn(
             temp.path(),
-            &config,
             None,
             "session-2",
             "hello there",
@@ -4886,11 +4869,9 @@ mod tests {
     #[test]
     fn test_persist_session_context_turn_skips_signal_user_message() {
         let temp = tempfile::tempdir().expect("tempdir should create");
-        let config = GatewayConfig::default();
 
         persist_session_context_turn(
             temp.path(),
-            &config,
             None,
             "session-signal",
             "real user message",
@@ -4899,7 +4880,6 @@ mod tests {
         );
         persist_session_context_turn(
             temp.path(),
-            &config,
             None,
             "session-signal",
             "gateway signal payload",
@@ -4914,158 +4894,112 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_facts_from_task_runs_finds_installed_agent() {
-        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+    fn test_extract_promotion_facts_loads_from_store_for_child_session() {
+        // The promoting session is a child path under the root session
+        // (e.g. "root/specialized_builder.default-xxx"), exactly as written
+        // by agent_revision_promote in production. The prefix match must
+        // surface it when querying by the bare root session id.
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(dir.path())
+            .expect("store should open");
+        let root = "session-12d6d198";
+        store
+            .record_promotion_attempt(
+                "patt-1",
+                "fibonacci-next",
+                "rev-abc",
+                "sha256:deadbeef",
+                "promoted",
+                None,
+                None,
+                Some(&format!("{root}/specialized_builder.default-zzz")),
+                Some("wf-1"),
+            )
+            .unwrap();
 
-        let tasks = vec![TaskRun {
-            task_id: "task-install".to_string(),
-            workflow_id: "wf-test".to_string(),
-            agent_id: "agent-factory.default".to_string(),
-            session_id: "root-session/agent-factory.default-xxx".to_string(),
-            parent_session_id: "root-session".to_string(),
-            status: TaskRunStatus::Succeeded,
-            created_at: "2026-07-06T19:45:20Z".to_string(),
-            updated_at: "2026-07-06T19:45:20Z".to_string(),
-            source_agent_id: None,
-            result_summary: Some(
-                r#"{"status":"ok","agent_id":"fibonacci-next","installed":true,"smoke_test_performed":true}"#
-                    .to_string(),
-            ),
-            join_group: None,
-            message: None,
-            metadata: None,
-            retry_count: 0,
-            last_failure_class: None,
-            retry_policy: None,
-            side_effect_state: None,
-            dedupe_key: None,
-        }];
-
-        let (facts, topic) = extract_facts_from_task_runs(&tasks);
+        let (facts, topic) = extract_promotion_facts(Some(&store), root)
+            .expect("promotion facts should be present");
 
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].label, "installed_agent");
         assert_eq!(facts[0].value, "fibonacci-next");
+        assert_eq!(facts[0].source, "promotion");
         assert_eq!(topic.as_deref(), Some("fibonacci-next (installed)"));
     }
 
     #[test]
-    fn test_extract_facts_from_task_runs_ignores_non_installed() {
-        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+    fn test_extract_promotion_facts_ignores_rejected_attempts() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(dir.path())
+            .expect("store should open");
+        let root = "session-rejected";
+        store
+            .record_promotion_attempt(
+                "patt-rej",
+                "fibonacci-next",
+                "rev-abc",
+                "sha256:deadbeef",
+                "rejected",
+                Some("promotion_gate"),
+                Some("validation_failed"),
+                Some(root),
+                Some("wf-1"),
+            )
+            .unwrap();
 
-        let tasks = vec![TaskRun {
-            task_id: "task-other".to_string(),
-            workflow_id: "wf-test".to_string(),
-            agent_id: "coder.default".to_string(),
-            session_id: "root-session/coder.default-xxx".to_string(),
-            parent_session_id: "root-session".to_string(),
-            status: TaskRunStatus::Succeeded,
-            created_at: "2026-07-06T19:45:20Z".to_string(),
-            updated_at: "2026-07-06T19:45:20Z".to_string(),
-            source_agent_id: None,
-            result_summary: Some(r#"{"artifact_ref":"ar.55c3ccaf7f06","status":"ok"}"#.to_string()),
-            join_group: None,
-            message: None,
-            metadata: None,
-            retry_count: 0,
-            last_failure_class: None,
-            retry_policy: None,
-            side_effect_state: None,
-            dedupe_key: None,
-        }];
-
-        let (facts, topic) = extract_facts_from_task_runs(&tasks);
-
-        assert!(facts.is_empty());
-        assert!(topic.is_none());
+        assert!(extract_promotion_facts(Some(&store), root).is_none());
     }
 
     #[test]
-    fn test_extract_workflow_facts_loads_from_store() {
-        use autonoetic_types::workflow::{
-            JoinPolicy, TaskRun, TaskRunStatus, WorkflowRun, WorkflowRunStatus,
-        };
-        use sha2::{Digest, Sha256};
+    fn test_extract_promotion_facts_returns_none_without_store() {
+        // No gateway store available (e.g. minimal test config): gracefully
+        // skip fact injection rather than panic.
+        assert!(extract_promotion_facts(None, "session-any").is_none());
+    }
 
-        let temp = tempfile::tempdir().expect("tempdir should create");
-        let agents = temp.path().join("agents");
-        std::fs::create_dir_all(&agents).unwrap();
-        let config = GatewayConfig {
-            agents_dir: agents,
-            ..Default::default()
-        };
-        let root_session_id = "root-session";
-        let workflow_id = "wf-test-workflow";
+    #[test]
+    fn test_extract_promotion_facts_tracks_latest_topic() {
+        // Multiple promotions in the same root session: the most recent one
+        // (by created_at) becomes the current topic, while all are recorded
+        // as durable facts.
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(dir.path())
+            .expect("store should open");
+        let root = "session-multi";
+        store
+            .record_promotion_attempt(
+                "patt-old",
+                "agent-old",
+                "rev-1",
+                "sha256:a",
+                "promoted",
+                None,
+                None,
+                Some(root),
+                Some("wf-1"),
+            )
+            .unwrap();
+        // Sleep briefly so the second attempt has a strictly-later created_at.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store
+            .record_promotion_attempt(
+                "patt-new",
+                "agent-new",
+                "rev-2",
+                "sha256:b",
+                "promoted",
+                None,
+                None,
+                Some(&format!("{root}/builder-1")),
+                Some("wf-1"),
+            )
+            .unwrap();
 
-        let gateway_dir = gateway_root_dir(&config);
-        let index_dir = gateway_dir
-            .join("scheduler")
-            .join("workflows")
-            .join("index")
-            .join("by_root");
-        std::fs::create_dir_all(&index_dir).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(root_session_id.as_bytes());
-        let key = hex::encode(hasher.finalize());
-        let index_path = index_dir.join(format!("{}.json", key));
-        std::fs::write(
-            index_path,
-            serde_json::json!({
-                "workflow_id": workflow_id,
-                "root_session_id": root_session_id,
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let run = WorkflowRun {
-            workflow_id: workflow_id.to_string(),
-            root_session_id: root_session_id.to_string(),
-            lead_agent_id: "planner.collaborative".to_string(),
-            status: WorkflowRunStatus::Completed,
-            created_at: "2026-07-06T19:40:00Z".to_string(),
-            updated_at: "2026-07-06T19:45:00Z".to_string(),
-            active_task_ids: vec![],
-            queued_task_ids: vec![],
-            join_policy: JoinPolicy::default(),
-            join_task_ids: vec![],
-            active_plan_ref: None,
-            reactivated_for_root_spawn: false,
-        };
-        crate::scheduler::workflow_store::save_workflow_run(&config, None, &run).unwrap();
-
-        let task = TaskRun {
-            task_id: "task-install".to_string(),
-            workflow_id: workflow_id.to_string(),
-            agent_id: "agent-factory.default".to_string(),
-            session_id: format!("{}/agent-factory.default-xxx", root_session_id),
-            parent_session_id: root_session_id.to_string(),
-            status: TaskRunStatus::Succeeded,
-            created_at: "2026-07-06T19:42:00Z".to_string(),
-            updated_at: "2026-07-06T19:45:00Z".to_string(),
-            source_agent_id: None,
-            result_summary: Some(
-                r#"{"status":"ok","agent_id":"fibonacci-next","installed":true}"#.to_string(),
-            ),
-            join_group: None,
-            message: None,
-            metadata: None,
-            retry_count: 0,
-            last_failure_class: None,
-            retry_policy: None,
-            side_effect_state: None,
-            dedupe_key: None,
-        };
-        crate::scheduler::workflow_store::save_task_run(&config, None, &task).unwrap();
-
-        let (facts, topic) = extract_workflow_facts(&config, None, root_session_id)
-            .expect("extraction should succeed")
-            .expect("facts should be present");
-
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].label, "installed_agent");
-        assert_eq!(facts[0].value, "fibonacci-next");
-        assert_eq!(topic.as_deref(), Some("fibonacci-next (installed)"));
+        let (facts, topic) = extract_promotion_facts(Some(&store), root)
+            .expect("promotion facts should be present");
+        assert_eq!(facts.len(), 2);
+        // Topic reflects the latest promotion.
+        assert_eq!(topic.as_deref(), Some("agent-new (installed)"));
     }
 
     #[test]

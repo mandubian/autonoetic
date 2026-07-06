@@ -17,6 +17,7 @@ mod migrate;
 mod notifications;
 mod operator_activity;
 pub use operator_activity::OperatorActivityInsert;
+pub use agent_registry::PromotedAgent;
 mod observability;
 pub mod plan_frames;
 pub mod post_promotion_reviews;

@@ -6,6 +6,14 @@ use autonoetic_types::agent_revision::{
 };
 use rusqlite::{params, OptionalExtension};
 
+/// A successfully promoted agent, surfaced for session-context fact injection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotedAgent {
+    pub agent_id: String,
+    pub revision_id: String,
+    pub created_at: String,
+}
+
 const AGENT_REVISION_SELECT: &str = "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
@@ -824,6 +832,33 @@ impl GatewayStore {
             params![alias_id, content_digest],
         )?;
         Ok(deleted)
+    }
+
+    /// List agents successfully promoted in `root_session_id` or any of its
+    /// child sessions (`root_session_id/...`). Returns rows ordered oldest
+    /// first so callers can identify the most recent promotion. Used to seed
+    /// durable session-context facts so the planner retains conversational
+    /// referents (e.g. "it") across session finalization.
+    pub fn list_promoted_agents_by_root_session(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<PromotedAgent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT alias_id, revision_id, created_at
+             FROM promotion_attempts
+             WHERE outcome = 'promoted'
+               AND (session_id = ?1 OR session_id LIKE ?1 || '/%')
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            Ok(PromotedAgent {
+                agent_id: row.get(0)?,
+                revision_id: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
     /// Transactional variant of `record_promotion_attempt`. The caller must
