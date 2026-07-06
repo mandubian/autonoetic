@@ -1521,6 +1521,177 @@ fn test_agent_spawn_coalesces_duplicate_durable_operation() {
 }
 
 #[test]
+fn test_agent_spawn_injects_default_retry_policy() {
+    let manifest = test_manifest_with_id(
+        "planner.default",
+        vec![Capability::AgentSpawn {
+            max_children: 2,
+            max_spawn_depth: 0,
+        }],
+    );
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agents_dir = temp.path().join("agents");
+    let parent_dir = agents_dir.join("planner.default");
+    let child_dir = agents_dir.join("builder.default");
+    std::fs::create_dir_all(&parent_dir).expect("parent dir should create");
+    std::fs::create_dir_all(&child_dir).expect("child dir should create");
+
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store = Arc::new(
+        GatewayStore::open(&gateway_dir).expect("gateway store should open"),
+    );
+
+    // No retry_policy in metadata — the gateway should inject the default.
+    let args = serde_json::json!({
+        "agent_id": "builder.default",
+        "message": "Build something.",
+        "metadata": { "stage_kind": "build" }
+    });
+
+    let registry = default_registry();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+    let _guard = runtime.enter();
+    let result = registry
+        .execute(
+            "agent_spawn",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-default-retry"),
+            None,
+            Some(&config),
+            Some(gateway_store.clone()),
+            None,
+        )
+        .expect("spawn should queue");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("result should decode");
+    assert_eq!(parsed.get("status"), Some(&serde_json::json!("queued")));
+    let task_id = parsed
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("queued response should include task_id");
+
+    let workflow_id = parsed
+        .get("workflow_id")
+        .and_then(|v| v.as_str())
+        .expect("queued response should include workflow_id");
+
+    let task = autonoetic_gateway::scheduler::workflow_store::load_task_run(
+        &config,
+        Some(gateway_store.as_ref()),
+        workflow_id,
+        task_id,
+    )
+    .expect("load task run")
+    .expect("task should exist");
+
+    let retry_policy = task
+        .retry_policy
+        .expect("default retry policy should be injected");
+    assert_eq!(
+        retry_policy.get("transient_infra").and_then(|v| v.get("max_retries")),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        retry_policy.get("timeout").and_then(|v| v.get("max_retries")),
+        Some(&serde_json::json!(1))
+    );
+}
+
+#[test]
+fn test_agent_spawn_preserves_explicit_retry_policy() {
+    let manifest = test_manifest_with_id(
+        "planner.default",
+        vec![Capability::AgentSpawn {
+            max_children: 2,
+            max_spawn_depth: 0,
+        }],
+    );
+    let policy = PolicyEngine::new(manifest.clone());
+    let temp = tempdir().expect("tempdir should create");
+    let agents_dir = temp.path().join("agents");
+    let parent_dir = agents_dir.join("planner.default");
+    let child_dir = agents_dir.join("builder.default");
+    std::fs::create_dir_all(&parent_dir).expect("parent dir should create");
+    std::fs::create_dir_all(&child_dir).expect("child dir should create");
+
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..GatewayConfig::default()
+    };
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store = Arc::new(
+        GatewayStore::open(&gateway_dir).expect("gateway store should open"),
+    );
+
+    let args = serde_json::json!({
+        "agent_id": "builder.default",
+        "message": "Build something.",
+        "metadata": {
+            "stage_kind": "build",
+            "retry_policy": { "transient_infra": { "max_retries": 3 } }
+        }
+    });
+
+    let registry = default_registry();
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should create");
+    let _guard = runtime.enter();
+    let result = registry
+        .execute(
+            "agent_spawn",
+            &manifest,
+            &policy,
+            &parent_dir,
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).expect("json should encode"),
+            Some("root-explicit-retry"),
+            None,
+            Some(&config),
+            Some(gateway_store.clone()),
+            None,
+        )
+        .expect("spawn should queue");
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("result should decode");
+    let task_id = parsed
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("queued response should include task_id");
+
+    let workflow_id = parsed
+        .get("workflow_id")
+        .and_then(|v| v.as_str())
+        .expect("queued response should include workflow_id");
+
+    let task = autonoetic_gateway::scheduler::workflow_store::load_task_run(
+        &config,
+        Some(gateway_store.as_ref()),
+        workflow_id,
+        task_id,
+    )
+    .expect("load task run")
+    .expect("task should exist");
+
+    let retry_policy = task
+        .retry_policy
+        .expect("explicit retry policy should be preserved");
+    assert_eq!(
+        retry_policy.get("transient_infra").and_then(|v| v.get("max_retries")),
+        Some(&serde_json::json!(3))
+    );
+    assert!(
+        retry_policy.get("timeout").is_none(),
+        "explicit policy should not include gateway defaults"
+    );
+}
+
+#[test]
 fn test_skill_normalize_writes_autonoetic_skill_under_skills_scope() {
     let manifest = test_manifest(vec![Capability::WriteAccess {
         scopes: vec!["skills/*".to_string()],

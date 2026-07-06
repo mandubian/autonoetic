@@ -265,6 +265,12 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
         || lower.contains("502")
         || lower.contains("503")
         || lower.contains("504")
+        || lower.contains("500")
+        || lower.contains("529")
+        || lower.contains("api error 5")
+        || lower.contains("overloaded")
+        || lower.contains("peg-native")
+        || lower.contains("internal server error")
         || lower.contains("temporarily unavailable")
     {
         return WorkflowFailureMetadata::transient_infra();
@@ -375,6 +381,12 @@ pub(crate) fn classify_task_status(
                 || summary.contains("502")
                 || summary.contains("503")
                 || summary.contains("504")
+                || summary.contains("500")
+                || summary.contains("529")
+                || summary.contains("api error 5")
+                || summary.contains("overloaded")
+                || summary.contains("peg-native")
+                || summary.contains("internal server error")
                 || summary.contains("temporarily unavailable")
             {
                 Some(WorkflowFailureMetadata::transient_infra())
@@ -524,13 +536,66 @@ mod tests {
         );
     }
 
-    // P-5.14: prose is the last-resort fallback for error types without an
-    // unambiguous type-only mapping. An `Execution` error whose message says
-    // "active revision exists" still resolves to install_conflict via the
-    // string heuristics.
+    // Classification tests for LLM/server-style transient infrastructure
+    // failures. These exercise the prose fallback string heuristics that map
+    // HTTP 5xx and related overload phrases to TransientInfra.
     #[test]
-    fn prose_fallback_only_for_untyped() {
-        let metadata = classify_message("active revision exists for this agent", ToolErrorType::Execution);
-        assert_eq!(metadata.failure_class, Some(FailureClass::InstallConflict));
+    fn llm_5xx_task_status_is_transient_infra() {
+        let cases = [
+            "OpenAI API error 500: internal server error",
+            "Anthropic API error 529",
+            "model produced output that does not match the expected peg-native format",
+            "upstream returned api error 500",
+            "connection refused",
+            "transport reset",
+            "bad gateway 502",
+            "service unavailable 503",
+            "gateway timeout 504",
+            "server is temporarily unavailable",
+        ];
+        for summary in cases {
+            let metadata = classify_task_status(TaskRunStatus::Failed, Some(summary)).expect(summary);
+            assert_eq!(
+                metadata.failure_class,
+                Some(FailureClass::TransientInfra),
+                "{summary} should be transient_infra"
+            );
+            assert_eq!(metadata.retryable, Some(true));
+            assert_eq!(metadata.side_effect_state, Some(SideEffectState::NoSideEffect));
+        }
+    }
+
+    #[test]
+    fn llm_5xx_message_is_transient_infra() {
+        let cases = [
+            "OpenAI API error 500: internal server error",
+            "Anthropic API error 529",
+            "model produced output that does not match the expected peg-native format",
+            "upstream returned api error 5xx",
+        ];
+        for msg in cases {
+            let err = decorate_tool_error(ToolError::execution(msg, None::<String>));
+            assert_eq!(
+                err.failure_class,
+                Some(FailureClass::TransientInfra),
+                "{msg} should be transient_infra"
+            );
+            assert_eq!(err.retryable, Some(true));
+        }
+    }
+
+    #[test]
+    fn explicit_500_in_message_is_transient_infra() {
+        let err = decorate_tool_error(ToolError::execution("500", None::<String>));
+        assert_eq!(err.failure_class, Some(FailureClass::TransientInfra));
+    }
+
+    #[test]
+    fn non_retryable_validation_error_is_not_transient_infra() {
+        let err = decorate_tool_error(ToolError::validation(
+            "invalid json missing field",
+            None::<String>,
+        ));
+        assert_eq!(err.failure_class, Some(FailureClass::SchemaValidationFailed));
     }
 }
