@@ -467,6 +467,11 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayEscalationCommands,
     },
+    /// Inspect or retry durable workflow tasks.
+    Workflow {
+        #[command(subcommand)]
+        command: GatewayWorkflowCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -602,6 +607,45 @@ pub enum GatewayEscalationCommands {
         /// Optional reason for the decision.
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayWorkflowCommands {
+    /// Inspect or retry durable workflow tasks.
+    Task {
+        #[command(subcommand)]
+        command: GatewayTaskCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayTaskCommands {
+    /// Re-run a Failed (or Aborted) workflow task.
+    ///
+    /// Moves the task back to Runnable so the durable scheduler re-queues and
+    /// re-spawns it. This is the manual escape hatch for a task that exhausted
+    /// its automatic stage-retry budget (or never had one) — e.g. a child agent
+    /// that crashed on a transient LLM error past the driver retries. Reactivates
+    /// the parent workflow run if it is itself terminal.
+    Retry {
+        /// Task ID (e.g. task-xxxxxxxx).
+        task_id: String,
+        /// Workflow ID (wf-*). One of --workflow-id / --root-session is
+        /// required to locate the workflow. Takes precedence over --root-session.
+        #[arg(long)]
+        workflow_id: Option<String>,
+        /// Root session ID, used to resolve the workflow when --workflow-id is
+        /// omitted. One of --workflow-id / --root-session is required.
+        #[arg(long)]
+        root_session: Option<String>,
+        /// Optional note stamped on the task's result_summary (default:
+        /// "operator retry at <timestamp>").
+        #[arg(long)]
+        note: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -1434,6 +1434,131 @@ pub(crate) fn schedule_task_stage_retry(
     Ok(())
 }
 
+/// Operator-initiated retry of a terminal task.
+///
+/// Moves a `Failed` (or `Aborted`) task back to `Runnable` so the durable
+/// scheduler re-queues and re-spawns it. This is the manual escape hatch for a
+/// task that exhausted its automatic stage-retry budget (or never had one) —
+/// e.g. a child that crashed on a transient LLM error past the driver retries.
+///
+/// Unlike [`schedule_task_stage_retry`], this:
+/// - is an explicit operator action, not an automated state-machine transition;
+/// - deliberately bypasses [`TaskRunStatus::try_transition`], which forbids
+///   `Failed -> Runnable` (that guard is for *automated* correctness; an
+///   operator override is exactly the escape hatch we want here);
+/// - reactivates the parent [`WorkflowRun`] if it is itself terminal, mirroring
+///   the root-spawn reactivation in `agent.rs` (status -> `Resumable`,
+///   `reactivated_for_root_spawn = true`).
+///
+/// `result_summary` is stamped on the task (defaulting to an `"operator retry"`
+/// note) and a `task.updated` causal event is emitted.
+pub fn retry_workflow_task(
+    config: &GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    workflow_id: &str,
+    task_id: &str,
+    operator_note: Option<&str>,
+) -> anyhow::Result<TaskRun> {
+    let mut task = load_task_run(config, store, workflow_id, task_id)?
+        .ok_or_else(|| anyhow::anyhow!("task '{}' not in workflow '{}'", task_id, workflow_id))?;
+    anyhow::ensure!(
+        matches!(task.status, TaskRunStatus::Failed | TaskRunStatus::Aborted),
+        "task '{}' is {:?}; only Failed or Aborted tasks can be operator-retried",
+        task_id,
+        task.status,
+    );
+
+    let note = operator_note
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("operator retry at {}", now_rfc3339()));
+
+    task.status = TaskRunStatus::Runnable;
+    task.updated_at = now_rfc3339();
+    task.retry_count = task.retry_count.saturating_add(1);
+    task.result_summary = Some(note.clone());
+    // Clear the prior failure classification so the retried attempt starts
+    // without inherited failure metadata; a new failure will re-populate it.
+    task.last_failure_class = None;
+    task.side_effect_state = None;
+    save_task_run(config, store, &task)?;
+
+    // Reactivate the parent workflow run if it is itself terminal, so the
+    // scheduler picks the revived task back up. Mirrors the root-spawn
+    // reactivation in `runtime/tools/agent.rs` (status -> Resumable).
+    if is_workflow_terminal(config, store, workflow_id)? {
+        if let Some(mut run) = load_workflow_run(config, store, workflow_id)? {
+            run.status = WorkflowRunStatus::Resumable;
+            run.reactivated_for_root_spawn = true;
+            run.updated_at = now_rfc3339();
+            save_workflow_run(config, store, &run)?;
+        }
+    }
+
+    // Event emission is best-effort: by this point the task and (optionally)
+    // workflow-run state have been durably mutated and the retry has succeeded.
+    // Returning an error here would mislead the operator (the retry *did* work)
+    // and could cause a double-retry (retry_count bumped again). Log and
+    // continue returning the updated task.
+    if let Err(e) = append_workflow_event(
+        config,
+        store,
+        &WorkflowEventRecord {
+            event_id: new_event_id(),
+            workflow_id: workflow_id.to_string(),
+            task_id: Some(task_id.to_string()),
+            event_type: "task.updated".to_string(),
+            agent_id: Some(task.agent_id.clone()),
+            payload: serde_json::json!({
+                "status": TaskRunStatus::Runnable,
+                "result_summary": note,
+                "retry_count": task.retry_count,
+                "reason": "operator_retry",
+            }),
+            occurred_at: now_rfc3339(),
+        },
+    ) {
+        tracing::warn!(
+            target: "workflow_store",
+            workflow_id,
+            task_id,
+            error = %e,
+            "retry_workflow_task: failed to append task.updated event (state already mutated; retry succeeded)",
+        );
+    }
+
+    Ok(task)
+}
+
+/// Resolve a workflow id from operator-supplied `workflow_id` / `root_session`
+/// parameters, applying consistent normalization (trim; whitespace-only treated
+/// as absent). Used by both the CLI handler and the `workflow.task.retry` RPC
+/// arm so the resolution ladder and error messages stay identical.
+///
+/// Resolution order: explicit `workflow_id` > lookup by `root_session` > error.
+pub fn resolve_workflow_id_for_operator_retry(
+    config: &GatewayConfig,
+    workflow_id: Option<&str>,
+    root_session: Option<&str>,
+) -> anyhow::Result<String> {
+    let wf = workflow_id.map(str::trim).filter(|s| !s.is_empty());
+    let rs = root_session.map(str::trim).filter(|s| !s.is_empty());
+    match wf {
+        Some(w) => Ok(w.to_string()),
+        None => match rs {
+            Some(rsid) => resolve_workflow_id_for_root_session(config, rsid)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no workflow found for root session '{}'; pass --workflow-id explicitly",
+                        rsid
+                    )
+                }),
+            None => anyhow::bail!(
+                "either workflow_id or root_session must be provided to locate the workflow"
+            ),
+        },
+    }
+}
+
 /// Gather child-state summaries for all terminal tasks in a join group.
 /// Used to enrich the WorkflowJoinSatisfied signal so the planner can see
 /// every child's result without separate `workflow_state` / artifact inspect
@@ -4884,6 +5009,198 @@ mod tests {
         assert!(
             !events.iter().any(|e| e.event_type == "task.failed"),
             "retry scheduling should not emit a terminal failure event"
+        );
+    }
+
+    #[test]
+    fn retry_workflow_task_moves_failed_to_runnable_and_increments_count() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "op-retry-root", None).unwrap();
+
+        let mut task = TaskRun {
+            task_id: "task-op-retry".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "op-retry-root/coder-x".to_string(),
+            parent_session_id: "op-retry-root".to_string(),
+            status: TaskRunStatus::Failed,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: Some("child crashed: spawn_execute_error".to_string()),
+            join_group: None,
+            message: Some("Do the work".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: Some(
+                autonoetic_types::tool_error::FailureClass::Unknown,
+            ),
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let retried = retry_workflow_task(
+            &cfg,
+            None,
+            &wf.workflow_id,
+            "task-op-retry",
+            Some("operator: transient LLM 500, retrying"),
+        )
+        .unwrap();
+
+        assert_eq!(retried.status, TaskRunStatus::Runnable);
+        assert_eq!(retried.retry_count, 1);
+        assert_eq!(
+            retried.result_summary.as_deref(),
+            Some("operator: transient LLM 500, retrying")
+        );
+        assert_eq!(retried.last_failure_class, None, "prior failure class cleared");
+
+        let loaded = load_task_run(&cfg, None, &wf.workflow_id, "task-op-retry")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, TaskRunStatus::Runnable);
+        assert_eq!(loaded.retry_count, 1);
+
+        let events = load_workflow_events(&cfg, None, &wf.workflow_id).unwrap();
+        let updated = events
+            .iter()
+            .filter(|e| e.event_type == "task.updated")
+            .last()
+            .expect("task.updated event should exist");
+        assert_eq!(updated.payload["status"], "runnable");
+        assert_eq!(updated.payload["reason"], "operator_retry");
+        assert_eq!(updated.payload["retry_count"], 1);
+    }
+
+    #[test]
+    fn retry_workflow_task_reactivates_terminal_workflow_run() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "op-retry-term-root", None).unwrap();
+
+        // Force the workflow run itself into a terminal state.
+        let mut run =
+            load_workflow_run(&cfg, None, &wf.workflow_id).unwrap().unwrap();
+        run.status = WorkflowRunStatus::Failed;
+        save_workflow_run(&cfg, None, &run).unwrap();
+        assert!(is_workflow_terminal(&cfg, None, &wf.workflow_id).unwrap());
+
+        let task = TaskRun {
+            task_id: "task-term-retry".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "op-retry-term-root/coder-x".to_string(),
+            parent_session_id: "op-retry-term-root".to_string(),
+            status: TaskRunStatus::Failed,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: Some("Do the work".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        retry_workflow_task(&cfg, None, &wf.workflow_id, "task-term-retry", None).unwrap();
+
+        let revived = load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            revived.status,
+            WorkflowRunStatus::Resumable,
+            "terminal workflow should be reactivated to Resumable"
+        );
+        assert!(
+            revived.reactivated_for_root_spawn,
+            "reactivated_for_root_spawn flag should be set"
+        );
+    }
+
+    #[test]
+    fn retry_workflow_task_rejects_non_terminal_task() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf =
+            ensure_workflow_for_root_session(&cfg, None, "op-retry-succ-root", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-succeeded".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: "op-retry-succ-root/coder-x".to_string(),
+            parent_session_id: "op-retry-succ-root".to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: Some("done".to_string()),
+            join_group: None,
+            message: Some("Do the work".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let err = retry_workflow_task(&cfg, None, &wf.workflow_id, "task-succeeded", None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("only Failed or Aborted"),
+            "non-terminal task should be rejected; got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_workflow_id_for_operator_retry_normalizes_and_prefers_explicit() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "resolve-root", None).unwrap();
+
+        // Explicit workflow_id wins (and trims surrounding whitespace).
+        let resolved = resolve_workflow_id_for_operator_retry(
+            &cfg,
+            Some(&format!("  {}  ", wf.workflow_id)),
+            Some("resolve-root"),
+        )
+        .unwrap();
+        assert_eq!(resolved, wf.workflow_id);
+
+        // root_session resolves when workflow_id is absent/whitespace.
+        let resolved_by_root = resolve_workflow_id_for_operator_retry(
+            &cfg,
+            Some("   "),
+            Some("resolve-root"),
+        )
+        .unwrap();
+        assert_eq!(resolved_by_root, wf.workflow_id);
+
+        // Neither provided (both whitespace/None) → error.
+        let err = resolve_workflow_id_for_operator_retry(&cfg, Some("  "), None).unwrap_err();
+        assert!(
+            err.to_string().contains("either workflow_id or root_session"),
+            "missing both should error; got: {err}"
         );
     }
 

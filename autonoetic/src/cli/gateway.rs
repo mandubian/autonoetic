@@ -2966,3 +2966,69 @@ pub async fn handle_gateway_escalations(
     }
     Ok(())
 }
+
+pub async fn handle_gateway_workflow(
+    config_path: &Path,
+    command: &super::common::GatewayWorkflowCommands,
+) -> anyhow::Result<()> {
+    use autonoetic_types::workflow::TaskRunStatus;
+
+    match command {
+        super::common::GatewayWorkflowCommands::Task { command } => match command {
+            super::common::GatewayTaskCommands::Retry {
+                task_id,
+                workflow_id,
+                root_session,
+                note,
+                json,
+            } => {
+                let config = autonoetic_gateway::config::load_config(config_path)?;
+                let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+                let gateway_store =
+                    autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
+                        &gateway_dir,
+                    )?;
+
+                // Resolve the workflow id with the shared helper so the
+                // (explicit workflow_id > root_session > error) ladder and the
+                // trim/empty-as-None normalization stay identical to the RPC arm.
+                let wf_id =
+                    autonoetic_gateway::scheduler::workflow_store::resolve_workflow_id_for_operator_retry(
+                        &config,
+                        workflow_id.as_deref(),
+                        root_session.as_deref(),
+                    )?;
+
+                let task =
+                    autonoetic_gateway::scheduler::workflow_store::retry_workflow_task(
+                        &config,
+                        Some(&gateway_store),
+                        &wf_id,
+                        task_id,
+                        note.as_deref(),
+                    )?;
+
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "task_id": task.task_id,
+                            "workflow_id": task.workflow_id,
+                            "agent_id": task.agent_id,
+                            "status": TaskRunStatus::Runnable,
+                            "retry_count": task.retry_count,
+                            "result_summary": task.result_summary,
+                        }))?
+                    );
+                    return Ok(());
+                }
+
+                println!(
+                    "Task {} in workflow {} moved back to Runnable (retry #{}). The scheduler will re-queue it.",
+                    task_id, wf_id, task.retry_count
+                );
+            }
+        },
+    }
+    Ok(())
+}
