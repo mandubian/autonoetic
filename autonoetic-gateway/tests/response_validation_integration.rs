@@ -681,8 +681,113 @@ async fn test_curator_decision_persisted_under_io_returns_advisory_skip() -> any
 
 #[serial_test::serial]
 #[tokio::test]
-async fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()>
-{
+async fn test_curator_decision_persisted_after_repair_success() -> anyhow::Result<()> {
+    // Issue #752 (repair path): a curator whose first reply fails io.returns
+    // schema validation, then satisfies it on the repair turn while also
+    // emitting a decision_journal, must still have its journal persisted.
+    // Previously the repair-success Ok path never called extract_and_persist.
+    let workspace = TestWorkspace::new()?;
+    let mut config = workspace.gateway_config();
+    config.response_validation.enabled = true;
+    config.response_validation.repair_enabled = true;
+
+    install_validation_agent(
+        &workspace.agents_dir,
+        "curator.repair.agent",
+        r#"io:
+  returns:
+    type: object
+    required:
+      - status
+    properties:
+      status:
+        type: string
+  returns_enforcement: strict
+  output_policy:
+    repair:
+      auto: true
+      max_attempts: 1
+"#,
+    )?;
+    let store = setup_store_and_seed(&config, &workspace.agents_dir, "curator.repair.agent")?;
+
+    let call_count = Arc::new(Mutex::new(0usize));
+    let cc = call_count.clone();
+    let stub = OpenAiStub::spawn(move |_raw, _body_json| {
+        let cc = cc.clone();
+        async move {
+            let mut n = cc.lock().unwrap();
+            *n += 1;
+            // The 2nd+ LLM call is the repair turn (1st is the initial run).
+            let is_repair_turn = *n >= 2;
+            let content = if is_repair_turn {
+                // Satisfies io.returns (has `status`) and carries a journal.
+                r#"{"status":"ok","decision_journal":[{"target":"mem-repaired","action":"drop","reason_code":"stale","reason_detail":"no retrievals in 30d","confidence":0.8}]}"#
+            } else {
+                // Valid JSON but missing required `status` -> output_schema
+                // violation -> triggers one repair round.
+                r#"{"notes":"curating"}"#
+            };
+            serde_json::json!({
+                "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4}
+            })
+        }
+    })
+    .await?;
+    let _url = EnvGuard::set("AUTONOETIC_LLM_BASE_URL", stub.completion_url());
+    let _key = EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+
+    let execution = GatewayExecutionService::new(config, Some(store.clone()));
+    let result = execution
+        .spawn_agent_once(
+            "curator.repair.agent",
+            "curate memory",
+            "sess-curator-repair-1",
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "repaired reply satisfying io.returns must pass, got: {result:?}"
+    );
+    assert!(
+        *call_count.lock().unwrap() >= 2,
+        "repair loop should have run at least 2 LLM calls (initial + repair)"
+    );
+
+    let events = store.search_causal_events(
+        Some("sess-curator-repair-1"),
+        Some("curator.repair.agent"),
+        100,
+    )?;
+    let decision_event = events
+        .iter()
+        .find(|e| e.category == "curator" && e.action == "decision")
+        .expect("expected curator.decision event to be persisted after repair success");
+    assert_eq!(decision_event.target.as_deref(), Some("mem-repaired"));
+    let payload = decision_event
+        .payload
+        .as_ref()
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+        .expect("decision payload should be valid json");
+    assert_eq!(payload["action"], "drop");
+    assert_eq!(payload["reason_code"], "stale");
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()> {
+
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;

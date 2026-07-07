@@ -1303,43 +1303,10 @@ impl GatewayExecutionService {
                 out.extend(violations_to_feedback_events(&violations));
             }
 
-            // Issue #30: if the reply carries a `decision_journal` array
-            // (curator-style output), persist one `curator.decision` causal
-            // event per entry so operators can query by target.
-            if let (Some(store), Some(reply)) =
-                (self.gateway_store(), result.assistant_reply.as_deref())
-            {
-                let revision_id = store
-                    .get_session_agent_binding(&result.session_id)
-                    .ok()
-                    .flatten()
-                    .map(|b| b.revision_id)
-                    .filter(|s| !s.is_empty());
-                match crate::runtime::curator_journal::extract_and_persist(
-                    store.as_ref(),
-                    "curator",
-                    agent_id,
-                    &result.session_id,
-                    revision_id.as_deref(),
-                    reply,
-                ) {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(
-                        target: "curator_journal",
-                        agent_id = %agent_id,
-                        session_id = %result.session_id,
-                        entry_count = n,
-                        "decision_journal persisted"
-                    ),
-                    Err(e) => tracing::warn!(
-                        target: "curator_journal",
-                        agent_id = %agent_id,
-                        session_id = %result.session_id,
-                        error = %e,
-                        "decision_journal persistence failed"
-                    ),
-                }
-            }
+            // Issue #30 / #752: persist any `decision_journal` entries as
+            // `curator.decision` events. Independent of io.returns schema
+            // validation — see `persist_curator_decision_journal`.
+            self.persist_curator_decision_journal(&result, agent_id);
 
             return Ok(result);
         }
@@ -1383,28 +1350,9 @@ impl GatewayExecutionService {
             }
 
             if policy_violations.is_empty() {
-                // Issue #752: extract_and_persist lives inside the
-                // `violations.is_empty()` block at line 1306, but the Advisory
-                // early-return here bypasses it. Persist curator decisions
-                // here too before returning.
-                if let (Some(store), Some(reply)) =
-                    (gateway_store.as_deref(), result.assistant_reply.as_deref())
-                {
-                    let revision_id = store
-                        .get_session_agent_binding(&result.session_id)
-                        .ok()
-                        .flatten()
-                        .map(|b| b.revision_id)
-                        .filter(|s| !s.is_empty());
-                    let _ = crate::runtime::curator_journal::extract_and_persist(
-                        store,
-                        "curator",
-                        agent_id,
-                        &result.session_id,
-                        revision_id.as_deref(),
-                        reply,
-                    );
-                }
+                // Issue #752: journal extraction is independent of io.returns
+                // schema validation — persist before the Advisory early return.
+                self.persist_curator_decision_journal(&result, agent_id);
                 return Ok(result);
             }
 
@@ -1673,6 +1621,9 @@ impl GatewayExecutionService {
                     self.config().as_ref(),
                     &result.session_id,
                 );
+                // Issue #752: a successfully repaired reply may still carry a
+                // `decision_journal`; persist it like any other Ok path.
+                self.persist_curator_decision_journal(&result, agent_id);
                 Ok(result)
             }
             Err(e) => {
@@ -1682,6 +1633,53 @@ impl GatewayExecutionService {
                 );
                 Err(e)
             }
+        }
+    }
+
+    /// Persist any `decision_journal` entries the reply carries as one
+    /// `curator.decision` causal event per entry (Issue #30).
+    ///
+    /// This is deliberately independent of io.returns schema validation
+    /// (Issue #752): even when the reply is incomplete or was admitted under
+    /// Advisory enforcement — or only passed after a repair round — the
+    /// journal entries that *are* present must still be recorded so the
+    /// causal-chain audit trail is never silently dropped. Call this at every
+    /// `Ok` exit of [`validate_and_maybe_repair`].
+    fn persist_curator_decision_journal(&self, result: &SpawnResult, agent_id: &str) {
+        let (Some(store), Some(reply)) =
+            (self.gateway_store(), result.assistant_reply.as_deref())
+        else {
+            return;
+        };
+        let revision_id = store
+            .get_session_agent_binding(&result.session_id)
+            .ok()
+            .flatten()
+            .map(|b| b.revision_id)
+            .filter(|s| !s.is_empty());
+        match crate::runtime::curator_journal::extract_and_persist(
+            store.as_ref(),
+            "curator",
+            agent_id,
+            &result.session_id,
+            revision_id.as_deref(),
+            reply,
+        ) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                target: "curator_journal",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                entry_count = n,
+                "decision_journal persisted"
+            ),
+            Err(e) => tracing::warn!(
+                target: "curator_journal",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                error = %e,
+                "decision_journal persistence failed"
+            ),
         }
     }
 
