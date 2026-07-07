@@ -223,15 +223,15 @@ fn parse_u32_field(value: Option<&Value>) -> Option<u32> {
     None
 }
 
-/// Insert or replace `context_window_tokens` in a YAML config string (default preset block).
+/// Insert or replace `context_window_tokens` in a YAML config string (preset blocks).
+/// Existing lines are normalized to the standard 4-space preset-field indentation so a
+/// previously corrupted/outdented line cannot break the next config load.
 pub fn patch_context_window_tokens_in_yaml(content: &str, tokens: u32) -> String {
     let line = format!("context_window_tokens: {tokens}");
-    if let Ok(re) = regex::Regex::new(r"(?m)^(\s*)context_window_tokens:\s*\d+\s*$") {
+    if let Ok(re) = regex::Regex::new(r"(?m)^\s*context_window_tokens:\s*\d+\s*$") {
         if re.is_match(content) {
             return re
-                .replace_all(content, |caps: &regex::Captures<'_>| {
-                    format!("{}{line}", &caps[1])
-                })
+                .replace_all(content, |_caps: &regex::Captures<'_>| format!("    {line}"))
                 .into_owned();
         }
     }
@@ -322,5 +322,13 @@ mod tests {
         let yaml = "    context_window_tokens: 32768\n";
         let patched = patch_context_window_tokens_in_yaml(yaml, 114688);
         assert_eq!(patched.trim(), "context_window_tokens: 114688");
+    }
+
+    #[test]
+    fn patch_context_window_tokens_reindents_top_level_line() {
+        let yaml = "llm_presets:\n  default:\n    provider: \"openrouter\"\n    model: \"x\"\n    temperature: 0.2\ncontext_window_tokens: 32768\n";
+        let patched = patch_context_window_tokens_in_yaml(yaml, 114688);
+        assert!(patched.contains("    context_window_tokens: 114688"));
+        assert!(!patched.contains("\ncontext_window_tokens:"));
     }
 }

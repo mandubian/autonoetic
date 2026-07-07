@@ -311,8 +311,12 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
     let (provider, original_entry, model, base_url) = match super::model_discovery::interactive_select(&client).await {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("  Model selection skipped ({}). Using current config.", e);
-            return Ok(());
+            // Surface the failure loudly instead of silently leaving the config untouched.
+            // A missing/empty API key, a model-fetch network error, etc. must abort with a
+            // non-zero exit so the operator knows the config was not updated.
+            return Err(anyhow::anyhow!(
+                "model selection failed; config left unchanged. {e}"
+            ));
         }
     };
 
