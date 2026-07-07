@@ -7465,8 +7465,9 @@ fn draw_gate_modal(
     } else {
         content_lines.push(Line::from(format!("Gate id: {}", modal.gate.id)));
     }
-    // Plan gates render the canonical plan detail in a dedicated section below;
-    // do not auto-inject inspect_lines here or the plan would appear twice.
+    // Plan gates render the canonical plan detail in a dedicated section below.
+    // Do not auto-inject inspect_lines for plan gates in either branch or the plan
+    // would appear twice (the headline is already shown above the dedicated section).
     if content_lines.len() <= 2 && !inspect_lines.is_empty() && modal.gate.kind != GateKind::Plan {
         content_lines.push(Line::from(Span::styled(
             "From approval record:",
@@ -7476,6 +7477,7 @@ fn draw_gate_modal(
             content_lines.push(Line::from(line.clone()));
         }
     } else if !inspect_lines.is_empty()
+        && modal.gate.kind != GateKind::Plan
         && entry.is_some_and(|e| {
             payload_field_str(e, "reason").is_none()
                 && payload_field_str(e, "synthesis").is_none()
