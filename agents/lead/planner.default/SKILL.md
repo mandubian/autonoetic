@@ -412,15 +412,30 @@ When an artifact-backed agent needs promotion (after `coder.default` produces an
 
 | Artifact type | Roles to spawn |
 |---|---|
-| Pure-skill (SKILL.md only, no code) | `auditor.default` + `static_evaluator.default` |
-| Artifact-backed, no external HTTP | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` |
-| Artifact-backed, has HTTP calls | `auditor.default` + `static_evaluator.default` + `unit_test_runner.default` (sealed_evaluator deferred to operator decision) |
+| Pure-skill (SKILL.md only, no code) | `auditor.default` + `static_evaluator.default` in parallel |
+| Artifact-backed, no external HTTP | `unit_test_runner.default` first, then `auditor.default` + `static_evaluator.default` in parallel |
+| Artifact-backed, has HTTP calls | `unit_test_runner.default` first, then `auditor.default` + `static_evaluator.default` in parallel (sealed_evaluator deferred to operator decision) |
 
 `unit_test_runner.default` runs tests in a **no-network** promotion sandbox (P-3.10). Artifact unit tests must mock external HTTP/DNS — live API or localhost-server tests are integration tests and will yield `unable_to_evaluate`, not a pass/fail verdict. Ensure `coder.default` wrote hermetic tests before federation; do not re-spawn the unit test runner hoping network approval will appear.
 
-Spawn the independent roles in parallel with `async=true`, then join them with a single `workflow_wait(task_ids=[<all roles>], timeout_secs=300)` (Case 2 — parallel fan-out). It returns once every role is terminal; then collect verdicts. Do not loop the wait or end your turn per-role.
+**Step 2: Run the correctness gate first**
 
-**Step 2: Collect verdicts**
+For artifact-backed agents, spawn `unit_test_runner.default` alone with `async=true`, then call `workflow_wait(task_ids=[<unit_test_task>], timeout_secs=300)`. This is a single sequential gate, not a fan-out. If it fails, stop and route findings to `coder.default` (code bug) or `packager.default` (missing dependency layer). Do not spawn `auditor.default` or `static_evaluator.default` on a known-broken artifact.
+
+If `unit_test_runner` returns `unable_to_evaluate` (no test files in the artifact), proceed to Step 3 — this is normal for trivial scripts.
+
+**Step 3: Run the review gates in parallel**
+
+Only after `unit_test_runner` passes or is inapplicable, spawn the independent review gates in parallel with `async=true`, then join them with a single `workflow_wait` (Case 2 — parallel fan-out):
+
+| Artifact type | Review gates to spawn in parallel |
+|---|---|
+| Pure-skill (SKILL.md only, no code) | `auditor.default` + `static_evaluator.default` |
+| Artifact-backed | `auditor.default` + `static_evaluator.default` |
+
+It returns once every review role is terminal; then collect verdicts. Do not loop the wait or end your turn per-role.
+
+**Step 4: Collect verdicts**
 
 After all roles complete, call `promotion_query({artifact_ref})` to collect role records:
 
@@ -431,7 +446,7 @@ After all roles complete, call `promotion_query({artifact_ref})` to collect role
 
 Use `promotion_query` records — not child reply JSON — as the source of truth.
 
-**Step 3: Escalate to operator**
+**Step 5: Escalate to operator**
 
 Bundle all evaluation reports and escalate to the operator using `federation.escalate`.
 
@@ -456,11 +471,11 @@ federation.escalate({
     {"role": "static_evaluator", "agent_id": "static_evaluator.default", "passed": true, "findings_summary": "...", "recorded_at": "..."},
     {"role": "unit_test_runner", "agent_id": "unit_test_runner.default", "passed": true, "findings_summary": "...", "recorded_at": "..."}
   ],
-  "planner_synthesis": "All three federation roles passed. Recommend promotion."
+  "planner_synthesis": "All federation roles passed. Recommend promotion."
 })
 ```
 
-`federation.escalate` returns `{approval_request_id: "apr-esc-...", status: "pending"}`. **This is a gateway approval — it gates `agent.spawn` for the entire session until resolved.** Save the `approval_request_id`; you will need it in Step 4.
+`federation.escalate` returns `{approval_request_id: "apr-esc-...", status: "pending"}`. **This is a gateway approval — it gates `agent.spawn` for the entire session until resolved.** Save the `approval_request_id`; you will need it in Step 6.
 
 The operator resolves it via the chat TUI's pending-approvals command or `autonoetic gateway approvals approve|reject <id>`. Once resolved, re-check via `approval_status` or `promotion_query`. The operator may:
 - **Approve**: spawn `agent-factory.default` with `artifact_ref`, `agent_id`, `federation_complete: true`, and `escalation_approval_id` — factory creates candidate, smoke-tests capability-bearing agents, then promotes
@@ -470,7 +485,7 @@ The operator resolves it via the chat TUI's pending-approvals command or `autono
 
 **Note**: Do NOT use `session.escalate` for federation reviews — use `federation.escalate`. The `session.escalate` tool is for when the agent itself is stuck and needs human guidance, not for structured promotion review.
 
-**Step 4: Wait for the operator decision — one channel only**
+**Step 6: Wait for the operator decision — one channel only**
 
 After `federation.escalate`, the only valid wait pattern is:
 

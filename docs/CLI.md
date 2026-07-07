@@ -628,6 +628,56 @@ autonoetic trace contract-health [--since <RFC3339>] [--json]
 
 ---
 
+## Session Commands
+
+Inspect and export session-level state.
+
+### `autonoetic session show`
+
+Print the `SessionOutcome` row for a session as JSON. The row is created when the session closes.
+
+```bash
+autonoetic session show <session_id>
+```
+
+### `autonoetic session rate`
+
+Attach an operator rating (`thumbs-up` or `thumbs-down`) to a session's `SessionOutcome` row.
+
+```bash
+autonoetic session rate <session_id> --thumbs-up [--note "..."]
+autonoetic session rate <session_id> --thumbs-down [--note "..."]
+```
+
+- `--note` is capped at 500 characters.
+
+### `autonoetic session export`
+
+Export a full session (root session tree) into a single human-readable archive or a structured archive directory.
+
+```bash
+# Single-file export (default: <session-id>.room.md in current directory)
+autonoetic session export <session_id>
+autonoetic session export <session_id> --format json --output report.json
+
+# Structured archive directory with wiki-style Markdown + JSON + manifest
+autonoetic session export <session_id> --output-dir ./archives
+```
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output <PATH>` | Output path for a single-file export. Defaults to `<session-id>.room.md` (or `.json`). Mutually exclusive with `--output-dir`. |
+| `-f, --format <FORMAT>` | Export format: `room` (default), `room-raw`, or `json`. |
+| `--with-checkpoints` | Include full checkpoint files (message history) in the export. Checkpoints can be large. Implied when `--output-dir` is used. |
+| `--min-altitude <LEVEL>` | Drop `detail` events when set to `normal`, `attention`, or `error`. |
+| `--output-dir <DIR>` | Export into a structured archive directory instead of a single file. Layout: `<DIR>/<constitution-version>-<lock-digest-short>/<session-id>/` containing `wiki/`, `<session-id>.json`, and `MANIFEST.json`. Mutually exclusive with `--output`. |
+
+The archive directory is cleaned on re-export for the same session, so stale pages are removed.
+
+---
+
 ## Capsule Commands
 
 Export, import, verify, and inspect Cognitive Capsules — portable, signed, revision-pinned agent snapshots. See [`docs/cognitive-capsule.md`](cognitive-capsule.md).

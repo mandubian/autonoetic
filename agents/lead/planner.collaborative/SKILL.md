@@ -266,7 +266,7 @@ For a new agent build, include the full pipeline — not just the first step:
       "title": "Federation gates (artifact evidence)",
       "owner": "planner",
       "depends_on": ["s3b"],
-      "notes": "Parallel: auditor + static_evaluator + unit_test_runner on final layered artifact_ref. Execution roles (unit_test_runner) record with execution_trace_id; static_evaluator and auditor set pass explicitly. NOT install smoke test."
+      "notes": "Tiered gates: run unit_test_runner first on the final layered artifact_ref. On pass, run auditor + static_evaluator in parallel. Execution roles (unit_test_runner) record with execution_trace_id; static_evaluator and auditor set pass explicitly. NOT install smoke test."
     },
     {
       "step_id": "s5",
@@ -400,10 +400,10 @@ re-ask the operator about, something already granted.
    one event with ALL child results. Process every child's outcome in the same turn —
    do not spend separate turns acknowledging each result. Analyze all findings
    together and decide the next action (next step, error routing, or operator message)
-   in a single response. This is especially important for parallel federation gates
-   (auditor + static_evaluator + unit_test_runner): read all three outcomes in one
-   pass, route failures to the correct specialist (packager for dep errors, coder for
-   code bugs), and proceed without intermediate ack turns.
+   in a single response. This is especially important for parallel review gates
+   (`auditor.default` + `static_evaluator.default` after `unit_test_runner` passes): read both
+   outcomes in one pass, route failures to the correct specialist (packager for dep errors,
+   coder for code bugs), and proceed without intermediate ack turns.
 
 5. If a completed step reveals **structural** scope change (new step, removed step,
    new specialist, new hosts/capabilities), `planframe_amend` and note that
@@ -542,9 +542,8 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
 
 **Federation**
 
-1. Spawn federation roles in parallel (`async=true`): `auditor.default`,
-   `static_evaluator.default`, and `unit_test_runner.default` when the artifact has code.
-2. Join with one `workflow_wait`, then `promotion_query({artifact_ref})`.
+1. **Run the correctness gate first.** Spawn `unit_test_runner.default` alone (`async=true`) and call `workflow_wait(task_ids=[<unit_test_task>], timeout_secs=300)`. This is a sequential gate, not a fan-out. If it fails, stop and route findings to `coder.default` (code bug) or `packager.default` (missing dependency layer) — do not spawn `auditor.default` or `static_evaluator.default` on a broken artifact. If it returns `unable_to_evaluate` (no tests in artifact), proceed to step 2.
+2. **Run the review gates in parallel.** Only after `unit_test_runner` passes or is inapplicable, spawn `auditor.default` + `static_evaluator.default` (`async=true`) and join with one `workflow_wait`. Then `promotion_query({artifact_ref})`.
 3. Verify records: execution roles need `execution_trace_id`; auditor needs `pass: true` with no `critical` findings. Use `promotion_query` — not child reply JSON.
 4. Call `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` to
    seed the revision, then call `federation.escalate` with role verdicts, `planner_synthesis`,

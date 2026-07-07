@@ -1161,7 +1161,7 @@ The promotion gate uses a **federation of evaluation roles** — not a single ev
 | **Unit Test Runner** | `unit_test_runner.default` | Runs artifact's built-in test suite in a no-network sandbox | No |
 | **Sealed Evaluator** | `sealed_evaluator.default` | Dynamic execution in sealed sandbox with fixture-proxied HTTP | Sealed proxy only |
 
-The planner orchestrates federation: it inspects the artifact type, spawns the applicable roles in parallel, collects verdicts via `promotion_query`, and escalates the consolidated report to the operator.
+The planner orchestrates federation: it inspects the artifact type, runs the `unit_test_runner` correctness gate first (for artifact-backed agents), then spawns the review roles (`auditor.default` + `static_evaluator.default`) in parallel, collects verdicts via `promotion_query`, and escalates the consolidated report to the operator.
 
 ### FullJury Gate
 
