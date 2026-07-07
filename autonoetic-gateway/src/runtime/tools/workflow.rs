@@ -1,11 +1,14 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::content_store::ContentStore;
+use crate::runtime::promotion_store::PromotionStore;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::ToolError;
+use autonoetic_types::workflow::TaskRun;
 use serde::Deserialize;
 use serde::de;
 use std::collections::HashMap;
@@ -17,6 +20,87 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WorkflowStateTool));
     registry.register(Box::new(WorkflowCancelTaskTool));
     registry.register(Box::new(WorkflowForceCompleteTool));
+}
+
+/// Resolve an artifact ref or canonical id to a canonical `art_*` id.
+fn resolve_artifact_ref_to_id(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: Option<&str>,
+    ref_id: &str,
+) -> Option<String> {
+    if ref_id.starts_with("art_") {
+        return Some(ref_id.to_string());
+    }
+    if !ref_id.starts_with("ar.") {
+        return None;
+    }
+    let store = gateway_store?;
+    let sid = session_id?;
+    store
+        .resolve_artifact_ref_any_scope(ref_id, sid)
+        .ok()
+        .flatten()
+        .map(|r| r.artifact_id)
+}
+
+/// Determine the primary artifact being evaluated by federation roles.
+/// The `workflow.revision.created` builder candidate is authoritative: it points
+/// at the exact revision under review. The coder-task fallback is best-effort;
+/// it may diverge if the builder promoted a non-latest coder iteration or if
+/// another specialist produced the artifact under review.
+fn resolve_primary_artifact_id(
+    gw_dir: &Path,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: Option<&str>,
+    builder_candidate: Option<&serde_json::Value>,
+    tasks: &[TaskRun],
+) -> Option<String> {
+    // 1. Builder candidate revision already points at the artifact under review.
+    if let Some(bc) = builder_candidate {
+        if let Some(id) = bc.get("artifact_id").and_then(|v| v.as_str()) {
+            if id.starts_with("art_") {
+                return Some(id.to_string());
+            }
+        }
+        if let Some(ref_id) = bc.get("artifact_ref").and_then(|v| v.as_str()) {
+            if let Some(id) = resolve_artifact_ref_to_id(gateway_store, session_id, ref_id) {
+                return Some(id);
+            }
+        }
+    }
+
+    // 2. Latest coder task's implicit artifact carries the built artifacts.
+    let coder_task = tasks
+        .iter()
+        .filter(|t| t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded)
+        .filter(|t| t.agent_id.split('.').next() == Some("coder"))
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    if let Some(task) = coder_task {
+        let implicit_name = format!("impl_{}", task.task_id);
+        let content_store = ContentStore::new(gw_dir).ok()?;
+        let bytes = content_store
+            .read_by_name(&task.parent_session_id, &implicit_name)
+            .ok()?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let artifacts = json
+            .get("content")
+            .and_then(|c| c.get("artifacts"))
+            .and_then(|a| a.as_array())?;
+        for artifact in artifacts {
+            if let Some(id) = artifact.get("artifact_id").and_then(|v| v.as_str()) {
+                if id.starts_with("art_") {
+                    return Some(id.to_string());
+                }
+            }
+            if let Some(ref_id) = artifact.get("artifact_ref").and_then(|v| v.as_str()) {
+                if let Some(id) = resolve_artifact_ref_to_id(gateway_store, session_id, ref_id) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -905,7 +989,7 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
         agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -1115,23 +1199,81 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 Some(serde_json::json!({
                     "agent_id": payload.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
                     "revision_id": payload.get("revision_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "artifact_id": payload.get("artifact_id").cloned().unwrap_or(serde_json::Value::Null),
                     "artifact_ref": payload.get("artifact_ref").cloned().unwrap_or(serde_json::Value::Null),
                     "content_digest": payload.get("content_digest").cloned().unwrap_or(serde_json::Value::Null),
                 }))
             })
             .last();
 
+        // The federation/evaluation completion predicates must be sourced from
+        // the promotion store (recorded verdicts), not merely artifact presence.
+        // A role can produce an artifact without ever calling promotion.record,
+        // which would falsely satisfy the old artifact-presence guards.
+        let primary_artifact_id = gateway_dir.and_then(|gw_dir| {
+            resolve_primary_artifact_id(
+                gw_dir,
+                gateway_store.as_deref(),
+                session_id,
+                builder_candidate.as_ref(),
+                &tasks,
+            )
+        });
+        let promotion_record = gateway_dir
+            .zip(primary_artifact_id.as_ref())
+            .and_then(|(gw_dir, artifact_id)| {
+                PromotionStore::new(gw_dir)
+                    .ok()
+                    .and_then(|store| store.get_promotion(artifact_id))
+            });
+
+        // reuse_guards: when we can resolve the promotion record for the primary
+        // artifact, verdicts are authoritative. When no record is resolvable, we
+        // fall back to artifact presence as a non-breaking diagnostic hint; the
+        // actual completion decision below does NOT fall back.
+        let has_evaluator_result = promotion_record
+            .as_ref()
+            .map(|r| r.evaluator_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("evaluator"));
+        let has_auditor_result = promotion_record
+            .as_ref()
+            .map(|r| r.auditor_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("auditor"));
+        let has_static_evaluator_result = promotion_record
+            .as_ref()
+            .map(|r| r.static_evaluator_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("static_evaluator"));
+        let has_unit_test_runner_result = promotion_record
+            .as_ref()
+            .map(|r| r.unit_test_runner_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("unit_test_runner"));
+        let has_sealed_evaluator_result = promotion_record
+            .as_ref()
+            .map(|r| r.sealed_evaluator_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("sealed_evaluator"));
+
+        // Completion predicates (resume hints) must NOT fall back to artifact
+        // presence; only recorded promotion-store verdicts can satisfy a gate.
+        let evaluation_verdict_complete = promotion_record.as_ref().map_or(false, |r| {
+            (r.evaluator_id.is_some() || r.sealed_evaluator_id.is_some())
+                && r.auditor_id.is_some()
+        });
+        let federation_verdict_complete = promotion_record.as_ref().map_or(false, |r| {
+            r.static_evaluator_id.is_some() && r.auditor_id.is_some()
+        });
+
         let reuse_guards = serde_json::json!({
             "has_coder_artifact": latest_artifact_by_role.contains_key("coder"),
-            "has_evaluator_result": latest_artifact_by_role.contains_key("evaluator"),
-            "has_auditor_result": latest_artifact_by_role.contains_key("auditor"),
-            "has_static_evaluator_result": latest_artifact_by_role.contains_key("static_evaluator"),
-            "has_unit_test_runner_result": latest_artifact_by_role.contains_key("unit_test_runner"),
-            "has_sealed_evaluator_result": latest_artifact_by_role.contains_key("sealed_evaluator"),
+            "has_evaluator_result": has_evaluator_result,
+            "has_auditor_result": has_auditor_result,
+            "has_static_evaluator_result": has_static_evaluator_result,
+            "has_unit_test_runner_result": has_unit_test_runner_result,
+            "has_sealed_evaluator_result": has_sealed_evaluator_result,
             "has_builder_candidate": builder_candidate.is_some(),
             "builder_candidate": builder_candidate,
             "pending_approvals": !pending_approvals.is_empty(),
             "active_tasks_running": !active_tasks.is_empty(),
+            "primary_artifact_id": primary_artifact_id,
         });
 
         let state = serde_json::json!({
@@ -1150,13 +1292,9 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 "tasks_running — wait for completion or proceed with partial results"
             } else if builder_candidate.is_some() {
                 "builder_candidate_exists — use install_mode:\"promote\" with the existing revision_id; do not create a new revision"
-            } else if (latest_artifact_by_role.contains_key("evaluator") || latest_artifact_by_role.contains_key("sealed_evaluator"))
-                && latest_artifact_by_role.contains_key("auditor")
-            {
+            } else if evaluation_verdict_complete {
                 "evaluation_complete — proceed to specialized_builder or coder iteration"
-            } else if latest_artifact_by_role.contains_key("static_evaluator")
-                && latest_artifact_by_role.contains_key("auditor")
-            {
+            } else if federation_verdict_complete {
                 "federation_complete — collect all verdicts and escalate to operator"
             } else if latest_artifact_by_role.contains_key("coder") && !latest_artifact_by_role.contains_key("evaluator") {
                 "coder_done — proceed to evaluator/auditor or federation"
