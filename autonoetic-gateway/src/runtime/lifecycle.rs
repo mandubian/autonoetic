@@ -3261,6 +3261,17 @@ impl AgentExecutor {
             });
 
             if let Some(request_id) = escalation_info {
+                // Register the escalation with the LoopGuard before suspending.
+                // The escalation path returns early (below), so the generic
+                // guard-registration loop at lines ~3302 is never reached for
+                // escalation results. Without this, repeated identical
+                // escalations across suspend/resume cycles are invisible to
+                // the guard, causing an infinite escalation loop (the guard
+                // state in the checkpoint never accumulates counts).
+                if let Some((_, tool_name, result_json)) = results.last() {
+                    self.guard.register_irrecoverable(tool_name, result_json);
+                }
+
                 let _ = self.save_yield_checkpoint(
                     history,
                     turn_id,

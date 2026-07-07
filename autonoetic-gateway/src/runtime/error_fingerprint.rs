@@ -88,7 +88,11 @@ pub fn extract_error_text(result_json: &str) -> Option<String> {
         .get("any_failed")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if ok != Some(false) && !has_error && !any_failed {
+    let escalation = obj
+        .get("escalation_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if ok != Some(false) && !has_error && !any_failed && !escalation {
         return None;
     }
 
@@ -100,7 +104,11 @@ pub fn extract_error_text(result_json: &str) -> Option<String> {
         parts.push(s.to_string());
     }
     if parts.is_empty() {
-        if let Some(s) = obj.get("message").and_then(|v| v.as_str()) {
+        if let Some(s) = obj
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .or_else(|| obj.get("message").and_then(|v| v.as_str()))
+        {
             parts.push(s.to_string());
         }
     }
@@ -205,5 +213,38 @@ mod tests {
     #[test]
     fn error_type_only_result_is_fingerprinted() {
         assert!(fingerprint_result(r#"{"ok":false,"error_type":"validation"}"#).is_some());
+    }
+
+    #[test]
+    fn escalation_result_is_fingerprinted() {
+        let json = r#"{"escalation_type":"human","message":"Escalation logged.","reason":"coder.default cannot be spawned","escalation_required":true,"request_id":"esc-0671cf0d"}"#;
+        assert!(fingerprint_result(json).is_some(), "escalation_required result must be fingerprinted");
+    }
+
+    #[test]
+    fn escalation_uses_reason_not_message() {
+        // The session.escalate tool always sets a static `message`. The
+        // fingerprint must use `reason` (the escalation-specific text) so
+        // that different escalation reasons produce different fingerprints.
+        let a = r#"{"escalation_required":true,"message":"Escalation logged.","reason":"coder.default cannot be spawned"}"#;
+        let b = r#"{"escalation_required":true,"message":"Escalation logged.","reason":"need network approval for api.example.com"}"#;
+        let fp_a = fingerprint_result(a).expect("a fingerprinted");
+        let fp_b = fingerprint_result(b).expect("b fingerprinted");
+        assert_ne!(fp_a, fp_b, "different escalation reasons must produce different fingerprints");
+    }
+
+    #[test]
+    fn same_escalation_reason_shares_fingerprint_across_request_ids() {
+        let a = r#"{"escalation_required":true,"reason":"coder.default cannot be spawned — 4 consecutive failures","request_id":"esc-aaa111"}"#;
+        let b = r#"{"escalation_required":true,"reason":"coder.default cannot be spawned — 7 consecutive failures","request_id":"esc-bbb222"}"#;
+        let fp_a = fingerprint_result(a).expect("a fingerprinted");
+        let fp_b = fingerprint_result(b).expect("b fingerprinted");
+        assert_eq!(fp_a, fp_b, "same root-cause escalation (differing only in count/id) must share a fingerprint");
+    }
+
+    #[test]
+    fn escalation_required_false_not_fingerprinted() {
+        let json = r#"{"escalation_required":false,"reason":"something"}"#;
+        assert!(fingerprint_result(json).is_none(), "escalation_required:false must not be fingerprinted");
     }
 }
