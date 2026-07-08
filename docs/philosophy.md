@@ -47,10 +47,24 @@ The design insight behind P-6.23 is worth stating plainly: LLM agents
 lose track of what they did. Rather than asking the model to be self-aware,
 the gateway **hands it a verified self-model every turn**. Self-awareness here
 is not an emergent property we hope for; it is a service the runtime
-guarantees. Whether anything is "experienced" is deliberately orthogonal — an
-agent with a truthful self-model reasons better and can be held responsible
-legitimately, and both of those hold regardless of one's views on machine
-consciousness.
+guarantees — and it is delivered at two levels, matching the two things an
+agent must know to reason well:
+
+- Its **operational** state (budget, capabilities, pending gates, the law in
+  force) is handed *in full*, every turn, in the signed attestation block. The
+  agent is taught this block is more authoritative than its own memory.
+- Its **normative** standing (the rights that bind the gateway on its behalf)
+  is *surfaced by default* — the headline rights (Ri-0.2 read your history,
+  Ri-0.3 named rejection, Ri-0.11 non-repudiation) are named in the foundation
+  prompt every agent receives, and the one-call `self_describe` tool is nudged
+  there — and *fully available on demand* via `constitution_read`. Surfacing
+  the headlines by default matters because an agent that does not know it has
+  a right will not exercise it; making the full text on-demand keeps the
+  per-turn prompt bounded.
+
+Whether anything is "experienced" is deliberately orthogonal — an agent with
+a truthful self-model reasons better and can be held responsible legitimately,
+and both of those hold regardless of one's views on machine consciousness.
 
 ## 2. The social contract: who is bound, and to whom
 

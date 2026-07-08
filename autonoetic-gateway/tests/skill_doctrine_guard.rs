@@ -45,6 +45,21 @@ const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
         "Return a single raw JSON object",
         "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
     ),
+    // Centralized into foundation_core.md §7 — the rights/self-describe/community
+    // doctrine every agent already receives. Keep these specific enough that they
+    // only match the centralized phrasing, not legitimate role-specific wording.
+    (
+        "Your headline rights, in force every turn",
+        "foundation_core.md §7 (the constitution is your contract)",
+    ),
+    (
+        "are one call away: `self_describe()`",
+        "foundation_core.md §7 (self_describe nudge)",
+    ),
+    (
+        "its rights bind the gateway as its rules bind you",
+        "foundation_core.md §7 (community / social-contract framing)",
+    ),
 ];
 
 fn agents_root() -> PathBuf {
