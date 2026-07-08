@@ -900,7 +900,7 @@ fn build_footer(
         } else if gi.allow_freeform {
             format!("{choices}   [number choose · or type a reply · Esc cancel]")
         } else {
-            format!("{choices}   [number choose · Esc cancel]")
+            format!("{choices}   [Enter submit · Esc cancel]")
         };
         let err = status
             .filter(|s| s.starts_with('✗'))
@@ -2722,39 +2722,28 @@ pub fn run(
 
                     // Text-capture mode takes over all input while open.
                     if let Some(gi) = input.as_mut() {
-                        // Instant single-digit pick — only when it's unambiguous: a
-                        // pure-choice question (no free-text) with ≤9 options and an
-                        // empty buffer. Otherwise digits go into the buffer so multi-
-                        // digit ordinals (>9 options) and free-text starting with a
-                        // digit still work; Enter then resolves the ordinal.
-                        let chosen = if gi.action == GateAction::Answer
-                            && gi.buffer.is_empty()
-                            && !gi.allow_freeform
-                            && !gi.details_mode
-                            && gi.options.len() <= 9
-                        {
-                            if let KeyCode::Char(c @ '1'..='9') = key.code {
-                                gi.options.get((c as usize) - ('1' as usize)).cloned()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        // Number selection and Enter both commit; share the resolve path.
-                        let commit = chosen.is_some() || key.code == KeyCode::Enter;
-                        if commit {
+                        if key.code == KeyCode::Enter {
                             // The synthetic "Give more details" option switches the input
                             // into free-text follow-up mode without submitting.
-                            if let Some(ref opt) = chosen {
-                                if opt.id == "__details__" {
-                                    gi.buffer.clear();
-                                    gi.details_mode = true;
-                                    status = Some(
-                                        "✓ type your details, then press Enter".to_string(),
-                                    );
-                                    continue;
-                                }
+                            let details = gi
+                                .options
+                                .iter()
+                                .position(|o| o.id == "__details__")
+                                .and_then(|idx| {
+                                    gi.buffer
+                                        .trim()
+                                        .parse::<usize>()
+                                        .ok()
+                                        .filter(|n| *n == idx + 1)
+                                })
+                                .is_some();
+                            if details {
+                                gi.buffer.clear();
+                                gi.details_mode = true;
+                                status = Some(
+                                    "✓ type your details, then press Enter".to_string(),
+                                );
+                                continue;
                             }
                             let gi = input.take().unwrap();
                             if let Some(err) = gate_commit_validation_error(&gi) {
@@ -2769,13 +2758,10 @@ pub fn run(
                                     GateAction::Reject => "rejected",
                                     GateAction::Answer => "answered",
                                 };
-                                let answer_text = chosen
-                                    .as_ref()
-                                    .map(|o| o.label.as_str())
-                                    .or_else(|| {
-                                        let b = gi.buffer.trim();
-                                        (!b.is_empty()).then_some(b)
-                                    });
+                                let answer_text = {
+                                    let b = gi.buffer.trim();
+                                    (!b.is_empty()).then_some(b)
+                                };
                                 let followup = super::test_scenarios::resolve_followup(
                                     &gi.id,
                                     gi.action == GateAction::Approve,
@@ -2789,7 +2775,7 @@ pub fn run(
                                     gi.id
                                 ));
                             } else {
-                                match resolve_gate(client, gi, chosen.clone()) {
+                                match resolve_gate(client, gi, None) {
                                     Ok(pending) => {
                                         pending_gate = Some(pending);
                                         status = Some(
@@ -7277,10 +7263,8 @@ fn gate_modal_input_panel_lines(
         "Enter submit details · Esc cancel details".to_string()
     } else if gi.options.is_empty() {
         "Enter submit · Esc back · Esc×2 peek timeline".to_string()
-    } else if gi.allow_freeform {
-        format!("{choices}   Enter submit · Esc back")
     } else {
-        format!("{choices}   number choose · Esc back")
+        format!("{choices}   Enter submit · Esc back")
     };
     lines.push(Line::from(Span::styled(
         hint,
