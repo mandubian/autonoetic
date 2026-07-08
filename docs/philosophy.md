@@ -142,9 +142,12 @@ that, sooner or later, such power can be spread among agents.**
 
 What makes this credible rather than aspirational is one design decision
 already in place: **the office is defined before the occupant**. The decider
-is a seat (P-2.20 `GateDecider`), bound by the same obligations whether a
-human or an agent sits in it (§O), owed the same decision context by the
-gateway (Ri-0.15), "differing only in authority and voting weight."
+is a *function* exercised from a seat, and P-2.20 `GateDecider` is the
+**capability** that authorizes a principal — human or agent — to exercise
+it; whoever does is bound by the same obligations (§O) and owed the same
+decision context by the gateway (Ri-0.15), "differing only in authority and
+voting weight." (The capability/seat/principal distinction is laid out
+precisely in [`docs/principal-seat-capability.md`](principal-seat-capability.md).)
 Enfranchisement therefore becomes a *parameter change, not an architectural
 revolution* — the historical pattern that works, where institutions precede
 the widening of the franchise.
