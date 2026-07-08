@@ -209,7 +209,7 @@ async fn recording_session_starts_when_operator_has_opted_in() {
         Ok(Ok(TurnOutcome::Completed(_)))
         | Ok(Ok(TurnOutcome::Suspended { .. }))
         | Ok(Ok(TurnOutcome::SuspendedUserInput { .. }))
-        | Ok(Ok(TurnOutcome::WaitingForChild { .. }))
+        | Ok(Ok(TurnOutcome::WaitingForChild))
         | Ok(Ok(TurnOutcome::Escalated { .. })) => {
             panic!("Stub LLM should not return an outcome — guard interaction is suspicious")
         }

@@ -1644,6 +1644,12 @@ pub async fn run_interactive_session(
                     .await?;
                 stdout.flush().await?;
             }
+            Ok(TurnOutcome::WaitingForChild) => {
+                stdout
+                    .write_all(b"[Turn suspended waiting for child tasks]\n")
+                    .await?;
+                stdout.flush().await?;
+            }
             Err(e) => {
                 let _ = runtime.close_session(SessionCloseOutcome::InteractiveError);
                 return Err(e);

@@ -907,10 +907,18 @@ fn migrate_legacy_task_files(
             continue;
         }
         match read_json_file::<TaskRun>(&path) {
-            Ok(t) => {
-                let _ = store.upsert_task_run(&t);
-                let _ = fs::remove_file(&path);
-            }
+            Ok(t) => match store.upsert_task_run(&t) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&path);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to migrate legacy task json into SQLite; leaving file in place",
+                    );
+                }
+            },
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skip invalid legacy task json");
             }
@@ -2293,12 +2301,32 @@ pub fn acquire_task_claim(
     let store = open_store_for(config, store, &mut owned_store)?;
 
     // If there is a legacy claim file, migrate it first so SQLite owns the claim.
+    // Only remove the file once the claim is durably stored in SQLite — otherwise
+    // a failed upsert would drop the only record of an active claim and risk
+    // duplicate execution.
     let path = task_claim_path(config, workflow_id, task_id);
     if path.exists() {
-        if let Ok(legacy) = read_json_file::<TaskExecutionClaim>(&path) {
-            let _ = store.upsert_task_claim(&legacy);
+        match read_json_file::<TaskExecutionClaim>(&path) {
+            Ok(legacy) => match store.upsert_task_claim(&legacy) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&path);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to migrate legacy task claim into SQLite; leaving file in place",
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "skip invalid legacy task claim json; leaving file in place",
+                );
+            }
         }
-        let _ = fs::remove_file(&path);
     }
 
     store.acquire_task_claim(workflow_id, task_id, stale_after_secs)
@@ -2547,10 +2575,18 @@ fn migrate_legacy_queued_files(
             continue;
         }
         match read_json_file::<QueuedTaskRun>(&path) {
-            Ok(q) => {
-                let _ = store.enqueue_queued_task(&q);
-                let _ = fs::remove_file(&path);
-            }
+            Ok(q) => match store.enqueue_queued_task(&q) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&path);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to migrate legacy queued task json into SQLite; leaving file in place",
+                    );
+                }
+            },
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skip invalid legacy queued task json");
             }

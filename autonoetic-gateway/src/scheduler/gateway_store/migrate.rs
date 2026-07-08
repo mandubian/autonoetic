@@ -2977,7 +2977,7 @@ fn apply_workflow_tasks_sqlite_v65(conn: &mut Connection) -> Result<()> {
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS task_runs (
-            task_id            TEXT PRIMARY KEY,
+            task_id            TEXT NOT NULL,
             workflow_id        TEXT NOT NULL,
             agent_id           TEXT NOT NULL,
             session_id         TEXT NOT NULL,
@@ -2994,13 +2994,14 @@ fn apply_workflow_tasks_sqlite_v65(conn: &mut Connection) -> Result<()> {
             last_failure_class TEXT,
             retry_policy_json  TEXT,
             side_effect_state  TEXT,
-            dedupe_key         TEXT
+            dedupe_key         TEXT,
+            PRIMARY KEY (workflow_id, task_id)
         );
         CREATE INDEX IF NOT EXISTS idx_task_runs_workflow
             ON task_runs(workflow_id);
 
         CREATE TABLE IF NOT EXISTS queued_task_runs (
-            task_id             TEXT PRIMARY KEY,
+            task_id             TEXT NOT NULL,
             workflow_id         TEXT NOT NULL,
             agent_id            TEXT NOT NULL,
             message             TEXT NOT NULL,
@@ -3011,17 +3012,19 @@ fn apply_workflow_tasks_sqlite_v65(conn: &mut Connection) -> Result<()> {
             join_group          TEXT,
             blocks_planner      INTEGER NOT NULL DEFAULT 1,
             enqueued_at         TEXT NOT NULL,
-            credential_bindings_json TEXT
+            credential_bindings_json TEXT,
+            PRIMARY KEY (workflow_id, task_id)
         );
         CREATE INDEX IF NOT EXISTS idx_queued_task_runs_workflow
             ON queued_task_runs(workflow_id);
 
         CREATE TABLE IF NOT EXISTS task_claims (
-            task_id                 TEXT PRIMARY KEY,
+            task_id                 TEXT NOT NULL,
             workflow_id             TEXT NOT NULL,
             scheduler_instance_id   TEXT NOT NULL,
             claimed_at              TEXT NOT NULL,
-            heartbeat_at            TEXT NOT NULL
+            heartbeat_at            TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, task_id)
         );
         CREATE INDEX IF NOT EXISTS idx_task_claims_workflow
             ON task_claims(workflow_id);
