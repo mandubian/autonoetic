@@ -36,6 +36,7 @@ pub fn actor_label(entry: &SessionTimelineEntry) -> String {
     let seat = role_label(&entry.role);
     match &entry.principal.kind {
         PrincipalKind::Human => format!("🧑 {seat}"),
+        PrincipalKind::ServedUser => format!("👤 {seat}"),
         PrincipalKind::ForeignAgent { provider } => format!("🌐 {seat}·{provider}"),
         PrincipalKind::Script => seat,
         PrincipalKind::AutonoeticAgent => seat,

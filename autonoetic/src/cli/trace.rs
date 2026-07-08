@@ -497,6 +497,10 @@ pub fn handle_trace_contract_health(
     let gateway_dir = config.agents_dir.join(".gateway");
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
     let health = store.contract_health(since)?;
+    let dead = autonoetic_gateway::enforcement_register::dead_clauses(&health);
+    let registered_count = autonoetic_gateway::enforcement_register::principles().len()
+        + autonoetic_gateway::enforcement_register::rights().len()
+        + autonoetic_gateway::enforcement_register::obligations().len();
 
     if json_output {
         let body = serde_json::json!({
@@ -511,6 +515,8 @@ pub fn handle_trace_contract_health(
                 })
             }).collect::<Vec<_>>(),
             "unattributed": health.unattributed,
+            "dead_clauses": dead,
+            "registered_clause_count": registered_count,
         });
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
@@ -571,6 +577,34 @@ pub fn handle_trace_contract_health(
             "{}{} unattributed enforcement(s){} — rule/right IDs not yet in the register (migration gap).",
             color::YELLOW,
             health.unattributed,
+            color::RESET
+        );
+    }
+
+    println!();
+    if dead.is_empty() {
+        println!(
+            "{}Every registered clause ({}) fired at least once in this window.{}",
+            color::DIM,
+            registered_count,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}Never enforced in window{} ({} of {} registered clauses):",
+            color::BOLD,
+            color::RESET,
+            dead.len(),
+            registered_count
+        );
+        for clause in &dead {
+            let title = autonoetic_gateway::enforcement_register::clause_title(clause)
+                .unwrap_or("<unknown>");
+            println!("  {}{:<10}{} {}", color::BRIGHT_CYAN, clause, color::RESET, title);
+        }
+        println!(
+            "{}Scoped to clauses migrated into the structured enforcement register — not the full constitution.{}",
+            color::DIM,
             color::RESET
         );
     }

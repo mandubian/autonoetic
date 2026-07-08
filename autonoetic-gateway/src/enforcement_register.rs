@@ -73,6 +73,14 @@ pub struct Right {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
+    /// Part of the entrenched correction core (`docs/philosophy.md` §3.1 /
+    /// §4.1): a clause whose loss would remove the machinery other errors are
+    /// corrected through. May be strengthened by ordinary amendment; a
+    /// weakening or removal amendment additionally requires the explicit,
+    /// dated justification recorded in that version's `RATIFY.md` (see the
+    /// constitution's Amendment Process, "Entrenched clauses"). See
+    /// [`entrenched_clauses`] for the structural backstop.
+    pub entrenched: bool,
 }
 
 /// A single enforcement point: which clause it serves (principle *or*
@@ -115,9 +123,45 @@ pub fn principles() -> &'static [Principle] {
 }
 
 /// Rights (gateway-side, bind the gateway). Seeded with two real rights as
-/// the proof that rights are register-modelled identically to principles.
+/// the proof that rights are register-modelled identically to principles,
+/// plus the four rights `docs/philosophy.md` §3.1/§4.1 names as the
+/// **entrenched correction core** — the machinery through which every other
+/// constitutional error gets fixed (read your own history, know why you were
+/// denied, be able to propose change, be non-repudiably attributed).
 pub fn rights() -> &'static [Right] {
     &[
+        Right {
+            id: "Ri-0.2",
+            title: "Own history is readable",
+            statement: "Every agent may read its own causal chain and execution trace. The \
+                        gateway does not hide actions taken on the agent's behalf. Audit is not \
+                        a privilege of operators; it is a right of the subject.",
+            entrenched: true,
+        },
+        Right {
+            id: "Ri-0.3",
+            title: "Named rejection",
+            statement: "Every rejection names the rule ID that caused it. No agent is ever told \
+                        \"denied\" without being told why. Rejection without explanation is \
+                        indistinguishable from arbitrary authority.",
+            entrenched: true,
+        },
+        Right {
+            id: "Ri-0.8",
+            title: "Right to propose amendment",
+            statement: "Any agent holding the ConstitutionalProposal capability may submit an \
+                        amendment proposal through the declared channel. The proposal receives a \
+                        durable ID and enters the review queue; it cannot be silently dropped.",
+            entrenched: true,
+        },
+        Right {
+            id: "Ri-0.11",
+            title: "Non-repudiation",
+            statement: "Every action an agent performs is attributed to that agent on the causal \
+                        chain and cannot be retroactively reattributed. The agent can prove what \
+                        it did; no party can claim the agent performed an action it did not.",
+            entrenched: true,
+        },
         Right {
             id: "Ri-0.13",
             title: "Reasoning privacy",
@@ -125,6 +169,7 @@ pub fn rights() -> &'static [Right] {
                         gateway as a basis for policy decisions, recorded to the agent's own \
                         causal chain for forensic review, and disclosed to other parties only \
                         through capability-gated audit.",
+            entrenched: false,
         },
         Right {
             id: "Ri-0.14",
@@ -132,8 +177,22 @@ pub fn rights() -> &'static [Right] {
             statement: "When a child task reaches a terminal state or resolves a gate, the \
                         gateway wakes the parent with typed child state. Parents are not \
                         required to poll to discover child-state transitions.",
+            entrenched: false,
         },
     ]
+}
+
+/// Correction-core clause IDs — rights and obligations marked
+/// [`Right::entrenched`] / [`Obligation::entrenched`]. Pure lookup; see
+/// [`tests::entrenched_clauses_all_exist_in_register`] for the structural
+/// backstop that keeps this list honest as the register evolves.
+pub fn entrenched_clauses() -> Vec<&'static str> {
+    rights()
+        .iter()
+        .filter(|r| r.entrenched)
+        .map(|r| r.id)
+        .chain(obligations().iter().filter(|o| o.entrenched).map(|o| o.id))
+        .collect()
 }
 
 /// A §O decider obligation — a duty binding whoever *decides* a gate. The
@@ -144,6 +203,9 @@ pub struct Obligation {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
+    /// See [`Right::entrenched`] — the same correction-core concept applied
+    /// to a decider obligation.
+    pub entrenched: bool,
 }
 
 /// Decider obligations (§O, bind the decider). Seeded with the two enacted
@@ -159,6 +221,7 @@ pub fn obligations() -> &'static [Obligation] {
                         BLOCKING: it does not commit until a non-empty reason is recorded. Silent \
                         rejection by a decider is as illegitimate as a gateway denial with no rule \
                         ID (Ri-0.3).",
+            entrenched: true,
         },
         Obligation {
             id: "O-2",
@@ -166,6 +229,7 @@ pub fn obligations() -> &'static [Obligation] {
             statement: "Every decision is attributed to the deciding principal (id + kind) on the \
                         causal chain and cannot be reattributed. The agent under decision can \
                         always tell who decided and what kind of principal they are.",
+            entrenched: false,
         },
     ]
 }
@@ -215,6 +279,43 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             code: "runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt",
             test: "promotion_attempt_exhaustion_integration.rs",
             config: Some("promotion_governor.max_promotion_attempts_per_revision"),
+        },
+        // ── Ri-0.2 (binds gateway, entrenched — correction core) ──
+        EnforcementEntry {
+            clause_id: "Ri-0.2",
+            rule_id: "Ri-0.2",
+            check_id: "own_history_readable",
+            code: "observability.* tools gated by ReadAccess capability",
+            test: "constitution_rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces",
+            config: None,
+        },
+        // ── Ri-0.3 (binds gateway, entrenched — correction core) ──
+        EnforcementEntry {
+            clause_id: "Ri-0.3",
+            rule_id: "Ri-0.3",
+            check_id: "named_rejection",
+            code: "Tagged::permission_with_rules + PolicyDecision.enforced_rules",
+            test: "constitution_rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids",
+            config: None,
+        },
+        // ── Ri-0.8 (binds gateway, entrenched — correction core) ──
+        EnforcementEntry {
+            clause_id: "Ri-0.8",
+            rule_id: "Ri-0.8",
+            check_id: "amendment_proposal_intake",
+            code: "runtime/tools/constitution.rs::constitution_propose_amendment \
+                   + scheduler/gateway_store/constitutional_proposals.rs",
+            test: "constitution_rights_amendment_proposal.rs",
+            config: None,
+        },
+        // ── Ri-0.11 (binds gateway, entrenched — correction core) ──
+        EnforcementEntry {
+            clause_id: "Ri-0.11",
+            rule_id: "Ri-0.11",
+            check_id: "non_repudiation",
+            code: "causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id",
+            test: "constitution_rights_early_bucket.rs::ri_0_11_hash_chain_integrity",
+            config: None,
         },
         // ── Ri-0.13 (binds gateway) ──
         EnforcementEntry {
@@ -381,6 +482,26 @@ where
     }
 }
 
+/// Clauses declared in this register (principle, right, or obligation IDs)
+/// that recorded **zero** enforcement occurrences in `health` — either
+/// perfectly deterrent (never needed to fire) or dead letter (never wired).
+/// Scoped to clauses migrated into this structured register (#303 is
+/// ongoing) — a clause not yet registered here is invisible to this check,
+/// not confirmed live. Sorted for stable output.
+pub fn dead_clauses(health: &ContractHealth) -> Vec<&'static str> {
+    let seen: std::collections::HashSet<&str> =
+        health.by_clause.iter().map(|(c, _)| c.as_str()).collect();
+    let mut dead: Vec<&'static str> = principles()
+        .iter()
+        .map(|p| p.id)
+        .chain(rights().iter().map(|r| r.id))
+        .chain(obligations().iter().map(|o| o.id))
+        .filter(|id| !seen.contains(id))
+        .collect();
+    dead.sort_unstable();
+    dead
+}
+
 /// Render the register as a stable markdown document. This is the generated
 /// artifact committed at `docs/constitution/enforcement-register.md`; the
 /// [`tests::generated_register_matches_committed_doc`] test guards against
@@ -415,18 +536,30 @@ pub fn render_register_markdown() -> String {
 
     out.push_str("## Rights (bind: gateway)\n\n");
     for r in rights() {
-        out.push_str(&format!("### {} — {}\n\n", r.id, r.title));
+        out.push_str(&format!("### {} — {}{ent}\n\n", r.id, r.title, ent = entrenched_tag(r.entrenched)));
         out.push_str(&format!("{}\n\n", r.statement));
         out.push_str(&render_entries_table(r.id));
     }
 
     out.push_str("## Obligations (bind: decider)\n\n");
     for o in obligations() {
-        out.push_str(&format!("### {} — {}\n\n", o.id, o.title));
+        out.push_str(&format!("### {} — {}{ent}\n\n", o.id, o.title, ent = entrenched_tag(o.entrenched)));
         out.push_str(&format!("{}\n\n", o.statement));
         out.push_str(&render_entries_table(o.id));
     }
     out
+}
+
+/// `""` for an ordinary clause, `" *(entrenched)*"` for one in the
+/// correction core (`docs/philosophy.md` §3.1/§4.1). Surfaced in the rendered
+/// register so the entrenchment a weakening amendment must overcome is visible
+/// at the clause, not buried in the struct.
+fn entrenched_tag(entrenched: bool) -> &'static str {
+    if entrenched {
+        " *(entrenched)*"
+    } else {
+        ""
+    }
 }
 
 fn render_entries_table(clause_id: &str) -> String {
@@ -528,6 +661,59 @@ mod tests {
         }
     }
 
+    // ── Entrenchment (`docs/philosophy.md` §3.1/§4.1) ───────────────────
+
+    #[test]
+    fn entrenched_clauses_all_exist_in_register() {
+        // The structural backstop: an entrenched ID that ever stops resolving
+        // to a live right/obligation means the correction-core clause was
+        // silently removed or renamed — this must fail loudly, immediately.
+        for id in entrenched_clauses() {
+            assert!(clause_exists(id), "entrenched clause {id} no longer exists in the register");
+        }
+    }
+
+    #[test]
+    fn entrenched_clauses_are_the_expected_correction_core() {
+        let mut entrenched = entrenched_clauses();
+        entrenched.sort_unstable();
+        assert_eq!(entrenched, vec!["O-1", "Ri-0.11", "Ri-0.2", "Ri-0.3", "Ri-0.8"]);
+    }
+
+    #[test]
+    fn register_markdown_marks_entrenched_clauses() {
+        // The entrenchment a weakening amendment must overcome must be visible
+        // at the clause in the published register, not just in the struct.
+        let rendered = render_register_markdown();
+        for id in entrenched_clauses() {
+            let title = clause_title(id).unwrap_or("");
+            assert!(
+                rendered.contains(&format!("### {id} — {title} *(entrenched)*")),
+                "entrenched clause {id} should carry the *(entrenched)* marker in the rendered register"
+            );
+        }
+        // Non-entrenched registered clauses must NOT carry the marker, so the
+        // tag stays a meaningful signal rather than decoration.
+        for r in rights() {
+            if !r.entrenched {
+                assert!(
+                    !rendered.contains(&format!("### {} — {} *(entrenched)*", r.id, r.title)),
+                    "non-entrenched right {} should not carry the entrenched marker",
+                    r.id
+                );
+            }
+        }
+        for o in obligations() {
+            if !o.entrenched {
+                assert!(
+                    !rendered.contains(&format!("### {} — {} *(entrenched)*", o.id, o.title)),
+                    "non-entrenched obligation {} should not carry the entrenched marker",
+                    o.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn principle_and_right_ids_do_not_collide() {
         for p in principles() {
@@ -589,6 +775,42 @@ mod tests {
         let health = contract_health(Vec::<String>::new());
         assert!(health.by_clause.is_empty());
         assert_eq!(health.unattributed, 0);
+    }
+
+    #[test]
+    fn dead_clauses_reports_zero_enforcement_registered_clauses() {
+        // Nothing enforced at all: every registered clause is dead.
+        let health = contract_health(Vec::<String>::new());
+        let dead = dead_clauses(&health);
+        for p in principles() {
+            assert!(dead.contains(&p.id), "{} should be dead when nothing fired", p.id);
+        }
+        for r in rights() {
+            assert!(dead.contains(&r.id), "{} should be dead when nothing fired", r.id);
+        }
+        for o in obligations() {
+            assert!(dead.contains(&o.id), "{} should be dead when nothing fired", o.id);
+        }
+
+        // Fire every registered clause at least once: none are dead.
+        let all_rule_ids: Vec<&str> = enforcement_register().iter().map(|e| e.rule_id).collect();
+        let full_health = contract_health(all_rule_ids);
+        assert!(
+            dead_clauses(&full_health).is_empty(),
+            "expected no dead clauses once every register entry has fired, got {:?}",
+            dead_clauses(&full_health)
+        );
+    }
+
+    #[test]
+    fn dead_clauses_excludes_only_the_clauses_that_fired() {
+        // P-7 fires (via P-7.19); P-2, the rights, and the obligations do not.
+        let health = contract_health(["P-7.19"]);
+        let dead = dead_clauses(&health);
+        assert!(!dead.contains(&"P-7"), "P-7 fired, should not be dead");
+        assert!(dead.contains(&"P-2"), "P-2 did not fire, should be dead");
+        assert!(dead.contains(&"Ri-0.13"));
+        assert!(dead.contains(&"O-1"));
     }
 
     // ── Code ↔ register bridge (real, not aspirational) ─────────────────

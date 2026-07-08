@@ -535,6 +535,156 @@ impl JsonRpcRouter {
                     serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
                 )
             }
+            "constitution.resolve_proposal" => {
+                // O-6 (Decider Obligations, §O of the 2026.07.08 amendment):
+                // every Ri-0.8 proposal is owed a recorded decision. Mirrors
+                // admin.escalation_resolve's shape; no bidirectional projection
+                // to resolve (proposals don't project into another gate table).
+                #[derive(Deserialize)]
+                struct ResolveProposalParams {
+                    proposal_id: String,
+                    decided_by: String,
+                    status: String,
+                    reason: Option<String>,
+                }
+                let params: ResolveProposalParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for constitution.resolve_proposal: {}", e),
+                        );
+                    }
+                };
+                if params.proposal_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "proposal_id and decided_by must not be empty",
+                    );
+                }
+                if !crate::scheduler::gateway_store::constitutional_proposals::PROPOSAL_DECISION_STATUSES
+                    .contains(&params.status.as_str())
+                {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        format!(
+                            "Invalid status '{}'; expected one of {}",
+                            params.status,
+                            crate::scheduler::gateway_store::constitutional_proposals::PROPOSAL_DECISION_STATUSES
+                                .join(", "),
+                        ),
+                    );
+                }
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for constitution.resolve_proposal",
+                    );
+                };
+                match store.get_constitutional_proposal(&params.proposal_id) {
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Proposal '{}' not found", params.proposal_id),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to look up proposal: {}", e),
+                        );
+                    }
+                    Ok(Some(_)) => {}
+                }
+                match store.decide_constitutional_proposal(
+                    &params.proposal_id,
+                    &params.status,
+                    &params.decided_by,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(true) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "proposal_id": params.proposal_id,
+                            "status": params.status,
+                            "decided_by": params.decided_by,
+                        }),
+                    ),
+                    Ok(false) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Proposal '{}' not found", params.proposal_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to resolve proposal: {}", e),
+                    ),
+                }
+            }
+            "constitution.list_pending_proposals" => {
+                // Visibility counterpart to constitution.resolve_proposal.
+                // Deliberately NOT folded into operator_pending's per-root
+                // aggregation: a ConstitutionalProposal carries no
+                // root_session_id (it is a gateway-global concern — any
+                // agent may propose, any operator may decide), so it does not
+                // fit collect_pending_for_root's root-scoped model without a
+                // scoping decision the RFC (#359/#399) has not made. This is
+                // a separate, honestly-global list, mirroring
+                // wiki.proposals_pending's shape.
+                #[derive(Deserialize)]
+                struct ListPendingProposalsParams {
+                    #[serde(default)]
+                    status: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let params: ListPendingProposalsParams = if req.params.is_null() {
+                    ListPendingProposalsParams { status: None, limit: None }
+                } else {
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for constitution.list_pending_proposals: {}", e),
+                            );
+                        }
+                    }
+                };
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for constitution.list_pending_proposals",
+                    );
+                };
+                let status_filter = params.status.as_deref().unwrap_or("pending");
+                match store.list_constitutional_proposals(
+                    Some(status_filter),
+                    None,
+                    params.limit.unwrap_or(50),
+                ) {
+                    Ok(proposals) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({ "proposals": proposals }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to list proposals: {}", e),
+                    ),
+                }
+            }
             "interaction.answer" => {
                 let params: crate::interaction_answer::InteractionAnswerParams =
                     match serde_json::from_value(req.params) {
@@ -4385,6 +4535,155 @@ mod tests {
             .result
             .expect("constitution.get should return payload");
         assert!(result["text"].as_str().unwrap_or("").contains("P-1.1"));
+    }
+
+    /// A router backed by a real `GatewayStore` (`test_router()` intentionally
+    /// passes `None` — most dispatch tests don't need one). Needed here
+    /// because `constitution.resolve_proposal` / `.list_pending_proposals`
+    /// read and write the store.
+    fn test_router_with_store() -> (TempDir, JsonRpcRouter, Arc<crate::scheduler::gateway_store::GatewayStore>) {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&agents_dir.join(".gateway"))
+                .expect("store should open"),
+        );
+        let router = JsonRpcRouter::new(
+            GatewayConfig {
+                agents_dir,
+                ..GatewayConfig::default()
+            },
+            Some(store.clone()),
+        );
+        (temp, router, store)
+    }
+
+    fn sample_proposal(proposal_id: &str) -> crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal {
+        crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal {
+            proposal_id: proposal_id.to_string(),
+            proposer_agent_id: "auditor.default".to_string(),
+            proposer_session_id: None,
+            kind: "add_right".to_string(),
+            target_id: None,
+            proposed_text: Some("Agents may do X".to_string()),
+            justification: "closes a gap".to_string(),
+            evidence_json: serde_json::json!({}),
+            status: "pending".to_string(),
+            operator_decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            published_in_release: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    // O-6 (Decider Obligations, §O of docs/constitution/versions/2026.07.08):
+    // every Ri-0.8 proposal is owed a recorded decision. Before this RPC
+    // existed, `decide_constitutional_proposal` had no caller — a proposal
+    // could never leave `pending`. These tests pin the adjudication path.
+    #[tokio::test]
+    async fn test_dispatch_constitution_resolve_proposal() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_constitutional_proposal(&sample_proposal("prop-1"))
+            .expect("insert should succeed");
+
+        // Visible via the global pending-proposals list before resolution.
+        let list_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp1".to_string(),
+            method: "constitution.list_pending_proposals".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result = router
+            .dispatch(list_req)
+            .await
+            .result
+            .expect("list should return payload");
+        let proposals = list_result["proposals"].as_array().expect("proposals array");
+        assert!(proposals.iter().any(|p| p["proposal_id"] == "prop-1"));
+
+        // Resolve it.
+        let resolve_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "rp1".to_string(),
+            method: "constitution.resolve_proposal".to_string(),
+            params: serde_json::json!({
+                "proposal_id": "prop-1",
+                "decided_by": "operator",
+                "status": "approved",
+                "reason": "looks good",
+            }),
+            auth_token: None,
+        };
+        let resolve_resp = router.dispatch(resolve_req).await;
+        assert!(resolve_resp.error.is_none(), "unexpected error: {:?}", resolve_resp.error);
+        let result = resolve_resp.result.expect("resolve should return payload");
+        assert_eq!(result["status"], "approved");
+        assert_eq!(result["decided_by"], "operator");
+
+        // No longer surfaced as pending.
+        let list_req2 = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp2".to_string(),
+            method: "constitution.list_pending_proposals".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result2 = router.dispatch(list_req2).await.result.unwrap();
+        let proposals2 = list_result2["proposals"].as_array().unwrap();
+        assert!(!proposals2.iter().any(|p| p["proposal_id"] == "prop-1"));
+
+        // The store carries the full, attributed decision record (Ri-0.11 /
+        // O-2 — a decision that can be reattributed later is not attributed
+        // at all).
+        let stored = store
+            .get_constitutional_proposal("prop-1")
+            .unwrap()
+            .expect("proposal should still exist");
+        assert_eq!(stored.status, "approved");
+        assert_eq!(stored.decided_by.as_deref(), Some("operator"));
+        assert_eq!(stored.decision_reason.as_deref(), Some("looks good"));
+        assert!(stored.decided_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_constitution_resolve_proposal_rejects_unknown_status() {
+        let (_temp, router) = test_router();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "bad".to_string(),
+            method: "constitution.resolve_proposal".to_string(),
+            params: serde_json::json!({
+                "proposal_id": "prop-x",
+                "decided_by": "operator",
+                "status": "maybe",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32602));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_constitution_resolve_proposal_not_found() {
+        let (_temp, router, _store) = test_router_with_store();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "nf".to_string(),
+            method: "constitution.resolve_proposal".to_string(),
+            params: serde_json::json!({
+                "proposal_id": "does-not-exist",
+                "decided_by": "operator",
+                "status": "approved",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert!(resp.error.is_some(), "resolving an unknown proposal must error, not succeed");
     }
 
     #[tokio::test]

@@ -12,6 +12,22 @@ use rusqlite::params;
 
 use super::GatewayStore;
 
+/// Every status a decider may move a proposal to via
+/// [`GatewayStore::decide_constitutional_proposal`]. The single source of
+/// truth shared by the JSON-RPC (`constitution.resolve_proposal`) and the CLI
+/// (`gateway constitution proposal …`) so the two can never drift. Mirrors
+/// the state machine in the module docs and the constitution's O-6 vocabulary
+/// (`approved`/`rejected`/`deferred`/`under_review`).
+pub const PROPOSAL_DECISION_STATUSES: &[&str] =
+    &["approved", "rejected", "deferred", "under_review"];
+
+/// Terminal proposal decisions — the ones that stamp `decided_at` and the
+/// decision fields. `under_review` is excluded: it is a non-terminal
+/// review-start transition that only updates `status` (see
+/// [`GatewayStore::decide_constitutional_proposal`]). The CLI exposes only
+/// these as subcommands.
+pub const PROPOSAL_TERMINAL_DECISION_STATUSES: &[&str] = &["approved", "rejected", "deferred"];
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConstitutionalProposal {
     pub proposal_id: String,

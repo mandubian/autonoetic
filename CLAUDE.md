@@ -145,6 +145,7 @@ Notable suite for approval continuation:
 ## Key Documentation
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow
+- `docs/philosophy.md` — The conceptions behind the constitution: functional autonoesis, bind-direction social contract, correctability over perfection, democratic trajectory, end-user primacy, and the intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
 - `docs/AGENTS.md` — Agent roles, routing, capabilities, lifecycle
 - `docs/CLI.md` — Complete CLI reference
 - `docs/separation-of-powers.md` — Agent vs gateway responsibilities

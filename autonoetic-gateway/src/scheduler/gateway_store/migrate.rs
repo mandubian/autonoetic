@@ -1083,11 +1083,14 @@ fn apply_decided_by_kind_v47(conn: &mut Connection) -> Result<()> {
 
     // Backfill already-decided rows so SQL accountability queries cover history.
     // Mirrors `principal::decider_principal_kind` exactly: operator⇒human,
+    // `user:<id>`⇒served_user (checked before the agent heuristic so a dotted
+    // user id like `user:alice.smith` is not caught by the `%.%` arm),
     // agent-id-shaped (`agent:` or contains `.`)⇒autonoetic_agent, and
     // gateway/system/emergency_stop/unknown⇒NULL (mechanical, no obligation).
     conn.execute(
         "UPDATE approvals SET decided_by_kind = CASE
             WHEN trim(decided_by) = 'operator' THEN 'human'
+            WHEN decided_by LIKE 'user:%' THEN 'served_user'
             WHEN decided_by LIKE 'agent:%' OR decided_by LIKE '%.%' THEN 'autonoetic_agent'
             ELSE NULL
          END

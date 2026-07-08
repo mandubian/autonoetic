@@ -693,8 +693,11 @@ pub fn actor_from_kind_id(
 /// Attribute a gate decision to a `(principal, seat)` from its recorded
 /// `decided_by` string. Operator (human) ⇒ Operator seat; an agent decider
 /// (`auditor.default` or `agent:auditor.default`) ⇒ that agent's seat (the
-/// `agent:` prefix is stripped first); a mechanical/unknown decider
-/// (`gateway`, `emergency_stop:<id>`, …) ⇒ the hidable Runtime seat.
+/// `agent:` prefix is stripped first); a served user (`user:<id>`) ⇒ its own
+/// distinct principal kind, never collapsed into `Human` or `Script` (the
+/// conflation `PrincipalKind::ServedUser` exists to prevent — see
+/// `docs/philosophy.md` §3.3); a mechanical/unknown decider (`gateway`,
+/// `emergency_stop:<id>`, …) ⇒ the hidable Runtime seat.
 pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
     use autonoetic_types::principal::{Principal, PrincipalKind};
     match autonoetic_types::principal::decider_principal_kind(decided_by) {
@@ -702,6 +705,15 @@ pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal
         Some(PrincipalKind::AutonoeticAgent) => {
             let id = decided_by.strip_prefix("agent:").unwrap_or(decided_by);
             (Principal::agent(id), derive_role(id))
+        }
+        // A served user is an attribution kind, not a seat (§3.3): it carries
+        // no Specialist/Auditor role of its own. It is kept distinct from
+        // `Human` (the operator) by its principal kind — the thing every
+        // accountability check keys on — and from `Script` (mechanical) by
+        // getting its own arm rather than the `_` fallback.
+        Some(PrincipalKind::ServedUser) => {
+            let id = decided_by.strip_prefix("user:").unwrap_or(decided_by);
+            (Principal::served_user(id), SessionRole::Operator)
         }
         _ => (
             Principal {
@@ -1089,6 +1101,15 @@ mod tests {
         assert_eq!(r, SessionRole::Runtime);
         let (_p, r) = decider_seat("gateway");
         assert_eq!(r, SessionRole::Runtime);
+
+        // A served user is attributed as its own kind — never collapsed into
+        // Human (operator) or Script (mechanical). The `user:` prefix is
+        // stripped from the id, matching the `agent:` handling above.
+        let (p, _r) = decider_seat("user:alice.smith");
+        assert_eq!(p.kind, PrincipalKind::ServedUser);
+        assert_eq!(p.id, "alice.smith");
+        assert_ne!(p.kind, PrincipalKind::Human);
+        assert_ne!(p.kind, PrincipalKind::Script);
     }
 
     #[test]

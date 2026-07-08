@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-2 principle(s) (bind the agent), 2 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+2 principle(s) (bind the agent), 6 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -29,6 +29,38 @@ A session is halted when it stops making progress, on a closed, configurable set
 
 ## Rights (bind: gateway)
 
+### Ri-0.2 — Own history is readable *(entrenched)*
+
+Every agent may read its own causal chain and execution trace. The gateway does not hide actions taken on the agent's behalf. Audit is not a privilege of operators; it is a right of the subject.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.2` | `own_history_readable` | `observability.* tools gated by ReadAccess capability` | `constitution_rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces` | — |
+
+### Ri-0.3 — Named rejection *(entrenched)*
+
+Every rejection names the rule ID that caused it. No agent is ever told "denied" without being told why. Rejection without explanation is indistinguishable from arbitrary authority.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.3` | `named_rejection` | `Tagged::permission_with_rules + PolicyDecision.enforced_rules` | `constitution_rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids` | — |
+
+### Ri-0.8 — Right to propose amendment *(entrenched)*
+
+Any agent holding the ConstitutionalProposal capability may submit an amendment proposal through the declared channel. The proposal receives a durable ID and enters the review queue; it cannot be silently dropped.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.8` | `amendment_proposal_intake` | `runtime/tools/constitution.rs::constitution_propose_amendment + scheduler/gateway_store/constitutional_proposals.rs` | `constitution_rights_amendment_proposal.rs` | — |
+
+### Ri-0.11 — Non-repudiation *(entrenched)*
+
+Every action an agent performs is attributed to that agent on the causal chain and cannot be retroactively reattributed. The agent can prove what it did; no party can claim the agent performed an action it did not.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.11` | `non_repudiation` | `causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id` | `constitution_rights_early_bucket.rs::ri_0_11_hash_chain_integrity` | — |
+
 ### Ri-0.13 — Reasoning privacy
 
 An agent's internal reasoning is private-under-law: not used by the gateway as a basis for policy decisions, recorded to the agent's own causal chain for forensic review, and disclosed to other parties only through capability-gated audit.
@@ -47,7 +79,7 @@ When a child task reaches a terminal state or resolves a gate, the gateway wakes
 
 ## Obligations (bind: decider)
 
-### O-1 — Motivated decision
+### O-1 — Motivated decision *(entrenched)*
 
 A decision owes a motivation, graduated by stakes. A rejection/abort, or an approval of an elevated-authority or external/irreversible action, is BLOCKING: it does not commit until a non-empty reason is recorded. Silent rejection by a decider is as illegitimate as a gateway denial with no rule ID (Ri-0.3).
 

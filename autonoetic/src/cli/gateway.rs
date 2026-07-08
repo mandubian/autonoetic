@@ -2510,7 +2510,11 @@ fn truncate_field(s: &str, max: usize) -> String {
 // Constitution amendment proposals — R+++1 (issue #92)
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_DECISION_STATES: &[&str] = &["approved", "rejected", "deferred"];
+// Single source of truth lives in the gateway store module so the CLI and the
+// `constitution.resolve_proposal` JSON-RPC method share one vocabulary (O-6).
+// The CLI only issues terminal decisions (approve/reject/defer); the broader
+// set including `under_review` is the RPC's.
+use autonoetic_gateway::scheduler::gateway_store::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES as PROPOSAL_DECISION_STATES;
 
 pub async fn handle_gateway_constitution(
     config_path: &Path,
