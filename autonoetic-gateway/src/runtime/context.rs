@@ -528,6 +528,15 @@ impl AgentExecutor {
         let budget_meters = self.snapshot_budget_meters();
         let gateway_node_id = crate::execution::gateway_actor_id();
 
+        // Bind the active constitution (version + digest) into the signed
+        // per-turn block so non-retroactivity (Ri-0.10) is a verified fact,
+        // not an on-demand lookup. The constitution is initialized at gateway
+        // startup before any turn runs, so these accessors are always live
+        // here. Fetched in the caller to keep `state_attestation` free of
+        // upward dependencies.
+        let constitution_version = crate::constitution_digest::constitution_version();
+        let constitution_digest = crate::constitution_digest::constitution_digest();
+
         let attestation = crate::runtime::state_attestation::compose_and_sign(
             crate::runtime::state_attestation::AttestationInputs {
                 agent_id: &self.manifest.agent.id,
@@ -540,6 +549,8 @@ impl AgentExecutor {
                 pending_user_interaction_ids,
                 pending_escalation_ids,
                 budget_meters,
+                constitution_version: &constitution_version,
+                constitution_digest: &constitution_digest,
             },
             &key,
         )?;

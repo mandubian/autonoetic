@@ -63,6 +63,12 @@ pub struct Principle {
     pub id: &'static str,
     pub title: &'static str,
     pub statement: &'static str,
+    /// See [`Right::entrenched`] — the same correction-core concept applied
+    /// to a principle. P-8.1 (hash-chain integrity) is the principle-side
+    /// member of the entrenched core: without a tamper-evident causal chain,
+    /// every other correction relies on evidence that could be silently
+    /// rewritten.
+    pub entrenched: bool,
 }
 
 /// A constitutional right — a guarantee the gateway upholds for the agent.
@@ -101,7 +107,10 @@ pub struct EnforcementEntry {
 }
 
 /// Principles (rule-side, bind the agent). Seeded with the loop-guard family
-/// as the proof; grows as #303 migrates the remaining sections.
+/// as the proof; grows as #303 migrates the remaining sections. `P-8.1` is
+/// migrated here (ahead of the rest of §8) because `docs/philosophy.md` §3.1
+/// names it as a member of the entrenched correction core — migrating it
+/// lets the entrenchment backstop cover it structurally.
 pub fn principles() -> &'static [Principle] {
     &[
         Principle {
@@ -110,6 +119,7 @@ pub fn principles() -> &'static [Principle] {
             statement: "Promotion and gate actions are bounded so that repeated mechanical \
                         rejection cannot be respawned indefinitely across sessions without \
                         operator acknowledgement.",
+            entrenched: false,
         },
         Principle {
             id: "P-7",
@@ -118,6 +128,20 @@ pub fn principles() -> &'static [Principle] {
                         configurable set of mechanically-detected non-progress conditions, \
                         each emitting a typed, attributable reason. No condition relies on \
                         agent self-report.",
+            entrenched: false,
+        },
+        // P-8.1 — the causal chain is append-only and tamper-evident. This is
+        // the substrate every correction-machinery clause depends on (read
+        // your history, attribute decisions, prove what happened): if the
+        // chain can be silently rewritten, none of those rights hold.
+        Principle {
+            id: "P-8.1",
+            title: "Hash-chain integrity",
+            statement: "The causal chain is append-only JSONL with hash-chain integrity — \
+                        each entry's `entry_hash` binds its fields and its `prev_hash` links \
+                        it to the prior entry. Tampering with any recorded field (actor, \
+                        action, outcome) leaves a stale hash detectable by recomputation.",
+            entrenched: true,
         },
     ]
 }
@@ -182,15 +206,17 @@ pub fn rights() -> &'static [Right] {
     ]
 }
 
-/// Correction-core clause IDs — rights and obligations marked
-/// [`Right::entrenched`] / [`Obligation::entrenched`]. Pure lookup; see
-/// [`tests::entrenched_clauses_all_exist_in_register`] for the structural
-/// backstop that keeps this list honest as the register evolves.
+/// Correction-core clause IDs — principles, rights, and obligations marked
+/// [`Principle::entrenched`] / [`Right::entrenched`] / [`Obligation::entrenched`].
+/// Pure lookup; see [`tests::entrenched_clauses_all_exist_in_register`] for
+/// the structural backstop that keeps this list honest as the register
+/// evolves.
 pub fn entrenched_clauses() -> Vec<&'static str> {
-    rights()
+    principles()
         .iter()
-        .filter(|r| r.entrenched)
-        .map(|r| r.id)
+        .filter(|p| p.entrenched)
+        .map(|p| p.id)
+        .chain(rights().iter().filter(|r| r.entrenched).map(|r| r.id))
         .chain(obligations().iter().filter(|o| o.entrenched).map(|o| o.id))
         .collect()
 }
@@ -279,6 +305,15 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             code: "runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt",
             test: "promotion_attempt_exhaustion_integration.rs",
             config: Some("promotion_governor.max_promotion_attempts_per_revision"),
+        },
+        // ── P-8.1 (binds agent, entrenched — correction core: tamper-evident chain) ──
+        EnforcementEntry {
+            clause_id: "P-8.1",
+            rule_id: "P-8.1",
+            check_id: "hash_chain_integrity",
+            code: "causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage",
+            test: "constitution_rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash",
+            config: None,
         },
         // ── Ri-0.2 (binds gateway, entrenched — correction core) ──
         EnforcementEntry {
@@ -529,7 +564,7 @@ pub fn render_register_markdown() -> String {
 
     out.push_str("## Principles (bind: agent)\n\n");
     for p in principles() {
-        out.push_str(&format!("### {} — {}\n\n", p.id, p.title));
+        out.push_str(&format!("### {} — {}{ent}\n\n", p.id, p.title, ent = entrenched_tag(p.entrenched)));
         out.push_str(&format!("{}\n\n", p.statement));
         out.push_str(&render_entries_table(p.id));
     }
@@ -677,7 +712,14 @@ mod tests {
     fn entrenched_clauses_are_the_expected_correction_core() {
         let mut entrenched = entrenched_clauses();
         entrenched.sort_unstable();
-        assert_eq!(entrenched, vec!["O-1", "Ri-0.11", "Ri-0.2", "Ri-0.3", "Ri-0.8"]);
+        // The correction core spans all three bind-directions: a principle
+        // (tamper-evident chain), four rights (read history, named rejection,
+        // propose, non-repudiation), and an obligation (motivated decision —
+        // the decider-side mirror of named rejection).
+        assert_eq!(
+            entrenched,
+            vec!["O-1", "P-8.1", "Ri-0.11", "Ri-0.2", "Ri-0.3", "Ri-0.8"]
+        );
     }
 
     #[test]

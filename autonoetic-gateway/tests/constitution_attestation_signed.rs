@@ -75,6 +75,8 @@ fn default_inputs<'a>(manifest: &'a AgentManifest) -> AttestationInputs<'a> {
             used: 5.0,
             limit: Some(20.0),
         }],
+        constitution_version: "2026.07.02",
+        constitution_digest: "abc123def456",
     }
 }
 
@@ -177,6 +179,20 @@ fn different_gateway_key_rejects_attestation() {
         "{}",
         err
     );
+}
+
+#[test]
+fn tampered_constitution_digest_breaks_verification() {
+    // The constitution digest is bound into the signed payload (P-6.23 /
+    // Ri-0.10): swapping the law under an agent mid-session, without the
+    // gateway re-signing, must be detectable.
+    let dir = tempdir().expect("tempdir");
+    let key = GatewayIdentityKey::load_or_generate(dir.path()).expect("key");
+    let manifest = manifest_with_caps(vec![]);
+    let mut att = compose_and_sign(default_inputs(&manifest), &key).expect("compose");
+    att.payload.constitution_digest = "0000000000000000".to_string();
+    let err = verify(&key.public_key_bytes(), &att).expect_err("tampered digest");
+    assert!(err.to_string().contains("did not verify"), "{}", err);
 }
 
 #[test]

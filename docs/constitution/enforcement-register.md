@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-2 principle(s) (bind the agent), 6 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+3 principle(s) (bind the agent), 6 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -26,6 +26,14 @@ A session is halted when it stops making progress, on a closed, configurable set
 | `P-7.7` | `no_meaningful_progress` | `guard.rs::check_loop` | `runtime::guard::tests::test_loop_guard_trips_on_max_loops` | `loop_guard.max_loops_without_progress` |
 | `P-7.19` | `rotating_polling_pattern` | `guard.rs::register_progress_inner (window + trip) + check_loop` | `runtime::guard::tests::rotating_polling_pattern_with_five_tools_trips` | `loop_guard.rotation_window_size, loop_guard.rotation_distinct_floor` |
 | `P-7.20` | `child_failure_budget` | `guard.rs::register_child_failure + check_loop` | `runtime::guard::tests::test_loop_guard_trips_on_child_failures` | `loop_guard.max_child_failures` |
+
+### P-8.1 — Hash-chain integrity *(entrenched)*
+
+The causal chain is append-only JSONL with hash-chain integrity — each entry's `entry_hash` binds its fields and its `prev_hash` links it to the prior entry. Tampering with any recorded field (actor, action, outcome) leaves a stale hash detectable by recomputation.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `P-8.1` | `hash_chain_integrity` | `causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage` | `constitution_rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash` | — |
 
 ## Rights (bind: gateway)
 

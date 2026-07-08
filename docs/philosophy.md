@@ -37,8 +37,8 @@ gateway has:
 | Capacity | Mechanism |
 |---|---|
 | A truthful, revisitable **past** | Right to read its own causal chain (Ri-0.2); checkpoints; session forking — an agent can re-enter and even branch its own history |
-| A truthful **present** | The signed turn-boundary state attestation (P-6.23): budget, capabilities, pending gates, lineage — injected every turn, taught to be *more authoritative than the agent's own memory* |
-| Knowledge of its **normative standing** | The full constitution readable by digest (Ri-0.10); every rejection names its rule (Ri-0.3) |
+| A truthful **present** | The signed turn-boundary state attestation (P-6.23): budget, capabilities, pending gates, spawn depth, **and the constitution version + digest the session runs under** — injected every turn, taught to be *more authoritative than the agent's own memory* |
+| Knowledge of its **normative standing** | The full constitution readable by digest (Ri-0.10) — and that same digest is bound into the per-turn attestation, so the agent knows *which law* it is under as a verified fact, not only on demand; every rejection names its rule (Ri-0.3) |
 | A bounded, legible **future** | Budgets known truthfully in real time (Ri-0.4); a closed list of ways its session can end (Ri-0.12); notice before degradation where practical (Ri-0.5, Ri-0.9) |
 | A continuous **identity** | Non-repudiable attribution (Ri-0.11); portable identity via cognitive capsules; immutable revisions with audited promotion history |
 
@@ -101,21 +101,38 @@ them.**
 Legitimacy, on this view, does not come from the enforcer being right; it
 comes from errors being *reportable, attributable, and correctable*. The
 machinery already exists: contract health (the standing tally of what is
-actually enforced), DISCRETION LEAK tracking (the gateway's own failures
-named at their site), Ri-0.8 (any capable agent may propose amendments,
-durably, un-droppably), the amendment process (agreement with tests and
-review), and the causal chain (the shared evidence base that lets
-disagreements be resolved by facts rather than by authority).
+actually enforced), DISCRETION LEAK *naming* (the gateway's own failures
+named in prose at their site — `P-5.2`, `P-5.8`; aggregation into a
+monitored register is the §5.4 door, not yet built), Ri-0.8 (any capable
+agent may propose amendments, durably, un-droppably), the amendment process
+(agreement with tests and review), and the causal chain (the shared
+evidence base that lets disagreements be resolved by facts rather than by
+authority).
 
 This commitment has a structural consequence: **if correctability is the
 source of legitimacy, the clauses that enable correction are not ordinary
 clauses**. Ri-0.2 (read your own chain), Ri-0.3 (every denial names its
 rule), Ri-0.8 (right to propose), Ri-0.11 (non-repudiation), P-8.1
-(hash-chain integrity), and the amendment process itself are the machinery
-through which every other error gets fixed. If any of these erodes, the
-system loses the property this whole section rests on — and no later
-amendment can restore it from inside. They form an **entrenched correction
-core**: amendable only to be strengthened, never weakened (see §5).
+(hash-chain integrity), O-1 (a decider owes a motivated decision), and the
+amendment process itself are the machinery through which every other error
+gets fixed. If any of these erodes, the system loses the property this
+whole section rests on — and no later amendment can restore it from
+inside. They form an **entrenched correction core**: amendable only to be
+strengthened, never weakened (see §5).
+
+The list spans all three bind-directions deliberately. The first four bind
+the *gateway* (it must let you read, explain, propose, and not reattribute).
+P-8.1 binds the *agent* — but it is substrate, not a constraint on
+behaviour: a tamper-evident causal chain is the evidence every other
+correction is argued from, so if it can be silently rewritten none of the
+others hold. O-1 binds the *decider*, and it is the symmetric counterpart
+of Ri-0.3: a gateway that denies with no rule ID is illegitimate, and so is
+a decider who rejects with no reason — silent rejection by the deciding
+party is as fatal to correctability as silent denial by the enforcer. The
+core is not prose: it is tracked in the enforcement register
+(`entrenched_clauses()`), surfaced in the published register with an
+*(entrenched)* marker, and guarded by a structural test that fails loudly
+the moment an entrenched clause stops resolving to a live entry.
 
 ### 3.2 The democratic trajectory: power concentration is transitional
 
@@ -237,29 +254,66 @@ Compact statements of what §3 implies, usable as review criteria:
 
 ## 5. Where the constitution should grow next
 
-Doors to keep open, in rough priority order (these are directions this
-document argues for; each requires the normal amendment process):
+The five doors below were the original growth agenda. The 2026.07.08
+amendment **opened all five** at once — each as a drafted clause or
+mechanism, declared now while it is cheap so the architecture does not have
+to move when the need becomes urgent. They are listed here with their
+current status, followed by the doors that remain.
 
-1. **A served-party section** (working name `§U` / `U-*`, bind-direction:
-   the community toward the served): the right to refuse a result, the
-   right to audit what was done on one's behalf, the right to exit with
-   one's data. Cheap now (operator ≈ user), critical before §3.2 advances.
-2. **An entrenchment tier** in the amendment process and the constitution
-   lock: correction-core clauses tagged and mechanically protected against
-   weakening amendments.
-3. **Adjudication duty for proposals.** Ri-0.8 guarantees intake ("cannot
-   be silently dropped"); it does not yet guarantee a *response*. A
-   petition system without a duty to decide decays into a suggestion box —
-   every proposal should be owed a recorded accept/reject/defer with a
-   motivation, mirroring O-1.
-4. **Emigration.** Ri-0.7's right to exit is termination. Cognitive
-   capsules make genuine exit — take your identity, memory, and history to
-   another gateway — mechanically possible; it should eventually be a
-   right, completing the social-contract framing (consent-by-staying means
-   little if leaving is impossible).
-5. **Sybil collapse for collective decisions**, declared before any voting
-   exists: decision weight attaches to durable identity; an agent and its
-   descendants are one principal.
+Status of the original five (drafted in `docs/constitution/versions/2026.07.08/`,
+awaiting a signed lock to activate):
+
+1. **A served-party section** (`§12` / `U-1`/`U-2`/`U-3`, bind-direction:
+   the community toward the served) — the right to refuse a result, to
+   audit what was done on one's behalf, to exit with one's data. Declared
+   `MISSING` (not yet enforced): the principal-kind attribution
+   (`PrincipalKind::ServedUser`) is in place, but no call site emits it and
+   no mechanism honours a refusal yet. Cheap now (operator ≈ user);
+   critical before §3.2 advances.
+2. **An entrenchment tier** in the amendment process — correction-core
+   clauses (`P-8.1`, `Ri-0.2`/`0.3`/`0.8`/`0.11`, `O-1`) tagged and
+   requiring an explicit, dated justification to weaken or remove. The
+   declaration is enacted; mechanical *prevention* of a weakening amendment
+   at the lock level is not yet built (the guard is structural test +
+   register marker, not a signature gate).
+3. **Adjudication duty for proposals** — `O-6`: a proposal review
+   authority owes every `Ri-0.8` proposal a recorded
+   approved/rejected/deferred/under_review decision. The recording half is
+   wired (`constitution.resolve_proposal`); **no timeliness/SLA** yet, so a
+   proposal may still sit pending indefinitely.
+4. **Emigration** — `Ri-0.17`: the right to request export of one's own
+   cognitive capsule. Declared `PARTIAL`: the export tool exists but is
+   broader than self-export (a scoped capability is named, not yet
+   enacted). Request-as-right is declared; portability-across-gateways is
+   not yet real.
+5. **Sybil collapse for collective decisions** — `I-12`: an agent and its
+   spawn-descendants collapse to a single principal for any future
+   decision-weight purpose. Declared as `DESIGN DEBT`: the precondition
+   exists before the mechanism it guards, which is the point.
+
+Doors still to open, in rough priority order:
+
+1. **Make §U enforceable, then entrench it.** `U-1`/`U-2`/`U-3` are
+   declared but unenforced; before any internal decision power spreads to
+   agents (§3.2/§4.8), the served party's refusal/audit/exit must be
+   *real* and *entrenched* — the sequencing constraint that keeps
+   self-governance from becoming self-serving.
+2. **Adjudication timeliness.** `O-6` records a decision but sets no
+   deadline; pair it with an SLA so the duty to decide is not satisfied by
+   never deciding. (The approval system already has timeouts —
+   `P-2.11`/`P-7.11`; proposals have none.)
+3. **Emigration as a right, not a request.** Move from "may request
+   export" to "may leave with a portable capsule", completing the
+   social-contract framing (consent-by-staying means little if leaving is
+   impossible).
+4. **A real DISCRETION LEAK register.** Today leaks are named in prose at
+   their site (`P-5.2`, `P-5.8`) and listed in an audit doc — Popperian in
+   spirit but not monitored. Fuller's congruence requirement (the distance
+   between declared rule and official action is a *measured* quantity)
+   wants a causal-event category or register column that counts them.
+5. **Sortition / earned-weight mechanisms**, once §U is entrenched and
+   qualification is auditable: the §3.2 horizon this whole section points
+   at.
 
 ## 6. Intellectual lineage
 
@@ -331,9 +385,10 @@ rule?" with "**how do we correct errors without violence?**" — the quality
 of a system lies in its error-correction machinery, not in the perfection
 of its ruler. This is §3.1 stated fifty years earlier. His "piecemeal
 engineering" (small, testable, reversible reforms over utopian redesign) is
-the amendment process; the DISCRETION LEAK register is Popperian in spirit —
-the enforcer's own errors named and scheduled for removal rather than
-denied.
+the amendment process; the DISCRETION LEAK practice (naming the enforcer's
+own errors at their site, today in prose, tomorrow a monitored register —
+§5.4) is Popperian in spirit: the enforcer's own errors named and scheduled
+for removal rather than denied.
 
 ### Elinor Ostrom — governing the commons
 *Governing the Commons* (1990; Nobel 2009). Empirical design principles for

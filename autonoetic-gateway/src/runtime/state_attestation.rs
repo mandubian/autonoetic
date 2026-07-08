@@ -3,17 +3,19 @@
 //! At every turn boundary the gateway composes a small JSON block
 //! describing the agent's *current* operational state — remaining budget,
 //! active capabilities, pending approvals, spawn depth, session ids, turn
-//! counter — signs it with the per-gateway Ed25519 identity key, and
-//! injects the wrapper as a system-prompt tail. The agent's foundation
-//! prompt teaches it that this block is authoritative; its own memory of
-//! these facts is not.
+//! counter, **and the constitution version + digest the session runs under**
+//! — signs it with the per-gateway Ed25519 identity key, and injects the
+//! wrapper as a system-prompt tail. The agent's foundation prompt teaches it
+//! that this block is authoritative; its own memory of these facts is not.
 //!
 //! Threat addressed: LLM reasoning state diverges from gateway ground
 //! truth. The model's sense of what's true comes from its conversation
 //! history, which it also shapes; an agent can plan coherently on false
 //! premises for many turns before contradiction. The attestation is a
 //! signed fact-of-the-moment the model can re-read without trusting the
-//! transcript.
+//! transcript. Binding the constitution digest in (P-6.23 / Ri-0.10,
+//! non-retroactivity) means the agent knows *which law* it runs under as a
+//! verified per-turn fact, not only on demand via `constitution_read`.
 //!
 //! Verification: see `crypto::verify_attestation_signature`. The wrapper
 //! includes a short `key_fingerprint` (first 8 bytes of the public key,
@@ -47,6 +49,15 @@ pub struct AttestationInputs<'a> {
     /// without a ceiling). Empty when budgets are disabled or the
     /// session has not yet recorded any usage.
     pub budget_meters: Vec<BudgetMeter>,
+    /// Active constitution version label (e.g. `"2026.07.02"`). Bound into
+    /// the signed block so non-retroactivity (Ri-0.10) is a verified per-turn
+    /// fact, not an on-demand lookup. Fetched by the caller from
+    /// `constitution_digest::constitution_version()` so this module stays
+    /// free of upward dependencies.
+    pub constitution_version: &'a str,
+    /// SHA-256 digest of the canonical constitution text the session runs
+    /// under. See [`AttestationInputs::constitution_version`].
+    pub constitution_digest: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +94,13 @@ pub struct StateAttestationPayload {
     pub spawn_depth: u32,
     pub budget: Vec<BudgetMeter>,
     pub gateway_node_id: String,
+    /// Active constitution version label (e.g. `"2026.07.02"`).
+    pub constitution_version: String,
+    /// SHA-256 digest of the canonical constitution text. Bound into the
+    /// signed payload so an agent knows which law it runs under as a
+    /// verified fact (P-6.23 / Ri-0.10 non-retroactivity), not only via
+    /// `constitution_read`.
+    pub constitution_digest: String,
     pub attested_at: String,
 }
 
@@ -155,6 +173,8 @@ pub fn compose_and_sign(
         spawn_depth,
         budget: inputs.budget_meters,
         gateway_node_id: inputs.gateway_node_id.to_string(),
+        constitution_version: inputs.constitution_version.to_string(),
+        constitution_digest: inputs.constitution_digest.to_string(),
         attested_at: chrono::Utc::now().to_rfc3339(),
     };
 
@@ -184,9 +204,12 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
          The block below is signed by the gateway's identity key. It is the \
          **authoritative** statement of your remaining budget, active \
          capabilities, pending gates (approvals, user interactions, \
-         escalations), spawn depth, session ids, and turn counter. If your \
-         own memory of these facts disagrees with the block, the block is \
-         correct.\n\n\
+         escalations), spawn depth, session ids, turn counter, and the \
+         constitution version + digest you are running under. If your own \
+         memory of these facts disagrees with the block, the block is \
+         correct. The constitution digest pins the exact law in force for \
+         this session; if it changes mid-session, the law under you \
+         changed.\n\n\
          <gateway_state_attestation>\n{body}\n</gateway_state_attestation>\n",
     ))
 }
@@ -323,6 +346,8 @@ mod tests {
                     used: 3.0,
                     limit: Some(20.0),
                 }],
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -337,6 +362,10 @@ mod tests {
         assert_eq!(payload.pending_approval_count, 2);
         assert_eq!(payload.budget[0].remaining(), Some(17.0));
         assert_eq!(att.key_fingerprint, key.fingerprint());
+        // The constitution the session runs under is bound into the signed
+        // block (P-6.23 / Ri-0.10 non-retroactivity), not just on-demand.
+        assert_eq!(payload.constitution_version, "2026.07.02");
+        assert_eq!(payload.constitution_digest, "deadbeef");
     }
 
     #[test]
@@ -356,6 +385,8 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -387,6 +418,8 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -420,6 +453,8 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -448,6 +483,8 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -477,6 +514,8 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
