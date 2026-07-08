@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-3 principle(s) (bind the agent), 6 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+3 principle(s) (bind the agent), 7 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -84,6 +84,14 @@ When a child task reaches a terminal state or resolves a gate, the gateway wakes
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `Ri-0.14` | `child_state_wakeup` | `scheduler/workflow_store.rs::update_task_run_status (send_child_state_notification) + scheduler/signal.rs + scheduler/task_notify.rs` | `constitution_right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event` | `default_workflow_wait_secs` |
+
+### Ri-0.17 — Self capsule export (emigration)
+
+An agent may request export of its own cognitive capsule for migration to another gateway. Scoped to the caller's own identity.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.17` | `self_capsule_export` | `runtime/tools/capsule.rs::CapsuleExportTool (two-tier gate) + policy.rs::can_use_capsule_self` | `capsule_self_export_scoping_integration.rs::self_export_denied_for_other_agent_id` | — |
 
 ## Obligations (bind: decider)
 

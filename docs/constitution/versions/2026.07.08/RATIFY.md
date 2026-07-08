@@ -45,9 +45,13 @@ infrastructure (`autonoetic-types/src/principal.rs`).
 
 ### Ri-0.17 — Right to request capsule export · emigration
 
-```
-| Ri-0.17 | An agent may request export of its own cognitive capsule for migration to another gateway. | ... | `runtime/tools/capsule.rs::CapsuleExportTool` gated by `Capability::CapsuleExport` — currently broader than self-export ... A scoped `SelfCapsuleExport` capability ... is named but not yet enacted ... | PARTIAL |
-```
+Now **ENFORCED** (was PARTIAL). The `SelfCapsuleExport` capability named in
+the original amendment has been enacted: `CapsuleExportTool` applies a
+two-tier gate — broad `CapsuleExport` (operator-granted) may export any
+`agent_id`; scoped `SelfCapsuleExport` restricts export to the caller's own
+identity (`manifest.agent.id`) via `policy.rs::can_use_capsule_self`.
+Registered in `enforcement_register.rs` (`check_id: self_capsule_export`),
+pinned by `capsule_self_export_scoping_integration.rs`.
 
 ### O-6 — Proposal adjudication duty
 

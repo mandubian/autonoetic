@@ -271,6 +271,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
+        Capability::SelfCapsuleExport => "SelfCapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
         Capability::PromoteWith { .. } => "PromoteWith",

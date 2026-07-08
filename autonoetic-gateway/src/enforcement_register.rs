@@ -203,6 +203,13 @@ pub fn rights() -> &'static [Right] {
                         required to poll to discover child-state transitions.",
             entrenched: false,
         },
+        Right {
+            id: "Ri-0.17",
+            title: "Self capsule export (emigration)",
+            statement: "An agent may request export of its own cognitive capsule for \
+                        migration to another gateway. Scoped to the caller's own identity.",
+            entrenched: false,
+        },
     ]
 }
 
@@ -370,6 +377,16 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
                    + scheduler/signal.rs + scheduler/task_notify.rs",
             test: "constitution_right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event",
             config: Some("default_workflow_wait_secs"),
+        },
+        // ── Ri-0.17 (binds gateway) ──
+        EnforcementEntry {
+            clause_id: "Ri-0.17",
+            rule_id: "Ri-0.17",
+            check_id: "self_capsule_export",
+            code: "runtime/tools/capsule.rs::CapsuleExportTool (two-tier gate) \
+                   + policy.rs::can_use_capsule_self",
+            test: "capsule_self_export_scoping_integration.rs::self_export_denied_for_other_agent_id",
+            config: None,
         },
         // ── O-1 (binds decider) ──
         EnforcementEntry {

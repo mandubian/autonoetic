@@ -846,6 +846,26 @@ impl PolicyEngine {
         PolicyDecision::deny("P-1.1")
     }
 
+    /// Gate self-export of an agent's own cognitive capsule on the
+    /// `SelfCapsuleExport` capability (Ri-0.17: emigration). Unlike the broad
+    /// [`can_use_capsule`](Self::can_use_capsule), this is scoped: the agent
+    /// may export only the capsule whose `agent_id` equals its own identity
+    /// (`manifest.agent.id`). Returns `allow` only when the capability is held
+    /// *and* `requested_agent_id` matches the caller's own id; otherwise
+    /// `deny` carrying rule `Ri-0.17`.
+    pub fn can_use_capsule_self(&self, requested_agent_id: &str) -> PolicyDecision {
+        let has_self = self
+            .manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::SelfCapsuleExport));
+        if has_self && requested_agent_id == self.manifest.agent.id {
+            PolicyDecision::allow("Ri-0.17")
+        } else {
+            PolicyDecision::deny("Ri-0.17")
+        }
+    }
+
     pub fn can_audit_reasoning(&self, target_agent_id: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::ReasoningAudit { targets } = cap {

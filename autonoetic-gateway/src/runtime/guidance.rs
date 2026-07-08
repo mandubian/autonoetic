@@ -176,6 +176,7 @@ pub fn capability_kind(cap: &Capability) -> &'static str {
         Capability::GithubIssueCreate { .. } => "github_issue_create",
         Capability::SecurityRedTeam => "security_red_team",
         Capability::CapsuleExport => "capsule_export",
+        Capability::SelfCapsuleExport => "self_capsule_export",
         Capability::WikiContribute => "wiki_contribute",
         Capability::PlanFrameAccess { .. } => "plan_frame_access",
         Capability::PromoteWith { .. } => "promote_with",

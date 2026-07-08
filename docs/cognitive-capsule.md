@@ -344,7 +344,7 @@ autonoetic capsule inspect <capsule_path>
 
 ```rust
 /// capsule.export — export an agent as a capsule (agent-initiated)
-/// Capability: CapsuleExport
+/// Capability: CapsuleExport (any agent_id) OR SelfCapsuleExport (own agent_id only, Ri-0.17)
 capsule_export(agent_id, mode?, include_memory?) → { capsule_path, capsule_id }
 
 /// capsule.import — import a capsule (agent-initiated)
@@ -352,7 +352,12 @@ capsule_export(agent_id, mode?, include_memory?) → { capsule_path, capsule_id 
 capsule_import(capsule_path, activate?) → { agent_id, revision_id }
 ```
 
-These are gated by a new `CapsuleExport` capability variant in `capability.rs`.
+These are gated by a `CapsuleExport` capability variant in `capability.rs`.
+`capsule.export` additionally accepts the scoped `SelfCapsuleExport` variant
+(Ri-0.17: emigration), which restricts export to the caller's own `agent_id`
+(`manifest.agent.id`) via `policy.rs::can_use_capsule_self`. The broad
+`CapsuleExport` remains the operator-grant path for exporting any agent;
+`capsule.import` is gated by `CapsuleExport` only.
 
 ---
 
