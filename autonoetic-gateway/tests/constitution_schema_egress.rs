@@ -25,6 +25,7 @@ fn minimal_result(reply: &str) -> SpawnResult {
         llm_usage: vec![],
         suspended_for_approval: None,
         suspended_for_user_input: false,
+        suspended_for_child_wait: false,
     }
 }
 

@@ -28,7 +28,7 @@ use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::tagged;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -144,6 +144,7 @@ struct SessionCloseFlags {
     assistant_reply: Option<String>,
     suspended_for_approval: Option<String>,
     suspended_for_user_input: bool,
+    suspended_for_child_wait: bool,
 }
 
 impl SessionCloseFlags {
@@ -151,19 +152,21 @@ impl SessionCloseFlags {
         let has_reply = self.assistant_reply.is_some();
         let approval = self.suspended_for_approval.is_some();
         let user_input = self.suspended_for_user_input;
-        match (jsonrpc_spawn, has_reply, approval, user_input) {
-            (true, true, false, false) => SessionCloseOutcome::JsonRpcSpawnComplete,
-            (true, false, false, false) => SessionCloseOutcome::JsonRpcSpawnCompleteEmpty,
-            (true, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspended,
-            (true, false, false, true) => SessionCloseOutcome::JsonRpcSpawnSuspendedUserInput,
-            (false, true, false, false) => SessionCloseOutcome::CheckpointRespawnComplete,
-            (false, true, false, true) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
-            (false, false, true, false) => SessionCloseOutcome::CheckpointRespawnSuspended,
-            (false, false, false, true) => {
+        let child_wait = self.suspended_for_child_wait;
+        match (jsonrpc_spawn, has_reply, approval, user_input, child_wait) {
+            (true, true, false, false, false) => SessionCloseOutcome::JsonRpcSpawnComplete,
+            (true, false, false, false, false) => SessionCloseOutcome::JsonRpcSpawnCompleteEmpty,
+            (true, false, true, false, false) => SessionCloseOutcome::JsonRpcSpawnSuspended,
+            (true, false, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspendedUserInput,
+            (true, false, false, false, true) => SessionCloseOutcome::JsonRpcSpawnSuspended,
+            (false, true, false, false, false) => SessionCloseOutcome::CheckpointRespawnComplete,
+            (false, true, false, true, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
+            (false, false, true, false, false) => SessionCloseOutcome::CheckpointRespawnSuspended,
+            (false, false, false, true, false) => {
                 SessionCloseOutcome::CheckpointRespawnSuspendedUserInput
             }
-            (false, false, false, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
-            // Defensive fallback — conflicting flags should never be set.
+            (false, false, false, false, true) => SessionCloseOutcome::CheckpointRespawnSuspended,
+            (false, false, false, false, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
             _ => SessionCloseOutcome::SpawnExecuteError,
         }
     }
@@ -177,21 +180,31 @@ fn session_close_flags_from_turn_outcome(
             assistant_reply: reply,
             suspended_for_approval: None,
             suspended_for_user_input: false,
+            suspended_for_child_wait: false,
         },
         TurnOutcome::Suspended { approval_request_id, .. } => SessionCloseFlags {
             assistant_reply: None,
             suspended_for_approval: Some(approval_request_id),
             suspended_for_user_input: false,
+            suspended_for_child_wait: false,
         },
         TurnOutcome::SuspendedUserInput { .. } => SessionCloseFlags {
             assistant_reply: None,
             suspended_for_approval: None,
             suspended_for_user_input: true,
+            suspended_for_child_wait: false,
         },
         TurnOutcome::Escalated { .. } => SessionCloseFlags {
             assistant_reply: None,
             suspended_for_approval: None,
             suspended_for_user_input: true,
+            suspended_for_child_wait: false,
+        },
+        TurnOutcome::WaitingForChild => SessionCloseFlags {
+            assistant_reply: None,
+            suspended_for_approval: None,
+            suspended_for_user_input: false,
+            suspended_for_child_wait: true,
         },
     }
 }
@@ -523,6 +536,7 @@ pub struct SpawnResult {
     /// Set when the turn ended suspended for user input or human escalation.
     /// Callers should treat this as non-terminal and avoid completion-only post-processing.
     pub suspended_for_user_input: bool,
+    pub suspended_for_child_wait: bool,
 }
 
 /// Per-root-session wake hint injected by the operator's TUI after plan approval.
@@ -1774,6 +1788,7 @@ impl GatewayExecutionService {
             assistant_reply,
             suspended_for_approval,
             suspended_for_user_input,
+            suspended_for_child_wait,
         } = close_flags;
         let digest_turn_count = runtime.turn_counter;
         let gw_dir = self.config.agents_dir.join(".gateway");
@@ -1945,6 +1960,7 @@ impl GatewayExecutionService {
             llm_usage,
             suspended_for_approval,
             suspended_for_user_input,
+            suspended_for_child_wait,
         })
     }
 
@@ -2465,21 +2481,73 @@ impl GatewayExecutionService {
             checkpoint.restore_into(runtime);
 
             let mut history = checkpoint.history.clone();
-            inject_session_context_after_system_message(
-                &runtime.agent_dir,
-                session_id,
-                &mut history,
-            );
-            let (turn_start_messages, resume_message) =
-                gateway_signal_turn_start_context(
-                    message,
-                    metadata,
-                    Some(&self.config),
-                    self.gateway_store.as_deref(),
-                    &session_id,
+
+            if matches!(
+                checkpoint.yield_reason,
+                crate::runtime::checkpoint::YieldReason::WaitingForChild { .. }
+            ) {
+                if let Some(pts) = checkpoint.pending_tool_state.as_ref() {
+                    if let Some(ref am) = checkpoint.assistant_message {
+                        let completed_ids: HashSet<&str> = pts
+                            .completed_tool_results
+                            .iter()
+                            .map(|(id, _, _)| id.as_str())
+                            .collect();
+                        let mut m = am.clone();
+                        m.tool_calls.retain(|tc| completed_ids.contains(tc.id.as_str()));
+                        if !m.tool_calls.is_empty() || !m.content.trim().is_empty() {
+                            history.push(m);
+                        }
+                    }
+                    for (call_id, tool_name, result) in &pts.completed_tool_results {
+                        history.push(crate::llm::Message::tool_result(
+                            call_id.clone(),
+                            tool_name.clone(),
+                            result.clone(),
+                        ));
+                    }
+                    let call = crate::llm::ToolCall {
+                        id: pts.pending_tool_call.call_id.clone(),
+                        name: pts.pending_tool_call.tool_name.clone(),
+                        arguments: pts.pending_tool_call.arguments.clone(),
+                    };
+                    let mut synth = crate::llm::Message::assistant(String::new());
+                    synth.tool_calls = vec![call.clone()];
+                    runtime.resume_pending_batch = Some((synth, vec![call]));
+                } else {
+                    inject_session_context_after_system_message(
+                        &runtime.agent_dir,
+                        session_id,
+                        &mut history,
+                    );
+                    let (turn_start_messages, resume_message) =
+                        gateway_signal_turn_start_context(
+                            message,
+                            metadata,
+                            Some(&self.config),
+                            self.gateway_store.as_deref(),
+                            &session_id,
+                        );
+                    history.extend(turn_start_messages);
+                    history.push(crate::llm::Message::user(resume_message));
+                }
+            } else {
+                inject_session_context_after_system_message(
+                    &runtime.agent_dir,
+                    session_id,
+                    &mut history,
                 );
-            history.extend(turn_start_messages);
-            history.push(crate::llm::Message::user(resume_message));
+                let (turn_start_messages, resume_message) =
+                    gateway_signal_turn_start_context(
+                        message,
+                        metadata,
+                        Some(&self.config),
+                        self.gateway_store.as_deref(),
+                        &session_id,
+                    );
+                history.extend(turn_start_messages);
+                history.push(crate::llm::Message::user(resume_message));
+            }
             let initial_msg = checkpoint.initial_user_message();
 
             let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
@@ -3030,6 +3098,7 @@ impl GatewayExecutionService {
                     llm_usage: Vec::new(),
                     suspended_for_approval: None,
                     suspended_for_user_input: false,
+                    suspended_for_child_wait: false,
                 });
             }
 
@@ -3329,6 +3398,7 @@ impl GatewayExecutionService {
 
         if result.suspended_for_approval.is_none()
             && !result.suspended_for_user_input
+            && !result.suspended_for_child_wait
             && (manifest_returns_schema.is_some()
                 || (self.config.response_validation.enabled && manifest_output_policy.is_some()))
         {
@@ -5152,54 +5222,64 @@ mod tests {
 
     #[test]
     fn session_close_flags_jsonrpc_mapping_is_closed_and_stable() {
-        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input| {
+        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input, suspended_for_child_wait| {
             SessionCloseFlags {
                 assistant_reply,
                 suspended_for_approval,
                 suspended_for_user_input,
+                suspended_for_child_wait,
             }
         };
         assert_eq!(
-            flags(None, Some("apr-1".into()), false).outcome(true).as_str(),
+            flags(None, Some("apr-1".into()), false, false).outcome(true).as_str(),
             "jsonrpc_spawn_suspended_approval"
         );
         assert_eq!(
-            flags(None, None, true).outcome(true).as_str(),
+            flags(None, None, true, false).outcome(true).as_str(),
             "jsonrpc_spawn_suspended_user_input"
         );
         assert_eq!(
-            flags(Some("ok".into()), None, false).outcome(true).as_str(),
+            flags(None, None, false, true).outcome(true).as_str(),
+            "jsonrpc_spawn_suspended_approval"
+        );
+        assert_eq!(
+            flags(Some("ok".into()), None, false, false).outcome(true).as_str(),
             "jsonrpc_spawn_complete"
         );
         assert_eq!(
-            flags(None, None, false).outcome(true).as_str(),
+            flags(None, None, false, false).outcome(true).as_str(),
             "jsonrpc_spawn_complete_empty"
         );
     }
 
     #[test]
     fn session_close_flags_checkpoint_mapping_is_closed_and_stable() {
-        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input| {
+        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input, suspended_for_child_wait| {
             SessionCloseFlags {
                 assistant_reply,
                 suspended_for_approval,
                 suspended_for_user_input,
+                suspended_for_child_wait,
             }
         };
         assert_eq!(
-            flags(None, Some("apr-1".into()), false).outcome(false).as_str(),
+            flags(None, Some("apr-1".into()), false, false).outcome(false).as_str(),
             "checkpoint_respawn_suspended"
         );
         assert_eq!(
-            flags(None, None, true).outcome(false).as_str(),
+            flags(None, None, true, false).outcome(false).as_str(),
             "checkpoint_respawn_suspended_user_input"
         );
         assert_eq!(
-            flags(Some("ok".into()), None, false).outcome(false).as_str(),
+            flags(None, None, false, true).outcome(false).as_str(),
+            "checkpoint_respawn_suspended"
+        );
+        assert_eq!(
+            flags(Some("ok".into()), None, false, false).outcome(false).as_str(),
             "checkpoint_respawn_complete"
         );
         assert_eq!(
-            flags(None, None, false).outcome(false).as_str(),
+            flags(None, None, false, false).outcome(false).as_str(),
             "checkpoint_respawn_complete_empty"
         );
     }

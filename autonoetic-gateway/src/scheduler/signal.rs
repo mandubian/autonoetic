@@ -131,7 +131,7 @@ pub async fn deliver_signal(
     Ok(())
 }
 
-fn build_delivery_request(
+pub fn build_delivery_request(
     pending: &PendingSignal,
     session_id: &str,
 ) -> crate::router::JsonRpcRequest {

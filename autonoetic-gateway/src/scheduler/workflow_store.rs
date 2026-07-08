@@ -3,7 +3,9 @@
 //! Layout (under `<agents_dir>/.gateway/scheduler/workflows/`):
 //! - `index/by_root/<sha256-hex>.json` — maps stable root key → `workflow_id`
 //! - `runs/<workflow_id>/workflow.json` — [`WorkflowRun`](autonoetic_types::workflow::WorkflowRun)
-//! - `runs/<workflow_id>/tasks/<task_id>.json` — [`TaskRun`](autonoetic_types::workflow::TaskRun)
+//! - `runs/<workflow_id>/tasks/<task_id>.json` — legacy file fallback (migrated to SQLite on first read)
+//! - TaskRun, queued task, and task-claim state are now stored in SQLite (`gateway.db`)
+//!   tables `task_runs`, `queued_task_runs`, and `task_claims`.
 //! - Workflow events are stored in SQLite table `workflow_events` (`gateway.db`).
 
 use crate::execution::gateway_root_dir;
@@ -11,7 +13,7 @@ use crate::runtime::failure_classification::{
     classify_task_status, metadata_for_failure_class, WorkflowFailureMetadata,
 };
 use crate::runtime::live_digest::base_session_id;
-use crate::scheduler::gateway_store::GatewayStore;
+use crate::scheduler::gateway_store::{GatewayStore, TaskExecutionClaim};
 use crate::scheduler::store::{read_json_file, write_json_file};
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
@@ -301,13 +303,15 @@ pub fn load_workflow_events(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
 ) -> anyhow::Result<Vec<WorkflowEventRecord>> {
-    let owned_store;
+    let mut owned_store = None;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
-            &owned_store
+            owned_store = Some(crate::scheduler::gateway_store::GatewayStore::open(
+                &gateway_dir
+            )?);
+            owned_store.as_ref().unwrap()
         }
     };
 
@@ -586,13 +590,15 @@ pub fn append_workflow_event(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     event: &WorkflowEventRecord,
 ) -> anyhow::Result<()> {
-    let owned_store;
+    let mut owned_store = None;
     let store = match store {
         Some(s) => s,
         None => {
             let gateway_dir = crate::execution::gateway_root_dir(config);
-            owned_store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
-            &owned_store
+            owned_store = Some(crate::scheduler::gateway_store::GatewayStore::open(
+                &gateway_dir
+            )?);
+            owned_store.as_ref().unwrap()
         }
     };
     store.append_workflow_event(event)?;
@@ -790,19 +796,27 @@ pub fn append_scheduled_job_cancelled_workflow_event(
 /// Write or replace a task record and refresh `workflow.active_task_ids`.
 pub fn save_task_run(
     config: &GatewayConfig,
-    _store: Option<&GatewayStore>,
+    store: Option<&GatewayStore>,
     task: &TaskRun,
 ) -> anyhow::Result<()> {
-    let path = task_run_path(config, &task.workflow_id, &task.task_id);
-    write_json_file(&path, task)?;
+    let mut owned_store = None;
+    let store = match store {
+        Some(s) => s,
+        None => {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            owned_store = Some(GatewayStore::open(&gateway_dir)?);
+            owned_store.as_ref().unwrap()
+        }
+    };
+    store.upsert_task_run(task)?;
 
-    let mut run = load_workflow_run(config, _store, &task.workflow_id)?
+    let mut run = load_workflow_run(config, Some(store), &task.workflow_id)?
         .ok_or_else(|| anyhow::anyhow!("workflow '{}' not found", task.workflow_id))?;
     if !run.active_task_ids.contains(&task.task_id) {
         run.active_task_ids.push(task.task_id.clone());
     }
     run.updated_at = now_rfc3339();
-    save_workflow_run(config, _store, &run)?;
+    save_workflow_run(config, Some(store), &run)?;
     Ok(())
 }
 
@@ -821,31 +835,71 @@ pub fn update_task_run_metadata(
     save_task_run(config, store, &task)
 }
 
-/// Load a task run if the file exists.
+/// Load a task run. SQLite is the source of truth; legacy files are read once
+/// and migrated into SQLite on first touch.
 pub fn load_task_run(
     config: &GatewayConfig,
-    _store: Option<&GatewayStore>,
+    store: Option<&GatewayStore>,
     workflow_id: &str,
     task_id: &str,
 ) -> anyhow::Result<Option<TaskRun>> {
+    let mut owned_store = None;
+    let store = match store {
+        Some(s) => s,
+        None => {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            owned_store = Some(GatewayStore::open(&gateway_dir)?);
+            owned_store.as_ref().unwrap()
+        }
+    };
+
+    if let Some(task) = store.get_task_run(workflow_id, task_id)? {
+        return Ok(Some(task));
+    }
+
     let p = task_run_path(config, workflow_id, task_id);
     if !p.exists() {
         return Ok(None);
     }
-    Ok(Some(read_json_file(&p)?))
+    let task: TaskRun = read_json_file(&p)?;
+    store.upsert_task_run(&task)?;
+    let _ = fs::remove_file(&p);
+    Ok(Some(task))
 }
 
-/// List all persisted [`TaskRun`] records under `runs/<workflow_id>/tasks/`.
+/// List all persisted [`TaskRun`] records for a workflow. Legacy files are
+/// migrated into SQLite on the first scan.
 pub fn list_task_runs_for_workflow(
     config: &GatewayConfig,
-    _store: Option<&GatewayStore>,
+    store: Option<&GatewayStore>,
     workflow_id: &str,
 ) -> anyhow::Result<Vec<TaskRun>> {
+    let mut owned_store = None;
+    let store = match store {
+        Some(s) => s,
+        None => {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            owned_store = Some(GatewayStore::open(&gateway_dir)?);
+            owned_store.as_ref().unwrap()
+        }
+    };
+
+    migrate_legacy_task_files(config, store, workflow_id)?;
+
+    store.list_task_runs_for_workflow(workflow_id)
+}
+
+/// One-time migration of legacy task JSON files into SQLite. Files that are
+/// successfully migrated are deleted so SQLite becomes the single source of truth.
+fn migrate_legacy_task_files(
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    workflow_id: &str,
+) -> anyhow::Result<()> {
     let dir: PathBuf = workflow_run_dir(config, workflow_id).join("tasks");
     if !dir.is_dir() {
-        return Ok(Vec::new());
+        return Ok(());
     }
-    let mut out: Vec<TaskRun> = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -853,18 +907,16 @@ pub fn list_task_runs_for_workflow(
             continue;
         }
         match read_json_file::<TaskRun>(&path) {
-            Ok(t) => out.push(t),
+            Ok(t) => {
+                let _ = store.upsert_task_run(&t);
+                let _ = fs::remove_file(&path);
+            }
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "skip invalid task json");
+                tracing::warn!(path = %path.display(), error = %e, "skip invalid legacy task json");
             }
         }
     }
-    out.sort_by(|a, b| {
-        a.created_at
-            .cmp(&b.created_at)
-            .then_with(|| a.task_id.cmp(&b.task_id))
-    });
-    Ok(out)
+    Ok(())
 }
 
 /// Active workflow approval gate: any task in `AwaitingApproval` or workflow `BlockedApproval`.
@@ -2170,7 +2222,7 @@ fn create_implicit_artifact(
 }
 
 // ---------------------------------------------------------------------------
-// Async task queue
+// Async task queue (SQLite-backed; legacy files are migrated on first touch)
 // ---------------------------------------------------------------------------
 
 fn queue_dir(config: &GatewayConfig, workflow_id: &str) -> PathBuf {
@@ -2185,15 +2237,6 @@ pub(crate) fn task_claim_path(config: &GatewayConfig, workflow_id: &str, task_id
     queue_dir(config, workflow_id).join(format!("{task_id}.claim.json"))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TaskExecutionClaim {
-    pub workflow_id: String,
-    pub task_id: String,
-    pub scheduler_instance_id: String,
-    pub claimed_at: String,
-    pub heartbeat_at: String,
-}
-
 fn parse_rfc3339(ts: &str) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(ts)?.with_timezone(&Utc))
 }
@@ -2205,53 +2248,88 @@ pub(crate) fn claim_is_stale(claim: &TaskExecutionClaim, stale_after_secs: u64) 
     Utc::now() - heartbeat_at > Duration::seconds(stale_after_secs as i64)
 }
 
+fn open_store_for<'a>(
+    config: &GatewayConfig,
+    store: Option<&'a GatewayStore>,
+    owned: &'a mut Option<GatewayStore>,
+) -> anyhow::Result<&'a GatewayStore> {
+    if let Some(s) = store {
+        return Ok(s);
+    }
+    let gateway_dir = crate::execution::gateway_root_dir(config);
+    *owned = Some(GatewayStore::open(&gateway_dir)?);
+    Ok(owned.as_ref().unwrap())
+}
+
 pub fn load_task_claim(
     config: &GatewayConfig,
+    store: Option<&GatewayStore>,
     workflow_id: &str,
     task_id: &str,
 ) -> anyhow::Result<Option<TaskExecutionClaim>> {
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    if let Some(claim) = store.get_task_claim(workflow_id, task_id)? {
+        return Ok(Some(claim));
+    }
     let path = task_claim_path(config, workflow_id, task_id);
     if !path.exists() {
         return Ok(None);
     }
-    Ok(Some(read_json_file(&path)?))
+    let claim: TaskExecutionClaim = read_json_file(&path)?;
+    store.upsert_task_claim(&claim)?;
+    let _ = fs::remove_file(&path);
+    Ok(Some(claim))
 }
 
 pub fn acquire_task_claim(
     config: &GatewayConfig,
-    _store: Option<&GatewayStore>,
+    store: Option<&GatewayStore>,
     workflow_id: &str,
     task_id: &str,
     stale_after_secs: u64,
 ) -> anyhow::Result<Option<TaskExecutionClaim>> {
-    if let Some(existing) = load_task_claim(config, workflow_id, task_id)? {
-        if !claim_is_stale(&existing, stale_after_secs) {
-            return Ok(None);
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+
+    // If there is a legacy claim file, migrate it first so SQLite owns the claim.
+    let path = task_claim_path(config, workflow_id, task_id);
+    if path.exists() {
+        if let Ok(legacy) = read_json_file::<TaskExecutionClaim>(&path) {
+            let _ = store.upsert_task_claim(&legacy);
         }
+        let _ = fs::remove_file(&path);
     }
 
-    let claim = TaskExecutionClaim {
-        workflow_id: workflow_id.to_string(),
-        task_id: task_id.to_string(),
-        scheduler_instance_id: uuid::Uuid::new_v4().to_string(),
-        claimed_at: now_rfc3339(),
-        heartbeat_at: now_rfc3339(),
-    };
-    write_json_file(&task_claim_path(config, workflow_id, task_id), &claim)?;
-    Ok(Some(claim))
+    store.acquire_task_claim(workflow_id, task_id, stale_after_secs)
 }
 
 pub fn refresh_task_claim_heartbeat(
     config: &GatewayConfig,
-    _store: Option<&GatewayStore>,
+    store: Option<&GatewayStore>,
     workflow_id: &str,
     task_id: &str,
 ) -> anyhow::Result<()> {
-    let Some(mut claim) = load_task_claim(config, workflow_id, task_id)? else {
-        return Ok(());
-    };
-    claim.heartbeat_at = now_rfc3339();
-    write_json_file(&task_claim_path(config, workflow_id, task_id), &claim)
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    store.refresh_task_claim_heartbeat(workflow_id, task_id)
+}
+
+pub fn release_task_claim(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    task_id: &str,
+) -> anyhow::Result<()> {
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    store.delete_task_claim(workflow_id, task_id)?;
+    // Also remove legacy file if it exists.
+    let path = task_claim_path(config, workflow_id, task_id);
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+    Ok(())
 }
 
 /// Refresh a running task's `updated_at` without changing status or emitting workflow events.
@@ -2275,20 +2353,13 @@ pub fn refresh_task_run_heartbeat(
     save_task_run(config, store, &task)
 }
 
-pub fn release_task_claim(
-    config: &GatewayConfig,
-    _store: Option<&GatewayStore>,
-    workflow_id: &str,
-    task_id: &str,
-) -> anyhow::Result<()> {
-    let path = task_claim_path(config, workflow_id, task_id);
-    if path.exists() {
-        fs::remove_file(&path)?;
+pub fn queued_task_exists(config: &GatewayConfig, store: Option<&GatewayStore>, workflow_id: &str, task_id: &str) -> bool {
+    let mut owned_store = None;
+    if let Ok(store) = open_store_for(config, store, &mut owned_store) {
+        if let Ok(Some(_)) = store.get_queued_task(workflow_id, task_id) {
+            return true;
+        }
     }
-    Ok(())
-}
-
-pub fn queued_task_exists(config: &GatewayConfig, workflow_id: &str, task_id: &str) -> bool {
     queued_task_path(config, workflow_id, task_id).exists()
 }
 
@@ -2300,7 +2371,7 @@ pub fn refresh_queued_task_message_from_task_checkpoint(
     workflow_id: &str,
     task_id: &str,
 ) -> anyhow::Result<()> {
-    if !queued_task_exists(config, workflow_id, task_id) {
+    if !queued_task_exists(config, store, workflow_id, task_id) {
         return Ok(());
     }
     let Some(cp) = load_task_checkpoint(config, store, workflow_id, task_id)? else {
@@ -2327,11 +2398,15 @@ pub fn refresh_queued_task_message_from_task_checkpoint(
         Some(v) => serde_json::to_string(v)?,
         None => return Ok(()),
     };
-    let path = queued_task_path(config, workflow_id, task_id);
-    let mut q: QueuedTaskRun = read_json_file(&path)?;
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    let mut q = match store.get_queued_task(workflow_id, task_id)? {
+        Some(q) => q,
+        None => return Ok(()),
+    };
     if q.message != rm {
         q.message = rm;
-        write_json_file(&path, &q)?;
+        store.enqueue_queued_task(&q)?;
         tracing::info!(
             target: "workflow",
             workflow_id = %workflow_id,
@@ -2349,12 +2424,16 @@ pub fn enqueue_task(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     queued: &QueuedTaskRun,
 ) -> anyhow::Result<()> {
-    let dir = queue_dir(config, &queued.workflow_id);
-    fs::create_dir_all(&dir)?;
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    store.enqueue_queued_task(queued)?;
+    // Remove legacy file if present.
     let path = queued_task_path(config, &queued.workflow_id, &queued.task_id);
-    write_json_file(&path, queued)?;
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
 
-    let mut run = load_workflow_run(config, store, &queued.workflow_id)?
+    let mut run = load_workflow_run(config, Some(store), &queued.workflow_id)?
         .ok_or_else(|| anyhow::anyhow!("workflow '{}' not found", queued.workflow_id))?;
     anyhow::ensure!(
         run.status != WorkflowRunStatus::EmergencyStopping
@@ -2373,11 +2452,11 @@ pub fn enqueue_task(
         run.status = WorkflowRunStatus::WaitingChildren;
     }
     run.updated_at = now_rfc3339();
-    save_workflow_run(config, store, &run)?;
+    save_workflow_run(config, Some(store), &run)?;
 
     append_workflow_event(
         config,
-        store,
+        Some(store),
         &WorkflowEventRecord {
             event_id: new_event_id(),
             workflow_id: queued.workflow_id.clone(),
@@ -2407,23 +2486,20 @@ pub fn enqueue_task(
 /// Dequeue (remove from queue) after task execution completes.
 pub fn dequeue_task(
     config: &GatewayConfig,
-    _store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
     task_id: &str,
 ) -> anyhow::Result<()> {
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    store.dequeue_queued_task(workflow_id, task_id)?;
+    // Remove legacy file if present.
     let path = queued_task_path(config, workflow_id, task_id);
     if path.exists() {
-        if let Err(e) = fs::remove_file(&path) {
-            tracing::warn!(
-                target: "workflow",
-                path = %path.display(),
-                error = %e,
-                "Failed to remove queued task file"
-            );
-        }
+        let _ = fs::remove_file(&path);
     }
 
-    let mut run = match load_workflow_run(config, _store, workflow_id)? {
+    let mut run = match load_workflow_run(config, Some(store), workflow_id)? {
         Some(r) => r,
         None => return Ok(()),
     };
@@ -2431,22 +2507,32 @@ pub fn dequeue_task(
     // Also remove from active_task_ids when task completes (bug fix: tasks were staying active forever)
     run.active_task_ids.retain(|id| id != task_id);
     run.updated_at = now_rfc3339();
-    save_workflow_run(config, _store, &run)?;
-    release_task_claim(config, _store, workflow_id, task_id)?;
+    save_workflow_run(config, Some(store), &run)?;
+    release_task_claim(config, Some(store), workflow_id, task_id)?;
     Ok(())
 }
 
 /// Load all queued tasks for a workflow.
 pub fn load_queued_tasks(
     config: &GatewayConfig,
-    _store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     workflow_id: &str,
 ) -> anyhow::Result<Vec<QueuedTaskRun>> {
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+    migrate_legacy_queued_files(config, store, workflow_id)?;
+    store.list_queued_tasks_for_workflow(workflow_id)
+}
+
+fn migrate_legacy_queued_files(
+    config: &GatewayConfig,
+    store: &GatewayStore,
+    workflow_id: &str,
+) -> anyhow::Result<()> {
     let dir = queue_dir(config, workflow_id);
     if !dir.is_dir() {
-        return Ok(Vec::new());
+        return Ok(());
     }
-    let mut out = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -2461,38 +2547,42 @@ pub fn load_queued_tasks(
             continue;
         }
         match read_json_file::<QueuedTaskRun>(&path) {
-            Ok(q) => out.push(q),
+            Ok(q) => {
+                let _ = store.enqueue_queued_task(&q);
+                let _ = fs::remove_file(&path);
+            }
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "skip invalid queued task json");
+                tracing::warn!(path = %path.display(), error = %e, "skip invalid legacy queued task json");
             }
         }
     }
-    out.sort_by(|a, b| a.enqueued_at.cmp(&b.enqueued_at));
-    Ok(out)
+    Ok(())
 }
 
 /// Load ALL queued tasks across all workflows (for the scheduler tick).
-/// Scans the runs/ directory for any workflow with a non-empty queue/.
+/// Reads from SQLite; legacy queue files are migrated when a workflow is first
+/// touched by `load_queued_tasks`.
 pub fn load_all_queued_tasks(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
 ) -> anyhow::Result<Vec<QueuedTaskRun>> {
+    let mut owned_store = None;
+    let store = open_store_for(config, store, &mut owned_store)?;
+
+    // Migrate any workflow that still has legacy queue files.
     let root = workflows_root(config).join("runs");
-    if !root.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
+    if root.is_dir() {
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let wf_id = entry.file_name().to_string_lossy().to_string();
+            let _ = migrate_legacy_queued_files(config, store, &wf_id);
         }
-        let wf_id = entry.file_name().to_string_lossy().to_string();
-        let queued = load_queued_tasks(config, store, &wf_id)?;
-        out.extend(queued);
     }
-    out.sort_by(|a, b| a.enqueued_at.cmp(&b.enqueued_at));
-    Ok(out)
+
+    store.list_all_queued_tasks()
 }
 
 /// Check if a workflow's join condition is satisfied.
@@ -5419,13 +5509,13 @@ mod tests {
             "fresh claim should block duplicate claim"
         );
 
-        let loaded = load_task_claim(&cfg, &wf.workflow_id, "task-c1")
+        let loaded = load_task_claim(&cfg, None, &wf.workflow_id, "task-c1")
             .unwrap()
             .expect("claim present");
         assert_eq!(loaded.scheduler_instance_id, claim.scheduler_instance_id);
 
         release_task_claim(&cfg, None, &wf.workflow_id, "task-c1").unwrap();
-        assert!(load_task_claim(&cfg, &wf.workflow_id, "task-c1")
+        assert!(load_task_claim(&cfg, None, &wf.workflow_id, "task-c1")
             .unwrap()
             .is_none());
     }
