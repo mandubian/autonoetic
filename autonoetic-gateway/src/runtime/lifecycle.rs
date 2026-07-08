@@ -74,10 +74,10 @@ pub enum TurnOutcome {
     /// as blocked on user input (not "completed empty").
     SuspendedUserInput { interaction_id: String },
 
-    /// The turn was suspended because the agent escalated to a human operator.
-    /// The checkpoint has already been saved; the session resumes when the
-    /// operator approves the escalation and provides guidance.
+    /// The turn was suspended because an escalation requires human review.
     Escalated { escalation_request_id: String },
+
+    WaitingForChild,
 }
 
 /// Map a `TurnOutcome` to the close reason used by the direct
@@ -93,6 +93,7 @@ pub fn session_close_outcome_from_turn_outcome(
             SessionCloseOutcome::ExecuteLoopSuspendedUserInput
         }
         TurnOutcome::Escalated { .. } => SessionCloseOutcome::ExecuteLoopEscalated,
+        TurnOutcome::WaitingForChild => SessionCloseOutcome::ExecuteLoopSuspended,
     }
 }
 
@@ -3261,13 +3262,6 @@ impl AgentExecutor {
             });
 
             if let Some(request_id) = escalation_info {
-                // Register the escalation with the LoopGuard before suspending.
-                // The escalation path returns early (below), so the generic
-                // guard-registration loop at lines ~3302 is never reached for
-                // escalation results. Without this, repeated identical
-                // escalations across suspend/resume cycles are invisible to
-                // the guard, causing an infinite escalation loop (the guard
-                // state in the checkpoint never accumulates counts).
                 if let Some((_, tool_name, result_json)) = results.last() {
                     self.guard.register_irrecoverable(tool_name, result_json);
                 }
@@ -3293,6 +3287,82 @@ impl AgentExecutor {
                 return Ok(Some(TurnOutcome::Escalated {
                     escalation_request_id: request_id,
                 }));
+            }
+
+            let waiting_for_child_info = results.last().and_then(|(id, _name, result_json)| {
+                let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                if parsed.get("waiting_for_child").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let workflow_id = parsed
+                        .get("workflow_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .or_else(|| self.workflow_id.clone())
+                        .unwrap_or_default();
+                    Some((id.clone(), workflow_id))
+                } else {
+                    None
+                }
+            });
+
+            if let Some((pending_call_id, workflow_id)) = waiting_for_child_info {
+                let completed_results = results[..results.len() - 1].to_vec();
+                let remaining_calls = tool_calls[results.len()..].to_vec();
+
+                let pending_tc = tool_calls
+                    .iter()
+                    .find(|tc| tc.id == pending_call_id)
+                    .expect("waiting_for_child call id must match a tool call in the response");
+
+                let pending_tool_state = PendingToolState {
+                    completed_tool_results: completed_results,
+                    pending_tool_call: PendingToolCall {
+                        call_id: pending_call_id,
+                        tool_name: pending_tc.name.clone(),
+                        arguments: pending_tc.arguments.clone(),
+                        approval_response: None,
+                    },
+                    remaining_tool_calls: remaining_calls,
+                };
+
+                let yield_reason = YieldReason::WaitingForChild {
+                    workflow_id,
+                    task_id: self.task_id.clone(),
+                };
+
+                let mut cp = self.build_checkpoint(
+                    history,
+                    turn_id,
+                    yield_reason,
+                    Some(pending_tool_state),
+                );
+                cp.assistant_message = Some(assistant_msg);
+
+                if let Some(config) = self.config.as_ref() {
+                    if let Err(e) = save_checkpoint(config, &cp) {
+                        tracing::warn!(
+                            target: "checkpoint",
+                            session_id = %session_id,
+                            turn_id = %turn_id,
+                            error = %e,
+                            "Failed to save enriched waiting_for_child checkpoint"
+                        );
+                    }
+                }
+                if let Some(gs) = self.gateway_store.as_ref() {
+                    let lifecycle = "hibernated";
+                    if let Err(e) = gs.set_session_lifecycle_state(&cp.session_id, lifecycle) {
+                        tracing::warn!(
+                            target: "lifecycle",
+                            session_id = %cp.session_id,
+                            lifecycle_state = %lifecycle,
+                            error = %e,
+                            "Failed to persist lifecycle state on yield"
+                        );
+                    }
+                }
+
+                let _ = tracer.end_digest_turn();
+                return Ok(Some(TurnOutcome::WaitingForChild));
             }
 
             // No approval or interaction required — commit assistant message + tool results to history.

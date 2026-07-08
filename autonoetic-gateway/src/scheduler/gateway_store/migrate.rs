@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 64;
+const SCHEMA_VERSION_LATEST: i64 = 65;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -549,6 +549,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_escalation_approval_request_id_v62(conn)?;
     apply_escalation_plan_frame_expiry_v63(conn)?;
     apply_session_lifecycle_state_v64(conn)?;
+    apply_workflow_tasks_sqlite_v65(conn)?;
 
     Ok(())
 }
@@ -2960,6 +2961,80 @@ fn apply_escalation_code_excerpts_v36(conn: &mut Connection) -> Result<()> {
             "escalation_code_excerpts",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+fn apply_workflow_tasks_sqlite_v65(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 65 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_runs (
+            task_id            TEXT NOT NULL,
+            workflow_id        TEXT NOT NULL,
+            agent_id           TEXT NOT NULL,
+            session_id         TEXT NOT NULL,
+            parent_session_id  TEXT NOT NULL DEFAULT '',
+            status             TEXT NOT NULL,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL,
+            source_agent_id    TEXT,
+            result_summary     TEXT,
+            join_group         TEXT,
+            message            TEXT,
+            metadata_json      TEXT,
+            retry_count        INTEGER NOT NULL DEFAULT 0,
+            last_failure_class TEXT,
+            retry_policy_json  TEXT,
+            side_effect_state  TEXT,
+            dedupe_key         TEXT,
+            PRIMARY KEY (workflow_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_runs_workflow
+            ON task_runs(workflow_id);
+
+        CREATE TABLE IF NOT EXISTS queued_task_runs (
+            task_id             TEXT NOT NULL,
+            workflow_id         TEXT NOT NULL,
+            agent_id            TEXT NOT NULL,
+            message             TEXT NOT NULL,
+            child_session_id    TEXT NOT NULL,
+            parent_session_id   TEXT NOT NULL,
+            source_agent_id     TEXT NOT NULL,
+            metadata_json       TEXT,
+            join_group          TEXT,
+            blocks_planner      INTEGER NOT NULL DEFAULT 1,
+            enqueued_at         TEXT NOT NULL,
+            credential_bindings_json TEXT,
+            PRIMARY KEY (workflow_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_queued_task_runs_workflow
+            ON queued_task_runs(workflow_id);
+
+        CREATE TABLE IF NOT EXISTS task_claims (
+            task_id                 TEXT NOT NULL,
+            workflow_id             TEXT NOT NULL,
+            scheduler_instance_id   TEXT NOT NULL,
+            claimed_at              TEXT NOT NULL,
+            heartbeat_at            TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_claims_workflow
+            ON task_claims(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_task_claims_heartbeat
+            ON task_claims(heartbeat_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![65_i64, "workflow_tasks_sqlite", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

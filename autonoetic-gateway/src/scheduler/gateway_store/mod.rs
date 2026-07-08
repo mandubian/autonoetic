@@ -18,6 +18,7 @@ mod notifications;
 mod operator_activity;
 pub use operator_activity::OperatorActivityInsert;
 pub use agent_registry::PromotedAgent;
+pub use workflow_tasks::TaskExecutionClaim;
 mod observability;
 pub mod plan_frames;
 pub mod post_promotion_reviews;
@@ -39,6 +40,7 @@ mod user_profiles;
 mod util;
 mod validation_waivers;
 mod workbenches;
+pub mod workflow_tasks;
 mod workflow;
 
 use anyhow::Result;

@@ -1,9 +1,8 @@
-//! Text-presence pin for the drafted (not yet activated) constitution
-//! amendment at `docs/constitution/versions/2026.07.08/`.
+//! Text-presence pin for the constitution amendment at
+//! `docs/constitution/versions/2026.07.08/`, which is now the active, signed
+//! constitution (`docs/constitution/CURRENT` points at `2026.07.08`).
 //!
-//! This version is NOT the active constitution (`docs/constitution/CURRENT`
-//! still points at `2026.07.02` — no signing key was available to recompute
-//! the lock). For declarative clauses with no enforcement code of their own
+//! For declarative clauses with no enforcement code of their own
 //! (§12's `U-*` rights, `I-12`), a text-presence assertion is the closest
 //! approximation of "a right without a test is a lie" available: if a future
 //! edit silently drops one of these rows, this test fails immediately rather
@@ -91,17 +90,21 @@ fn entrenched_clauses_paragraph_is_present() {
 }
 
 #[test]
-fn active_constitution_is_untouched_by_this_draft() {
-    // The signed, running version must not have moved.
+fn active_constitution_is_the_signed_2026_07_08_amendment() {
+    // The signed, running version must point at the activated amendment.
     let current = include_str!("../../docs/constitution/CURRENT").trim();
     assert_eq!(
-        current, "2026.07.02",
-        "docs/constitution/CURRENT must remain 2026.07.02 until the draft \
-         2026.07.08 amendment is activated with a signed lock"
+        current, "2026.07.08",
+        "docs/constitution/CURRENT must point at the signed 2026.07.08 amendment"
     );
-    let active: &str = include_str!("../../docs/constitution/versions/2026.07.02/constitution.md");
+    assert_eq!(
+        autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
+        "2026.07.08",
+        "ACTIVE_CONSTITUTION_VERSION must match the activated amendment"
+    );
+    let active: &str = include_str!("../../docs/constitution/versions/2026.07.08/constitution.md");
     assert!(
-        !active.contains("Rights of the Served"),
-        "the active, signed constitution must not carry this draft's text"
+        active.contains("Rights of the Served"),
+        "the active, signed constitution must carry this amendment's §12 text"
     );
 }

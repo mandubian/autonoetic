@@ -436,7 +436,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Suspends until watched task_ids reach terminal state (Succeeded, Failed, Cancelled, Aborted). Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Wakes immediately on child-state transitions. The gateway auto-extends the wait server-side up to max_wait_secs (configured by workflow_wait_max_total_secs) WITHOUT returning control to you between chunks, so you do NOT need to re-issue workflow_wait after a non-terminal return — just call it once and it blocks until the tasks finish or the budget is exhausted. Pass timeout_secs=0 to probe current status without waiting. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
+            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -453,13 +453,13 @@ impl NativeTool for WorkflowWaitTool {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 300,
-                        "description": "Per-chunk block duration. Omit to use default_workflow_wait_secs (default 30s). 0 = probe once and return immediately (no blocking). The gateway keeps waiting past this in chunks (server-side, no LLM round) up to max_wait_secs."
+                        "description": "Legacy: only 0 is meaningful. 0 = probe once and return immediately (no suspension). Non-zero values are ignored; the session hibernates until the children finish."
                     },
                     "max_wait_secs": {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 1800,
-                        "description": "Total server-side wall-clock budget for this call (issue #702). Omit to use workflow_wait_max_total_secs. The wait auto-extends up to this without returning to you; it returns as soon as tasks finish. Floored at one timeout_secs chunk."
+                        "description": "Legacy: ignored. The gateway suspends and resumes automatically instead of blocking for a fixed budget."
                     }
                 },
                 "additionalProperties": false
@@ -494,6 +494,8 @@ impl NativeTool for WorkflowWaitTool {
 
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let _ = args.max_wait_secs;
 
         let agents_dir = agent_dir
             .parent()
@@ -533,35 +535,25 @@ impl NativeTool for WorkflowWaitTool {
             .unwrap_or(gw_config.default_workflow_wait_secs)
             .min(300);
 
-        // Server-side auto-extension budget (#702): when a `timeout_secs` chunk
-        // elapses with tasks still running, the gateway re-issues the wait
-        // internally — no LLM round — up to this total. Callers may lower it via
-        // `max_wait_secs`; it is floored at one chunk and hard-capped at 1800s.
-        let max_total_wait = args
-            .max_wait_secs
-            .unwrap_or(gw_config.workflow_wait_max_total_secs)
-            .min(1800)
-            .max(timeout_secs);
+        let (
+            tasks_status,
+            all_done,
+            any_failed,
+            any_not_found,
+            failed_task_count,
+            failure_summary,
+        ) = check_task_statuses(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+            &task_ids,
+            _gateway_dir,
+            session_id,
+        );
+        let any_gate_fail =
+            autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
 
-        // Non-blocking mode: check once and return
-        if timeout_secs == 0 {
-            let (
-                tasks_status,
-                all_done,
-                any_failed,
-                any_not_found,
-                failed_task_count,
-                failure_summary,
-            ) = check_task_statuses(
-                gw_config,
-                gateway_store.as_deref(),
-                &workflow_id,
-                &task_ids,
-                _gateway_dir,
-                session_id,
-            );
-            let any_gate_fail =
-                autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
+        if timeout_secs == 0 || all_done {
             return serde_json::to_string(&serde_json::json!({
                 "ok": true,
                 "workflow_id": workflow_id,
@@ -584,348 +576,27 @@ impl NativeTool for WorkflowWaitTool {
             .map_err(Into::into);
         }
 
-        // Blocking mode: wait for signal-driven wake or deadline
-        let task_ids_clone = task_ids.clone();
-        let wf_id = workflow_id.clone();
-        let gw_config_arc = std::sync::Arc::new(gw_config.clone());
-        let notify = match (gateway_store.as_ref(), session_id) {
-            (Some(s), Some(sid)) => Some(s.task_notify.get_or_create(sid)),
-            _ => None,
-        };
-
-        let (
-            tasks_status,
-            all_done,
-            any_failed,
-            any_not_found,
-            waited_secs,
-            failed_task_count,
-            failure_summary,
-        ) = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tokio::task::block_in_place(|| {
-                handle.block_on(async {
-                    signal_driven_wait_with_extension(
-                        gw_config_arc.as_ref(),
-                        gateway_store.as_deref(),
-                        &wf_id,
-                        &task_ids_clone,
-                        timeout_secs,
-                        max_total_wait,
-                        notify.as_ref(),
-                        _gateway_dir,
-                        session_id,
-                    )
-                    .await
-                })
-            })
-        } else {
-            tokio::runtime::Runtime::new()?.block_on(async {
-                signal_driven_wait(
-                    gw_config_arc.as_ref(),
-                    gateway_store.as_deref(),
-                    &wf_id,
-                    &task_ids_clone,
-                    timeout_secs,
-                    notify.as_ref(),
-                    _gateway_dir,
-                    session_id,
-                )
-                .await
-            })
-        };
-
-        let any_gate_fail =
-            autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "workflow_id": workflow_id,
             "tasks": tasks_status,
-            "join_satisfied": all_done,
+            "join_satisfied": false,
             "any_failed": any_failed,
             "any_not_found": any_not_found,
             "any_gate_unsatisfied": any_gate_fail,
             "failed_task_count": failed_task_count,
             "failure_summary": failure_summary,
-            "waited_secs": waited_secs,
+            "waited_secs": 0,
+            "waiting_for_child": true,
             "message": autonoetic_types::task_completion::workflow_wait_join_message(
-                all_done,
+                false,
                 any_failed,
                 any_not_found,
                 any_gate_fail,
-                waited_secs,
+                0,
             ),
         }))
         .map_err(Into::into)
-    }
-}
-
-const STALL_GRACE_SECS: i64 = 30;
-const FALLBACK_POLL_SECS: u64 = 5;
-
-/// Wrap [`signal_driven_wait`] in a server-side re-poll loop (issue #702). Each
-/// iteration waits one `chunk_secs` chunk (capped by the remaining total
-/// budget); if it elapses with tasks still running (not terminal, not missing),
-/// the wait is re-issued WITHOUT returning to the LLM, until all watched task
-/// IDs reach a terminal state, a task goes missing, or the accumulated
-/// wall-clock reaches `max_total_secs`. Because `signal_driven_wait` wakes
-/// immediately on a child-state `Notify`, a task that finishes mid-chunk returns
-/// right away — the extension only spends real time when tasks genuinely keep
-/// running. The returned `waited_secs` is the accumulated total across chunks,
-/// so the caller reports one coherent wait.
-#[allow(clippy::too_many_arguments)]
-async fn signal_driven_wait_with_extension(
-    config: &GatewayConfig,
-    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    workflow_id: &str,
-    task_ids: &[String],
-    chunk_secs: u64,
-    max_total_secs: u64,
-    notify: Option<&std::sync::Arc<tokio::sync::Notify>>,
-    gateway_dir: Option<&Path>,
-    session_id: Option<&str>,
-) -> (
-    Vec<serde_json::Value>,
-    bool,
-    bool,
-    bool,
-    u64,
-    usize,
-    Vec<serde_json::Value>,
-) {
-    let mut total_waited = 0u64;
-    loop {
-        // Cap the next chunk by the remaining total budget so we don't
-        // overshoot `max_total_secs` by almost a whole chunk.
-        let remaining = max_total_secs.saturating_sub(total_waited);
-        let this_chunk = chunk_secs.min(remaining).max(1);
-
-        let (tasks_status, all_done, any_failed, any_not_found, waited, failed_count, failures) =
-            signal_driven_wait(
-                config,
-                store,
-                workflow_id,
-                task_ids,
-                this_chunk,
-                notify,
-                gateway_dir,
-                session_id,
-            )
-            .await;
-        total_waited = total_waited.saturating_add(waited);
-
-        // Stop and return to the LLM only on a terminal outcome or when the
-        // total budget is exhausted. A non-terminal chunk timeout re-issues the
-        // wait server-side (no LLM round). `waited == 0` is a defensive guard: a
-        // non-terminal chunk should always consume ~chunk_secs, so a 0-second
-        // non-terminal return is anomalous — stop rather than spin.
-        if all_done || any_not_found || total_waited >= max_total_secs || waited == 0 {
-            return (
-                tasks_status,
-                all_done,
-                any_failed,
-                any_not_found,
-                total_waited,
-                failed_count,
-                failures,
-            );
-        }
-    }
-}
-
-async fn signal_driven_wait(
-    config: &GatewayConfig,
-    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    workflow_id: &str,
-    task_ids: &[String],
-    timeout_secs: u64,
-    notify: Option<&std::sync::Arc<tokio::sync::Notify>>,
-    gateway_dir: Option<&Path>,
-    session_id: Option<&str>,
-) -> (
-    Vec<serde_json::Value>,
-    bool,
-    bool,
-    bool,
-    u64,
-    usize,
-    Vec<serde_json::Value>,
-) {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-    let mut last_waited_report = 0u64;
-
-    loop {
-        let (tasks_status, all_done, any_failed, any_not_found, failed_task_count, failure_summary) =
-            check_task_statuses(
-                config,
-                store,
-                workflow_id,
-                task_ids,
-                gateway_dir,
-                session_id,
-            );
-        let waited_secs = start.elapsed().as_secs();
-
-        if all_done {
-            return (
-                tasks_status,
-                true,
-                any_failed,
-                any_not_found,
-                waited_secs,
-                failed_task_count,
-                failure_summary,
-            );
-        }
-        if any_not_found {
-            return (
-                tasks_status,
-                false,
-                any_failed,
-                true,
-                waited_secs,
-                failed_task_count,
-                failure_summary,
-            );
-        }
-
-        // After a grace period, reconcile each still-`Running` task against its
-        // session transcript. Two mismatches mean the TaskRun status is stale
-        // and we must stop blocking rather than wait out `timeout_secs`:
-        //   1. No transcript at all → the child failed to start.
-        //   2. The transcript is terminal (`completed`/`failed`) while the
-        //      TaskRun still says `Running` → the crash window between
-        //      transcript finalization and the TaskRun status update
-        //      (RFC: unit-test-runner-divergence-loop §2.5, Change 5).
-        if waited_secs >= STALL_GRACE_SECS as u64 && waited_secs != last_waited_report {
-            last_waited_report = waited_secs;
-            if let Some(gw_store) = store {
-                let mut mismatch_detected = false;
-                let mut mismatch_any_failed = false;
-                let mut mismatch_failed_count = 0usize;
-                let mut mismatch_failures: Vec<serde_json::Value> = Vec::new();
-                let mut enriched_status = tasks_status.clone();
-                for entry in enriched_status.iter_mut() {
-                    let status_str = entry
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let task_session = entry
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if status_str != "Running" || task_session.is_empty() {
-                        continue;
-                    }
-                    let transcript = gw_store
-                        .find_transcript_by_session_id(&task_session)
-                        .ok()
-                        .flatten();
-                    match transcript {
-                        None => {
-                            mismatch_detected = true;
-                            entry["stall_detected"] = serde_json::json!(true);
-                            entry["stall_reason"] = serde_json::json!(
-                                "Task is Running but has no transcript after grace period — child session may have failed to start"
-                            );
-                        }
-                        Some(t) => {
-                            let tstatus = t.status.to_ascii_lowercase();
-                            let terminal_failed = matches!(
-                                tstatus.as_str(),
-                                "failed" | "aborted" | "cancelled" | "error"
-                            );
-                            let terminal_done = tstatus == "completed";
-                            if terminal_failed || terminal_done {
-                                mismatch_detected = true;
-                                // Uniform signal for callers: a reconciled
-                                // transcript/TaskRun mismatch is also a
-                                // "stop blocking and reconcile" condition, like
-                                // the no-transcript stall above.
-                                entry["stall_detected"] = serde_json::json!(true);
-                                entry["transcript_status"] = serde_json::json!(t.status);
-                                entry["transcript_status_mismatch"] = serde_json::json!(true);
-                                if terminal_failed {
-                                    // Keep `failure_summary` consistent with the
-                                    // returned `any_failed`/`failed_task_count`:
-                                    // surface this reconciled failure so the
-                                    // caller has something actionable.
-                                    mismatch_failures.push(serde_json::json!({
-                                        "task_id": entry.get("task_id").cloned().unwrap_or(serde_json::Value::Null),
-                                        "agent_id": entry.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
-                                        "result_summary": entry.get("result_summary").cloned().unwrap_or(serde_json::Value::Null),
-                                        "reason": "session transcript terminal (failed) while TaskRun still Running",
-                                    }));
-                                    entry["status"] = serde_json::json!("Failed");
-                                    entry["stall_reason"] = serde_json::json!(
-                                        "TaskRun is Running but the session transcript is terminal (failed) — resolving as Failed (crash window, RFC §2.5)"
-                                    );
-                                    mismatch_any_failed = true;
-                                    mismatch_failed_count += 1;
-                                } else {
-                                    entry["status"] = serde_json::json!("Succeeded");
-                                    entry["stall_reason"] = serde_json::json!(
-                                        "TaskRun is Running but the session transcript is completed — resolving as Succeeded (TaskRun update lag, RFC §2.5)"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                if mismatch_detected {
-                    // Recompute join completion from the reconciled view so a
-                    // lagging-but-completed task is reported done, not pending.
-                    let resolved_all_done = enriched_status.iter().all(|e| {
-                        matches!(
-                            e.get("status").and_then(|v| v.as_str()).unwrap_or(""),
-                            "Succeeded" | "Failed" | "Cancelled" | "Aborted"
-                        )
-                    });
-                    let mut reconciled_failures = failure_summary.clone();
-                    reconciled_failures.extend(mismatch_failures);
-                    return (
-                        enriched_status,
-                        resolved_all_done,
-                        any_failed || mismatch_any_failed,
-                        any_not_found,
-                        waited_secs,
-                        failed_task_count + mismatch_failed_count,
-                        reconciled_failures,
-                    );
-                }
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return (
-                tasks_status,
-                false,
-                any_failed,
-                any_not_found,
-                waited_secs,
-                failed_task_count,
-                failure_summary,
-            );
-        }
-
-        let time_to_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let fallback = tokio::time::sleep(
-            std::time::Duration::from_secs(FALLBACK_POLL_SECS).min(time_to_deadline),
-        );
-        tokio::pin!(fallback);
-
-        if let Some(n) = notify {
-            let notified = n.notified();
-            tokio::pin!(notified);
-            tokio::select! {
-                _ = &mut notified => {}
-                _ = &mut fallback => {}
-            }
-        } else {
-            fallback.await;
-        }
     }
 }
 

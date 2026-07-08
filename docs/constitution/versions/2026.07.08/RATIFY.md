@@ -99,22 +99,21 @@ requirements, for any amendment that weakens or removes one of them.
   `autonoetic-gateway/tests/constitution_2026_07_08_new_clauses_present.rs`
   (text-presence pin for this amendment's drafted clauses).
 
-**Not activated in this change** (deliberately — no signing key available):
-`docs/constitution/CURRENT` still points to `2026.07.02`;
-`autonoetic-types/src/config.rs::ACTIVE_CONSTITUTION_VERSION` unchanged;
-`gateway-constitution.lock.json` for this version does not yet exist. The
-signed, running constitution is untouched by this amendment.
+**Activated.** The lock was recomputed with the operator signing key;
+`docs/constitution/CURRENT` points to `2026.07.08` and
+`autonoetic-types/src/config.rs::ACTIVE_CONSTITUTION_VERSION` is set to
+`"2026.07.08"`. `gateway-constitution.lock.json` for this version is signed
+under `autonoetic:constitution:v1`.
 
-## Recompute (required before this version can activate)
+## Recompute (record of how this version was activated)
 
-This version ships **no lock file yet** — `recompute_lock.py` requires the
-operator signing key, which was not available when drafting this amendment.
-To activate:
+This version was activated by running `recompute_lock.py` with the operator
+signing key, then bumping the pointers:
 
 ```bash
 python3 docs/constitution/recompute_lock.py --version 2026.07.08 \
   --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
-# Bump pointers:
+# Pointers bumped:
 #   docs/constitution/CURRENT -> 2026.07.08
 #   autonoetic-types/src/config.rs::ACTIVE_CONSTITUTION_VERSION -> "2026.07.08"
 #     (+ default_constitution_source_path / default_constitution_lock_path)

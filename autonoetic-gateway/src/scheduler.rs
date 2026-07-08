@@ -49,8 +49,9 @@ pub use workflow_causal::*;
 pub use workflow_store::*;
 
 pub async fn start_background_scheduler(
-    execution: Arc<crate::execution::GatewayExecutionService>,
+    router: Arc<crate::router::JsonRpcRouter>,
 ) -> anyhow::Result<()> {
+    let execution = router.execution_service();
     let config = execution.config();
     if !config.background_scheduler_enabled {
         tracing::info!("Background scheduler disabled");
@@ -63,25 +64,32 @@ pub async fn start_background_scheduler(
     ));
     loop {
         ticker.tick().await;
-        if let Err(e) = run_scheduler_tick(execution.clone()).await {
+        if let Err(e) = run_scheduler_tick_with_router(router.clone()).await {
             tracing::warn!(error = %e, "Background scheduler tick failed");
         }
     }
 }
 
+pub async fn run_scheduler_tick_with_router(
+    router: Arc<crate::router::JsonRpcRouter>,
+) -> anyhow::Result<()> {
+    run_scheduler_tick_common(router.execution_service(), Some(router), Utc::now()).await
+}
+
 pub async fn run_scheduler_tick(
     execution: Arc<crate::execution::GatewayExecutionService>,
 ) -> anyhow::Result<()> {
-    run_scheduler_tick_at(execution, Utc::now()).await
+    run_scheduler_tick_common(execution, None, Utc::now()).await
 }
 
-async fn run_scheduler_tick_at(
+async fn run_scheduler_tick_common(
     execution: Arc<crate::execution::GatewayExecutionService>,
+    router: Option<Arc<crate::router::JsonRpcRouter>>,
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     // Process pending notifications
     if let Some(store) = execution.gateway_store() {
-        if let Err(e) = process_pending_notifications(execution.clone(), store.as_ref()).await {
+        if let Err(e) = process_pending_notifications(execution.clone(), store.as_ref(), router.clone()).await {
             tracing::warn!(error = %e, "Failed to process pending notifications");
         }
         // Cleanup stale notifications (e.g., older than 24h)
@@ -588,7 +596,7 @@ async fn check_stuck_running_tasks(
             // Respect heartbeat freshness: a task with a live claim is still
             // active, just slow. Only sweep once the claim heartbeat itself is
             // stale relative to the configured timeout.
-            let claim_opt = workflow_store::load_task_claim(&config, &wf_id, &task.task_id)
+            let claim_opt = workflow_store::load_task_claim(&config, store, &wf_id, &task.task_id)
                 .ok()
                 .flatten();
             let claim_fresh = claim_opt.as_ref().map_or(false, |claim| {
@@ -2186,7 +2194,7 @@ pub async fn process_runnable_workflow_tasks(
                 "Re-queueing approval-unblocked task for durable execution"
             );
 
-            if workflow_store::queued_task_exists(&config, &wf_id, &task.task_id) {
+            if workflow_store::queued_task_exists(&config, store, &wf_id, &task.task_id) {
                 if let Err(e) = workflow_store::refresh_queued_task_message_from_task_checkpoint(
                     &config,
                     store,
@@ -2238,6 +2246,7 @@ pub fn append_task_board_entry(
 async fn process_pending_notifications(
     execution: Arc<crate::execution::GatewayExecutionService>,
     store: &crate::scheduler::gateway_store::GatewayStore,
+    router: Option<Arc<crate::router::JsonRpcRouter>>,
 ) -> anyhow::Result<()> {
     let pending = store.list_pending_notifications()?;
     if pending.is_empty() {
@@ -2355,7 +2364,35 @@ async fn process_pending_notifications(
                     n.request_id.as_deref().unwrap_or(&n.notification_id)
                 ),
             };
-            if let Err(e) = crate::scheduler::signal::deliver_signal(
+            if let Some(router) = router.as_ref() {
+                let request = crate::scheduler::signal::build_delivery_request(
+                    &pending_signal,
+                    &n.target_session_id,
+                );
+                let response = router.dispatch(request).await;
+                if let Some(error) = response.error {
+                    let e = anyhow::anyhow!("Signal delivery failed: {}", error.message);
+                    tracing::warn!(notification_id = %n.notification_id, error = %e, "Failed to deliver signal in-process");
+                    let _ = store.increment_attempt(&n.notification_id, Some(&e.to_string()));
+                    let next_attempt = n.attempt_count.saturating_add(1);
+                    if next_attempt >= 3 {
+                        let _ = store.update_notification_status(
+                            &n.notification_id,
+                            autonoetic_types::notification::NotificationStatus::Failed,
+                        );
+                    }
+                } else {
+                    store.update_notification_status(
+                        &n.notification_id,
+                        autonoetic_types::notification::NotificationStatus::Delivered,
+                    )?;
+                    if n.notification_type
+                        == autonoetic_types::notification::NotificationType::ChildStateNotification
+                    {
+                        child_notified_sessions.insert(n.target_session_id.clone());
+                    }
+                }
+            } else if let Err(e) = crate::scheduler::signal::deliver_signal(
                 &pending_signal,
                 &n.target_session_id,
                 port,
@@ -2629,7 +2666,7 @@ mod stuck_task_tests {
         task_id: &str,
         heartbeat_secs_ago: u64,
     ) {
-        let claim = workflow_store::TaskExecutionClaim {
+        let claim = crate::scheduler::gateway_store::TaskExecutionClaim {
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
             scheduler_instance_id: "test-instance".to_string(),
@@ -2645,7 +2682,7 @@ mod stuck_task_tests {
 
     fn fresh_claim(config: &GatewayConfig, workflow_id: &str, task_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
-        let claim = workflow_store::TaskExecutionClaim {
+        let claim = crate::scheduler::gateway_store::TaskExecutionClaim {
             workflow_id: workflow_id.to_string(),
             task_id: task_id.to_string(),
             scheduler_instance_id: "test-instance".to_string(),

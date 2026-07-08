@@ -1388,6 +1388,7 @@ fn session_close_outcome_from_headless_turn_outcome(
             SessionCloseOutcome::HeadlessSuspendedUserInput
         }
         TurnOutcome::Escalated { .. } => SessionCloseOutcome::HeadlessEscalated,
+        TurnOutcome::WaitingForChild => SessionCloseOutcome::HeadlessSuspended,
     }
 }
 
@@ -1476,6 +1477,9 @@ pub async fn run_agent_with_runtime_with_driver(
                         escalation_request_id
                     );
                 }
+                TurnOutcome::WaitingForChild => {
+                    println!("[Turn suspended waiting for child tasks]");
+                }
             }
             runtime.close_session(
                 session_close_outcome_from_headless_turn_outcome(&outcome),
@@ -1558,6 +1562,12 @@ pub async fn run_interactive_session(
                     .await?;
                 stdout.flush().await?;
             }
+            Ok(TurnOutcome::WaitingForChild) => {
+                stdout
+                    .write_all(b"[Turn suspended waiting for child tasks]\n")
+                    .await?;
+                stdout.flush().await?;
+            }
             Err(e) => {
                 let _ = runtime.close_session(SessionCloseOutcome::InteractiveError);
                 return Err(e);
@@ -1631,6 +1641,12 @@ pub async fn run_interactive_session(
                         )
                         .as_bytes(),
                     )
+                    .await?;
+                stdout.flush().await?;
+            }
+            Ok(TurnOutcome::WaitingForChild) => {
+                stdout
+                    .write_all(b"[Turn suspended waiting for child tasks]\n")
                     .await?;
                 stdout.flush().await?;
             }

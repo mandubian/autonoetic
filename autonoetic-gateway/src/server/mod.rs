@@ -249,7 +249,7 @@ impl GatewayServer {
             self.config.port,
         )?;
         let background_scheduler =
-            crate::scheduler::start_background_scheduler(jsonrpc_router.execution_service());
+            crate::scheduler::start_background_scheduler(jsonrpc_router.clone());
         let fast_scheduler = crate::scheduler::fast_scheduler::start_fast_scheduler(
             jsonrpc_router.execution_service(),
         );

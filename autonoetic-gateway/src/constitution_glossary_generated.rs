@@ -187,6 +187,7 @@ pub(crate) static GLOSSARY: &[(&str, &str)] = &[
     ("Ri-0.14", "When a child task reaches a terminal state (succeeded, failed, cancelled, aborted) or resolves a gate (approval, user interaction, escalation), the gateway wakes the parent with typed child state."),
     ("Ri-0.15", "Every gate output — every `GateKind` (approval, user_input, escalation), to every decider (human or agent) — carries a typed `DecisionContext` sufficient to decide"),
     ("Ri-0.16", "The divergence Sentinel is **observational**"),
+    ("Ri-0.17", "An agent may request export of its own cognitive capsule for migration to another gateway."),
     ("Ri-0.2", "Every agent may read its own causal chain and execution trace."),
     ("Ri-0.3", "Every rejection names the rule ID that caused it."),
     ("Ri-0.4", "Every agent knows its budget balances truthfully and in real time."),
