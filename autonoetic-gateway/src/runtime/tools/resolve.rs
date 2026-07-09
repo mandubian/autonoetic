@@ -49,16 +49,15 @@ impl NativeTool for ResolveTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list), or 'content' (inline the bytes; for an artifact pass `file` to choose which file inside it). To RUN an artifact use artifact_exec; to SEE one use resolve."
-                .to_string(),
+            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list), or 'content' (inline the bytes; for an artifact pass `file` to choose which file inside it). To RUN an artifact use artifact_exec; to SEE one use resolve. IMPORTANT for include=content: the gateway truncates large tool results to a character budget (default 4000). The `content` field in the response may be shortened, but the JSON structure and metadata (`offset`, `next_offset`, `total_bytes`, `truncated`) are always preserved — use `next_offset` to page through the rest. Do NOT keep calling with the same `limit` expecting more; pass `offset=next_offset` to advance.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "ref": { "type": "string", "description": "Any handle: art_<id>, ar.<ref>, cnt_<alias>, 8-char alias, content name, or sha256:…" },
                     "include": { "type": "string", "enum": ["metadata", "files", "content"], "description": "Depth: metadata (default), files (artifact file list), content (inline bytes)" },
                     "file": { "type": "string", "description": "For include=content on an artifact: which file inside it to read (the file name from include=files)" },
-                    "offset": { "type": "integer", "minimum": 0, "description": "Optional byte offset for partial content reads. Omit or 0 to read from the start." },
-                    "limit": { "type": "integer", "minimum": 0, "description": "Optional maximum bytes to return. Omit to read the entire content. Use with offset to page through large files." }
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start reading from. On each call, check `next_offset` in the response and pass it here to page through the rest. Do not re-read from 0 if next_offset is set." },
+                    "limit": { "type": "integer", "minimum": 0, "description": "Maximum bytes of content to return. The gateway separately truncates the total tool result to a character budget (~4000 chars), so the JSON wrapper + this field compete for that budget. If `truncated` is true in the response, use `next_offset` to continue — do not retry with a smaller limit." }
                 },
                 "required": ["ref"],
                 "additionalProperties": false
