@@ -41,6 +41,9 @@ pub struct ProviderCapabilities {
     pub supports_tools: bool,
     /// Provider supports the tool_choice parameter (some OpenAI-compatible APIs don't).
     pub supports_tool_choice: bool,
+    /// Provider rejects JSON Schema where `type` sits alongside `anyOf`/`oneOf` at the
+    /// same level; the `type` must be moved into each branch item instead.
+    pub strict_schema_anyof: bool,
     /// Which reasoning-request schema the provider expects (or `None`).
     pub reasoning: ReasoningStyle,
 }
@@ -56,6 +59,7 @@ impl ProviderCapabilities {
             supports_usage_in_stream: false,
             supports_tools: true,
             supports_tool_choice: true,
+            strict_schema_anyof: false,
             reasoning: ReasoningStyle::None,
         }
     }
@@ -69,6 +73,7 @@ impl ProviderCapabilities {
             supports_usage_in_stream: false,
             supports_tools: false,
             supports_tool_choice: false,
+            strict_schema_anyof: false,
             reasoning: ReasoningStyle::None,
         }
     }
@@ -83,6 +88,7 @@ impl ProviderCapabilities {
             supports_usage_in_stream: true,
             supports_tools: true,
             supports_tool_choice: true,
+            strict_schema_anyof: false,
             reasoning: ReasoningStyle::None,
         }
     }
@@ -97,6 +103,7 @@ impl ProviderCapabilities {
             supports_usage_in_stream: false,
             supports_tools: true,
             supports_tool_choice: false,
+            strict_schema_anyof: false,
             reasoning: ReasoningStyle::None,
         }
     }
@@ -159,6 +166,9 @@ struct ProviderDefaults {
     api_key_env: &'static str,
     kind: DriverKind,
     capabilities: fn() -> ProviderCapabilities,
+    /// If set, this provider/model requires this exact temperature and ignores
+    /// the preset/agent-level temperature (e.g. Kimi Code only accepts 1.0).
+    fixed_temperature: Option<f32>,
 }
 
 fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
@@ -168,12 +178,14 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             api_key_env: "ANTHROPIC_API_KEY",
             kind: DriverKind::Anthropic,
             capabilities: ProviderCapabilities::anthropic,
+            fixed_temperature: None,
         }),
         "gemini" | "google" => Some(ProviderDefaults {
             base_url: "https://generativelanguage.googleapis.com/v1beta",
             api_key_env: "GEMINI_API_KEY",
             kind: DriverKind::Gemini,
             capabilities: ProviderCapabilities::gemini,
+            fixed_temperature: None,
         }),
         // ----------- OpenAI-compatible providers (single code path) -----------
         "openai" | "codex" => Some(ProviderDefaults {
@@ -181,108 +193,133 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             api_key_env: "OPENAI_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "opencode" => Some(ProviderDefaults {
             base_url: "https://opencode.ai/zen/go/v1/chat/completions",
             api_key_env: "OPENCODE_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "openrouter" => Some(ProviderDefaults {
             base_url: "https://openrouter.ai/api/v1/chat/completions",
             api_key_env: "OPENROUTER_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "groq" => Some(ProviderDefaults {
             base_url: "https://api.groq.com/openai/v1/chat/completions",
             api_key_env: "GROQ_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "together" => Some(ProviderDefaults {
             base_url: "https://api.together.xyz/v1/chat/completions",
             api_key_env: "TOGETHER_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "deepseek" => Some(ProviderDefaults {
             base_url: "https://api.deepseek.com/v1/chat/completions",
             api_key_env: "DEEPSEEK_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "mistral" => Some(ProviderDefaults {
             base_url: "https://api.mistral.ai/v1/chat/completions",
             api_key_env: "MISTRAL_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "fireworks" => Some(ProviderDefaults {
             base_url: "https://api.fireworks.ai/inference/v1/chat/completions",
             api_key_env: "FIREWORKS_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "perplexity" => Some(ProviderDefaults {
             base_url: "https://api.perplexity.ai/chat/completions",
             api_key_env: "PERPLEXITY_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "cohere" => Some(ProviderDefaults {
             base_url: "https://api.cohere.com/compatibility/v1/chat/completions",
             api_key_env: "COHERE_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "ai21" => Some(ProviderDefaults {
             base_url: "https://api.ai21.com/studio/v1/chat/completions",
             api_key_env: "AI21_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "cerebras" => Some(ProviderDefaults {
             base_url: "https://api.cerebras.ai/v1/chat/completions",
             api_key_env: "CEREBRAS_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "sambanova" => Some(ProviderDefaults {
             base_url: "https://api.sambanova.ai/v1/chat/completions",
             api_key_env: "SAMBANOVA_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "huggingface" => Some(ProviderDefaults {
             base_url: "https://api-inference.huggingface.co/v1/chat/completions",
             api_key_env: "HUGGINGFACE_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "xai" => Some(ProviderDefaults {
             base_url: "https://api.x.ai/v1/chat/completions",
             api_key_env: "XAI_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "replicate" => Some(ProviderDefaults {
             base_url: "https://api.replicate.com/v1/deployments",
             api_key_env: "REPLICATE_API_TOKEN",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "moonshot" | "kimi" => Some(ProviderDefaults {
             base_url: "https://api.moonshot.cn/v1/chat/completions",
             api_key_env: "MOONSHOT_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
+        }),
+        "kimi-code" => Some(ProviderDefaults {
+            base_url: "https://api.kimi.com/coding/v1/chat/completions",
+            api_key_env: "KIMI_CODE_API_KEY",
+            kind: DriverKind::OpenAi,
+            capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: Some(1.0),
         }),
         "qwen" | "dashscope" => Some(ProviderDefaults {
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
             api_key_env: "DASHSCOPE_API_KEY",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         // Local providers — no API key needed
         "ollama" => Some(ProviderDefaults {
@@ -290,24 +327,28 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             api_key_env: "",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "vllm" => Some(ProviderDefaults {
             base_url: "http://localhost:8000/v1/chat/completions",
             api_key_env: "",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "lmstudio" => Some(ProviderDefaults {
             base_url: "http://localhost:1234/v1/chat/completions",
             api_key_env: "",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         "llamacpp" | "llama.cpp" => Some(ProviderDefaults {
             base_url: "http://localhost:8080/v1/chat/completions",
             api_key_env: "",
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
+            fixed_temperature: None,
         }),
         _ => None,
     }
@@ -326,11 +367,12 @@ pub fn resolve(
 ) -> anyhow::Result<ResolvedProvider> {
     let defaults = provider_defaults(provider);
 
-    let (kind, base_url, mut capabilities) = if let Some(ref d) = defaults {
+    let (kind, base_url, mut capabilities, fixed_temperature) = if let Some(ref d) = defaults {
         (
             d.kind.clone(),
             base_url_override.unwrap_or(d.base_url).to_string(),
             (d.capabilities)(),
+            d.fixed_temperature,
         )
     } else if let Some(url) = base_url_override {
         // Unknown provider with a custom URL — treat as OpenAI-compatible
@@ -338,6 +380,7 @@ pub fn resolve(
             DriverKind::OpenAi,
             url.to_string(),
             ProviderCapabilities::openai_compatible(),
+            None,
         )
     } else {
         anyhow::bail!(
@@ -354,6 +397,16 @@ pub fn resolve(
     // Per-provider reasoning style (only applies to OpenAI-shape providers;
     // Anthropic and Gemini drivers use their own native reasoning paths).
     capabilities.reasoning = reasoning_style_for_provider(provider);
+
+    // Providers such as Kimi Code only accept a single fixed temperature.
+    let temperature = fixed_temperature.or(temperature);
+
+    // Moonshot's schema validator requires `type` to live inside each anyOf/oneOf
+    // branch instead of at the parent level.
+    capabilities.strict_schema_anyof = matches!(
+        provider,
+        "moonshot" | "kimi" | "kimi-code"
+    );
 
     // Resolve auth
     let api_key = if let Some(k) = api_key_override {

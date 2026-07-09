@@ -46,7 +46,7 @@ Options:
 
 **Interactive setup (first run only):**
 
-1. Detects available providers from environment variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, etc.) and probes local servers (Ollama, LM Studio, vLLM, llama.cpp).
+1. Detects available providers from environment variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `MOONSHOT_API_KEY`, `KIMI_CODE_API_KEY`, etc.) and probes local servers (Ollama, LM Studio, vLLM, llama.cpp).
 2. Presents a numbered menu to pick a provider.
 3. Fetches the provider's model catalog and lets you pick a model.
 4. Optionally prompts for a user persona ("Tell me about yourself").

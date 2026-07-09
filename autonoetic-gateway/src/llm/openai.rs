@@ -34,6 +34,52 @@ fn model_supports_tools(model: &str) -> bool {
     true
 }
 
+/// Moonshot's schema validator rejects a `type` field sitting alongside `anyOf`
+/// or `oneOf` at the same level. Move the parent `type` into each branch item
+/// and drop it from the parent.
+pub(crate) fn sanitize_schema_for_strict_anyof(schema: &serde_json::Value) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(map) => {
+            let typ = map.get("type").cloned();
+            let has_branches = map.contains_key("anyOf") || map.contains_key("oneOf");
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if k == "anyOf" || k == "oneOf" {
+                    if let serde_json::Value::Array(branches) = v {
+                        let new_branches: Vec<serde_json::Value> = branches
+                            .iter()
+                            .map(|branch| {
+                                let mut branch = sanitize_schema_for_strict_anyof(branch);
+                                if has_branches && branch.get("type").is_none() {
+                                    if let Some(ref t) = typ {
+                                        if let serde_json::Value::Object(ref mut b) = branch {
+                                            b.insert("type".to_string(), t.clone());
+                                        }
+                                    }
+                                }
+                                branch
+                            })
+                            .collect();
+                        out.insert(k.clone(), serde_json::Value::Array(new_branches));
+                    } else {
+                        out.insert(k.clone(), sanitize_schema_for_strict_anyof(v));
+                    }
+                } else {
+                    out.insert(k.clone(), sanitize_schema_for_strict_anyof(v));
+                }
+            }
+            if has_branches && out.contains_key("type") {
+                out.remove("type");
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter().map(sanitize_schema_for_strict_anyof).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// OpenCode Go's gateway accepts Anthropic-style `cache_control` breakpoints on
 /// most models, but passes them through untouched to GLM/Zhipu upstreams, which
 /// reject the extra field. Match the model ids Pi's extension skips.
@@ -305,17 +351,23 @@ impl OpenAiDriver {
             // providers cache automatically by prefix and must not see the field.
             let mark_tools_openrouter = cache_system;
             let mark_last_tool_opencode = opencode_cache_supported;
+            let sanitize_schema = self.provider.capabilities.strict_schema_anyof;
             body["tools"] = serde_json::Value::Array(
                 req.tools
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
+                        let schema = if sanitize_schema {
+                            sanitize_schema_for_strict_anyof(&t.input_schema)
+                        } else {
+                            t.input_schema.clone()
+                        };
                         let mut entry = json!({
                             "type": "function",
                             "function": {
                                 "name": t.name,
                                 "description": t.description,
-                                "parameters": t.input_schema,
+                                "parameters": schema,
                             }
                         });
                         if mark_tools_openrouter && i == req.tools.len() - 1 {
@@ -1590,5 +1642,63 @@ mod tests {
         assert!(body.get("prompt_cache_key").is_none());
         assert!(body.get("prompt_cache_retention").is_none());
         assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn sanitize_moves_type_into_anyof_branches() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "target_session_id": { "type": "string" },
+                "target_agent_id": { "type": "string" }
+            },
+            "required": ["message"],
+            "anyOf": [
+                { "required": ["target_session_id"] },
+                { "required": ["target_agent_id"] }
+            ]
+        });
+        let sanitized = sanitize_schema_for_strict_anyof(&schema);
+        assert!(sanitized.get("type").is_none(), "parent type must be removed");
+        let branches = sanitized["anyOf"].as_array().unwrap();
+        assert_eq!(branches[0]["type"], "object");
+        assert_eq!(branches[1]["type"], "object");
+    }
+
+    #[test]
+    fn sanitize_preserves_existing_branch_type() {
+        let schema = json!({
+            "type": "object",
+            "oneOf": [
+                { "type": "string" },
+                { "type": "null" }
+            ]
+        });
+        let sanitized = sanitize_schema_for_strict_anyof(&schema);
+        let branches = sanitized["oneOf"].as_array().unwrap();
+        assert_eq!(branches[0]["type"], "string");
+        assert_eq!(branches[1]["type"], "null");
+        assert!(sanitized.get("type").is_none(), "parent type must be removed");
+    }
+
+    #[test]
+    fn sanitize_recurses_into_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "string",
+                    "anyOf": [
+                        { "enum": ["a"] },
+                        { "enum": ["b"] }
+                    ]
+                }
+            }
+        });
+        let sanitized = sanitize_schema_for_strict_anyof(&schema);
+        let nested = &sanitized["properties"]["nested"];
+        assert!(nested.get("type").is_none(), "parent type must be removed");
+        assert_eq!(nested["anyOf"][0]["type"], "string");
+        assert_eq!(nested["anyOf"][1]["type"], "string");
     }
 }

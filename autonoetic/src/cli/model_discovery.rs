@@ -105,6 +105,22 @@ fn all_providers() -> Vec<ProviderEntry> {
             },
         },
         ProviderEntry {
+            name: "moonshot",
+            display: "Moonshot (Kimi)",
+            kind: ProviderKind::Remote {
+                api_key_env: "MOONSHOT_API_KEY",
+                models_url: "https://api.moonshot.cn/v1/models",
+            },
+        },
+        ProviderEntry {
+            name: "kimi-code",
+            display: "Kimi Code",
+            kind: ProviderKind::Remote {
+                api_key_env: "KIMI_CODE_API_KEY",
+                models_url: "https://api.kimi.com/coding/v1/models",
+            },
+        },
+        ProviderEntry {
             name: "gemini",
             display: "Google Gemini",
             kind: ProviderKind::Remote {
@@ -861,7 +877,8 @@ fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>)> {
     writeln!(
         stderr,
         "\n  Known providers: anthropic, openai, opencode, openrouter, ollama, lmstudio, \
-         deepseek, mistral, groq, together, gemini, cohere, xai, vllm, llamacpp\n"
+         deepseek, mistral, groq, together, gemini, cohere, xai, moonshot, kimi-code, vllm, \
+         llamacpp\n"
     )?;
     let provider = read_line_with_prompt("  Provider: ")?;
     if provider.is_empty() {
@@ -942,5 +959,7 @@ mod tests {
         assert!(names.contains(&"ollama"));
         assert!(names.contains(&"lmstudio"));
         assert!(names.contains(&"llamacpp"));
+        assert!(names.contains(&"moonshot"));
+        assert!(names.contains(&"kimi-code"));
     }
 }
