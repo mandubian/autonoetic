@@ -1414,7 +1414,7 @@ important signals (progress reports, divergence findings, status updates from sp
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Send a direct asynchronous message to another active agent session or broadcast to all sessions of a specific agent role.".to_string(),
+            description: "Send a direct asynchronous message to another active agent session or broadcast to all sessions of a specific agent role. At least one of target_session_id or target_agent_id must be provided; the gateway validates this at execution time.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1422,11 +1422,7 @@ important signals (progress reports, divergence findings, status updates from sp
                     "target_agent_id": { "type": "string", "description": "Agent role to message. Broadcasts to all active sessions for this role if target_session_id is absent." },
                     "message": { "type": "string", "description": "The message to send." }
                 },
-                "required": ["message"],
-                "anyOf": [
-                    { "required": ["target_session_id"] },
-                    { "required": ["target_agent_id"] }
-                ]
+                "required": ["message"]
             }),
         }
     }

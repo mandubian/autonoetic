@@ -374,6 +374,12 @@ fn with_intent_schema(mut definition: ToolDefinition) -> ToolDefinition {
         return definition;
     };
 
+    // Tool parameter schemas must declare `type: object`. Some providers
+    // (Moonshot/Kimi Code) reject requests where this is missing.
+    if !schema.contains_key("type") {
+        schema.insert("type".to_string(), json!("object"));
+    }
+
     let properties = schema.entry("properties").or_insert_with(|| json!({}));
     let Some(properties_map) = properties.as_object_mut() else {
         return definition;
@@ -1116,7 +1122,6 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::artifact_exec::register_tools(&mut registry);
     crate::runtime::tools::artifact_prepare::register_tools(&mut registry);
     crate::runtime::tools::knowledge::register_tools(&mut registry);
-    crate::runtime::tools::agent::register_tools(&mut registry);
     crate::runtime::tools::sandbox::register_tools(&mut registry);
     crate::runtime::tools::workflow::register_tools(&mut registry);
     crate::runtime::tools::user_interaction::register_tools(&mut registry);
@@ -1221,6 +1226,212 @@ mod tests {
         assert!(filter.allows("agent_list"));
         assert!(filter.allows("agent_inspect"));
         assert!(!filter.allows("agent_spawn"));
+    }
+
+    fn manifest_with_capabilities(
+        agent_id: &str,
+        capabilities: Vec<Capability>,
+    ) -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: agent_id.to_string(),
+                name: agent_id.to_string(),
+                description: "test".to_string(),
+            singleton: false,
+        },
+            capabilities,
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn test_planner_collaborative_sees_install_tools() {
+        use autonoetic_types::capability::Capability;
+        use crate::llm::openai::sanitize_schema_for_strict_anyof;
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "planner.collaborative",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "agent_".to_string(), "credential_".to_string()],
+                },
+                Capability::AgentSpawn { max_children: 10, max_spawn_depth: 0 },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+            ],
+        );
+        let defs = registry.available_definitions(&manifest);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        // Planner delegates creation/promotion to agent-factory/specialized_builder,
+        // so it only needs spawn and schema/artifact tools.
+        assert!(names.contains(&"agent_spawn"), "planner must see agent_spawn; got {:?}", names);
+        assert!(names.contains(&"agent_revision_schema"), "planner must see agent_revision_schema; got {:?}", names);
+        assert!(names.contains(&"artifact_build"), "planner must see artifact_build; got {:?}", names);
+
+        for def in &defs {
+            let sanitized = sanitize_schema_for_strict_anyof(&def.input_schema);
+            let obj = sanitized.as_object().expect("schema must be an object");
+            assert!(
+                obj.contains_key("type"),
+                "schema for {} must have a top-level type after Kimi sanitization",
+                def.name
+            );
+            assert_eq!(
+                obj["type"], "object",
+                "schema for {} must have type: object after Kimi sanitization",
+                def.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_static_evaluator_sees_promotion_record_and_schemas_are_valid() {
+        use autonoetic_types::capability::Capability;
+        use crate::llm::openai::sanitize_schema_for_strict_anyof;
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "static_evaluator.default",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+            ],
+        );
+        let defs = registry.available_definitions(&manifest);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"promotion_record"),
+            "static_evaluator must see promotion_record; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"resolve"),
+            "static_evaluator must see resolve; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"artifact_inspect"),
+            "static_evaluator must see artifact_inspect; got {:?}",
+            names
+        );
+
+        // Every parameters schema must declare type: object (Kimi Code rejects
+        // schemas missing the top-level type), and must remain valid after the
+        // Moonshot/Kimi Code anyOf/oneOf sanitizer runs.
+        for def in &defs {
+            let sanitized = sanitize_schema_for_strict_anyof(&def.input_schema);
+            let obj = sanitized.as_object().expect("schema must be an object");
+            assert!(
+                obj.contains_key("type"),
+                "schema for {} must have a top-level type after Kimi sanitization",
+                def.name
+            );
+            assert_eq!(
+                obj["type"], "object",
+                "schema for {} must have type: object after Kimi sanitization",
+                def.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_specialized_builder_sees_revision_tools_and_network_access_capability() {
+        use autonoetic_types::capability::Capability;
+        use crate::llm::openai::sanitize_schema_for_strict_anyof;
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "specialized_builder.default",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "agent_".to_string()],
+                },
+                Capability::AgentRevision { patterns: vec![] },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string(), "agents/*".to_string()],
+                },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string(), "agents/*".to_string()],
+                },
+            ],
+        );
+        let defs = registry.available_definitions(&manifest);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"agent_revision_create_from_intent"),
+            "specialized_builder must see agent_revision_create_from_intent; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"agent_revision_promote"),
+            "specialized_builder must see agent_revision_promote; got {:?}",
+            names
+        );
+
+        // Verify the install tool's capability schema still advertises NetworkAccess
+        // after the Kimi/Moonshot sanitizer runs, so the model knows it can (and must)
+        // declare NetworkAccess for agents that contact remote hosts.
+        let create_def = defs
+            .iter()
+            .find(|d| d.name == "agent_revision_create_from_intent")
+            .expect("create_from_intent definition found");
+        let sanitized = sanitize_schema_for_strict_anyof(&create_def.input_schema);
+        let defs_node = &sanitized["$defs"]["Capability"];
+        let branches = defs_node["oneOf"]
+            .as_array()
+            .or_else(|| defs_node["anyOf"].as_array())
+            .expect("Capability schema must use oneOf/anyOf branches after sanitization");
+        let has_network_access = branches.iter().any(|b| {
+            b["properties"]["type"]["const"]
+                .as_str()
+                .map(|t| t == "NetworkAccess")
+                .unwrap_or(false)
+        });
+        assert!(
+            has_network_access,
+            "agent_revision_create_from_intent capability schema must advertise NetworkAccess after Kimi sanitization"
+        );
+
+        // The schema must remain a valid object-schema at the top level.
+        assert_eq!(
+            sanitized["type"], "object",
+            "create_from_intent schema must keep type: object after Kimi sanitization"
+        );
     }
 
     #[test]

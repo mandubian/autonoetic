@@ -2432,7 +2432,7 @@ impl NativeTool for AgentRevisionInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect a specific agent revision's metadata and execution closure."
+            description: "Inspect a specific agent revision's metadata and execution closure. At least one of agent_ref or revision_id must be provided; the gateway validates this at execution time."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -2440,10 +2440,6 @@ impl NativeTool for AgentRevisionInspectTool {
                     "agent_ref": { "type": "string", "description": "Agent ref or alias target to inspect" },
                     "revision_id": { "type": "string", "description": "Full revision ID (rev_sha256:...)" }
                 },
-                "anyOf": [
-                    {"required": ["agent_ref"]},
-                    {"required": ["revision_id"]}
-                ],
                 "additionalProperties": false
             }),
         }
