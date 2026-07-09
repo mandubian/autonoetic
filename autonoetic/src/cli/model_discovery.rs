@@ -16,6 +16,16 @@ pub struct ProviderEntry {
     pub kind: ProviderKind,
 }
 
+impl ProviderEntry {
+    /// Returns the default API-key environment variable for this provider, if any.
+    pub fn api_key_env(&self) -> Option<String> {
+        match &self.kind {
+            ProviderKind::Remote { api_key_env, .. } => Some(api_key_env.to_string()),
+            ProviderKind::Local { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ProviderKind {
     /// Remote provider requiring an API key env var.
@@ -549,7 +559,7 @@ fn read_line_with_prompt(prompt: &str) -> anyhow::Result<String> {
 /// Returns `(provider_name, original_entry_name, model_id)` ready for config generation.
 pub async fn interactive_select(
     client: &reqwest::Client,
-) -> anyhow::Result<(String, String, String, Option<String>)> {
+) -> anyhow::Result<(String, String, String, Option<String>, Option<String>)> {
     let mut stderr = io::stderr();
 
     'outer: loop {
@@ -673,7 +683,8 @@ pub async fn interactive_select(
                 }
                 let name = provider_entry.entry.name.to_string();
                 let base_url = prompt_base_url_if_local(&provider_entry.entry)?;
-                return Ok((name.clone(), name, model, base_url));
+                let api_key_env = provider_entry.entry.api_key_env();
+                return Ok((name.clone(), name, model, base_url, api_key_env));
             }
             Err(first_err) => {
                 if let ProviderKind::Local { models_url } = &provider_entry.entry.kind {
@@ -726,7 +737,8 @@ pub async fn interactive_select(
                             }
                             let chat_url = format!("{}/chat/completions", retry_base);
                             let name = provider_entry.entry.name.to_string();
-                            return Ok((name.clone(), name, model, Some(chat_url)));
+                            let api_key_env = provider_entry.entry.api_key_env();
+                            return Ok((name.clone(), name, model, Some(chat_url), api_key_env));
                         }
                         Err(e2) => {
                             writeln!(
@@ -739,7 +751,8 @@ pub async fn interactive_select(
                             }
                             let chat_url = format!("{}/chat/completions", retry_base);
                             let name = provider_entry.entry.name.to_string();
-                            return Ok((name.clone(), name, model, Some(chat_url)));
+                            let api_key_env = provider_entry.entry.api_key_env();
+                            return Ok((name.clone(), name, model, Some(chat_url), api_key_env));
                         }
                     }
                 } else {
@@ -752,7 +765,8 @@ pub async fn interactive_select(
                         continue 'outer;
                     }
                     let name = provider_entry.entry.name.to_string();
-                    return Ok((name.clone(), name, model, None));
+                    let api_key_env = provider_entry.entry.api_key_env();
+                    return Ok((name.clone(), name, model, None, api_key_env));
                 }
             }
         };
@@ -771,11 +785,13 @@ pub async fn interactive_select(
             Some(n) if n >= 1 && n <= models.len() => {
                 let model_id = models[n - 1].id.clone();
                 let provider_name = provider_entry.entry.name.to_string();
+                let api_key_env = provider_entry.entry.api_key_env();
                 return Ok((
                     provider_name,
                     provider_entry.entry.name.to_string(),
                     model_id,
                     chat_base_url,
+                    api_key_env,
                 ));
             }
             _ => {
@@ -784,11 +800,13 @@ pub async fn interactive_select(
                     anyhow::bail!("Model ID cannot be empty");
                 }
                 let provider_name = provider_entry.entry.name.to_string();
+                let api_key_env = provider_entry.entry.api_key_env();
                 return Ok((
                     provider_name,
                     provider_entry.entry.name.to_string(),
                     manual,
                     chat_base_url,
+                    api_key_env,
                 ));
             }
         }
@@ -872,7 +890,7 @@ fn display_model_menu(models: &[ModelInfo]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>)> {
+fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>, Option<String>)> {
     let mut stderr = io::stderr();
     writeln!(
         stderr,
@@ -892,6 +910,36 @@ fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>)> {
     let original = provider.clone();
     let is_local = ["ollama", "lmstudio", "vllm", "llamacpp", "llama.cpp"].contains(&original.as_str());
 
+    // Derive the default API key env var for known remote providers so that
+    // refresh_models can keep api_key_env in sync with the chosen provider.
+    let api_key_env = if is_local {
+        None
+    } else {
+        match original.as_str() {
+            "anthropic" | "claude" => Some("ANTHROPIC_API_KEY".to_string()),
+            "openai" | "codex" => Some("OPENAI_API_KEY".to_string()),
+            "opencode" => Some("OPENCODE_API_KEY".to_string()),
+            "openrouter" => Some("OPENROUTER_API_KEY".to_string()),
+            "deepseek" => Some("DEEPSEEK_API_KEY".to_string()),
+            "mistral" => Some("MISTRAL_API_KEY".to_string()),
+            "groq" => Some("GROQ_API_KEY".to_string()),
+            "together" => Some("TOGETHER_API_KEY".to_string()),
+            "xai" => Some("XAI_API_KEY".to_string()),
+            "moonshot" | "kimi" => Some("MOONSHOT_API_KEY".to_string()),
+            "kimi-code" => Some("KIMI_CODE_API_KEY".to_string()),
+            "gemini" | "google" => Some("GEMINI_API_KEY".to_string()),
+            "cohere" => Some("COHERE_API_KEY".to_string()),
+            "fireworks" => Some("FIREWORKS_API_KEY".to_string()),
+            "perplexity" => Some("PERPLEXITY_API_KEY".to_string()),
+            "ai21" => Some("AI21_API_KEY".to_string()),
+            "cerebras" => Some("CEREBRAS_API_KEY".to_string()),
+            "sambanova" => Some("SAMBANOVA_API_KEY".to_string()),
+            "huggingface" => Some("HUGGINGFACE_API_KEY".to_string()),
+            "replicate" => Some("REPLICATE_API_TOKEN".to_string()),
+            _ => None,
+        }
+    };
+
     let base_url = if is_local {
         let url = read_line_with_prompt("  Base URL (e.g. http://host:port/v1/chat/completions): ")?;
         if url.trim().is_empty() { None } else { Some(url.trim().to_string()) }
@@ -899,7 +947,7 @@ fn manual_entry() -> anyhow::Result<(String, String, String, Option<String>)> {
         None
     };
 
-    Ok((original.clone(), original, model, base_url))
+    Ok((original.clone(), original, model, base_url, api_key_env))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

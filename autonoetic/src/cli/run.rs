@@ -21,6 +21,7 @@ fn starter_llm_presets_and_mapping_yaml(
     model: &str,
     base_url_line: &str,
     context_window_line: &str,
+    api_key_env_line: &str,
     thinking_block: &str,
 ) -> String {
     fn fixed_preset(
@@ -29,12 +30,14 @@ fn starter_llm_presets_and_mapping_yaml(
         temperature: f64,
         base_url_line: &str,
         context_window_line: &str,
+        api_key_env_line: &str,
         extra: &str,
     ) -> String {
         format!(
-            "    provider: \"{provider}\"\n    model: \"{model}\"\n    temperature: {temperature}{base_url}{context_window}{extra}\n",
+            "    provider: \"{provider}\"\n    model: \"{model}\"\n{api_key_env}    temperature: {temperature}{base_url}{context_window}{extra}\n",
             provider = provider,
             model = model,
+            api_key_env = api_key_env_line,
             temperature = temperature,
             base_url = base_url_line,
             context_window = context_window_line,
@@ -92,6 +95,7 @@ llm_preset_mapping:
             0.2,
             base_url_line,
             context_window_line,
+            api_key_env_line,
             thinking_block,
         ),
         smart_body = fixed_preset(
@@ -100,21 +104,63 @@ llm_preset_mapping:
             0.2,
             base_url_line,
             context_window_line,
+            api_key_env_line,
             smart_extra,
         ),
-        coding_body = fixed_preset(provider, model, 0.1, base_url_line, context_window_line, ""),
+        coding_body = fixed_preset(
+            provider,
+            model,
+            0.1,
+            base_url_line,
+            context_window_line,
+            api_key_env_line,
+            "",
+        ),
         agentic_body = fixed_preset(
             provider,
             model,
             0.2,
             base_url_line,
             context_window_line,
+            api_key_env_line,
             agentic_extra,
         ),
-        research_body = fixed_preset(provider, model, 0.3, base_url_line, context_window_line, ""),
-        budget_body = fixed_preset(provider, model, 0.2, base_url_line, context_window_line, ""),
-        haiku_body = fixed_preset(provider, model, 0.2, base_url_line, context_window_line, ""),
-        fallback_body = fixed_preset(provider, model, 0.2, base_url_line, context_window_line, ""),
+        research_body = fixed_preset(
+            provider,
+            model,
+            0.3,
+            base_url_line,
+            context_window_line,
+            api_key_env_line,
+            "",
+        ),
+        budget_body = fixed_preset(
+            provider,
+            model,
+            0.2,
+            base_url_line,
+            context_window_line,
+            api_key_env_line,
+            "",
+        ),
+        haiku_body = fixed_preset(
+            provider,
+            model,
+            0.2,
+            base_url_line,
+            context_window_line,
+            api_key_env_line,
+            "",
+        ),
+        fallback_body = fixed_preset(
+            provider,
+            model,
+            0.2,
+            base_url_line,
+            context_window_line,
+            api_key_env_line,
+            "",
+        ),
     )
 }
 
@@ -127,7 +173,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
 
-    let (provider, _original_entry, model, base_url) = super::model_discovery::interactive_select(&client).await?;
+    let (provider, _original_entry, model, base_url, api_key_env) = super::model_discovery::interactive_select(&client).await?;
 
     let context_window_tokens = match base_url.as_deref() {
         Some(url) => {
@@ -149,6 +195,9 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
     let context_window_line = context_window_tokens
         .map(|tokens| format!("\n    context_window_tokens: {tokens}"))
         .unwrap_or_default();
+    let api_key_env_line = api_key_env
+        .map(|env| format!("    api_key_env: \"{}\"\n", env))
+        .unwrap_or_default();
 
     // Enable reasoning by default for providers whose API accepts it.
     // OpenRouter silently ignores `reasoning` on non-reasoning models, so
@@ -166,6 +215,7 @@ async fn ensure_config(config_path: &Path) -> anyhow::Result<()> {
         &model,
         &base_url_line,
         &context_window_line,
+        &api_key_env_line,
         thinking_block,
     );
 
@@ -308,7 +358,7 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let (provider, original_entry, model, base_url) = match super::model_discovery::interactive_select(&client).await {
+    let (provider, _original_entry, model, base_url, api_key_env) = match super::model_discovery::interactive_select(&client).await {
         Ok(result) => result,
         Err(e) => {
             // Surface the failure loudly instead of silently leaving the config untouched.
@@ -331,6 +381,7 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
     // Also support unquoted scalars (e.g. base_url: http://...).
     let re_base_url_unquoted =
         regex::Regex::new(r#"(?m)^(\s{4}base_url:\s*)([^\s#"][^\s#]*)"#).unwrap();
+    let re_api_key_env = regex::Regex::new(r#"(?m)^(\s{4}api_key_env:\s*)"[^"]*""#).unwrap();
 
     let mut updated = current.clone();
     if update_scope == UpdateScope::DefaultOnly {
@@ -348,6 +399,7 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
         let mut in_default_preset = false;
         let mut preset_indent: usize = 0;
         let mut found_base_url = false;
+        let mut found_api_key_env = false;
         let mut model_line_idx: Option<usize> = None;
 
         for line in &lines {
@@ -385,16 +437,32 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
                     }
                     found_base_url = true;
                     continue;
+                } else if trimmed.starts_with("api_key_env:") {
+                    if let Some(ref env) = api_key_env {
+                        out.push(format!("    api_key_env: \"{}\"", env));
+                    }
+                    found_api_key_env = true;
+                    continue;
                 }
             }
             out.push(line.clone());
         }
 
-        // Insert base_url after model line if it wasn't already present.
-        if model_line_idx.is_some() && !found_base_url {
+        // Insert base_url and api_key_env after model line if they weren't already present.
+        let mut insert_idx = model_line_idx.map(|idx| idx + 1);
+        if !found_base_url {
             if let Some(ref url) = base_url {
-                let insert_at = model_line_idx.unwrap() + 1;
-                out.insert(insert_at, format!("    base_url: \"{}\"", url));
+                if let Some(idx) = insert_idx {
+                    out.insert(idx, format!("    base_url: \"{}\"", url));
+                    insert_idx = Some(idx + 1);
+                }
+            }
+        }
+        if !found_api_key_env {
+            if let Some(ref env) = api_key_env {
+                if let Some(idx) = insert_idx {
+                    out.insert(idx, format!("    api_key_env: \"{}\"", env));
+                }
             }
         }
 
@@ -443,6 +511,36 @@ pub async fn refresh_models(config_path: &Path) -> anyhow::Result<()> {
                 }
                 if let Some(re) =
                     regex::Regex::new(r#"(?m)^\s{4}base_url:\s*[^\s#"][^\s#]*\s*\n?"#).ok()
+                {
+                    updated = re.replace_all(&updated, "").to_string();
+                }
+            }
+        }
+
+        match &api_key_env {
+            Some(env) => {
+                if re_api_key_env.is_match(&updated) {
+                    updated = re_api_key_env
+                        .replace_all(&updated, format!("${{1}}\"{}\"", env))
+                        .to_string();
+                } else {
+                    // Insert api_key_env after each model line (or after base_url if present).
+                    if let Some(re) =
+                        regex::Regex::new(r#"(?m)^(\s{4}model:\s*"[^"]*"\s*(?:\n\s{4}base_url:\s*"[^"]*"\s*)?)$"#).ok()
+                    {
+                        updated = re
+                            .replace_all(
+                                &updated,
+                                format!("${{1}}\n    api_key_env: \"{}\"", env),
+                            )
+                            .to_string();
+                    }
+                }
+            }
+            None => {
+                // Remove all api_key_env lines in preset blocks.
+                if let Some(re) =
+                    regex::Regex::new(r#"(?m)^\s{4}api_key_env:\s*"[^"]*"\s*\n?"#).ok()
                 {
                     updated = re.replace_all(&updated, "").to_string();
                 }
