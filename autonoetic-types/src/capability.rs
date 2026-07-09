@@ -4,7 +4,8 @@
 //! - **SandboxFunctions**: MCP tool access by prefix (web_, sandbox_)
 //! - **ReadAccess**: Read content, memory, knowledge (includes search)
 //! - **WriteAccess**: Write content, memory, knowledge (includes share)
-//! - **CodeExecution**: Execute scripts in sandbox
+//! - **CodeExecution**: Execute command strings with `sandbox_exec`
+//! - **ArtifactExecution**: Execute immutable artifact entrypoints
 //! - **NetworkAccess**: Make HTTP requests
 //! - **AgentSpawn**: Create child agent sessions
 //! - **AgentMessage**: Send messages to other agents
@@ -67,6 +68,13 @@ pub enum Capability {
         #[serde(default)]
         commands: Vec<String>,
     },
+
+    /// Execute immutable artifact entrypoints with `artifact_exec`.
+    ///
+    /// This is intentionally separate from [`Capability::CodeExecution`]:
+    /// artifact execution is bound to a content-addressed artifact and does not
+    /// authorize arbitrary command strings.
+    ArtifactExecution,
 
     /// Request a gateway-level emergency stop for a root session (dedicated responders only).
     EmergencyStop,
@@ -364,6 +372,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "AgentMessage",
         "BackgroundReevaluation",
         "CodeExecution",
+        "ArtifactExecution",
         "EmergencyStop",
         "AgentRevision",
         "Evaluation",
@@ -397,6 +406,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage".to_string(),
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
         Capability::CodeExecution { .. } => "CodeExecution".to_string(),
+        Capability::ArtifactExecution => "ArtifactExecution".to_string(),
         Capability::EmergencyStop => "EmergencyStop".to_string(),
         Capability::AgentRevision { .. } => "AgentRevision".to_string(),
         Capability::Evaluation { .. } => "Evaluation".to_string(),
@@ -793,6 +803,7 @@ mod tests {
                 patterns: vec![],
                 commands: vec![],
             },
+            Capability::ArtifactExecution,
             Capability::EmergencyStop,
             Capability::AgentRevision { patterns: vec![] },
             Capability::Evaluation { patterns: vec![] },

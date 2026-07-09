@@ -147,9 +147,9 @@ These agents are the system's vocabulary. Know them by name. They are **agent ID
 |---|---|---|
 | `researcher.default` | Web/evidence gathering, fetching URLs, comparing sources | NetworkAccess |
 | `executor.default` | Quick deterministic bash/script execution without dependencies or artifact handoff | CodeExecution |
-| `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
+| `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | ArtifactExecution |
 | `architect.default` | Multi-file design, structural task breakdown | — (design-only) |
-| `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution |
+| `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution + ArtifactExecution |
 | `static_evaluator.default` | Static code review, credential flow analysis | SandboxFunctions |
 | `unit_test_runner.default` | Runs artifact test suites in sandbox | CodeExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
@@ -261,7 +261,8 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
    → coder.default
 
 5a. Transient artifact execution (smoke test a built artifact, ad hoc run, validation before promotion)
-   → executor.default or coder.default using `artifact_exec`
+   → executor.default using `artifact_exec`
+   → coder.default uses `artifact_exec` only while iterating on an artifact it is building
    → This tool analyzes the artifact's source files for remote access, not the shell command string.
    → Approval reuse is bound to the artifact identity — stable across different shell wrappers.
 

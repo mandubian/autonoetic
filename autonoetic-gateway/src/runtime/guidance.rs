@@ -161,6 +161,7 @@ pub fn capability_kind(cap: &Capability) -> &'static str {
         Capability::AgentMessage { .. } => "agent_message",
         Capability::BackgroundReevaluation { .. } => "background_reevaluation",
         Capability::CodeExecution { .. } => "code_execution",
+        Capability::ArtifactExecution => "artifact_execution",
         Capability::EmergencyStop => "emergency_stop",
         Capability::AgentRevision { .. } => "agent_revision",
         Capability::Evaluation { .. } => "evaluation",

@@ -22,6 +22,7 @@ metadata:
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]
         commands: ["date", "ls", "echo", "cat", "pwd", "wc", "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee", "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat", "du", "df", "uname", "hostname", "whoami", "which", "basename", "dirname", "readlink", "file", "sleep", "test", "true", "false", "curl", "wget"]
+      - type: "ArtifactExecution"
       - type: "WriteAccess"
         scopes: ["self.*"]
       - type: "ReadAccess"

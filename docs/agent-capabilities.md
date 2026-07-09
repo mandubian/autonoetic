@@ -11,7 +11,8 @@ This document describes the capability system used by Autonoetic agents. Capabil
 | `SandboxFunctions` | `allowed: [string]` | Access to MCP tools by prefix |
 | `ReadAccess` | `scopes: [string]` | Read content, memory, knowledge |
 | `WriteAccess` | `scopes: [string]` | Write content, memory, knowledge |
-| `CodeExecution` | `patterns: [string]` | Execute scripts in sandbox |
+| `CodeExecution` | `patterns: [string]` | Execute command strings with `sandbox_exec` |
+| `ArtifactExecution` | none | Execute immutable artifact entrypoints with `artifact_exec` |
 | `NetworkAccess` | `hosts: [string]` | Make HTTP requests |
 | `AgentSpawn` | `max_children: integer` | Create child agent sessions |
 | `AgentMessage` | `patterns: [string]` | Send messages to other agents |
@@ -29,8 +30,8 @@ This document describes the capability system used by Autonoetic agents. Capabil
 | `artifact_build` | `WriteAccess` | Build immutable artifact from session content |
 | `artifact_inspect` | `ReadAccess` | Inspect artifact files and metadata |
 | `resolve` | `ReadAccess` | One front door: resolve any artifact/content handle |
-| `artifact_prepare` | `CodeExecution` | Preflight for artifact execution (approval + credentials) |
-| `artifact_exec` | `CodeExecution` **or** explicit `SandboxFunctions: ["artifact_exec"]` | Execute artifact entrypoint with artifact-bound approval reuse. `Evaluation` alone does **not** grant this tool; it must be listed explicitly in `SandboxFunctions.allowed` (used by promotion-gate roles such as `unit_test_runner.default`). |
+| `artifact_prepare` | `ArtifactExecution` | Preflight for artifact execution (approval + credentials) |
+| `artifact_exec` | `ArtifactExecution` | Execute artifact entrypoint with artifact-bound approval reuse. Legacy promotion-gate manifests may also receive this narrowly through explicit `SandboxFunctions` declarations. |
 
 ### Agent Tools
 | Tool | Requires Capability | Notes |
@@ -64,6 +65,16 @@ This document describes the capability system used by Autonoetic agents. Capabil
 |------|---------------------|-------|
 | `sandbox_exec` | `CodeExecution` | Execute scripts with patterns |
 
+`CodeExecution` and `ArtifactExecution` are deliberately disjoint. Holding one
+does not grant the other. This lets shell-oriented roles execute scratch
+commands without running arbitrary artifacts, and artifact-oriented roles run
+content-addressed entrypoints without receiving a general shell.
+
+This is a strict capability boundary: revisions created before the split must
+declare `ArtifactExecution` in a new reviewed revision if they need
+`artifact_exec` or `artifact_prepare`. `CodeExecution` is not treated as a
+compatibility fallback.
+
 ## Important: SandboxFunctions vs Native Tools
 
 **Common misconception**: `SandboxFunctions` with prefix `"content_"` grants access to `resolve`, `content_write`, etc.
@@ -92,7 +103,7 @@ This document describes the capability system used by Autonoetic agents. Capabil
 |-------|------------|-------------|---------------|---------------|------------|--------------|
 | **planner.default** | ✅ | ✅ | ❌ | ❌ | ✅ (10) | ❌ Delegates to specialized_builder |
 | **specialized_builder.default** | ✅ | ✅ | ❌ | ❌ | ✅ (5) | ✅ **EXCLUSIVE** |
-| **coder.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **coder.default** | ✅ | ✅ | Artifact only | ❌ | ❌ | ❌ |
 | **researcher.default** | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
 | **architect.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **debugger.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
@@ -137,15 +148,14 @@ capabilities:
 ```yaml
 capabilities:
   - type: "SandboxFunctions"
-    allowed: ["knowledge_", "sandbox_"]
+    allowed: ["knowledge_"]
   - type: "ReadAccess"
     scopes: ["self.*", "skills/*", "scripts/*"]
-  - type: "CodeExecution"
-    patterns: ["python3 scripts/*", "node *", "bash *"]
+  - type: "ArtifactExecution"
   - type: "WriteAccess"
     scopes: ["self.*", "skills/*", "scripts/*"]
 ```
-- **Role**: Code production, sandboxed execution
+- **Role**: Code production and immutable artifact execution
 - **Cannot**: Install agents, make HTTP requests directly
 
 #### researcher.default

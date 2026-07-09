@@ -14,12 +14,14 @@ pub enum SmokeTestInvolvement {
 }
 
 /// True when the revision declares executable behavior that must be smoke-tested
-/// before first install (`NetworkAccess` or `CodeExecution`).
+/// before first install (`NetworkAccess`, `CodeExecution`, or `ArtifactExecution`).
 pub fn revision_requires_smoke_test(capabilities: &[Capability]) -> bool {
     capabilities.iter().any(|cap| {
         matches!(
             cap,
-            Capability::NetworkAccess { .. } | Capability::CodeExecution { .. }
+            Capability::NetworkAccess { .. }
+                | Capability::CodeExecution { .. }
+                | Capability::ArtifactExecution
         )
     })
 }

@@ -401,7 +401,7 @@ Controls how the gateway analyzes agent code during `agent_revision_create` for 
 | `code_analysis.capability_provider` | string | `"pattern"` | Provider for capability analysis: `"pattern"`, `"python_ast"`, `"llm"`, `"composite"`, `"none"`. |
 | `code_analysis.security_provider` | string | `"pattern"` | Provider for security analysis: `"pattern"`, `"python_ast"`, `"llm"`, `"composite"`, `"none"`. |
 | `code_analysis.require_capabilities` | bool | `true` | Reject revision creation if code requires undeclared capabilities. |
-| `code_analysis.require_approval_for` | list | `["NetworkAccess", "CodeExecution"]` | Capability types that always require human approval when detected during revision creation. |
+| `code_analysis.require_approval_for` | list | `["NetworkAccess", "CodeExecution", "ArtifactExecution"]` | Capability types that always require human approval when detected during revision creation. |
 
 ### LLM-based analysis (when provider is `"llm"` or `"composite"`)
 
@@ -1218,6 +1218,7 @@ code_analysis:
   require_approval_for:
     - NetworkAccess
     - CodeExecution
+    - ArtifactExecution
 
 session_budget:
   profile: dev

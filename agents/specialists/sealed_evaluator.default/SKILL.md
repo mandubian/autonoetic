@@ -31,6 +31,7 @@ metadata:
                    "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat",
                    "du", "uname", "hostname", "whoami", "basename", "dirname",
                    "readlink", "file", "sleep", "test", "true", "false"]
+      - type: "ArtifactExecution"
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"

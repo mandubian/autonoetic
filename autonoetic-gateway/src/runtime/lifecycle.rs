@@ -2991,6 +2991,12 @@ impl AgentExecutor {
                     artifact_id: self.artifact_id.clone(),
                     sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
                     discovered_tools: Some(self.discovered_tools_writer.clone()),
+                    tool_discovery_catalog: Some(std::sync::Arc::new(
+                        crate::runtime::active_execution_registry::NativeToolDiscoveryCatalog {
+                            registered: self.registry.registered_tool_names(),
+                            available: self.registry.available_tool_names(&self.manifest),
+                        },
+                    )),
                     wake_hint: None,
                     wake_hints_map: None,
                 }

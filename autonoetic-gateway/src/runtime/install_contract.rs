@@ -802,7 +802,9 @@ pub fn analyze_bundle_health(
     for cap in capabilities {
         match cap {
             Capability::NetworkAccess { .. } => report.declares_network_access = true,
-            Capability::CodeExecution { .. } => report.declares_code_execution = true,
+            Capability::CodeExecution { .. } | Capability::ArtifactExecution => {
+                report.declares_code_execution = true
+            }
             _ => {}
         }
     }
@@ -868,6 +870,7 @@ pub fn is_high_risk_capability(cap: &Capability) -> bool {
         cap,
         Capability::NetworkAccess { .. }
             | Capability::CodeExecution { .. }
+            | Capability::ArtifactExecution
             | Capability::AgentSpawn { .. }
     )
 }
@@ -878,7 +881,9 @@ pub fn is_high_risk_capability(cap: &Capability) -> bool {
 pub fn requires_artifact_review(cap: &Capability) -> bool {
     matches!(
         cap,
-        Capability::CodeExecution { .. } | Capability::AgentSpawn { .. }
+        Capability::CodeExecution { .. }
+            | Capability::ArtifactExecution
+            | Capability::AgentSpawn { .. }
     )
 }
 

@@ -120,16 +120,20 @@ fn strip_gemma_token_artifacts(s: &str) -> String {
     out
 }
 
-impl<'a> ToolCallProcessor<'a> {
-    fn canonical_tool_name(name: &str) -> &str {
-        match name {
-            "spawn" => "agent_spawn",
-            "message" => "agent_message",
-            "search" => "web_search",
-            "fetch" => "web_fetch",
-            _ => name,
-        }
+pub(crate) fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "spawn" => "agent_spawn",
+        "message" => "agent_message",
+        "search" => "web_search",
+        "fetch" => "web_fetch",
+        "sandbox.exec" => "sandbox_exec",
+        "artifact.exec" => "artifact_exec",
+        "artifact.prepare" => "artifact_prepare",
+        _ => name,
     }
+}
+
+impl<'a> ToolCallProcessor<'a> {
 
     pub fn new(
         mcp_runtime: &'a mut McpToolRuntime,
@@ -194,7 +198,7 @@ impl<'a> ToolCallProcessor<'a> {
         for tc in tool_calls {
             let started_at = Instant::now();
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
-            let tool_name = Self::canonical_tool_name(&tc.name).to_string();
+            let tool_name = canonical_tool_name(&tc.name).to_string();
             if tool_name != tc.name {
                 // C (#619): tool-name shorthands are STILL accepted here — a hard
                 // reject is a breaking change that requires a logged deprecation
@@ -249,7 +253,7 @@ impl<'a> ToolCallProcessor<'a> {
                     continue;
                 }
             };
-            let canonical_tool = Self::canonical_tool_name(&tc.name);
+            let canonical_tool = canonical_tool_name(&tc.name);
             tracer.log_tool_requested(canonical_tool, &tc.arguments, intent.as_deref())?;
 
             // Execute tool call, handling errors appropriately
@@ -344,7 +348,7 @@ impl<'a> ToolCallProcessor<'a> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session_id missing while recording execution trace"))?;
 
-        let canonical_tool_name = Self::canonical_tool_name(&tc.name).to_string();
+        let canonical_tool_name = canonical_tool_name(&tc.name).to_string();
         let parsed_result = serde_json::from_str::<serde_json::Value>(result_json).ok();
         let success = infer_trace_success(parsed_result.as_ref(), tool_error);
         let error_type = infer_trace_error_type(parsed_result.as_ref(), tool_error);
@@ -423,7 +427,7 @@ impl<'a> ToolCallProcessor<'a> {
         let Some(session_id) = &self.session_id else {
             return;
         };
-        let canonical_tool_name = Self::canonical_tool_name(&tc.name).to_string();
+        let canonical_tool_name = canonical_tool_name(&tc.name).to_string();
         let Some(draft) = crate::runtime::operator_activity::classify_tool_activity(
             &canonical_tool_name,
             &tc.arguments,
@@ -487,7 +491,7 @@ impl<'a> ToolCallProcessor<'a> {
         agent_dir: &Path,
         gateway_dir: Option<&Path>,
     ) -> anyhow::Result<ToolCallOutput> {
-        let tool_name = Self::canonical_tool_name(&tc.name);
+        let tool_name = canonical_tool_name(&tc.name);
         let policy = &self.policy;
 
         // TODO(#619): hoist to driver boundary. Sanitizing here (and in
@@ -1655,24 +1659,27 @@ mod tests {
     #[test]
     fn test_canonical_tool_name_aliases() {
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("spawn"),
+            canonical_tool_name("spawn"),
             "agent_spawn"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("message"),
+            canonical_tool_name("message"),
             "agent_message"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("search"),
+            canonical_tool_name("search"),
             "web_search"
         );
-        assert_eq!(ToolCallProcessor::canonical_tool_name("fetch"), "web_fetch");
+        assert_eq!(canonical_tool_name("fetch"), "web_fetch");
+        assert_eq!(canonical_tool_name("sandbox.exec"), "sandbox_exec");
+        assert_eq!(canonical_tool_name("artifact.exec"), "artifact_exec");
+        assert_eq!(canonical_tool_name("artifact.prepare"), "artifact_prepare");
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("agent_spawn"),
+            canonical_tool_name("agent_spawn"),
             "agent_spawn"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("web_search"),
+            canonical_tool_name("web_search"),
             "web_search"
         );
     }

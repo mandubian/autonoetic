@@ -266,6 +266,10 @@ fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
             "capability 'CodeExecution' cannot be a bare string — explicit command patterns required. \
              Use {{ \"type\": \"CodeExecution\", \"patterns\": [\"python*\"] }} instead."
         )),
+        "ArtifactExecution" => Err(anyhow::anyhow!(
+            "capability 'ArtifactExecution' cannot be a bare string — use a tagged object instead. \
+             Use {{ \"type\": \"ArtifactExecution\" }} instead."
+        )),
         "AgentMessage" => Err(anyhow::anyhow!(
             "capability 'AgentMessage' cannot be a bare string — explicit patterns required. \
              Use {{ \"type\": \"AgentMessage\", \"patterns\": [\"*\"] }} instead."
@@ -1474,6 +1478,15 @@ fn capability_oneof_schema() -> serde_json::Value {
                 "type": { "const": "CodeExecution" },
                 "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "Command prefix patterns." },
                 "commands": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Specific shell commands (word-boundary match)." }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Execute immutable artifact entrypoints. Does not authorize arbitrary shell commands.",
+            "properties": {
+                "type": { "const": "ArtifactExecution" }
             },
             "required": ["type"],
             "additionalProperties": false
@@ -5187,6 +5200,7 @@ mod approval_execution_context_tests {
             artifact_id: None,
             sentinel_suppress_target: None,
             discovered_tools: None,
+            tool_discovery_catalog: None,
             wake_hints_map: None,
             wake_hint: None,
         };
@@ -5886,6 +5900,7 @@ mod capability_schema_tests {
             Capability::AgentMessage { patterns: vec![] },
             Capability::BackgroundReevaluation { min_interval_secs: 1, allow_reasoning: false },
             Capability::CodeExecution { patterns: vec![], commands: vec![] },
+            Capability::ArtifactExecution,
             Capability::EmergencyStop,
             Capability::AgentRevision { patterns: vec![] },
             Capability::Evaluation { patterns: vec![] },

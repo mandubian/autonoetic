@@ -22,11 +22,10 @@ metadata:
       max_session_turns: 8
     capabilities:
       - type: "SandboxFunctions"
-        # Exact tool names (not prefix) to exclude artifact_build and artifact_prepare.
+        # Promotion verdict access; execution is granted separately.
         # The runner inspects and executes — it never builds, repackages, or writes content.
-        # `artifact_exec` + `promotion_` here declare a promotion exec gate (gateway #596):
-        # artifact_exec is permitted without broad CodeExecution/Evaluation caps.
-        allowed: ["knowledge_", "artifact_inspect", "artifact_exec", "promotion_"]
+        allowed: ["knowledge_", "artifact_inspect", "promotion_"]
+      - type: "ArtifactExecution"
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     validation: "soft"
@@ -134,7 +133,7 @@ Return this JSON on the first turn and end:
 These are stop conditions, not invitations to explore.
 
 - If `artifact_exec` returns `promotion_gate_network_denied` or `approval_required` for network patterns in the artifact's tests, stop immediately — return `unable_to_evaluate` (see above). **Never** wait for or seek operator approval.
-- If `artifact_exec` is rejected by gateway execution policy (P-1.9 / P-3.8), stop and report the policy mismatch. Do **not** retry with different command variants.
+- If `artifact_exec` is rejected by gateway execution policy (P-1.1 / P-3.8), stop and report the policy mismatch. Do **not** retry with different arguments.
 - If test execution fails with `ModuleNotFoundError` / missing third-party dependency, first check whether the artifact has dependency layers (review `artifact_inspect` output for `layers` with a `mount_path`). If layers exist but imports still fail, the issue is a runtime PYTHONPATH wiring problem — not a packaging failure. In that case, record a `warning` finding describing the missing module and the layer mount paths, and set `status: "unable_to_evaluate"` rather than `fail`. If no layers exist and the artifact declares dependencies that were not packaged, that IS a packaging failure — record `status: "fail"`.
 - If `artifact_exec` fails because the artifact ref is missing, expired, or revoked, stop and report that exact issue. Do not retry with guessed artifact refs.
 - If `artifact_exec` reports the **sandbox driver is unavailable** (error mentions `sandbox_driver_unavailable` or "sandbox driver '…' not found on PATH"), the host is missing the sandbox backend — no test can run here. Return `status: "unable_to_evaluate"` immediately with a `warning` finding naming the missing driver. **Do not** retry with different commands or runners — every attempt will fail identically and trip the loop guard.

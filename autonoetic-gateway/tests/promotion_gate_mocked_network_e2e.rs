@@ -84,7 +84,7 @@ fn writer_manifest() -> AgentManifest {
 }
 
 /// `unit_test_runner.default` — promotion federation exec gate on bubblewrap with
-/// no `CodeExecution` / `Evaluation` caps (gateway grants `artifact_exec` by role
+/// no `ArtifactExecution` / `Evaluation` caps (gateway grants `artifact_exec` by role
 /// + `SandboxFunctions` allowlist).
 fn unit_test_runner_manifest() -> AgentManifest {
     base_manifest(

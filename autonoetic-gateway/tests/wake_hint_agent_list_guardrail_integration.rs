@@ -92,6 +92,7 @@ fn make_run_context(root_session_id: &str, wake_hint: Option<WakeHintState>) -> 
         artifact_id: None,
         sentinel_suppress_target: None,
         discovered_tools: None,
+        tool_discovery_catalog: None,
         wake_hint,
         wake_hints_map: Some(wake_hints_map),
     }

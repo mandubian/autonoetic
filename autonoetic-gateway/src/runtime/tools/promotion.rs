@@ -52,13 +52,13 @@ fn manifest_has_broad_artifact_exec_cap(manifest: &AgentManifest) -> bool {
     manifest.capabilities.iter().any(|cap| {
         matches!(
             cap,
-            Capability::CodeExecution { .. } | Capability::Evaluation { .. }
+            Capability::ArtifactExecution | Capability::Evaluation { .. }
         )
     })
 }
 
 /// Federation exec gates may run artifact entrypoints via [`artifact_exec`] without
-/// declaring broad `CodeExecution` or `Evaluation` capabilities.
+/// declaring broad `ArtifactExecution` or `Evaluation` capabilities.
 ///
 /// Declared in SKILL frontmatter: list `artifact_exec` and `promotion_` under
 /// `SandboxFunctions.allowed`. Static reviewers keep `promotion_` only (no exec).
@@ -730,15 +730,12 @@ mod promotion_gate_exec_tests {
     }
 
     #[test]
-    fn code_execution_agent_uses_standard_exec_path() {
+    fn artifact_execution_agent_uses_standard_exec_path() {
         let manifest = base_manifest(
             "sealed_evaluator.default",
             vec![
                 promotion_exec_sandbox(),
-                Capability::CodeExecution {
-                    patterns: vec!["python3 ".to_string()],
-                    commands: vec![],
-                },
+                Capability::ArtifactExecution,
             ],
         );
         assert!(!manifest_may_exec_artifact_in_promotion_gate(&manifest));

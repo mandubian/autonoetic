@@ -5,7 +5,7 @@
 //! 2. Classify coverage → Concrete (import + URL allows reuse)
 //! 3. Fingerprint stability → same artifact_id produces same fingerprint
 //! 4. Cache hit on second run → approval reuse works
-//! 5. artifact.exec tool is registered and gated by CodeExecution
+//! 5. artifact_exec tool is registered and gated by ArtifactExecution
 
 mod support;
 
@@ -20,7 +20,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use tempfile::tempdir;
 
-fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
+fn manifest_with_artifact_execution(agent_id: &str) -> AgentManifest {
     AgentManifest {
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
@@ -38,10 +38,7 @@ fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
             singleton: false,
         },
         capabilities: vec![
-            Capability::CodeExecution {
-                patterns: vec!["*".to_string()],
-                commands: vec![],
-            },
+            Capability::ArtifactExecution,
             Capability::NetworkAccess {
                 hosts: vec!["*".to_string()],
             },
@@ -84,10 +81,7 @@ fn manifest_without_network() -> AgentManifest {
             description: "Test executor".to_string(),
             singleton: false,
         },
-        capabilities: vec![Capability::CodeExecution {
-            patterns: vec!["*".to_string()],
-            commands: vec![],
-        }],
+        capabilities: vec![Capability::ArtifactExecution],
         llm_overrides: None,
         llm_preset: None,
         llm_config: None,
@@ -288,12 +282,29 @@ fn test_artifact_exec_tool_registered_and_gated() {
     let registry = default_registry();
     assert!(registry.has_tool("artifact_exec"));
 
-    let manifest = manifest_with_code_execution("coder.default");
+    let manifest = manifest_with_artifact_execution("coder.default");
     let defs = registry.available_definitions(&manifest);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
         names.contains(&"artifact_exec"),
-        "artifact.exec should be available with CodeExecution"
+        "artifact_exec should be available with ArtifactExecution"
+    );
+
+    let shell_only = AgentManifest {
+        capabilities: vec![Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+            commands: vec![],
+        }],
+        ..manifest_with_artifact_execution("executor.shell-only")
+    };
+    let shell_names: Vec<String> = registry
+        .available_definitions(&shell_only)
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert!(
+        !shell_names.iter().any(|name| name == "artifact_exec"),
+        "CodeExecution alone must not grant artifact_exec"
     );
 
     let manifest_no_exec = AgentManifest {
@@ -338,7 +349,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
         !names.contains(&"artifact_exec"),
-        "artifact_exec should NOT be available without CodeExecution, Evaluation, or promotion exec gate role"
+        "artifact_exec should NOT be available without ArtifactExecution or a legacy promotion exec gate role"
     );
 }
 

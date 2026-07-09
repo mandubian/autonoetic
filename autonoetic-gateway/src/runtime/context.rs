@@ -46,10 +46,11 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
         matches!(
             c,
             autonoetic_types::capability::Capability::CodeExecution { .. }
+                | autonoetic_types::capability::Capability::ArtifactExecution
         )
     });
 
-    // SDK reference: writers (CodeExecution), delegators (AgentSpawn), and
+    // SDK reference: executable-code roles, delegators (AgentSpawn), and
     // federation roles that statically review script code (architect, static_evaluator).
     let role = role_from_manifest(manifest);
     let needs_sdk_reference = has_code_execution

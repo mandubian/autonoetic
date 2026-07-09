@@ -256,6 +256,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage",
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation",
         Capability::CodeExecution { .. } => "CodeExecution",
+        Capability::ArtifactExecution => "ArtifactExecution",
         Capability::EmergencyStop => "EmergencyStop",
         Capability::AgentRevision { .. } => "AgentRevision",
         Capability::Evaluation { .. } => "Evaluation",

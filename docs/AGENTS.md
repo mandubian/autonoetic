@@ -239,7 +239,7 @@ Capabilities fall into three categories:
 
 | Category | Purpose | Examples |
 |----------|---------|----------|
-| **Tool Access** | Which tools/commands can be invoked | `SandboxFunctions`, `CodeExecution` |
+| **Tool Access** | Which tools/commands can be invoked | `SandboxFunctions`, `CodeExecution`, `ArtifactExecution` |
 | **Storage Access** | Which paths/scopes can be read/written | `ReadAccess`, `WriteAccess` |
 | **Privilege Escalation** | Operations that escape sandbox/agent boundaries | `NetworkAccess`, `AgentSpawn` |
 
@@ -251,7 +251,8 @@ Capabilities fall into three categories:
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge (includes search) |
 | `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge_store`) |
 | `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
-| `CodeExecution` | `patterns: [string]` | Execute scripts/commands in sandbox |
+| `CodeExecution` | `patterns: [string]` | Execute command strings through `sandbox_exec` |
+| `ArtifactExecution` | none | Execute immutable artifact entrypoints through `artifact_exec` |
 | `AgentSpawn` | `max_children: number` | Create child agent sessions |
 | `AgentMessage` | `patterns: [string]` | Send messages to other agents |
 | `BackgroundReevaluation` | `min_interval_secs: number, allow_reasoning: boolean` | Periodic wake-ups for background processing |
@@ -273,6 +274,7 @@ Capabilities fall into three categories:
 |------------|----------|
 | `NetworkAccess` | HTTP requests via `web_fetch`, `web_search` |
 | `CodeExecution` | Script execution via `sandbox_exec` |
+| `ArtifactExecution` | Content-addressed entrypoint execution via `artifact_exec` and preflight via `artifact_prepare` |
 | `AgentSpawn` | Creating new agent sessions |
 
 ### Scoping
@@ -442,6 +444,10 @@ For searching raw tool execution traces within sessions. Returns stdout, stderr,
 ### Artifact Execution Tool (Transient Runs)
 
 For running built artifact entrypoints in a sandbox with artifact-aware analysis and approval reuse. The tool analyzes the artifact's source files (not the shell command string) and binds approval reuse to the artifact identity.
+
+Both `artifact_exec` and `artifact_prepare` require `ArtifactExecution`.
+`CodeExecution` grants only `sandbox_exec`; the capabilities do not imply one
+another.
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
@@ -855,7 +861,7 @@ Planner: "Create a weather agent"
 
 **Promotion evidence binding (high-risk capabilities):**
 
-- For revisions declaring `NetworkAccess`, `CodeExecution`, or `AgentSpawn`, promotion requires evaluator and auditor pass records (legacy gate) or federation verdicts + approved operator escalation (FullJury gate).
+- For revisions declaring `NetworkAccess`, `CodeExecution`, `ArtifactExecution`, or `AgentSpawn`, promotion requires evaluator and auditor pass records (legacy gate) or federation verdicts + approved operator escalation (FullJury gate).
 - Evidence is validated against the revision's canonical `content_digest` (not by timestamp ordering against `created_at`).
 - Evaluator/auditor can run either:
   - **before** `create_from_intent` (artifact-first flow), or

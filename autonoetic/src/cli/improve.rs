@@ -294,8 +294,8 @@ fn check_auto_approve_eligibility(
         return false;
     }
 
-    // Constitutional hard rule: L3 never applies to agents with CodeExecution
-    // or AgentSpawn capabilities, regardless of track record. Parse the SKILL.md
+    // Constitutional hard rule: L3 never applies to agents with execution or
+    // AgentSpawn capabilities, regardless of track record. Parse the SKILL.md
     // front-matter to check.
     let skill_path = config.agents_dir.join(agent_id).join("SKILL.md");
     if let Ok(content) = std::fs::read_to_string(&skill_path) {
@@ -303,6 +303,7 @@ fn check_auto_approve_eligibility(
             for cap in &manifest.capabilities {
                 match cap {
                     autonoetic_types::capability::Capability::CodeExecution { .. }
+                    | autonoetic_types::capability::Capability::ArtifactExecution
                     | autonoetic_types::capability::Capability::AgentSpawn { .. } => return false,
                     _ => {}
                 }

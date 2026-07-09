@@ -273,6 +273,21 @@ impl NativeToolRegistry {
         self.tools.iter().any(|t| t.name() == name)
     }
 
+    pub fn registered_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tools.iter().map(|tool| tool.name().to_string()).collect()
+    }
+
+    pub fn available_tool_names(
+        &self,
+        manifest: &AgentManifest,
+    ) -> std::collections::HashSet<String> {
+        self.tools
+            .iter()
+            .filter(|tool| tool.is_available(manifest))
+            .map(|tool| tool.name().to_string())
+            .collect()
+    }
+
     /// Collect tool definitions with tier-based filtering based on workflow context.
     /// When filter is None, returns all available tools (same as `available_definitions`).
     pub fn available_definitions_filtered(
@@ -634,6 +649,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage".to_string(),
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
         Capability::CodeExecution { .. } => "CodeExecution".to_string(),
+        Capability::ArtifactExecution => "ArtifactExecution".to_string(),
         Capability::EmergencyStop => "EmergencyStop".to_string(),
         Capability::AgentRevision { .. } => "AgentRevision".to_string(),
         Capability::Evaluation { .. } => "Evaluation".to_string(),
@@ -1268,6 +1284,32 @@ mod tests {
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
+    }
+
+    #[test]
+    fn execution_capabilities_expose_disjoint_native_tools() {
+        let registry = default_registry();
+        let shell_manifest = manifest_with_capabilities(
+            "shell-only",
+            vec![Capability::CodeExecution {
+                patterns: vec!["python3 ".to_string()],
+                commands: vec![],
+            }],
+        );
+        let artifact_manifest = manifest_with_capabilities(
+            "artifact-only",
+            vec![Capability::ArtifactExecution],
+        );
+
+        let shell_names = registry.available_tool_names(&shell_manifest);
+        assert!(shell_names.contains("sandbox_exec"));
+        assert!(!shell_names.contains("artifact_exec"));
+        assert!(!shell_names.contains("artifact_prepare"));
+
+        let artifact_names = registry.available_tool_names(&artifact_manifest);
+        assert!(!artifact_names.contains("sandbox_exec"));
+        assert!(artifact_names.contains("artifact_exec"));
+        assert!(artifact_names.contains("artifact_prepare"));
     }
 
     #[test]

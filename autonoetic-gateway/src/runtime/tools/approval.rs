@@ -143,7 +143,12 @@ impl NativeTool for ApprovalWithdrawTool {
         manifest
             .capabilities
             .iter()
-            .any(|cap| matches!(cap, Capability::CodeExecution { .. }))
+            .any(|cap| {
+                matches!(
+                    cap,
+                    Capability::CodeExecution { .. } | Capability::ArtifactExecution
+                )
+            })
     }
 
     fn definition(&self) -> ToolDefinition {

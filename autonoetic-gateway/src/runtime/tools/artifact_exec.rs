@@ -152,11 +152,11 @@ impl NativeTool for ArtifactExecTool {
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        let has_code_exec = manifest
+        let has_artifact_exec = manifest
             .capabilities
             .iter()
-            .any(|cap| matches!(cap, Capability::CodeExecution { .. }));
-        if has_code_exec {
+            .any(|cap| matches!(cap, Capability::ArtifactExecution));
+        if has_artifact_exec {
             return true;
         }
 
@@ -185,7 +185,7 @@ impl NativeTool for ArtifactExecTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Execute an artifact entrypoint in a sandbox. Unlike sandbox.exec, this tool runs remote-access analysis against the artifact's source files (not the shell command string) and binds approval reuse to the artifact identity. Use this for transient validation, smoke tests, and ad hoc runs of built artifacts. For reusable capabilities, prefer creating a script-agent revision instead.".to_string(),
+            description: "Execute an artifact entrypoint in a sandbox. Unlike sandbox_exec, this tool runs remote-access analysis against the artifact's source files (not the shell command string) and binds approval reuse to the artifact identity. Use this for transient validation, smoke tests, and ad hoc runs of built artifacts. For reusable capabilities, prefer creating a script-agent revision instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -229,7 +229,7 @@ impl NativeTool for ArtifactExecTool {
                     },
                     "deployment_ticket": {
                         "type": "string",
-                        "description": "Deployment ticket from artifact.prepare. When provided, remote-access approval and credential injection are resolved from the ticket — no separate approval_ref or credential_env needed."
+                        "description": "Deployment ticket from artifact_prepare. When provided, remote-access approval and credential injection are resolved from the ticket — no separate approval_ref or credential_env needed."
                     }
                 },
                 "required": ["artifact_ref", "entrypoint"],
@@ -396,7 +396,7 @@ impl NativeTool for ArtifactExecTool {
         let decision = if manifest_may_exec_artifact_in_promotion_gate(manifest) {
             promotion_gate_artifact_command_decision(&command)
         } else {
-            policy.can_exec_shell_detailed(&command)
+            artifact_command_decision(&command)
         };
         if !decision.is_allowed() {
             return Err(
@@ -1102,9 +1102,22 @@ impl NativeTool for ArtifactExecTool {
 /// wasm WASI-no-sockets → yes; microvm → no, the operator firecracker config
 /// controls the NIC, so its promotion runs keep the deterministic-without-network
 /// pre-deny, P-3.10).
-/// P-3.8 security analysis for promotion-gate `artifact_exec` runs. Skips
-/// CodeExecution pattern matching (P-1.9) because the command is synthesized
-/// from a gateway-controlled entrypoint + args, not operator-supplied shell.
+/// P-3.8 security analysis for ordinary artifact runs. Capability availability
+/// is checked by the native registry before dispatch; P-1.9 command-pattern
+/// matching does not apply because the gateway synthesizes this command from a
+/// validated artifact entrypoint and argument vector.
+fn artifact_command_decision(command: &str) -> PolicyDecision {
+    let security = SecurityAnalyzer::analyze_command(command);
+    if !security.is_safe {
+        PolicyDecision::deny_with_analysis("P-3.8", security)
+    } else {
+        PolicyDecision::allow("P-1.1")
+    }
+}
+
+/// P-3.8 security analysis for promotion-gate `artifact_exec` runs. Like
+/// ordinary artifact execution, this skips CodeExecution pattern matching
+/// because the command is synthesized by the gateway.
 fn promotion_gate_artifact_command_decision(command: &str) -> PolicyDecision {
     let security = SecurityAnalyzer::analyze_command(command);
     if !security.is_safe {

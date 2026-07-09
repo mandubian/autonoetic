@@ -327,6 +327,7 @@ code_analysis:
   require_approval_for:
     - NetworkAccess
     - CodeExecution
+    - ArtifactExecution
 
 # ── Capability Delta Gate ──────────────────────────────────────────────
 # Controls how capability broadening during revision promotion is gated.

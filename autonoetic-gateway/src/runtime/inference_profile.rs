@@ -193,6 +193,7 @@ pub fn agent_requires_tool_capable_llm(manifest: &AgentManifest) -> bool {
             Capability::SandboxFunctions { .. }
                 | Capability::AgentSpawn { .. }
                 | Capability::CodeExecution { .. }
+                | Capability::ArtifactExecution
         )
     }) || !manifest.allowed_tool_tiers.is_empty()
 }

@@ -399,6 +399,7 @@ fn default_improve_high_blast_radius_capability_kinds() -> Vec<String> {
         "SandboxFunctions".to_string(),
         "NetworkAccess".to_string(),
         "CodeExecution".to_string(),
+        "ArtifactExecution".to_string(),
         "CredentialAccess".to_string(),
         "EmergencyStop".to_string(),
         "AgentRevision".to_string(),
@@ -2368,7 +2369,11 @@ impl Default for CodeAnalysisConfig {
             capability_provider: default_capability_provider(),
             security_provider: default_security_provider(),
             require_capabilities: default_require_capabilities(),
-            require_approval_for: vec!["NetworkAccess".to_string(), "CodeExecution".to_string()],
+            require_approval_for: vec![
+                "NetworkAccess".to_string(),
+                "CodeExecution".to_string(),
+                "ArtifactExecution".to_string(),
+            ],
             llm_config: CodeAnalysisLlmConfig::default(),
         }
     }

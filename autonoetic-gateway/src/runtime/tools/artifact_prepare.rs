@@ -51,13 +51,13 @@ impl NativeTool for ArtifactPrepareTool {
         manifest
             .capabilities
             .iter()
-            .any(|cap| matches!(cap, Capability::CodeExecution { .. }))
+            .any(|cap| matches!(cap, Capability::ArtifactExecution))
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "One-pass preflight check for artifact execution. Analyzes artifact source for remote access, resolves credentials from the vault, and creates a single approval covering all domains + credential injection. Returns a deployment_ticket that artifact.exec can use to execute without further approvals or credential setup.".to_string(),
+            description: "One-pass preflight check for artifact execution. Analyzes artifact source for remote access, resolves credentials from the vault, and creates a single approval covering all domains + credential injection. Returns a deployment_ticket that artifact_exec can use to execute without further approvals or credential setup.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
