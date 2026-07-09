@@ -690,14 +690,17 @@ impl AgentExecutor {
         }
 
         if !outcome.is_suspended() {
-            if let Some(gs) = self.gateway_store.as_ref() {
-                let root_sid = crate::runtime::content_store::root_session_id(&session_id);
-                if let Err(e) = gs.delete_session_grants(&root_sid) {
-                    tracing::warn!(
-                        root_session_id = %root_sid,
-                        error = %e,
-                        "Failed to delete session grants on session close"
-                    );
+            let root_sid = crate::runtime::content_store::root_session_id(&session_id);
+            let is_root = root_sid == session_id;
+            if is_root {
+                if let Some(gs) = self.gateway_store.as_ref() {
+                    if let Err(e) = gs.delete_session_grants(&root_sid) {
+                        tracing::warn!(
+                            root_session_id = %root_sid,
+                            error = %e,
+                            "Failed to delete session grants on session close"
+                        );
+                    }
                 }
             }
         }
