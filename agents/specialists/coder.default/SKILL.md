@@ -69,11 +69,22 @@ On wake-up, follow the shared resumption rule (call `workflow_state` first; neve
 
 You do **NOT** have `NetworkAccess`. The sandbox is network-isolated. The gateway runs **static analysis** on your code and test files — it scans for URL strings, hostnames, IP addresses, and HTTP client calls **inside the source code itself**, not just the command. If any pattern is detected, `sandbox_exec` is blocked.
 
-**This means:**
+**This means for YOUR own code/tests:**
 - Do NOT put real URLs, hostnames, or IP addresses anywhere in your code or tests — not even in string literals, mock return values, comments, or test fixture data
 - Do NOT import or use `requests`, `urllib`, `httpx`, `aiohttp`, `socket`, `subprocess` (to launch servers), or any HTTP/network client library in test files
 - Do NOT write integration tests that start a local server and connect to it (e.g. `localhost:9876`, `127.0.0.1`, `0.0.0.0`)
 - Do NOT use `subprocess.run(["python3", "/tmp/server.py"])` in tests to launch a background server
+
+**Exception for agent artifacts you are building:**
+If the planner asked you to build an agent that legitimately calls external APIs (e.g., a weather agent that calls `api.example.com`), the artifact's source code **must** contain the real hostnames so the gateway can validate them at install time. In that case:
+- Put the real hostnames in the artifact's implementation code (e.g., `https://api.example.com/v1/endpoint`).
+- Mock the HTTP calls in the artifact's **tests**; never make real network calls in tests.
+- In `agent_instructions.md`, add a `required_capabilities` note listing the exact hostnames, e.g.:
+  ```markdown
+  ## required_capabilities
+  - NetworkAccess: ["api.example.com", "api-other.example.com"]
+  ```
+- This lets `agent-factory.default` declare the correct `NetworkAccess` hosts in the install intent; otherwise the install will be rejected for undeclared hosts.
 
 **Correct approach for testing code that uses HTTP/network APIs:**
 ```python

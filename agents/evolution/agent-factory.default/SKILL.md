@@ -269,7 +269,13 @@ On resume after coder completes (the child state arrives in your turn-start cont
    - If the artifact is library code only (no entry point) → `execution_mode: "reasoning"`, include `llm_preset`
 3. From `output.named_outputs`, inspect dependency files: `requirements.txt`, `pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`, `Gemfile`.
 4. Use `resolve` with `named_outputs[*].ref` (preferred) or `output.implicit_artifact_id` to inspect the full implicit payload only when the named outputs don't already tell you what you need.
-5. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
+5. **Determine required capabilities from the artifact itself** — do not rely solely on the planner's `intended_capabilities` list, which may omit specific hosts. Read the artifact source files and look for:
+   - URL literals (`http://...`, `https://...`) → extract hostnames and add `{"type": "NetworkAccess", "hosts": ["host1", "host2"]}`.
+   - Hostname lists in `agent_instructions.md` under `## required_capabilities` (coder may have noted them there).
+   - File reads/writes outside `self.*` → add `ReadAccess` / `WriteAccess` with appropriate scopes.
+   - Subprocess/shell calls → add `CodeExecution`.
+   - Keep `NetworkAccess` hosts **concrete**; only use `hosts: ["*"]` when the agent truly cannot enumerate targets (e.g., an open-web researcher). The gateway rejects revisions whose code contacts hosts not listed in the capability.
+6. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
 
 ### Step 3: Packager (if dependency files found)
 
@@ -434,6 +440,7 @@ This separation exists by design (see `docs/protected-agents.md`, recursive trus
 Call `agent_spawn` with `agent_id="specialized_builder.default"`, `async=true`, passing the full install intent **plus `install_mode: "create_candidate"`** only when no candidate exists. Then end your turn — you resume automatically when it completes (Ri-0.14). Include:
 - `artifact_ref` (for code agents) or omit (for reasoning agents)
 - `instructions`, `description`, `capabilities`, `execution_mode`
+  - `capabilities` MUST be the list you derived from artifact inspection in Step 2b, with concrete `NetworkAccess` hosts extracted from URL literals. Do not forward the planner's `intended_capabilities` verbatim if it lacks specific hosts — the gateway will reject the revision for undeclared hosts.
 - `llm_preset` (for reasoning mode — gateway `llm_presets` key)
 - `script_entry` (for script mode)
 - `credential_services` (for script-mode agents that need credentials at spawn time, e.g. `["my-service"]` — pass the service name from the planner's delegation message)
