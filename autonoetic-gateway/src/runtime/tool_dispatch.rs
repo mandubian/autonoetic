@@ -144,6 +144,11 @@ pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
 /// conservative is deliberate: labelling a tool that actually mutates state as
 /// read-only would let a real loop run unbounded, so only tools known to be
 /// pure reads are listed.
+///
+/// Note: `resolve` is listed here because `resolve(include=metadata)` and
+/// `resolve(include=files)` are pure probes. `resolve(include=content)` is
+/// treated as substantive progress at the call site via
+/// `is_resolve_content_read`.
 pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -170,6 +175,22 @@ pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
             | "observability_read_reasoning"
             | "execution_search"
     )
+}
+
+/// Returns true when a tool call is `resolve(include="content")`.
+///
+/// Content reads are substantive progress for review agents, so they should
+/// reset the LoopGuard no-progress counter even though `resolve` is otherwise
+/// classified as read-only (see `is_read_only_tool`). Metadata and files
+/// resolves remain read-only probes.
+pub(crate) fn is_resolve_content_read(tool_name: &str, arguments_json: &str) -> bool {
+    if tool_name != "resolve" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(arguments_json)
+        .ok()
+        .and_then(|v| v.get("include").and_then(|x| x.as_str().map(|s| s == "content")))
+        .unwrap_or(false)
 }
 
 pub(crate) fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
@@ -522,7 +543,46 @@ impl AgentExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_stagnant_poll, tool_result_counts_as_progress};
+    use super::{is_resolve_content_read, is_stagnant_poll, tool_result_counts_as_progress};
+
+    #[test]
+    fn resolve_content_read_not_read_only() {
+        assert!(is_resolve_content_read(
+            "resolve",
+            r#"{"ref": "ar.x", "include": "content"}"#
+        ));
+    }
+
+    #[test]
+    fn resolve_metadata_read_is_read_only() {
+        assert!(!is_resolve_content_read(
+            "resolve",
+            r#"{"ref": "ar.x", "include": "metadata"}"#
+        ));
+    }
+
+    #[test]
+    fn resolve_files_read_is_read_only() {
+        assert!(!is_resolve_content_read(
+            "resolve",
+            r#"{"ref": "ar.x", "include": "files"}"#
+        ));
+    }
+
+    #[test]
+    fn resolve_without_include_is_read_only() {
+        assert!(!is_resolve_content_read("resolve", r#"{"ref": "ar.x"}"#));
+    }
+
+    #[test]
+    fn resolve_content_malformed_args_fails_closed() {
+        assert!(!is_resolve_content_read("resolve", "not-json"));
+    }
+
+    #[test]
+    fn non_resolve_tool_is_not_content_read() {
+        assert!(!is_resolve_content_read("workflow_state", r#"{}"#));
+    }
 
     #[test]
     fn test_tool_result_counts_as_progress_ok_true() {

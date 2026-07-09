@@ -3477,13 +3477,26 @@ impl AgentExecutor {
                             // their result (P-5.14 / P-6.26).
                             // Terminal events clear the
                             // rotating-polling window — a real
-                            // side effect just landed, so any
-                            // prior monotony is stale (issue #287).
+                            // side effect just landed, so any prior
+                            // monotony is stale (issue #287).
                             let terminal = parsed
                                 .get("side_effect_state")
                                 .and_then(|v| v.as_str())
                                 == Some("committed");
-                            if crate::runtime::tool_dispatch::is_read_only_tool(&tc.name) {
+                            // Reading artifact/content file bytes is
+                            // substantive progress for review agents
+                            // (static_evaluator, auditor, etc.). Keep
+                            // metadata/files resolves as read-only
+                            // probes so a planner cannot reset the
+                            // guard by re-listing artifacts.
+                            let is_resolve_content_read =
+                                crate::runtime::tool_dispatch::is_resolve_content_read(
+                                    &tc.name,
+                                    &tc.arguments,
+                                );
+                            if crate::runtime::tool_dispatch::is_read_only_tool(&tc.name)
+                                && !is_resolve_content_read
+                            {
                                 // Read-only probes advance no workflow — track
                                 // for rotating-polling detection but do not
                                 // reset the no-progress counter (#701).
