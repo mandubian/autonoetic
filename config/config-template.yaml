@@ -516,10 +516,12 @@ prompt_budget:
   # Enable only when you are sure your model does not need it.
   # strip_reasoning_from_request: false
   # Maximum characters to allow in a tool-result message content before it is
-  # truncated to head + tail for the LLM request. Large stdout/stderr blobs are
-  # not replayed in full every turn, but the full result is still stored.
-  # Set to 0 to disable truncation. Default is 2000.
-  # max_tool_result_chars: 2000
+  # truncated for the LLM request. JSON results have their large string *values*
+  # shortened in-place — structure + metadata (offset, next_offset, total_bytes,
+  # error_type, etc.) survive so agents can paginate. Non-JSON results get a
+  # head+tail ellipsis. The full result is always stored regardless.
+  # Default is 4000. Set to 0 to disable truncation.
+  # max_tool_result_chars: 4000
   # Collapse duplicate tool-result messages into a short marker
   # ("duplicate result — see above"). Re-reading artifacts or polling status
   # tools often produces identical output across turns; this saves tokens while

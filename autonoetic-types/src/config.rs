@@ -2682,7 +2682,7 @@ fn default_strip_reasoning() -> bool {
 }
 
 fn default_max_tool_result_chars() -> usize {
-    2000
+    4000
 }
 
 fn default_dedup_tool_results() -> bool {

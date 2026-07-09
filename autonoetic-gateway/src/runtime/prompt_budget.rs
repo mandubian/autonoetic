@@ -21,9 +21,12 @@ pub struct HistorySanitizeOptions {
     /// chain-of-thought on subsequent turns.
     pub strip_reasoning: bool,
     /// Maximum characters to allow in a tool-result message content. Values
-    /// <= 0 disable truncation. When truncation is enabled, large results are
-    /// kept as `head + "[... N chars truncated ...]" + tail`, with each of
-    /// head/tail sized to roughly half the budget.
+    /// <= 0 disable truncation. When truncation is enabled, results are
+    /// reduced **structurally**: if the content is valid JSON, large string
+    /// *values* are head+tail truncated in-place so the JSON structure and
+    /// all small metadata fields (e.g. `ok`, `offset`, `total_bytes`,
+    /// `next_offset`, `truncated`, `error_type`) remain intact and parseable.
+    /// Non-JSON results fall back to a whole-string head+tail truncation.
     pub max_tool_result_chars: usize,
     /// When true, duplicate `Role::Tool` messages are collapsed: the first
     /// occurrence keeps its content, and later duplicates are replaced with a
@@ -47,9 +50,13 @@ impl Default for HistorySanitizeOptions {
             // reasoning models, etc.). Operators whose model does not require
             // replay can opt in to stripping.
             strip_reasoning: false,
-            // Conservative default: most tool results need only a summary,
-            // and 2000 chars is enough for that plus short stdout/stderr.
-            max_tool_result_chars: 2000,
+            // Default: 4000 chars. Large enough for a meaningful chunk of a
+            // file (the resolve tool pages in `limit`-sized byte chunks) plus
+            // short stdout/stderr from sandbox.exec. JSON-aware truncation
+            // (see `truncate_tool_result_json`) preserves structure + metadata
+            // even when the budget is tight, so pagination fields like
+            // `next_offset` and `total_bytes` survive.
+            max_tool_result_chars: 4000,
             // Most repeated tool reads are uninformative after the first
             // occurrence; collapsing them saves tokens without losing storage.
             dedup_tool_results: true,
@@ -64,8 +71,10 @@ impl Default for HistorySanitizeOptions {
 /// preserved in storage.
 ///
 /// - Assistant `reasoning_content` / `reasoning_details` are stripped.
-/// - Tool-result `content` over `max_tool_result_chars` is truncated with a
-///   head+tail ellipsis so status/summary is still visible.
+/// - Tool-result `content` over `max_tool_result_chars` is truncated. JSON
+///   results have their large string *values* shortened in-place (preserving
+///   structure + metadata like `next_offset`, `total_bytes`); non-JSON results
+///   get a whole-string head+tail ellipsis so status/summary remains visible.
 /// - Duplicate tool-result messages are collapsed to a short marker after the
 ///   first occurrence.
 /// - System, user, and assistant messages are otherwise untouched.
@@ -92,7 +101,7 @@ pub fn sanitize_history_for_request(
             }
 
             if opts.max_tool_result_chars > 0 && m.role == Role::Tool && !m.content.is_empty() {
-                m.content = truncate_middle(&m.content, opts.max_tool_result_chars);
+                m.content = truncate_tool_result(&m.content, opts.max_tool_result_chars);
             }
 
             m
@@ -173,6 +182,114 @@ fn dedup_duplicate_tool_results(messages: &mut [Message]) {
                 last_tool_content = Some(msg.content.clone());
             }
         }
+    }
+}
+
+/// Truncate a tool-result string to fit within `max_chars` chars.
+///
+/// If the content parses as JSON, large string *values* are truncated
+/// in-place so the JSON structure and all small metadata fields remain
+/// intact and parseable by the agent. This is critical for pagination: the
+/// agent can still read `next_offset`, `total_bytes`, `truncated`, etc. even
+/// when the `content` / `stdout` / `result` field is shortened.
+///
+/// If the JSON-aware pass still leaves the result over budget (many medium
+/// fields), or the content is not JSON, fall back to whole-string
+/// `truncate_middle`.
+fn truncate_tool_result(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(s) {
+        truncate_json_strings_in_place(&mut value, max_chars);
+        let serialized = serde_json::to_string(&value).unwrap_or_else(|_| s.to_string());
+        if serialized.chars().count() <= max_chars {
+            return serialized;
+        }
+        // Many medium fields pushed the total over even after per-field
+        // truncation — fall through to whole-string truncation.
+        return truncate_middle(&serialized, max_chars);
+    }
+    truncate_middle(s, max_chars)
+}
+
+/// Walk a JSON tree and truncate any string value longer than its fair share
+/// of `max_chars`. Non-string leaves and structural overhead (keys, braces,
+/// commas) are preserved untouched — only oversized string *values* are
+/// shortened with head+tail + marker.
+///
+/// The budget is split evenly across all string values, after reserving
+/// overhead for the JSON structure itself.
+fn truncate_json_strings_in_place(value: &mut serde_json::Value, max_chars: usize) {
+    let total_string_chars: usize = collect_string_values(value)
+        .iter()
+        .map(|s| s.chars().count())
+        .sum();
+    if total_string_chars <= max_chars {
+        return;
+    }
+
+    // Reserve space for JSON structural overhead (keys, braces, commas,
+    // quotes, colons). A rough estimate: 40% of the budget goes to structure,
+    // capped so we never starve the string budget below ~25%.
+    let struct_overhead = (max_chars * 2 / 5).min(max_chars * 3 / 4);
+    let string_budget = max_chars.saturating_sub(struct_overhead);
+    let string_count = count_string_values(value).max(1);
+    let per_field_budget = string_budget / string_count;
+
+    truncate_json_strings_recursive(value, per_field_budget);
+}
+
+fn truncate_json_strings_recursive(value: &mut serde_json::Value, per_field_budget: usize) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.chars().count() > per_field_budget {
+                *s = truncate_middle(s, per_field_budget);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                truncate_json_strings_recursive(v, per_field_budget);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                truncate_json_strings_recursive(v, per_field_budget);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_string_values(value: &serde_json::Value) -> Vec<&str> {
+    let mut out = Vec::new();
+    collect_string_values_helper(value, &mut out);
+    out
+}
+
+fn collect_string_values_helper<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(s) => out.push(s.as_str()),
+        serde_json::Value::Object(map) => {
+            for (_, v) in map {
+                collect_string_values_helper(v, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_string_values_helper(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn count_string_values(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(_) => 1,
+        serde_json::Value::Object(map) => map.values().map(count_string_values).sum(),
+        serde_json::Value::Array(arr) => arr.iter().map(count_string_values).sum(),
+        _ => 0,
     }
 }
 
@@ -1495,5 +1612,122 @@ mod tests {
         // When max_chars is too small for head + ellipsis + tail, fall back
         // to a simple head truncation.
         assert_eq!(truncate_middle("hello world", 5).len(), 5);
+    }
+
+    #[test]
+    fn truncate_tool_result_preserves_json_structure_and_metadata() {
+        let big = "x".repeat(5000);
+        let content = format!(
+            r#"{{"ok":true,"kind":"content","ref":"test.txt","content":"{big}","offset":0,"limit":5000,"next_offset":5000,"total_bytes":50000,"truncated":true}}"#
+        );
+
+        let result = truncate_tool_result(&content, 400);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result must be valid JSON");
+
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["kind"], "content");
+        assert_eq!(parsed["offset"], 0);
+        assert_eq!(parsed["next_offset"], 5000);
+        assert_eq!(parsed["total_bytes"], 50000);
+        assert_eq!(parsed["truncated"], true);
+
+        let content_field = parsed["content"].as_str().unwrap();
+        assert!(
+            content_field.contains("[..."),
+            "content field should contain truncation marker"
+        );
+        assert!(
+            content_field.chars().count() < big.chars().count(),
+            "content field should be shorter than the original"
+        );
+    }
+
+    #[test]
+    fn truncate_tool_result_short_json_untouched() {
+        let content = r#"{"ok":true,"result":"small"}"#;
+        let result = truncate_tool_result(content, 4000);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn truncate_tool_result_non_json_falls_back_to_middle() {
+        let big = "x".repeat(5000);
+        let result = truncate_tool_result(&big, 100);
+        assert!(result.contains("[..."));
+        assert!(
+            result.chars().count() < big.chars().count(),
+            "result should be significantly shorter than the original"
+        );
+    }
+
+    #[test]
+    fn truncate_tool_result_preserves_error_fields() {
+        let big_err = "E".repeat(3000);
+        let content = format!(
+            r#"{{"ok":false,"error_type":"validation","error":"{big_err}","repair_hint":"pass file=<name>"}}"#
+        );
+
+        let result = truncate_tool_result(&content, 300);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("error result must be valid JSON");
+
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error_type"], "validation");
+        assert_eq!(parsed["repair_hint"], "pass file=<name>");
+
+        let error_field = parsed["error"].as_str().unwrap();
+        assert!(error_field.contains("[..."));
+    }
+
+    #[test]
+    fn sanitize_history_truncates_json_tool_result_preserving_next_offset() {
+        let big_content = "y".repeat(8000);
+        let tool_result = serde_json::json!({
+            "ok": true,
+            "kind": "content",
+            "ref": "big.txt",
+            "content": big_content,
+            "offset": 0,
+            "limit": 8000,
+            "next_offset": 8000,
+            "total_bytes": 50000,
+            "truncated": true,
+        })
+        .to_string();
+
+        let history = vec![Message {
+            role: Role::Tool,
+            content: tool_result,
+            tool_calls: vec![],
+            tool_call_id: Some("tc_1".to_string()),
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 500,
+                dedup_tool_results: false,
+                collapse_repeated_errors: false,
+            },
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&sanitized[0].content).expect("must be valid JSON");
+
+        assert_eq!(parsed["next_offset"], 8000);
+        assert_eq!(parsed["total_bytes"], 50000);
+        assert_eq!(parsed["truncated"], true);
+        assert!(parsed["content"].as_str().unwrap().contains("[..."));
+    }
+
+    #[test]
+    fn default_max_tool_result_chars_is_4000() {
+        assert_eq!(HistorySanitizeOptions::default().max_tool_result_chars, 4000);
     }
 }

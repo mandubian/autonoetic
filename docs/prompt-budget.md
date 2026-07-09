@@ -73,8 +73,14 @@ full messages in storage (checkpoints, exports, timeline events):
   from assistant messages. The model does not need to re-read its own
   chain-of-thought on subsequent turns.
 - **Truncate tool results**: Cap tool-result message content to a configured
-  character budget, keeping `head + "[... N chars truncated ...]" + tail` so
-  status/summary remains visible.
+  character budget. JSON results have their large string *values* shortened
+  in-place (`content`, `stdout`, `result`…) so the JSON structure and all
+  small metadata fields (`ok`, `offset`, `next_offset`, `total_bytes`,
+  `truncated`, `error_type`) remain intact and parseable. This is critical
+  for pagination: the agent can still read `next_offset` / `total_bytes` to
+  page through large content even when the current chunk was truncated.
+  Non-JSON results fall back to a whole-string `head + "[... N chars truncated ...]" + tail`
+  so status/summary remains visible.
 - **Deduplicate tool results**: Collapse duplicate tool-result
   messages to a short marker after the first occurrence. Re-reading artifacts,
   polling status tools, or repeated workflow snapshots often produce identical
@@ -86,7 +92,7 @@ All three are controlled under `prompt_budget`:
 prompt_budget:
   strip_reasoning_from_request: false  # default; enable only if your model
                                        # does not require reasoning replay
-  max_tool_result_chars: 2000          # default; set 0 to disable
+  max_tool_result_chars: 4000          # default; set 0 to disable
   dedup_tool_results: true             # default
 ```
 
