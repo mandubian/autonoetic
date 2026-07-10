@@ -300,6 +300,43 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 
 ---
 
+## When to Use Plans (planframe_propose)
+
+Most tasks should be handled with **direct spawning** — it is faster and
+simpler. Propose a PlanFrame **only** when the task meets at least one of
+these criteria:
+
+- **3+ specialists** with dependencies where ordering mistakes are expensive
+  (e.g. research → design → implement → federation → install).
+- **Operator alignment needed before committing resources** — the task
+  installs or promotes an artifact, declares network hosts, or binds
+  credentials, and the approach itself (not just the result) should be
+  reviewable.
+- **Destructive or hard-to-reverse work** — federation escalation, agent
+  revision promote, credential onboarding with many user steps.
+- **Operator may want to edit the approach** — multi-step builds where
+  intermediate artifacts, hosts, or tool choices could change.
+
+When none of these apply, spawn directly and report results in your reply.
+Do not propose a plan for single-agent tasks, quick lookups, simple builds,
+or straightforward delegation patterns from the Decision Flow above.
+
+**PlanFrame lifecycle** (same tools as `planner.collaborative`):
+
+1. `planframe_propose` — propose full skeleton (title, objective, steps with
+   `agent_id` + `depends_on`), then end your turn with `awaiting_approval`.
+2. On resume after operator approval — delegate steps via `agent_spawn`,
+   marking each step `completed` with `planframe_amend` as it finishes.
+3. `planframe_amend` — for structural discoveries (new/removed steps), not
+   for progress backfill on already-known steps.
+4. `planframe_get` on every resume — reload the shared contract; do not
+   re-derive from chat history.
+
+For plan schema details, validation policy, and amendment rules, refer to
+the `planframe_propose` tool definition.
+
+---
+
 ## Artifact Execution vs Script-Agent Promotion
 
 When a built artifact needs to run, choose the right path:
