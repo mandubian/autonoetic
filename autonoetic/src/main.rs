@@ -5,8 +5,22 @@ use cli::common::{dirs_or_default, mcp_registry_path, Cli, Commands};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The default tokio worker stack (2 MB) is insufficient for this
+    // codebase. The scheduler → notification-pump → router dispatch →
+    // spawn_agent_once → execute_with_history chain is very deep, and the
+    // synchronous C-library calls at the bottom (SQLite query preparation,
+    // libyaml scanning) need headroom. In debug builds the unoptimised
+    // async state-machine poll frames are wide enough that the 2 MB guard
+    // page is hit, producing SIGSEGVs misreported as "stack overflow".
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let log_level = cli.log_level.as_deref().unwrap_or("info");
