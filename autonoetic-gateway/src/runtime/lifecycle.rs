@@ -43,6 +43,7 @@ use crate::runtime::budget_tracker::{
 use crate::runtime::context_governor::resolver::resolve_context_window_for_run;
 use crate::runtime::prompt_budget::{
     sanitize_history_for_request, HistorySanitizeOptions,
+    truncate_tool_result as truncate_tool_result_once,
 };
 use crate::runtime::trajectory_monitor::{ToolObservation, TrajectoryMonitor};
 use autonoetic_types::tool_error::ToolErrorType;
@@ -1571,6 +1572,7 @@ impl AgentExecutor {
                     .into_iter()
                     .filter(|def| policy.can_invoke_tool(&def.name).is_allowed())
                     .filter(|def| tier_filter.allows(&def.name))
+                    .filter(|def| !crate::runtime::tools::is_tool_excluded_public(&def.name, &self.manifest))
                     .collect();
                 t.extend(
                     self.registry
@@ -2932,6 +2934,22 @@ impl AgentExecutor {
 
     /// Processes a batch of tool calls from the LLM. Returns `Some(TurnOutcome)`
     /// if the turn should suspend (approval/user-input/escalation), or `None`
+    /// Truncate a tool result once, at push time, using JSON-aware
+    /// truncation. This avoids re-parsing every tool result as JSON on every
+    /// subsequent turn via `sanitize_history_for_request`.
+    fn truncate_result(&self, result: &str) -> String {
+        let max_chars = self
+            .config
+            .as_ref()
+            .map(|c| c.prompt_budget.max_tool_result_chars)
+            .unwrap_or(4000);
+        if max_chars > 0 && result.chars().count() > max_chars {
+            truncate_tool_result_once(result, max_chars)
+        } else {
+            result.to_string()
+        }
+    }
+
     /// if the batch completed and the loop should continue.
     pub async fn handle_tool_batch(
         &mut self,
@@ -3207,7 +3225,7 @@ impl AgentExecutor {
                     history.push(Message::tool_result(
                         id.clone(),
                         name.clone(),
-                        result.clone(),
+                        self.truncate_result(result),
                     ));
                 }
 
@@ -3381,7 +3399,7 @@ impl AgentExecutor {
                 history.push(Message::tool_result(
                     id.clone(),
                     _name.clone(),
-                    result.clone(),
+                    self.truncate_result(result),
                 ));
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                     // Recurring-error detector (#703): feed every result — the
@@ -3975,6 +3993,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,

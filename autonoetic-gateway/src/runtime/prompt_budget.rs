@@ -101,7 +101,11 @@ pub fn sanitize_history_for_request(
             }
 
             if opts.max_tool_result_chars > 0 && m.role == Role::Tool && !m.content.is_empty() {
-                m.content = truncate_tool_result(&m.content, opts.max_tool_result_chars);
+                // Safety-net truncation only — tool results are already
+                // JSON-aware truncated at push time (see
+                // `handle_tool_batch`). This catches any legacy/untruncated
+                // results with a fast string operation.
+                m.content = truncate_middle(&m.content, opts.max_tool_result_chars);
             }
 
             m
@@ -196,12 +200,26 @@ fn dedup_duplicate_tool_results(messages: &mut [Message]) {
 /// If the JSON-aware pass still leaves the result over budget (many medium
 /// fields), or the content is not JSON, fall back to whole-string
 /// `truncate_middle`.
-fn truncate_tool_result(s: &str, max_chars: usize) -> String {
+///
+/// **Call this once at push time** (when the tool result enters history), not
+/// on every turn. Re-parsing every tool result as JSON on each LLM round is
+/// O(M²) in the number of tool results.
+pub(crate) fn truncate_tool_result(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(s) {
+        let was_truncated = {
+            let total_string_chars: usize = collect_string_values(&value)
+                .iter()
+                .map(|s| s.chars().count())
+                .sum();
+            total_string_chars > max_chars
+        };
         truncate_json_strings_in_place(&mut value, max_chars);
+        if was_truncated {
+            mark_json_truncated(&mut value);
+        }
         let serialized = serde_json::to_string(&value).unwrap_or_else(|_| s.to_string());
         if serialized.chars().count() <= max_chars {
             return serialized;
@@ -211,6 +229,28 @@ fn truncate_tool_result(s: &str, max_chars: usize) -> String {
         return truncate_middle(&serialized, max_chars);
     }
     truncate_middle(s, max_chars)
+}
+
+/// After truncating string values inside a JSON tool result, patch the
+/// metadata fields that agents use for paging decisions. Without this,
+/// `resolve` returns `{"truncated": false, "next_offset": null}` even
+/// though the `content` field was silently shortened — leaving the agent
+/// with no valid paging handle and causing it to re-read the same content.
+fn mark_json_truncated(value: &mut serde_json::Value) {
+    if let Some(obj) = value.as_object_mut() {
+        if obj.contains_key("truncated") {
+            obj.insert("truncated".to_string(), serde_json::Value::Bool(true));
+        }
+        if obj.contains_key("next_offset") {
+            // Signal that content was cut — the agent should re-resolve
+            // with an explicit limit/offset to get the full content.
+            if obj.get("next_offset").map_or(false, |v| v.is_null()) {
+                obj.insert("next_offset".to_string(), serde_json::Value::Number(
+                    serde_json::Number::from(-1),
+                ));
+            }
+        }
+    }
 }
 
 /// Walk a JSON tree and truncate any string value longer than its fair share
@@ -237,60 +277,63 @@ fn truncate_json_strings_in_place(value: &mut serde_json::Value, max_chars: usiz
     let string_count = count_string_values(value).max(1);
     let per_field_budget = string_budget / string_count;
 
-    truncate_json_strings_recursive(value, per_field_budget);
+    truncate_json_strings_iterative(value, per_field_budget);
 }
 
-fn truncate_json_strings_recursive(value: &mut serde_json::Value, per_field_budget: usize) {
-    match value {
-        serde_json::Value::String(s) => {
-            if s.chars().count() > per_field_budget {
-                *s = truncate_middle(s, per_field_budget);
+fn truncate_json_strings_iterative(value: &mut serde_json::Value, per_field_budget: usize) {
+    let mut stack: Vec<&mut serde_json::Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::String(s) => {
+                if s.chars().count() > per_field_budget {
+                    *s = truncate_middle(s, per_field_budget);
+                }
             }
-        }
-        serde_json::Value::Object(map) => {
-            for (_, v) in map.iter_mut() {
-                truncate_json_strings_recursive(v, per_field_budget);
+            serde_json::Value::Object(map) => {
+                stack.extend(map.iter_mut().map(|(_, v)| v));
             }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                truncate_json_strings_recursive(v, per_field_budget);
+            serde_json::Value::Array(arr) => {
+                stack.extend(arr.iter_mut());
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 
 fn collect_string_values(value: &serde_json::Value) -> Vec<&str> {
     let mut out = Vec::new();
-    collect_string_values_helper(value, &mut out);
+    let mut stack: Vec<&serde_json::Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::String(s) => out.push(s.as_str()),
+            serde_json::Value::Object(map) => {
+                stack.extend(map.values());
+            }
+            serde_json::Value::Array(arr) => {
+                stack.extend(arr.iter());
+            }
+            _ => {}
+        }
+    }
     out
 }
 
-fn collect_string_values_helper<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
-    match value {
-        serde_json::Value::String(s) => out.push(s.as_str()),
-        serde_json::Value::Object(map) => {
-            for (_, v) in map {
-                collect_string_values_helper(v, out);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_string_values_helper(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn count_string_values(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(_) => 1,
-        serde_json::Value::Object(map) => map.values().map(count_string_values).sum(),
-        serde_json::Value::Array(arr) => arr.iter().map(count_string_values).sum(),
-        _ => 0,
+    let mut count = 0;
+    let mut stack: Vec<&serde_json::Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::String(_) => count += 1,
+            serde_json::Value::Object(map) => {
+                stack.extend(map.values());
+            }
+            serde_json::Value::Array(arr) => {
+                stack.extend(arr.iter());
+            }
+            _ => {}
+        }
     }
+    count
 }
 
 fn truncate_middle(s: &str, max_chars: usize) -> String {
@@ -1100,6 +1143,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1683,18 +1727,16 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_history_truncates_json_tool_result_preserving_next_offset() {
+    fn sanitize_history_uses_fast_truncate_middle_for_tool_results() {
+        // sanitize_history_for_request uses truncate_middle (fast string op)
+        // as a safety net. JSON-aware truncation happens at push time.
         let big_content = "y".repeat(8000);
         let tool_result = serde_json::json!({
             "ok": true,
             "kind": "content",
             "ref": "big.txt",
             "content": big_content,
-            "offset": 0,
-            "limit": 8000,
             "next_offset": 8000,
-            "total_bytes": 50000,
-            "truncated": true,
         })
         .to_string();
 
@@ -1717,13 +1759,14 @@ mod tests {
             },
         );
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&sanitized[0].content).expect("must be valid JSON");
-
-        assert_eq!(parsed["next_offset"], 8000);
-        assert_eq!(parsed["total_bytes"], 50000);
-        assert_eq!(parsed["truncated"], true);
-        assert!(parsed["content"].as_str().unwrap().contains("[..."));
+        assert!(
+            sanitized[0].content.contains("[..."),
+            "should contain truncation marker"
+        );
+        assert!(
+            sanitized[0].content.chars().count() <= 600,
+            "should be under budget + marker overhead"
+        );
     }
 
     #[test]

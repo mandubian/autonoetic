@@ -3317,24 +3317,23 @@ fn truncate_json(value: &Value, max_len: usize) -> Value {
 }
 
 fn truncate_json_strings(value: &mut Value, max_len: usize) {
-    match value {
-        Value::String(s) => {
-            if s.len() > max_len {
-                let truncated: String = s.chars().take(max_len).collect();
-                *s = format!("{}…", truncated);
+    let mut stack: Vec<&mut Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) => {
+                if s.len() > max_len {
+                    let truncated: String = s.chars().take(max_len).collect();
+                    *s = format!("{}…", truncated);
+                }
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                truncate_json_strings(item, max_len);
+            Value::Array(items) => {
+                stack.extend(items.iter_mut());
             }
-        }
-        Value::Object(map) => {
-            for value in map.values_mut() {
-                truncate_json_strings(value, max_len);
+            Value::Object(map) => {
+                stack.extend(map.values_mut());
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 

@@ -237,17 +237,17 @@ pub(crate) fn effective_loop_guard_config(
 
 pub(crate) fn loop_guard_from_config_and_manifest(
     config: Option<&GatewayConfig>,
-    agent_dir: &Path,
+    _agent_dir: &Path,
     declaration: Option<&LoopGuardDeclaration>,
     execution_mode: ExecutionMode,
 ) -> LoopGuard {
     match config {
         Some(cfg) => {
-            // Explicit parameter or manifest declaration = operator/agent-author intent;
-            // keep it capped to system ceilings for safety.
-            let manifest_decl = declaration
-                .cloned()
-                .or_else(|| load_manifest_loop_guard_declaration(agent_dir));
+            // The declaration is loaded once at AgentExecutor construction
+            // time. Do NOT re-read SKILL.md here — the YAML parse is
+            // expensive and unsafe_libyaml 0.2.11 has a SIGSEGV bug in its
+            // realloc path that can crash the process under certain inputs.
+            let manifest_decl = declaration.cloned();
             if let Some(decl) = manifest_decl {
                 let effective = effective_loop_guard_config(&cfg.loop_guard, Some(&decl));
                 return LoopGuard::with_config(&effective);
@@ -757,6 +757,7 @@ mod tier_filter_tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
