@@ -1408,16 +1408,19 @@ pub fn update_task_run_status(
         }
 
         // Send per-child notification — but skip it when the join was just
-        // satisfied in this same update. The join-satisfied signal already
-        // carries all child summaries, so sending both is redundant and
-        // causes a double planner wake (two LLM round-trips instead of one).
-        if !join_just_satisfied {
-            if let Some(child_event_type) = child_state_event_type(status) {
-                let target_session_id = if task.parent_session_id.is_empty() {
-                    root_session_id.as_str()
-                } else {
-                    task.parent_session_id.as_str()
-                };
+        // satisfied in this same update AND the target is the root session.
+        // The join-satisfied signal already carries all child summaries and is
+        // sent to the root, so sending both to the root would be redundant and
+        // cause a double planner wake. For nested workflows, the immediate
+        // parent session differs from the root and still needs this wake to
+        // resume its own workflow_wait.
+        if let Some(child_event_type) = child_state_event_type(status) {
+            let target_session_id = if task.parent_session_id.is_empty() {
+                root_session_id.as_str()
+            } else {
+                task.parent_session_id.as_str()
+            };
+            if !join_just_satisfied || target_session_id != root_session_id.as_str() {
                 tracing::info!(
                     target: "workflow",
                     workflow_id = %workflow_id,
@@ -6270,6 +6273,109 @@ mod tests {
                 );
             }
             other => panic!("expected WorkflowJoinSatisfied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn terminal_task_in_nested_session_emits_child_state_notification_to_parent() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "nested-terminal-root", None)
+                .unwrap();
+
+        let parent_session = "nested-terminal-root/intermediate";
+        let child_session = "nested-terminal-root/intermediate/coder-x";
+
+        let task = TaskRun {
+            task_id: "task-nested-terminal".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            session_id: child_session.to_string(),
+            parent_session_id: parent_session.to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-nested-terminal",
+            TaskRunStatus::Succeeded,
+            Some("completed".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Root session receives the coalesced WorkflowJoinSatisfied signal.
+        let root_notifications = store
+            .list_notifications_for_session(
+                &wf.root_session_id,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .unwrap();
+        let join_signal = root_notifications
+            .iter()
+            .find(|notification| {
+                notification.notification_type
+                    == autonoetic_types::notification::NotificationType::WorkflowJoinSatisfied
+            })
+            .expect("root session should receive WorkflowJoinSatisfied");
+        let signal: crate::scheduler::signal::Signal =
+            serde_json::from_value(join_signal.payload.clone()).expect("signal should deserialize");
+        match signal {
+            crate::scheduler::signal::Signal::WorkflowJoinSatisfied {
+                child_summaries, ..
+            } => {
+                assert_eq!(child_summaries.len(), 1);
+                assert_eq!(child_summaries[0].task_id, "task-nested-terminal");
+                assert_eq!(child_summaries[0].child_status, "succeeded");
+            }
+            other => panic!("expected WorkflowJoinSatisfied, got {other:?}"),
+        }
+
+        // Intermediate parent session also receives a ChildStateNotification so it
+        // can resume its own workflow_wait (regression test for the agent-factory
+        // create_candidate -> promote stall).
+        let parent_notifications = store
+            .list_notifications_for_session(
+                parent_session,
+                autonoetic_types::notification::NotificationStatus::Pending,
+            )
+            .unwrap();
+        let child_signal = parent_notifications
+            .iter()
+            .find(|notification| {
+                notification.notification_type
+                    == autonoetic_types::notification::NotificationType::ChildStateNotification
+            })
+            .expect("nested parent session should receive ChildStateNotification");
+        let signal: crate::scheduler::signal::Signal =
+            serde_json::from_value(child_signal.payload.clone()).expect("signal should deserialize");
+        match signal {
+            crate::scheduler::signal::Signal::ChildStateNotification { notification, .. } => {
+                assert_eq!(notification.task_id, "task-nested-terminal");
+                assert_eq!(notification.child_status, "succeeded");
+            }
+            other => panic!("expected ChildStateNotification, got {other:?}"),
         }
     }
 
