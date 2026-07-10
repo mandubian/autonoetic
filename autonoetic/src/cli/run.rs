@@ -239,6 +239,11 @@ auto_learning:
 # Starter profile defaults (also applied at config load when omitted).
 evidence_mode: errors
 
+# Tool surface optimization: start root sessions with Core+Workflow tools,
+# escalate to Specialized only after the first specialized call.
+prompt_budget:
+  progressive_tool_disclosure: true
+
 {llm_section}"#,
         agents_dir = agents_dir_str,
         llm_section = llm_section,
