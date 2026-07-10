@@ -205,6 +205,13 @@ pub struct AgentManifest {
     /// When set, tools outside these tiers are excluded from the agent's tool set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tool_tiers: Vec<ToolTier>,
+    /// Tool name patterns to exclude from this agent's tool set, applied
+    /// after capability gating (`is_available`) and before tier filtering.
+    /// Supports glob wildcards: `workbench_*`, `scheduler_*`, `eval_*`.
+    /// Useful for trimming the tool surface when an agent's capabilities
+    /// unlock tools it never needs (e.g., a coder doesn't need `planframe_*`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_tools: Vec<String>,
     /// Metadata from AgentSkills.io import. Set when the agent was imported
     /// from an external AgentSkills-compatible SKILL.md. Used for tool name
     /// bridging, resource mounting, and trust mode enforcement.

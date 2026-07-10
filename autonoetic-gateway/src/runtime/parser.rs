@@ -63,6 +63,8 @@ struct AutonoeticMetadata {
     #[serde(default)]
     allowed_tool_tiers: Option<Vec<autonoetic_types::agent::ToolTier>>,
     #[serde(default)]
+    excluded_tools: Option<Vec<String>>,
+    #[serde(default)]
     compression: Option<CompressionConfig>,
     #[serde(default)]
     open_web: Option<bool>,
@@ -186,6 +188,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         gateway_url: meta.gateway_url,
         gateway_token: meta.gateway_token,
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
+        excluded_tools: meta.excluded_tools.unwrap_or_default(),
         agentskills_import,
         compression: meta.compression,
         open_web: meta.open_web.unwrap_or(false),

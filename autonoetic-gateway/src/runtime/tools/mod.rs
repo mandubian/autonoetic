@@ -248,6 +248,27 @@ pub trait NativeTool: Send + Sync {
     }
 }
 
+/// Check if a tool name matches any exclusion pattern from the agent manifest.
+/// Patterns support glob wildcards (`*` and `?`) via simple prefix/suffix matching.
+pub(crate) fn is_tool_excluded_public(tool_name: &str, manifest: &AgentManifest) -> bool {
+    is_tool_excluded(tool_name, manifest)
+}
+
+fn is_tool_excluded(tool_name: &str, manifest: &AgentManifest) -> bool {
+    if manifest.excluded_tools.is_empty() {
+        return false;
+    }
+    manifest.excluded_tools.iter().any(|pattern| {
+        if pattern == tool_name {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return tool_name.starts_with(prefix);
+        }
+        false
+    })
+}
+
 pub struct NativeToolRegistry {
     tools: Vec<Box<dyn NativeTool>>,
 }
@@ -265,6 +286,7 @@ impl NativeToolRegistry {
         self.tools
             .iter()
             .filter(|t| t.is_available(manifest))
+            .filter(|t| !is_tool_excluded(t.name(), manifest))
             .map(|t| with_intent_schema(t.definition()))
             .collect()
     }
@@ -284,6 +306,7 @@ impl NativeToolRegistry {
         self.tools
             .iter()
             .filter(|tool| tool.is_available(manifest))
+            .filter(|tool| !is_tool_excluded(tool.name(), manifest))
             .map(|tool| tool.name().to_string())
             .collect()
     }
@@ -298,6 +321,7 @@ impl NativeToolRegistry {
         self.tools
             .iter()
             .filter(|t| t.is_available(manifest))
+            .filter(|t| !is_tool_excluded(t.name(), manifest))
             .filter(|t| {
                 filter
                     .map(|f| f.allows_tool(t.name(), t.tier()))
@@ -319,7 +343,10 @@ impl NativeToolRegistry {
     ) -> Vec<crate::runtime::guidance::GuidanceBlock> {
         let mut blocks = Vec::new();
         for tool in &self.tools {
-            if tool.is_available(manifest) && filter.allows_tool(tool.name(), tool.tier()) {
+            if tool.is_available(manifest)
+                && !is_tool_excluded(tool.name(), manifest)
+                && filter.allows_tool(tool.name(), tool.tier())
+            {
                 blocks.extend(tool.guidance());
             }
         }
@@ -1279,6 +1306,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1510,6 +1538,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1554,6 +1583,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1687,6 +1717,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1737,6 +1768,7 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,

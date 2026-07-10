@@ -216,6 +216,7 @@ impl NativeTool for SkillInstallTool {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
+            excluded_tools: parsed_manifest.excluded_tools.clone(),
             agentskills_import: parsed_manifest.agentskills_import.clone(),
             compression: parsed_manifest.compression.clone(),
             open_web: parsed_manifest.open_web,

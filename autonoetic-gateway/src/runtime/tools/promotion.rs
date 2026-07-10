@@ -682,6 +682,7 @@ mod promotion_gate_exec_tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
             open_web: false,
