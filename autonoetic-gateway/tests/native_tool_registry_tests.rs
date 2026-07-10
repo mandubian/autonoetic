@@ -53,6 +53,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
             open_web: false,

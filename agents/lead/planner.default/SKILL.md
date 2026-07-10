@@ -32,6 +32,20 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "AgentMessage"
         patterns: ["*"]
+    excluded_tools:
+      - "workbench_*"
+      - "scheduler_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "web_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
     io:
       returns_enforcement: advisory
       returns:

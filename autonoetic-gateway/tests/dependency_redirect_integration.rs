@@ -54,6 +54,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
     }
 }
 

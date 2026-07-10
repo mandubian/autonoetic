@@ -26,6 +26,27 @@ metadata:
         scopes: ["self.*", "skills/*", "scripts/*"]
       - type: "AgentMessage"
         patterns: ["*"]
+    excluded_tools:
+      - "workbench_*"
+      - "planframe_*"
+      - "scheduler_*"
+      - "workflow_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "web_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
+      - "session_*"
+      - "federation_*"
+      - "sentinel_*"
+      - "constitution_*"
+      - "sandbox_exec"
     validation: "soft"
     io:
       returns:

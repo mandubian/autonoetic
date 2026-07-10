@@ -132,6 +132,7 @@ fn builder_manifest() -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
             open_web: false,
@@ -174,6 +175,7 @@ fn evaluator_manifest() -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
             open_web: false,
@@ -216,6 +218,7 @@ fn auditor_manifest() -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
             open_web: false,
@@ -564,6 +567,7 @@ async fn test_promotion_record_with_artifact_ref() {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
             open_web: false,

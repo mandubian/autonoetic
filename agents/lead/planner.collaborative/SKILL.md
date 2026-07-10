@@ -34,6 +34,20 @@ metadata:
         patterns: ["*"]
       - type: "PlanFrameAccess"
         patterns: ["*"]
+    excluded_tools:
+      - "workbench_*"
+      - "scheduler_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "web_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
     io:
       returns_enforcement: advisory
       returns:
@@ -303,65 +317,15 @@ For a new agent build, include the full pipeline — not just the first step:
 }
 ```
 
-Another shape (trading adviser — includes operator workbench review):
+**Shorter plan shape** — when the deliverable is small (e.g., a single-file agent with
+no external APIs), use 2-3 steps with just research → code → gates. Add
+`capability_envelope` (concrete hosts, never `"*"`) when the agent calls external APIs:
 
 ```json
-{
-  "title": "Financial trading adviser agent",
-  "objective": "Design and implement an adviser agent with realtime market data and news; operator approves plan before build.",
-  "steps": [
-    {
-      "step_id": "s1",
-      "title": "Architecture and data sources",
-      "owner": "agent",
-      "agent_id": "architect.default",
-      "depends_on": []
-    },
-    {
-      "step_id": "s2",
-      "title": "Implementation artifact",
-      "owner": "agent",
-      "agent_id": "coder.default",
-      "depends_on": ["s1"]
-    },
-    {
-      "step_id": "s3",
-      "title": "Operator review in workbench",
-      "owner": "operator",
-      "depends_on": ["s2"],
-      "notes": "Operator edits via workbench; reconcile and /return"
-    }
-  ],
-  "validation_policy": {
-    "entries": [
-      {
-        "validation_id": "capability_check",
-        "title": "Capability and sandbox policy",
-        "class": "mechanical_safety",
-        "requirement": "required"
-      },
-      {
-        "validation_id": "static_security_review",
-        "title": "Security review",
-        "class": "security_review",
-        "requirement": "required"
-      },
-      {
-        "validation_id": "unit_tests",
-        "title": "Unit tests",
-        "class": "correctness_check",
-        "requirement": "advisory"
-      }
-    ]
-  },
-  "capability_envelope": [
-    {
-      "type": "NetworkAccess",
-      "hosts": ["api.polygon.io", "newsapi.org"]
-    }
-  ]
-}
+"capability_envelope": [{"type": "NetworkAccess", "hosts": ["api.polygon.io"]}]
 ```
+
+For advisory-only validations, use `"requirement": "advisory"` instead of `"required"`.
 
 Populate `capability_envelope` from research output: concrete hosts the build will
 call (never `"*"`), plus any artifact capabilities you already know the deliverable

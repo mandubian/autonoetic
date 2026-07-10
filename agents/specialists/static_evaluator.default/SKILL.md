@@ -25,6 +25,33 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
+    excluded_tools:
+      - "workbench_*"
+      - "planframe_*"
+      - "scheduler_*"
+      - "workflow_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "web_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
+      - "session_*"
+      - "federation_*"
+      - "sentinel_*"
+      - "constitution_*"
+      - "sandbox_exec"
+      - "agent_spawn"
+      - "agent_discover"
+      - "agent_list"
+      - "agent_message"
+      - "tool_discover"
+      - "self_describe"
     sandbox_network: normal
     validation: "soft"
     io:

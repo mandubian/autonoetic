@@ -65,6 +65,7 @@ fn base_manifest(id: &str, name: &str, capabilities: Vec<Capability>) -> AgentMa
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
             open_web: false,
