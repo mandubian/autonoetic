@@ -1,49 +1,141 @@
 # Autonoetic
 
-Autonoetic is a Rust-first runtime for autonomous, self-evolving agents with durable memory, portable identity, and reproducible execution.
+Autonoetic is a Rust runtime for autonomous agents with durable memory,
+portable identity, reproducible execution — and a machine-enforced
+constitution. It treats the trustworthiness of unsupervised agents as an
+engineering problem, not a prompt-writing problem.
 
 This repository hosts the standalone Autonoetic project.
 
-## Why Autonoetic
+## Why this exists
 
-The name comes from cognitive science. "Autonoetic" refers to self-aware, time-spanning cognition: not just storing facts, but relating memory, action, and future intent to a continuing self. That maps directly to the kind of agents this project aims to support:
+Most agent harnesses — OpenClaw, Hermes, the code-assistant CLIs — are built
+around one scenario: a capable model, a terminal, and a human watching. The
+LLM calls tools directly in its own process; safety is an allowlist plus an
+approval prompt; the transcript is the audit trail; trust is *personal* — you
+trust the model, and whoever wrote the prompt. For interactive assistance
+that design is right, and those tools are better at it than Autonoetic is.
 
-- agents with durable working memory
-- agents that can evolve their own skills
-- agents that can collaborate without losing continuity
-- agents that can be exported and relaunched with the same runtime closure
+Autonoetic starts from the scenario that design does not cover: an agent that
+works for hours while nobody watches, spawns and coordinates other agents,
+uses credentials it must never see, and whose actions you need to
+reconstruct — exactly, afterward. Three problems dominate that scenario, and
+they shape everything in this codebase.
 
-## Core Thesis
+**1. Agents don't know themselves.** LLM agents confabulate their own state:
+they misremember budgets, invent capabilities they don't have, lose track of
+what they already did. An agent reasoning from a false self-model makes bad
+decisions no amount of prompting fixes.
 
-Autonoetic is not trying to be a generic chatbot framework or a thin LLM wrapper. It is a runtime for agents that:
+**2. Constraint without legitimacy doesn't scale.** Most safety frameworks
+are rules-only: the agent is constrained, the enforcer owes nothing. That
+works while one human reviews everything. The moment agents spawn agents,
+evaluate each other's work, and promote each other's code, "the human checks
+every step" stops being an architecture — and a pure-constraint regime gives
+you no principled basis for letting go of it.
 
-- reason through text-native working state
-- execute through a strict Gateway security boundary
-- learn by promoting successful tactics into reusable Skills
-- share large content through immutable artifact handles instead of bloated inline payloads
-- remain portable through `runtime.lock` and Cognitive Capsules
+**3. Trust between agents can't be personal.** Two agents (or a human and an
+agent, or two federated runtimes) cannot inspect each other's weights or
+intentions. If cooperation requires a theory of the other party's mind, a
+mixed community of humans, agents, and scripts is impossible.
 
-## Governance: a constitution, not a config file
+Autonoetic's answer to each is structural, not aspirational:
 
-Autonoetic is not just a sandbox runtime — it is a **governed** runtime. The
-gateway enforces a versioned, digest-pinned **constitution** that defines a
-finite set of rules agents must not break (`P-*`), a Bill of **rights** the
-gateway owes every agent (`Ri-*`), and **obligations** binding whoever
-exercises authority over an agent (`O-*`). Amendments are a first-class
-operation (Ri-0.8) and the law itself is signed and verified by federated
-peers (P-10.9).
+### Self-knowledge is a runtime service, not an emergent hope
 
-- [`docs/philosophy.md`](docs/philosophy.md) — the *why* behind the law
+The name comes from cognitive science: **autonoetic consciousness** is Endel
+Tulving's term for self-knowing across time — remembering your own past as
+your own, and projecting yourself into your own future. Autonoetic makes
+**no claim about machine consciousness**. The claim is narrower and
+mechanical: rather than asking the model to be self-aware, the gateway
+**hands every agent a verified self-model, every turn**:
+
+| Capacity | Mechanism |
+|---|---|
+| A truthful **past** | Right to read its own hash-chained causal history; checkpoints; session forking |
+| A truthful **present** | A signed per-turn state attestation — budget, capabilities, pending gates, the law in force — taught to be more authoritative than the agent's own memory |
+| Its **normative standing** | The full constitution readable by digest; every rejection names the rule it enforces |
+| A bounded, legible **future** | Budgets known truthfully in real time; a closed list of ways a session can end |
+| A continuous **identity** | Non-repudiable attribution; portable identity via cognitive capsules; audited revision history |
+
+An agent with a truthful self-model reasons better *and* can be held
+responsible legitimately — both hold regardless of your views on machine
+consciousness.
+
+### A constitution, not a config file
+
+The gateway enforces a versioned, digest-pinned, signed **constitution**
+whose structural novelty is **bind-direction discipline**: every clause binds
+exactly one party. **Rules** (`P-*`) bind the *agent* — a finite, named set
+of forbidden actions; everything else is permitted. **Rights** (`Ri-*`) bind
+the *gateway* — unconditional entitlements the enforcer owes every agent.
+**Obligations** (`O-*`) bind whoever exercises authority over an agent.
+Making the enforcer a bound party is what turns a compliance regime into a
+social contract: a right is not a favour, it is what makes the rules
+legitimate rather than merely effective.
+
+The law is executable, and the gap between text and enforcement is a
+*measured quantity*: the working rule is **"a rule without a test is a wish;
+a right without a test is a lie."** The
+[enforcement register](docs/constitution/enforcement-register.md) tracks,
+clause by clause, what is `ENFORCED` versus `PARTIAL` / `MISSING`, and the
+gateway's own lapses are named debts (**DISCRETION LEAKs**), not accepted
+behaviour. The gateway itself is a *Lawful Executor*: it applies
+pre-committed law deterministically and exercises no improvised judgment.
+
+The wager underneath, stated once: **an imperfect enforcer plus entrenched
+correction machinery beats a perfect enforcer that cannot be corrected.**
+The clauses that enable correction — read your own history, every denial
+names its rule, any agent may propose amendments, attribution cannot be
+repudiated — form an entrenched core, amendable only to be strengthened.
+Amendments are a first-class, audited operation; the constitution itself is
+versioned and its digest is verified by federated peers. Voice is paired
+with exit: the constitution declares an agent's right to export its own
+cognitive capsule (emigration) — today only partially enforced — because
+voice without a credible exit option degrades into ritual.
+
+### Trust is structural, not personal
+
+Two parties cooperate because each can verify the other operates under
+compatible law — the constitution digest is checked in the federation
+handshake — not because they know each other's internals. Membership in the
+community *is* operating under the shared, verifiable law. This requires no
+theory of the other party's mind, which is exactly what makes a mixed
+community of humans, AI agents, and plain scripts possible: Autonoetic
+treats all three as actors under the same constitution, owed the same
+rights, held to the same rules.
+
+Where to dig further:
+
+- [`docs/philosophy.md`](docs/philosophy.md) — the conceptions behind the design, and their intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
+- [`docs/autonoetic-concepts-for-beginners.md`](docs/autonoetic-concepts-for-beginners.md) — the same ideas from first principles, for readers coming from direct-code assistants
 - [`docs/constitution/versions/2026.07.08/constitution.md`](docs/constitution/versions/2026.07.08/constitution.md) — the canonical law (current version)
-- [`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md) — which clauses are mechanically enforced today
 - [`docs/separation-of-powers.md`](docs/separation-of-powers.md) — agent vs gateway authority boundary
 
-A 30-second orientation: agents are **free** (anything not forbidden is
-permitted), **responsible** (every action is attributable, budgeted,
-audited), and **cooperative** (verifiable law-compatibility is the basis for
-trust). The gateway is a *Lawful Executor* — it enforces pre-committed law
-deterministically and exercises no improvised judgment (see §14 of the
-constitution).
+## How this differs from a classic agent harness
+
+The mechanical consequence of the above is a strict **separation of
+powers**: agents are low-privilege reasoners that *propose* intents; the
+gateway is the sole high-privilege executor that validates and runs them.
+An agent never "has" network access — it has permission to *ask* the
+gateway to perform network operations under declared, typed capabilities.
+
+| | Direct-loop harness (OpenClaw, Hermes, code CLIs) | Autonoetic |
+|---|---|---|
+| Execution | LLM calls tools directly in its own process | Agents propose; the gateway validates against typed capabilities and executes in a sandbox (bubblewrap / docker / microvm / wasm) |
+| Safety model | Allowlists + interactive approval | A signed constitution binding *both* sides, enforced deterministically; approvals suspend the turn to disk and resume with real results |
+| Secrets | In env/config, visible to the model | Vault-injected at execution time; never enter LLM context |
+| Audit trail | Session transcript | Hash-chained causal chain with non-repudiable attribution, mirrored to a queryable event store |
+| Agent identity | A prompt + a config | A `SKILL.md` manifest + immutable, content-addressed revisions with audited promotion; exportable as a Cognitive Capsule with its pinned runtime closure (`runtime.lock`) |
+| Multi-agent | Ephemeral subagents inside one trust domain | Durable agents that spawn, evaluate, and promote each other under the same law — including agents building and installing new agents through gated revision promotion |
+| Trust across machines | N/A — single node, single user | Federation (OFP) with HMAC + constitution-digest handshake: peers verify law-compatibility, not reputation |
+
+The honest trade-off: this costs ceremony. If all you want is a quick
+assistant that runs one-off shell commands under your eyes, a direct-loop
+tool is the better choice. Autonoetic is for **governed autonomy** — when
+the question is not "how fast can an agent type" but "can I let this run
+unsupervised, let it delegate and self-modify, and still know exactly what
+happened and why it was allowed."
 
 ## Main Concepts
 
@@ -51,6 +143,7 @@ constitution).
 - `runtime.lock`: the pinned execution closure for reproducible runtime resolution
 - `autonoetic_sdk`: the sandbox bridge for memory, artifacts, messaging, and secrets
 - Artifact Store: a content-addressed store for binaries, datasets, outputs, and runtime dependencies
+- Checkpoint: a runnable session snapshot taken at every yield point — enables crash recovery and forking a session from any past turn (`autonoetic trace fork`)
 - Cognitive Capsule: a portable export containing an agent bundle plus its runtime closure
 
 Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`name`, `description`, `metadata`) and stores Autonoetic-specific runtime fields under `metadata.autonoetic`.
@@ -165,17 +258,14 @@ sdk.files.write("main.py", "print(42)")
 
 More advanced features like full marketplace workflows, hermetic capsule replay, advanced memory substrate, and richer federation polish are deferred until the base runtime is proven.
 
-## Positioning
+## Lineage
 
-Autonoetic takes inspiration from systems like OpenFang, but it is differentiated by:
-
-- text-first working memory
-- stronger emphasis on self-evolution
-- portable runtime closures
-- explicit artifact and capsule semantics
-- a sharper separation between logical agent identity and execution runtime
-
-We are also actively trying to reuse the Openfang Protocol (OFP) as much as possible, as it provides a robust and well-designed foundation for agent interoperability.
+Autonoetic takes inspiration from systems like OpenFang, and reuses the
+OpenFang Protocol (OFP) for federation where possible — it is a robust,
+well-designed foundation for agent interoperability. Where Autonoetic
+diverges is documented above (see *Why this exists*) and in a detailed
+code-level comparison with a representative direct-loop harness:
+[`docs/comparison-hermes-agent.md`](docs/comparison-hermes-agent.md).
 
 ## Status
 
