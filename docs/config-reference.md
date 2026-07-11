@@ -42,7 +42,7 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `signal_delivery_timeout_secs` | u64 | `60` | Timeout in seconds for signal delivery responses (approval resolution, workflow join). The signal sender waits this long for the planner to finish processing the triggered `event.ingest` turn. |
 | `default_workflow_wait_secs` | u64 | `30` | Default per-chunk blocking timeout for `workflow.wait` when the caller omits `timeout_secs`. The tool blocks (signal-driven, via the per-session notify registry) until all watched task IDs reach a terminal state or this deadline elapses; it does **not** poll. Set to `0` to restore the legacy immediate-return ("probe") behaviour. See Ri-0.14 — orchestration should prefer the `WaitingForChild` wake-up over blocking here. |
 | `workflow_wait_max_total_secs` | u64 | `300` | **Server-side auto-extension budget (issue #702).** When a `timeout_secs` chunk elapses with tasks still running, the gateway re-issues the wait internally — **without returning to the LLM** — up to this total wall-clock, returning as soon as all watched task IDs reach a terminal state. This removes the expensive `wait → timeout → full LLM round → wait` churn where the model re-reads the whole context only to re-issue the same wait. Callers may lower it per call via the `max_wait_secs` argument (hard-capped at 1800s, floored at one chunk). Set equal to `default_workflow_wait_secs` (or `0`) to disable auto-extension. |
-| `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
+| `max_session_turns` | u32 | `25` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
 | `capability_delta_gate_mode` | string | `"strict"` | Capability delta gating during `agent.revision.promote`: `"strict"` (any broadening requires approval), `"evolving"` (broadening inside wildcard envelopes auto-allowed), `"bootstrap"` (gating disabled, dev only). |
 | `require_operator_approval_for_new_agents` | bool | `true` | Promotion-completeness cursor for **first admission of a brand-new agent** (no outgoing revision). `true`: a capability-bearing new agent requires operator approval (its whole capability set is "new"). `false`: a fully-audited new agent may self-promote — the completeness gate (auditor/evaluator pass, distinct identities, reviewable artifact) still applies and is always fail-closed. Re-promotion of an existing agent is unaffected. See `docs/design/promotion-completeness-invariant.md`. |
@@ -505,7 +505,7 @@ Circuit breaker for runaway agent sessions.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_session_turns` | u32 | `12` | Maximum turns per session before forced suspension (`MaxTurnsReached`). |
+| `max_session_turns` | u32 | `25` | Maximum turns per session before forced suspension (`MaxTurnsReached`). |
 
 ---
 
@@ -1185,7 +1185,7 @@ stuck_task_no_evidence_action: fail
 approval_dwell_multiplier: 1.0
 signal_delivery_timeout_secs: 60
 evidence_mode: full
-max_session_turns: 12
+max_session_turns: 25
 capability_delta_gate_mode: strict
 require_operator_approval_for_new_agents: true
 allow_zero_capability_direct_promote: true

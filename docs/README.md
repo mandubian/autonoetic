@@ -14,8 +14,8 @@ are in [`archived/`](archived/).
 - [`AGENTS.md`](./AGENTS.md) — **Canonical** agent reference: roles, routing, SKILL.md format, capabilities, lifecycle.
 - [`separation-of-powers.md`](./separation-of-powers.md) — Agent vs gateway authority boundary.
 - [`agent-features.md`](./agent-features.md) — *Partially superseded by `AGENTS.md`*; still has unique detail on middleware / disclosure / background scheduling.
-- [`agent_routing_and_roles.md`](./agent_routing_and_roles.md) — *Deprecated*; describes a removed default-front-door routing model. Use `AGENTS.md` → Routing Rules instead.
-- [`agent-capabilities.md`](./agent-capabilities.md) — *Superseded by `AGENTS.md` → Capabilities System* (kept in sync with `capability.rs`).
+- [`agent_routing_and_roles.md`](./archived/agent_routing_and_roles.md) — *Archived / deprecated*; describes a removed default-front-door routing model. Use `AGENTS.md` → Routing Rules instead.
+- [`agent-capabilities.md`](./archived/agent-capabilities.md) — *Archived / superseded by `AGENTS.md` → Capabilities System* (kept in sync with `capability.rs`).
 - [`agent-adapter-specialist.md`](./agent-adapter-specialist.md) — Adapter specialist contract.
 
 ## Workflow and Interaction
@@ -46,7 +46,7 @@ are in [`archived/`](archived/).
 - [`credential-management.md`](./credential-management.md) — Credential vault (live reference for multi-credential).
 - [`code-analysis.md`](./code-analysis.md) — Static analysis model.
 - [`schema-enforcement-hook.md`](./schema-enforcement-hook.md) — Schema enforcement.
-- [`agent-capabilities.md`](./agent-capabilities.md) — *Superseded*; use `AGENTS.md` → Capabilities System.
+- [`agent-capabilities.md`](./archived/agent-capabilities.md) — *Archived / superseded*; use `AGENTS.md` → Capabilities System.
 - [`security-sentinel.md`](./security-sentinel.md) — Divergence sentinel overview.
 - [`gateway-constitution-roadmap.md`](./gateway-constitution-roadmap.md) — Constitutional gap-closure backlog.
 - [`constitution-signing.md`](./constitution-signing.md) — Constitution lock and signing.

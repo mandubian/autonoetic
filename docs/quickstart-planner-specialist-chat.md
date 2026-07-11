@@ -734,6 +734,6 @@ If a command matches an agent's `CodeExecution` pattern but still fails with per
 - `docs/credential-management.md` — secure credential management
 - `docs/fts-session-search.md` — FTS session search
 - `docs/workflow-orchestration.md` — workflow orchestration
-- `docs/agent-capabilities.md` — agent capabilities reference
+- `docs/AGENTS.md` — canonical agent reference (roles, routing, capabilities, lifecycle)
 - `docs/plan-agent-revision-evaluation-federation-mvp.md` — revision, evaluation, and federation plan
 - `docs/plan-hermes-gap-closure.md` — Hermes gap closure plan

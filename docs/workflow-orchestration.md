@@ -345,7 +345,7 @@ The system has three layers of protection against runaway execution loops:
 
 ### Hard Gateway Guard
 
-**`max_session_turns`** (default: 12) in `GatewayConfig` acts as a circuit breaker. When an agent session reaches this turn count, the gateway:
+**`max_session_turns`** (default: 25) in `GatewayConfig` acts as a circuit breaker. When an agent session reaches this turn count, the gateway:
 1. Saves a checkpoint with `YieldReason::MaxTurnsReached`
 2. Returns `TurnOutcome::Completed(None)` to suspend the session
 3. Allows the session to be inspected and manually resumed

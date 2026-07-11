@@ -423,6 +423,6 @@ Implementation sketch: new `AnalysisProviderType` + provider that maps tool JSON
 
 ## See Also
 
-- [Agent Capabilities](./agent-capabilities.md) - Capability types and semantics
+- [AGENTS.md](./AGENTS.md) - Capability types and semantics (canonical reference)
 - [Approval System](./approval-system.md) - Current approval and interaction flow
 - [Remote Access Approval](./remote-access-approval.md) - Network access detection

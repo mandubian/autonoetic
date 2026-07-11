@@ -1,7 +1,7 @@
 # Autonoetic Platform Wiki
 
 This directory contains the curated knowledge corpus for the Autonoetic gateway wiki system.
-Agents can browse these docs at runtime via `wiki.list` and `wiki.get` tools.
+Agents can browse these docs at runtime via `wiki_list` and `wiki_get` tools.
 
 ## Adding a New Page
 

@@ -15,10 +15,17 @@ Promotion is the process of activating a new agent revision. It ensures that onl
 
 ## Evidence Binding
 
-For revisions declaring high-risk capabilities (`NetworkAccess`, `CodeExecution`, `AgentSpawn`), promotion requires:
-- **Evaluator pass** record (sealed evaluation or static evaluation)
-- **Auditor pass** record (security, governance, reproducibility check)
+For revisions declaring high-risk capabilities (`NetworkAccess`, `CodeExecution`, `AgentSpawn`, `ArtifactExecution`), promotion requires one or more of:
+- **Static evaluator** pass record (`static_evaluator.default`) — LLM-set, severity-gated
+- **Execution evaluator** pass records (`unit_test_runner.default`, `sealed_evaluator.default`) — trace-derived
+- **Auditor** pass record (`auditor.default`) — security, governance, reproducibility
 - Evidence is validated against the revision's canonical `content_digest`
+
+## `promotion_record` Severity Gating
+
+`promotion_record` mechanically rejects:
+- `pass=true` with any `error` or `critical` finding
+- `pass=true` with `warning` findings that lack a non-empty `evidence` field
 
 ## Gate Types
 
@@ -27,14 +34,13 @@ For revisions declaring high-risk capabilities (`NetworkAccess`, `CodeExecution`
 | **Legacy** | High-risk capabilities | Evaluator + Auditor pass records |
 | **FullJury** | Federation scenarios | Federation verdicts + approved operator escalation |
 
-## Mechanical Enforcement (Constitution P-2.26)
+## Mechanical Enforcement (Constitution P-2.25 – P-2.29)
 
-The gateway mechanically rejects promotion if any executed gate role returned a negative verdict:
-- If `unit_test_runner_id` is present and `unit_test_runner_pass` is `false` → **promotion blocked**
-- If evaluator ran and `evaluator_pass` is `false` → **promotion blocked**
-- If auditor ran and `auditor_pass` is `false` → **promotion blocked**
-
-Missing gate roles do NOT block promotion (fail-closed for negative verdicts only).
+- **P-2.25**: Promotion gate is fail-closed — missing required evidence blocks promotion.
+- **P-2.26**: Negative gate verdicts mechanically block promotion.
+- **P-2.27**: `PromoteWith` / session capability envelopes may satisfy the gate for a locked capability set.
+- **P-2.28**: Smoke-test gate for new agents with `NetworkAccess` / `CodeExecution`.
+- **P-2.29**: Promotion-attempt exhaustion gate limits repeated attempts.
 
 ## Rollback
 

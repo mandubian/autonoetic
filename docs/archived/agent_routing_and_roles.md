@@ -13,7 +13,8 @@
 > Routing. This file is preserved for historical reference only; do not
 > use it as a source of truth for current routing semantics.
 
-> Note: the canonical docs location is now `docs/agent_routing_and_roles.md`.
+> Note: this file is archived in `docs/archived/`. The canonical routing
+> reference is `docs/AGENTS.md` → Routing Rules.
 
 This document defines how Autonoetic should route ambiguous user goals when the user does not explicitly target a specific agent, and how specialist roles should be modeled in a self-evolving multi-agent system.
 

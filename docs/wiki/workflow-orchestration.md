@@ -52,7 +52,7 @@ Workflows support signal-based coordination:
 
 ## Task Cancellation
 
-Use `workflow_cancel(task_id)` to cancel a running child. The gateway:
+Use `workflow_cancel_task(task_id)` to cancel a running child. The gateway:
 - Sends a cancellation signal to the child
 - Waits for graceful shutdown
 - Cleans up all associated resources

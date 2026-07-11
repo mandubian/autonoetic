@@ -7,6 +7,7 @@ Agents interact with the gateway through tools. This page lists the major tool c
 | Tool | Description |
 |------|-------------|
 | `content_write` | Write content with visibility (private/session/global). Default: session |
+| `content_patch` | Apply a patch to existing content |
 
 ## Artifact Tools (Trust Boundary)
 
@@ -32,6 +33,7 @@ Agents interact with the gateway through tools. This page lists the major tool c
 | Tool | Description |
 |------|-------------|
 | `agent_spawn` | Spawn child agent session |
+| `agent_list` | List installed agents |
 | `agent_discover` | Find reusable agents matching an intent |
 | `agent_inspect` | Inspect any installed agent's metadata/capabilities |
 | `self_describe` | Describe your own identity, capabilities, rights, history |
@@ -56,6 +58,8 @@ Agents interact with the gateway through tools. This page lists the major tool c
 |------|-------------|
 | `workflow_wait` | Wait for child agent(s) to complete (blocking join) |
 | `workflow_state` | Read mechanical state of a task (once per wake, never in a loop) |
+| `workflow_cancel_task` | Cancel a running workflow task |
+| `workflow_force_complete` | Force-complete a workflow task |
 
 ## Revision and Promotion Tools
 
@@ -63,6 +67,7 @@ Agents interact with the gateway through tools. This page lists the major tool c
 |------|-------------|
 | `agent_revision_create` | Create immutable revision from artifact |
 | `agent_revision_create_from_intent` | Create revision from semantic intent (preferred) |
+| `agent_revision_schema` | Return install contract schema and canonical examples |
 | `agent_revision_promote` | Move alias to a revision (activates it) |
 | `agent_revision_rollback` | Roll alias back to previous revision |
 | `agent_revision_list` | List revisions for an agent |
@@ -78,14 +83,44 @@ Agents interact with the gateway through tools. This page lists the major tool c
 | `credential_check` | Check if credentials exist for a service |
 | `credential_setup` | Set up credentials with automated or human-assisted entry |
 | `credential_request` | Use stored credentials in HTTP requests without seeing secrets |
+| `credential_refresh` | Refresh an OAuth/token credential |
+
+## Approval Tools
+
+| Tool | Description |
+|------|-------------|
+| `approval_list` | List pending / resolved approvals |
+| `approval_status` | Check status of a specific approval |
+| `approval_withdraw` | Withdraw an approval request you created |
+
+## Session Tools
+
+| Tool | Description |
+|------|-------------|
+| `session_escalate` | Escalate a session to an operator or decider |
+| `session_search` | FTS5 search across session transcripts |
+| `session_summarize` | Generate a summary of a session |
+
+## Constitution Tools
+
+| Tool | Description |
+|------|-------------|
+| `constitution_read` | Read the active constitution |
+| `constitution_propose_amendment` | Propose a constitutional amendment |
+
+## Federation Tools
+
+| Tool | Description |
+|------|-------------|
+| `federation_escalate` | Escalate a promotion decision to a federation peer |
 
 ## Wiki Tools
 
 | Tool | Description |
 |------|-------------|
-| `wiki.list` | List all available wiki pages (id + title + tags) |
-| `wiki.get` | Get full content of a wiki page by id |
-| `wiki.propose` | Propose a new wiki page or edit an existing one (requires operator approval) |
+| `wiki_list` | List all available wiki pages (id + title + tags) |
+| `wiki_get` | Get full content of a wiki page by id |
+| `wiki_propose` | Propose a new wiki page or edit an existing one (requires operator approval) |
 
 ## Web Tools
 

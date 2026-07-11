@@ -8,6 +8,22 @@ This is a **deterministic** security check that does not rely on LLM self-declar
 
 ## Detection Categories
 
+### URL Literals
+
+| Pattern | Reason |
+|---------|--------|
+| `"https://api.example.com/..."` | Concrete HTTP target |
+| `"http://192.168.1.1/..."` | Concrete IP target |
+
+The gateway extracts hostnames and IP addresses from string literals in the source and requires them to be covered by `NetworkAccess.hosts`.
+
+### IP Address Literals
+
+| Pattern | Reason |
+|---------|--------|
+| IPv4 literals (`1.2.3.4`) | Concrete network target |
+| IPv6 literals (`::1`, `2001:db8::1`) | Concrete network target |
+
 ### Network Library Imports
 
 | Pattern | Reason |
@@ -35,11 +51,12 @@ This is a **deterministic** security check that does not rely on LLM self-declar
 
 ## Approval Flow
 
-1. Static analysis detects network patterns in the code
-2. Gateway extracts concrete targets (hostnames, IPs, URLs)
-3. Approval deduplication pipeline checks exec cache → session grants → existing approvals → flood cap
-4. If no existing approval covers the targets, operator approval is requested
-5. Once approved, execution proceeds with network access enabled
+1. Policy/capability check — does the agent hold `NetworkAccess`?
+2. Static analysis detects network patterns in the code
+3. Gateway extracts concrete targets (hostnames, IPs, URLs) and checks them against the agent's declared `remote_access.targets`
+4. Approval deduplication pipeline checks exec cache → plan grants → session grants → existing approvals → flood cap
+5. If no existing approval covers the targets, operator approval is requested
+6. Once approved, execution proceeds with network access enabled
 
 ## Declaring Network Access in SKILL.md
 
@@ -51,7 +68,7 @@ capabilities:
     hosts: ["api.example.com", "*.github.com"]
 ```
 
-The `hosts` list is a whitelist — only declared hosts are accessible. Use `["*"]` for unrestricted access (requires high-risk promotion gate).
+The `hosts` list is a whitelist — only declared hosts are accessible. `hosts: ["*"]` is only accepted when the agent also declares `open_web: true` (constitution P-1.5).
 
 ## Remote Access Analysis for Artifacts
 
