@@ -1,5 +1,16 @@
 # Specialized Builder Example
 
+> **⚠ ARCHIVED — does not run against a current gateway.** This example
+> depends on the `agent.install` tool, which has been removed (constitution
+> P-9.2). Its `run.sh` also uses GNU `find -printf`, which is not available
+> on macOS. It is preserved for reference only.
+>
+> The working builder flow lives in the real agent bundle:
+> [`agents/evolution/specialized_builder.default/SKILL.md`](../../../agents/evolution/specialized_builder.default/SKILL.md),
+> which uses the revision pipeline (`content_write` → `artifact_build` →
+> `agent_revision_create_from_intent` → `agent_revision_promote`). A rewrite
+> of this example to match that flow is tracked as future work.
+
 This example promotes the builder flow into a real runnable agent.
 
 It starts a builder agent that can install durable specialist child agents from normal terminal chat. The first built-in demo is the exact Fibonacci worker request:
@@ -13,7 +24,7 @@ Because the builder is generic, the installed child agent id and file layout are
 What it proves:
 
 - terminal chat reaches the gateway through `event.ingest`
-- the builder agent uses `agent.install`
+- the builder agent installs a child agent via the revision pipeline (`agent_revision_create_from_intent` + `agent_revision_promote`; the legacy `agent.install` tool has been removed, see P-9.2)
 - a durable child agent is written to disk
 - the background scheduler picks up the child agent automatically
 - the child agent executes sandboxed code and persists state between ticks

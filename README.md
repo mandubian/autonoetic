@@ -23,6 +23,28 @@ Autonoetic is not trying to be a generic chatbot framework or a thin LLM wrapper
 - share large content through immutable artifact handles instead of bloated inline payloads
 - remain portable through `runtime.lock` and Cognitive Capsules
 
+## Governance: a constitution, not a config file
+
+Autonoetic is not just a sandbox runtime — it is a **governed** runtime. The
+gateway enforces a versioned, digest-pinned **constitution** that defines a
+finite set of rules agents must not break (`P-*`), a Bill of **rights** the
+gateway owes every agent (`Ri-*`), and **obligations** binding whoever
+exercises authority over an agent (`O-*`). Amendments are a first-class
+operation (Ri-0.8) and the law itself is signed and verified by federated
+peers (P-10.9).
+
+- [`docs/philosophy.md`](docs/philosophy.md) — the *why* behind the law
+- [`docs/constitution/versions/2026.07.08/constitution.md`](docs/constitution/versions/2026.07.08/constitution.md) — the canonical law (current version)
+- [`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md) — which clauses are mechanically enforced today
+- [`docs/separation-of-powers.md`](docs/separation-of-powers.md) — agent vs gateway authority boundary
+
+A 30-second orientation: agents are **free** (anything not forbidden is
+permitted), **responsible** (every action is attributable, budgeted,
+audited), and **cooperative** (verifiable law-compatibility is the basis for
+trust). The gateway is a *Lawful Executor* — it enforces pre-committed law
+deterministically and exercises no improvised judgment (see §14 of the
+constitution).
+
 ## Main Concepts
 
 - `SKILL.md`: the unified manifest for agents and skills
@@ -71,19 +93,31 @@ Reference agent bundles are grouped under [`agents/`](agents/):
 
 Current bundles:
 
-- Lead: `agents/lead/planner.default/`
+- Lead: `agents/lead/planner.default/` (plus `planner.collaborative/`)
 - Specialists:
   - `agents/specialists/researcher.default/`
   - `agents/specialists/architect.default/`
+  - `agents/specialists/packager.default/`
   - `agents/specialists/coder.default/`
   - `agents/specialists/executor.default/`
   - `agents/specialists/debugger.default/`
   - `agents/specialists/sealed_evaluator.default/`
+  - `agents/specialists/static_evaluator.default/`
+  - `agents/specialists/unit_test_runner.default/`
   - `agents/specialists/auditor.default/`
+  - `agents/specialists/registration.default/` (plus `credential_onboarding.default/`)
+  - `agents/specialists/discovery.default/`
+  - `agents/specialists/watchdog.default/` (plus `watchdog-fast.default/`)
+  - `agents/specialists/improvement-orchestrator.default/`, `outcome-grader.default/`
 - Evolution:
   - `agents/evolution/specialized_builder.default/`
+  - `agents/evolution/agent-factory.default/`
+  - `agents/evolution/agent-adapter.default/`
   - `agents/evolution/evolution-steward.default/`
   - `agents/evolution/memory-curator.default/`
+  - `agents/evolution/evolution-orchestrator.default/`, `code-issue-proposer.default/`
+
+The authoritative role → agent-id table lives in [`docs/AGENTS.md`](docs/AGENTS.md) → Roles and Routing; check there when this list falls behind.
 
 To install these into your active runtime directory, run:
 
@@ -145,7 +179,18 @@ We are also actively trying to reuse the Openfang Protocol (OFP) as much as poss
 
 ## Status
 
-Phases 1 through 6 are implemented, including OFP networking/federation, MCP integration foundations, SDK package scaffolding, and multi-driver sandbox support. The prior Phase 7 roadmap is preserved in [`docs/archived/plan.md`](docs/archived/plan.md).
+The runtime core is implemented and self-hosting: gateway daemon (JSON-RPC +
+HTTP REST), `SKILL.md` + `runtime.lock` parsing, multi-driver sandboxing
+(bubblewrap / docker / microvm), content-addressed artifacts, hash-chain
+causal logging, durable workflows, OFP federation with HMAC + constitution
+digest handshake, and MCP client/server plumbing.
+
+Governance is built alongside the runtime: the current constitution
+(`2026.07.08`) has 17 enforced rights and 177 enforced rules — see
+[`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md)
+for what is `ENFORCED` vs `PARTIAL` / `MISSING` / `DESIGN DEBT`. Active and
+archived design plans are tracked under [`docs/design/`](docs/design/README.md)
+and [`docs/archived/`](docs/archived/) respectively.
 
 ## Quickstart Example
 
@@ -174,23 +219,18 @@ You can inspect traces with:
 - `autonoetic trace fork <session_id> [--message <text>] [--at-turn N] [--interactive]`
 - `autonoetic trace history <session_id> [--agent <agent_id>] [--json]`
 
-## Specialized Builder Example
+## Specialized Builder
 
-A second runnable example now lives at [`examples/specialized_builder`](examples/specialized_builder/README.md).
+The canonical builder flow lives in the agent bundle at
+[`agents/evolution/specialized_builder.default/`](agents/evolution/specialized_builder.default/SKILL.md),
+which uses the revision pipeline (`content_write` → `artifact_build` →
+`agent_revision_create_from_intent` → `agent_revision_promote`).
 
-From `autonoetic/`:
-
-```bash
-bash examples/specialized_builder/run.sh
-```
-
-This example promotes the builder flow into a real agent: you chat with a builder agent, it uses `agent.install` to create a durable child worker, and the background scheduler picks that worker up automatically. The default scripted demo sends:
-
-```text
-schedule every 20sec next fibonacci series element from previous element computed in last turn
-```
-
-and verifies that the spawned `fib_worker` runs its first scheduled tick and persists Fibonacci state/history under `agents/fib_worker/`.
+Older runnable examples that demonstrated this flow (`examples/specialized_builder`,
+`examples/tiered_memory_probe`) have been archived under
+[`examples/archived/`](examples/archived/) — they depended on the since-removed
+`agent.install` tool (constitution P-9.2) and on GNU-only `find -printf`, and no
+longer run against a current gateway.
 
 ## License
 

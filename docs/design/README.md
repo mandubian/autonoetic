@@ -6,7 +6,7 @@ under [`../archived/`](../archived/).
 
 | Doc | Status | Live reference (when shipped) |
 |-----|--------|-------------------------------|
-| [`constitution-gate-amendments.md`](constitution-gate-amendments.md) | Partial — P-2.18/19 enforced; agent-as-decider pending | Constitution §2 |
+| [`constitution-gate-amendments.md`](constitution-gate-amendments.md) | Mostly shipped — gate unification (P-2.18), gate enrichment (P-2.19), agent-as-decider `GateDecider` capability (P-2.20), and escalation (P-2.21) are all `ENFORCED`. What remains as draft RFC work is the broader multi-decider / voting-weight / ratification vision ([`principal-model-and-symmetric-obligations.md`](principal-model-and-symmetric-obligations.md)) | Constitution §2 |
 | [`constitution-restructure.md`](constitution-restructure.md) | Partial — P-x.y restructure in progress | [`constitution/enforcement-register.md`](../constitution/enforcement-register.md) |
 | [`operator-approval-inspection-plan.md`](operator-approval-inspection-plan.md) | Partial — Phase 1 (code excerpts) shipped; Phase 2 pending | Approval CLI / `code_excerpts.rs` |
 | [`human-agent-artifact-collaboration-plan.md`](human-agent-artifact-collaboration-plan.md) | Draft RFC — PlanFrame + workbench projection for human/agent co-construction | — |

@@ -278,7 +278,7 @@ to move when the need becomes urgent. They are listed here with their
 current status, followed by the doors that remain.
 
 Status of the original five (drafted in `docs/constitution/versions/2026.07.08/`,
-awaiting a signed lock to activate):
+enacted by the signed lock `gateway-constitution.lock.json`):
 
 1. **A served-party section** (`§12` / `U-1`/`U-2`/`U-3`, bind-direction:
    the community toward the served) — the right to refuse a result, to

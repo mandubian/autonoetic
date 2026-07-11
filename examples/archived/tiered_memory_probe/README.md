@@ -1,5 +1,9 @@
 # Tiered Memory Probe Example
 
+> **⚠ ARCHIVED — does not run against a current gateway.** Same reason as
+> `specialized_builder`: depends on the removed `agent.install` tool (P-9.2)
+> and uses GNU `find -printf` (not macOS-compatible). Preserved for reference.
+
 This example is a behavioral probe for Tier 1 vs Tier 2 memory usage.
 
 It asks a generic builder agent to install a recurring worker from a user request that implies two persistence layers:
@@ -11,7 +15,7 @@ The prompt does not explicitly say "use the SDK" or "call memory.remember". The 
 
 ## What This Probe Checks
 
-1. A child worker is installed and scheduled by the builder (`agent.install`).
+1. A child worker is installed and scheduled by the builder (via the revision pipeline — `agent_revision_create_from_intent` + `agent_revision_promote`; the legacy `agent.install` tool has been removed, see P-9.2).
 2. Tier 1 checkpoint files are produced under `state/`.
 3. Generated worker code references memory APIs (`autonoetic_sdk` or `memory.remember/recall/search`).
 4. Runtime causal traces include memory-category events from worker execution.

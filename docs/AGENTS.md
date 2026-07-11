@@ -146,9 +146,9 @@ metadata:
         effort: medium         # "low", "medium" (default), "high"
         # budget_tokens: 4096  # Optional: override reasoning token budget (Anthropic only)
     capabilities:
-      - type: "ToolInvoke"
-        allowed: ["content_", "knowledge_", "agent_"]
-      - type: "MemoryWrite"
+      - type: "SandboxFunctions"
+        allowed: ["knowledge_"]          # MCP tool prefixes (native tools use their own capability)
+      - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "AgentSpawn"
         max_children: 10
@@ -245,19 +245,41 @@ Capabilities fall into three categories:
 
 ### Available Capabilities
 
+The full, authoritative list is the `Capability` enum in
+`autonoetic-types/src/capability.rs`. The table below lists the variants most
+agents declare; constitution-named capabilities (cited by `P-*` / `Ri-*` in
+`docs/constitution/`) are marked with the clause.
+
 | Capability | Fields | Description |
 |------------|--------|-------------|
-| `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web_*`, `sandbox_*`) |
+| `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web_*`, `sandbox_*`). **MCP tools only** — native tools use their own capability (P-1.6). |
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge (includes search) |
 | `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge_store`) |
-| `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
+| `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts (P-1.5) |
 | `CodeExecution` | `patterns: [string]` | Execute command strings through `sandbox_exec` |
-| `ArtifactExecution` | none | Execute immutable artifact entrypoints through `artifact_exec` |
-| `AgentSpawn` | `max_children: number` | Create child agent sessions |
-| `AgentMessage` | `patterns: [string]` | Send messages to other agents |
-| `BackgroundReevaluation` | `min_interval_secs: number, allow_reasoning: boolean` | Periodic wake-ups for background processing |
+| `ArtifactExecution` | none | Execute immutable artifact entrypoints through `artifact_exec` / `artifact_prepare` |
+| `AgentSpawn` | `max_children`, … | Create child agent sessions (P-1.7, P-7.9) |
+| `AgentMessage` | `patterns: [string]` | Send messages to other agents (P-11.5) |
+| `BackgroundReevaluation` | `min_interval_secs`, `allow_reasoning` | Periodic wake-ups for background processing |
 | `SchedulerAccess` | `patterns: [string]` | Create, list, pause, resume, cancel scheduled cron jobs (e.g., `scheduler.cron.*`) |
 | `SkillInstall` | `allowed_sources: [string]` | Fetch a remote SKILL.md and install it as a new local agent via `skill_install`. Use `["*"]` for any source, or specific hosts like `["agentskills.io"]`. |
+| `AgentRevision` | … | Create / promote / rollback / diff revisions (P-1.3). Required to promote. |
+| `Evaluation` | … | Publish eval suites, queue runs, compare revisions, read reports |
+| `CredentialAccess` | `services`, … | Read / register / refresh vault credentials (P-1.8, P-4.5). Secrets never enter agent context (P-4.1). |
+| `EmergencyStop` | — | Request an emergency stop of a root session (P-7.1) |
+| `ConstitutionalProposal` | — | Propose amendments via `constitution_propose_amendment` (Ri-0.8) |
+| `GateDecider` | `kinds: [approval\|escalation]` | Resolve gates as an agent-decider, bound by the same hardening as human operators (P-2.20) |
+| `CapsuleExport` | — | Export a cognitive capsule (Ri-0.17, currently PARTIAL — broader than self-export) |
+| `ReasoningAudit` | … | Disclose an agent's private-under-law reasoning, with notification (Ri-0.13c) |
+| `PlanFrameAccess` | … | Read/decompose/track plans as a capability-grant envelope (P-2.16/P-2.27) |
+| `PromoteWith` | `agent_id`, `capabilities` | Session capability envelope lock satisfying P-2.16 for the locked set (P-2.27) |
+| `SchedulerSignal` | … | Internal: emit scheduler wake signals |
+
+> Variants not shown (`UserProfileAccess`, `BudgetNoPriceAvailableAllow`,
+> `GithubIssueCreate`, `SecurityRedTeam`, `WikiContribute`,
+> `PlanFrameApprove`, `ApprovalQueue`, `CapabilityDelta`) are narrow /
+> internal / experimental — see the enum for field shapes. Do not surface
+> them in agent examples without checking `capability.rs` first.
 
 ### Capability Semantics
 
@@ -290,10 +312,11 @@ Capabilities use pattern-based scoping:
 
 Capabilities are defined in `autonoetic-types/src/capability.rs` as a Rust enum. To add a new capability:
 
-1. Add a variant to the `Capability` enum
+1. Add a variant to the `Capability` enum (the canonical list — keep the table above in sync when you do)
 2. Implement the policy check in `policy.rs`
 3. Gate the relevant tool(s) in `is_available()` 
-4. Update this documentation
+4. If constitutionally relevant, add a `P-*` / `Ri-*` clause and a pinning test under `autonoetic-gateway/tests/constitution_*`
+5. Update this documentation
 
 Example: Adding a hypothetical `ImageGenerate` capability:
 ```rust
@@ -717,11 +740,11 @@ llm_config:
          id: "my.agent"
          name: "My Agent"
          description: "My script agent"
-       execution_mode: "script"
-       script_entry: "main.py"
-       capabilities:
-         - type: "MemoryWrite"
-           scopes: ["self.*"]
+        execution_mode: "script"
+        script_entry: "main.py"
+        capabilities:
+          - type: "WriteAccess"
+            scopes: ["self.*"]
    ---
    # My Agent
    This agent does X when given Y input.
@@ -762,12 +785,12 @@ llm_config:
        llm_config:
          provider: "openai"
          model: "gpt-4o"
-       capabilities:
-         - type: "ToolInvoke"
+        capabilities:
+          - type: "SandboxFunctions"
             allowed: ["content_", "knowledge_"]
-         - type: "MemoryWrite"
-           scopes: ["self.*", "skills/*"]
-       validation: "soft"
+          - type: "WriteAccess"
+            scopes: ["self.*", "skills/*"]
+        validation: "soft"
    ---
    # Instructions
    You are a [role]. When given [input], you should:
@@ -891,7 +914,7 @@ After installation, agents are discoverable:
 ```python
 results = sdk.tools.invoke("agent_discover", {
     "intent": "fetch weather data",
-    "required_capabilities": ["NetConnect"]
+    "required_capabilities": ["NetworkAccess"]
 })
 # Returns ranked list with scores
 ```

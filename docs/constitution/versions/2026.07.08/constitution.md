@@ -107,8 +107,8 @@ principal that resolves a gate — so that whoever holds authority over an
 agent owes duties mirroring the agent's own (#359). The bind-direction is
 uniform by section, so no per-row tag is needed — everything under §0
 binds the gateway, everything under §1–§11 binds the agent, and everything
-under §O binds the decider. The **rights/obligations ratio** (16 rights against
-176 rules) is itself a design signal: a constitution heavy on rules
+under §O binds the decider. The **rights/obligations ratio** (17 rights against
+177 rules) is itself a design signal: a constitution heavy on rules
 and light on rights is one to watch, and amendments that widen the gap
 deserve scrutiny.
 

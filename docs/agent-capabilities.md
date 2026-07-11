@@ -1,5 +1,14 @@
 # Agent Capabilities Reference
 
+> **⚠ SUPERSEDED (2026-07-11).** The canonical capability reference is now
+> `docs/AGENTS.md` → Capabilities System, which is kept in sync with the
+> `Capability` enum in `autonoetic-types/src/capability.rs` (the source of
+> truth). The table below lists only ~8 of the ~30 variants the gateway
+> actually enforces and does not reflect constitution-named capabilities
+> (`GateDecider`, `CapsuleExport`, `ConstitutionalProposal`,
+> `ReasoningAudit`, `AgentRevision`, `EmergencyStop`, `CredentialAccess`,
+> …). Use it only as historical reference.
+
 ## Overview
 
 This document describes the capability system used by Autonoetic agents. Capabilities define what tools and resources an agent can access.

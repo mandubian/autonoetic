@@ -1,5 +1,18 @@
 # Autonoetic: Front-Door Routing and Evolving Role Orchestration
 
+> **⚠ DEPRECATED (2026-07-11) — describes routing behavior that has been
+> removed.** This doc modeled a *default front-door* routing scheme in which
+> ambiguous ingress with no `target_agent` falls back to `planner.default`.
+> The current gateway does the opposite: `event.ingest` **requires** an
+> explicit `target_agent_id`; a missing or empty target fails with an error
+> and there is **no default routing fallback** (see `docs/AGENTS.md` →
+> Routing Rules, and the routing tests).
+>
+> The role-catalog and delegation-pattern content below is likewise
+> superseded by the authoritative tables in `docs/AGENTS.md` → Roles and
+> Routing. This file is preserved for historical reference only; do not
+> use it as a source of truth for current routing semantics.
+
 > Note: the canonical docs location is now `docs/agent_routing_and_roles.md`.
 
 This document defines how Autonoetic should route ambiguous user goals when the user does not explicitly target a specific agent, and how specialist roles should be modeled in a self-evolving multi-agent system.
