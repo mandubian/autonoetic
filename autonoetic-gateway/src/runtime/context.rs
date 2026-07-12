@@ -397,6 +397,15 @@ pub(crate) fn compose_system_instructions_full(
                     lines.push(format!(
                         "- **io.returns** — your ENTIRE final reply must be a single raw JSON object matching this schema. No prose before or after the JSON, and no markdown code fences (no ```json blocks).\n  Schema: `{compact}`\n  Template:\n  ```json\n  {template}\n  ```"
                     ));
+                    let has_anomalies = schema
+                        .get("properties")
+                        .and_then(|p| p.as_object())
+                        .map_or(false, |o| o.contains_key("anomalies"));
+                    if has_anomalies {
+                        lines.push(
+                            "  The `anomalies` field is a standing witness contract — report anything unexpected you observed, or [] if nothing.".to_string()
+                        );
+                    }
                 } else {
                     lines.push(format!(
                         "- **io.returns** — your final reply should be a single raw JSON object matching this schema, with no markdown code fences. Schema: `{compact}`"
@@ -853,6 +862,54 @@ mod agentskills_bridging_tests {
         assert!(
             output.contains("no markdown code fences"),
             "io.returns contract must instruct no fences: {output}"
+        );
+    }
+
+    #[test]
+    fn output_contract_states_anomalies_witness_line_when_present() {
+        // RFC C.2 (#770): when the (gateway-augmented) io.returns schema
+        // carries an `anomalies` property, the Output Contract renders the
+        // standing-witness doctrine line once, in addition to the schema.
+        let mut manifest = default_test_manifest();
+        manifest.io = Some(autonoetic_types::agent::AgentIO {
+            accepts: None,
+            returns: Some(serde_json::json!({
+                "type": "object",
+                "required": ["status", "anomalies"],
+                "properties": {
+                    "status": { "type": "string" },
+                    "anomalies": { "type": "array" }
+                }
+            })),
+            returns_enforcement: None,
+            output_policy: None,
+        });
+        let output = compose_system_instructions_with_metadata("Do things.", &manifest, None);
+        assert!(output.contains("Your Output Contract"));
+        assert!(output.contains("anomalies"));
+        assert!(
+            output.contains("standing witness contract"),
+            "expected the anomalies witness-contract doctrine line: {output}"
+        );
+    }
+
+    #[test]
+    fn output_contract_omits_anomalies_line_when_absent() {
+        let mut manifest = default_test_manifest();
+        manifest.io = Some(autonoetic_types::agent::AgentIO {
+            accepts: None,
+            returns: Some(serde_json::json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": { "status": { "type": "string" } }
+            })),
+            returns_enforcement: None,
+            output_policy: None,
+        });
+        let output = compose_system_instructions_with_metadata("Do things.", &manifest, None);
+        assert!(
+            !output.contains("standing witness contract"),
+            "no anomalies property declared; witness line must not appear: {output}"
         );
     }
 
