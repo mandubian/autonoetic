@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 65;
+const SCHEMA_VERSION_LATEST: i64 = 66;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -550,6 +550,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_escalation_plan_frame_expiry_v63(conn)?;
     apply_session_lifecycle_state_v64(conn)?;
     apply_workflow_tasks_sqlite_v65(conn)?;
+    apply_anomaly_flags_v66(conn)?;
 
     Ok(())
 }
@@ -3035,6 +3036,46 @@ fn apply_workflow_tasks_sqlite_v65(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![65_i64, "workflow_tasks_sqlite", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Anomaly flag persistence — future Ri-0.18 / O-7 (issue #770 part C.1).
+/// See `anomaly_flags.rs` module docs for the state machine.
+fn apply_anomaly_flags_v66(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 66 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS anomaly_flags (
+            flag_id             TEXT PRIMARY KEY,
+            reporter_agent_id   TEXT NOT NULL,
+            reporter_session_id TEXT,
+            subject_ref         TEXT NOT NULL,
+            observation         TEXT NOT NULL,
+            evidence_json       TEXT NOT NULL DEFAULT '[]',
+            severity            TEXT NOT NULL DEFAULT 'medium',
+            status              TEXT NOT NULL DEFAULT 'pending',
+            decision            TEXT,
+            decision_reason     TEXT,
+            decided_by          TEXT,
+            decided_at          TEXT,
+            created_at          TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_anomaly_flags_status      ON anomaly_flags(status);
+        CREATE INDEX IF NOT EXISTS idx_anomaly_flags_reporter    ON anomaly_flags(reporter_agent_id);
+        CREATE INDEX IF NOT EXISTS idx_anomaly_flags_created_at  ON anomaly_flags(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![66_i64, "anomaly_flags", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

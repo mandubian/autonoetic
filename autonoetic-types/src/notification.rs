@@ -41,6 +41,7 @@ pub enum NotificationType {
     AgentMessage,
     AdminProposal,
     ConstitutionalProposal,
+    AnomalyFlag,
 }
 
 impl NotificationRecord {
