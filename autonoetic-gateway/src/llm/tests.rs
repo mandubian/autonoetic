@@ -918,4 +918,60 @@ mod tests {
             );
         }
     }
+
+    // ---- RFC #779 Part E.2: failover eligibility tests ----
+
+    #[test]
+    fn failover_eligible_on_rate_limit() {
+        let err = anyhow::anyhow!("HTTP 429: too many requests");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_5xx() {
+        let err = anyhow::anyhow!("HTTP 503: Service Unavailable");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_anthropic_overloaded() {
+        let err = anyhow::anyhow!("{}", r#"HTTP 529: {"error":{"type":"overloaded_error"}}"#);
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_connection_refused() {
+        let err = anyhow::anyhow!("error sending request: connection refused");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_timeout() {
+        let err = anyhow::anyhow!("request timed out after 120s");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_bad_request() {
+        let err = anyhow::anyhow!("HTTP 400: invalid model name");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_auth_error() {
+        let err = anyhow::anyhow!("HTTP 401: invalid api key");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_forbidden() {
+        let err = anyhow::anyhow!("HTTP 403: forbidden");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_generic_validation() {
+        let err = anyhow::anyhow!("response validation failed: missing required field");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
 }

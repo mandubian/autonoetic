@@ -2273,6 +2273,14 @@ impl AgentExecutor {
                     Err(e) => {
                         self.guard.register_llm_failure();
                         let _ = tracer.log_llm_request_failed(&e);
+
+                        // RFC #779 Part E.2: only fail over on transient errors.
+                        // A 400/401/403 is deterministic — the same request to a
+                        // different provider will fail differently, not succeed.
+                        if !crate::llm::is_failover_eligible_error(&e) {
+                            return Err(e);
+                        }
+
                         if fallback_chain.is_empty() {
                             return Err(e);
                         }
@@ -2280,19 +2288,23 @@ impl AgentExecutor {
                             target: "autonoetic::model_routing",
                             original_model = %routed_model,
                             error = %e,
-                            "Primary model failed, trying fallback chain"
+                            "Primary model failed with transient error, trying fallback chain"
                         );
                         last_err = Some(e);
                         let mut final_response = None;
                         for (_fb_preset, fb_provider, fb_model) in &fallback_chain {
-                            if *fb_provider != routed_llm_cfg.provider {
-                                continue;
-                            }
+                            // RFC #779 Part E.2: cross-provider failover is now
+                            // allowed. The same-provider restriction has been
+                            // removed — if the primary provider is down, the
+                            // whole point is to try a different one.
+                            let cross_provider = *fb_provider != routed_llm_cfg.provider;
                             let mut fallback_req = req.clone();
                             fallback_req.model = fb_model.clone();
                             tracing::info!(
                                 target: "autonoetic::model_routing",
                                 fallback_model = %fb_model,
+                                fallback_provider = %fb_provider,
+                                cross_provider = cross_provider,
                                 "Trying fallback model"
                             );
                             if let Err(e) = self
