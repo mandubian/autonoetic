@@ -295,9 +295,14 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
     WorkflowFailureMetadata::unknown_failure()
 }
 
-pub(crate) fn decorate_tool_error(mut tool_error: ToolError) -> ToolError {
+pub fn decorate_tool_error(mut tool_error: ToolError) -> ToolError {
     let metadata = classify_message(&tool_error.message, tool_error.error_type.clone());
     metadata.apply_to_tool_error(&mut tool_error);
+    if tool_error.error_type == ToolErrorType::Permission && tool_error.available_actions.is_empty()
+    {
+        tool_error.available_actions =
+            crate::denial_affordances::available_actions_for_rules(&tool_error.enforced_rules);
+    }
     tool_error
 }
 
