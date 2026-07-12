@@ -396,6 +396,7 @@ mod tests {
                     install_conflict_detail: None,
                     retry_advice: Some(RetryAdvice::Wait),
                     side_effect_state: Some(SideEffectState::NoSideEffect),
+                    agent_outcome: None,
                     summary: Some("awaiting approval apr-123".to_string()),
                 },
                 message: "child waiting".to_string(),

@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::plan_frame::PlanRef;
+use crate::task_completion::AgentOutcome;
 use crate::tool_error::{FailureClass, RetryAdvice, SideEffectState};
 
 fn default_true() -> bool {
@@ -282,6 +283,12 @@ pub struct ChildStateNotification {
     pub retry_advice: Option<RetryAdvice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side_effect_state: Option<SideEffectState>,
+    /// Normalized child outcome parsed from the child's final reply
+    /// (RFC #775 Part A). When `Some(ClarificationNeeded)`, the child is
+    /// requesting clarification — penalty-free, not a failure. Parents
+    /// branch on this mechanically instead of re-deriving it from `summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_outcome: Option<AgentOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
