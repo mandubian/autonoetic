@@ -131,33 +131,82 @@ pub(crate) fn compose_system_instructions_with_metadata(
     compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None, None)
 }
 
+/// Candidate pool size for task-matched recall: wider than `max_memories` so
+/// the relevance scorer has something to rank before truncating down.
+const MEMORY_CANDIDATE_POOL: usize = 50;
+
+/// Jaccard token-overlap relevance score between the incoming task text and a
+/// candidate memory's content. Mirrors
+/// `runtime::tools::agent_revision::description_token_overlap` — kept as a
+/// local copy rather than a cross-module dependency since the two call sites
+/// score conceptually different things (description drift vs. task/memory
+/// relevance) and shouldn't be coupled by a shared signature change.
+pub(crate) fn score_task_relevance(task_text: &str, memory_content: &str) -> f64 {
+    use std::collections::BTreeSet;
+    let tokenize = |s: &str| -> BTreeSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .map(|t| t.to_string())
+            .collect()
+    };
+    let ta = tokenize(task_text);
+    let tb = tokenize(memory_content);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f64;
+    let union = ta.union(&tb).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Scopes treated as "error lessons" for prioritization/labeling purposes.
+fn is_error_lesson_scope(scope: &str) -> bool {
+    matches!(scope, "digest.error_pattern" | "digest.lesson")
+}
+
 /// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
+///
+/// When `task_text` is `Some` and non-empty, candidates are scored against it
+/// (Jaccard token overlap) and re-ranked so task-relevant memories — error
+/// lessons prioritized on ties — surface first; remaining slots are filled
+/// with the most recent unscored candidates so recency value is preserved
+/// when nothing matches. When `task_text` is `None`/empty, behavior is pure
+/// recency, unchanged from before task-matched recall.
 ///
 /// Returns `None` if no memories are found or the store is unavailable.
 pub(crate) fn build_memory_context_snippet(
     store: &crate::scheduler::gateway_store::GatewayStore,
     agent_id: &str,
     max_memories: usize,
+    task_text: Option<&str>,
 ) -> Option<String> {
     let agent_tag = format!("agent:{agent_id}");
 
     let agent_digests = store.search_memories_by_tags(
         &[agent_tag.as_str(), "source:post_session_digest"],
-        max_memories,
+        MEMORY_CANDIDATE_POOL,
     ).ok().unwrap_or_default();
 
     let agent_signals = store.search_memories_by_tags(
         &[agent_tag.as_str(), "source:quality_signal"],
-        max_memories,
+        MEMORY_CANDIDATE_POOL,
     ).ok().unwrap_or_default();
 
-    let mut memories: Vec<_> = agent_digests;
-    memories.extend(agent_signals);
-    memories.truncate(max_memories);
+    let mut seen = std::collections::HashSet::new();
+    let mut memories: Vec<_> = agent_digests
+        .into_iter()
+        .chain(agent_signals)
+        .filter(|m| seen.insert(m.memory_id.clone()))
+        .collect();
 
     if memories.is_empty() {
         memories = store
-            .search_memories_by_tags(&["source:post_session_digest"], max_memories)
+            .search_memories_by_tags(&["source:post_session_digest"], MEMORY_CANDIDATE_POOL)
             .ok()
             .unwrap_or_default();
     }
@@ -166,10 +215,58 @@ pub(crate) fn build_memory_context_snippet(
         return None;
     }
 
+    let task_text = task_text.filter(|t| !t.trim().is_empty());
+    let selected: Vec<_> = match task_text {
+        Some(task) => {
+            let mut scored: Vec<(f64, bool, _)> = memories
+                .into_iter()
+                .map(|m| {
+                    let score = score_task_relevance(task, &m.content);
+                    let error_lesson = is_error_lesson_scope(&m.scope);
+                    (score, error_lesson, m)
+                })
+                .collect();
+            // Score DESC, error-lesson-first tiebreak, updated_at DESC.
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.1.cmp(&a.1))
+                    .then_with(|| b.2.updated_at.cmp(&a.2.updated_at))
+            });
+
+            let (matched, unscored): (Vec<_>, Vec<_>) =
+                scored.into_iter().partition(|(score, _, _)| *score > 0.0);
+            matched
+                .into_iter()
+                .chain(unscored)
+                .take(max_memories)
+                .map(|(_, _, m)| m)
+                .collect()
+        }
+        None => memories.into_iter().take(max_memories).collect(),
+    };
+
+    if selected.is_empty() {
+        return None;
+    }
+
     let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
-    for mem in memories.iter().take(max_memories) {
+    for mem in &selected {
         let truncated: String = mem.content.chars().take(500).collect();
-        parts.push(format!("- {}", truncated));
+        let session_ref = mem
+            .tags
+            .iter()
+            .find_map(|t| t.strip_prefix("session:"))
+            .map(|sid| sid.chars().take(8).collect::<String>());
+        let prefix = if is_error_lesson_scope(&mem.scope) {
+            "(error lesson) "
+        } else {
+            ""
+        };
+        match session_ref {
+            Some(sid) => parts.push(format!("- {prefix}{truncated} [from session {sid}]")),
+            None => parts.push(format!("- {prefix}{truncated}")),
+        }
     }
     Some(parts.join("\n"))
 }
@@ -453,7 +550,13 @@ impl AgentExecutor {
         let config = self.config.as_ref()?;
         let agent_id = &self.manifest.agent.id;
         let limit = config.profile.memory_priming_limit();
-        build_memory_context_snippet(store, agent_id, limit)
+        // Config-absent test paths default to task-matched recall (true);
+        // an explicit `task_matched_recall: false` preserves pure recency.
+        let task_matched = config.auto_learning.task_matched_recall;
+        let task_text = task_matched
+            .then_some(self.initial_user_message.as_str())
+            .filter(|t| !t.trim().is_empty());
+        build_memory_context_snippet(store, agent_id, limit, task_text)
     }
 
     /// Compose, sign, and render the R++1 state-attestation tail for the
@@ -914,5 +1017,163 @@ mod workflow_status_chat_tests {
         let schema = serde_json::json!({"type": "object"});
         let tmpl = generate_json_template(&schema);
         assert_eq!(tmpl, "{}");
+    }
+}
+
+#[cfg(test)]
+mod injected_recall_tests {
+    use super::*;
+    use crate::scheduler::gateway_store::GatewayStore;
+    use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
+
+    #[test]
+    fn scorer_matches_related_memory_and_zero_for_unrelated() {
+        let task = "fetch weather data from api";
+        let related = score_task_relevance(task, "weather api requires retry on 429");
+        let unrelated = score_task_relevance(task, "unrelated database migration note");
+        assert!(related > 0.0, "expected positive score, got {related}");
+        assert_eq!(unrelated, 0.0, "expected zero score, got {unrelated}");
+    }
+
+    fn seed_memory(
+        store: &GatewayStore,
+        id: &str,
+        agent_id: &str,
+        scope: &str,
+        content: &str,
+        session: &str,
+        updated_at: &str,
+    ) {
+        let mut mem = MemoryObject::new(
+            id.to_string(),
+            scope.to_string(),
+            agent_id.to_string(),
+            agent_id.to_string(),
+            format!("session:{session}:post_digest"),
+            content.to_string(),
+        );
+        mem.source_type = MemorySourceType::SessionDigest;
+        mem.tags = vec![
+            "source:post_session_digest".to_string(),
+            format!("session:{session}"),
+            format!("agent:{agent_id}"),
+        ];
+        mem.visibility = MemoryVisibility::Global;
+        mem.created_at = updated_at.to_string();
+        mem.updated_at = updated_at.to_string();
+        store.memory_upsert(&mem).unwrap();
+    }
+
+    #[test]
+    fn task_matched_recall_prefers_relevant_over_recent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        seed_memory(
+            &store,
+            "mem-relevant",
+            agent_id,
+            "digest.lesson",
+            "weather api requires retry on 429 rate limits",
+            "sess-relevant-aaaaaaaa",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_memory(
+            &store,
+            "mem-recent-irrelevant",
+            agent_id,
+            "digest.fact",
+            "unrelated database migration note about schema versions",
+            "sess-recent-bbbbbbbb",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let snippet = build_memory_context_snippet(
+            &store,
+            agent_id,
+            1,
+            Some("fetch weather data from api"),
+        )
+        .expect("expected snippet");
+
+        assert!(
+            snippet.contains("weather api requires retry"),
+            "expected relevant memory to be selected: {snippet}"
+        );
+        assert!(
+            !snippet.contains("database migration"),
+            "irrelevant, more recent memory should not have been selected: {snippet}"
+        );
+    }
+
+    #[test]
+    fn snippet_includes_provenance_and_error_lesson_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        seed_memory(
+            &store,
+            "mem-error",
+            agent_id,
+            "digest.error_pattern",
+            "weather api call failed with 429 without retry",
+            "sess-errsession",
+            "2026-01-01T00:00:00Z",
+        );
+
+        let snippet = build_memory_context_snippet(
+            &store,
+            agent_id,
+            1,
+            Some("fetch weather data from api"),
+        )
+        .expect("expected snippet");
+
+        assert!(
+            snippet.contains("[from session sess-err"),
+            "expected provenance suffix: {snippet}"
+        );
+        assert!(
+            snippet.contains("(error lesson)"),
+            "expected error-lesson prefix: {snippet}"
+        );
+    }
+
+    #[test]
+    fn no_task_text_preserves_recency_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        seed_memory(
+            &store,
+            "mem-older",
+            agent_id,
+            "digest.fact",
+            "older fact about unrelated topic",
+            "sess-older-1",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_memory(
+            &store,
+            "mem-newer",
+            agent_id,
+            "digest.fact",
+            "newer fact about unrelated topic",
+            "sess-newer-2",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let snippet = build_memory_context_snippet(&store, agent_id, 2, None)
+            .expect("expected snippet");
+
+        let lines: Vec<&str> = snippet.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("newer fact") && lines[1].contains("older fact"),
+            "expected recency (newest first) order preserved when task_text is None: {snippet}"
+        );
     }
 }
