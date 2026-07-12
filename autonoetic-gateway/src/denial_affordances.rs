@@ -54,7 +54,9 @@ pub fn available_actions_for_rules(enforced_rules: &[String]) -> Vec<AvailableAc
         AvailableAction {
             action: "delegate".to_string(),
             description: delegate_description,
-            tool: Some("agent_discover".to_string()),
+            // The delegating tool is agent_spawn; the description points at
+            // agent_discover as the discovery step that precedes it.
+            tool: Some("agent_spawn".to_string()),
             clause: None,
             requires_capability: Some("AgentSpawn".to_string()),
         },

@@ -187,15 +187,29 @@ pub(crate) fn build_memory_context_snippet(
 ) -> Option<String> {
     let agent_tag = format!("agent:{agent_id}");
 
-    let agent_digests = store.search_memories_by_tags(
+    // `search_memories_by_tags` ORs its tags, so the two-tag queries below
+    // can return other agents' rows and crowd this agent's older-but-relevant
+    // memories out of the candidate pool — re-require the conjunction here.
+    let has_both = |m: &autonoetic_types::memory::MemoryObject, source_tag: &str| {
+        m.tags.iter().any(|t| t == agent_tag.as_str())
+            && m.tags.iter().any(|t| t == source_tag)
+    };
+
+    let agent_digests: Vec<_> = store.search_memories_by_tags(
         &[agent_tag.as_str(), "source:post_session_digest"],
         MEMORY_CANDIDATE_POOL,
-    ).ok().unwrap_or_default();
+    ).ok().unwrap_or_default()
+        .into_iter()
+        .filter(|m| has_both(m, "source:post_session_digest"))
+        .collect();
 
-    let agent_signals = store.search_memories_by_tags(
+    let agent_signals: Vec<_> = store.search_memories_by_tags(
         &[agent_tag.as_str(), "source:quality_signal"],
         MEMORY_CANDIDATE_POOL,
-    ).ok().unwrap_or_default();
+    ).ok().unwrap_or_default()
+        .into_iter()
+        .filter(|m| has_both(m, "source:quality_signal"))
+        .collect();
 
     let mut seen = std::collections::HashSet::new();
     let mut memories: Vec<_> = agent_digests
@@ -550,8 +564,9 @@ impl AgentExecutor {
         let config = self.config.as_ref()?;
         let agent_id = &self.manifest.agent.id;
         let limit = config.profile.memory_priming_limit();
-        // Config-absent test paths default to task-matched recall (true);
-        // an explicit `task_matched_recall: false` preserves pure recency.
+        // No config means no memory priming at all (early return above).
+        // With config present, `task_matched_recall` (default true) gates
+        // relevance ranking; an explicit `false` preserves pure recency.
         let task_matched = config.auto_learning.task_matched_recall;
         let task_text = task_matched
             .then_some(self.initial_user_message.as_str())
@@ -1138,6 +1153,42 @@ mod injected_recall_tests {
         assert!(
             snippet.contains("(error lesson)"),
             "expected error-lesson prefix: {snippet}"
+        );
+    }
+
+    #[test]
+    fn other_agents_digests_are_excluded_when_agent_has_own_memories() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        seed_memory(
+            &store,
+            "mem-own",
+            "coder.default",
+            "digest.lesson",
+            "own lesson about api retries",
+            "sess-own-1",
+            "2026-01-01T00:00:00Z",
+        );
+        // search_memories_by_tags ORs its tags, so without the conjunction
+        // re-filter this newer foreign row would enter the candidate pool.
+        seed_memory(
+            &store,
+            "mem-foreign",
+            "researcher.default",
+            "digest.lesson",
+            "foreign lesson about api retries",
+            "sess-foreign-1",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let snippet =
+            build_memory_context_snippet(&store, "coder.default", 5, Some("api retries"))
+                .expect("expected snippet");
+        assert!(snippet.contains("own lesson"), "own memory expected: {snippet}");
+        assert!(
+            !snippet.contains("foreign lesson"),
+            "another agent's digest must not appear: {snippet}"
         );
     }
 
