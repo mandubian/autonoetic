@@ -98,6 +98,13 @@ fn manifest(agent_id: &str) -> AgentManifest {
 }
 
 fn seed_agent_dir(base: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
+    // The executor binds the constitution version/digest into the per-turn
+    // state attestation tail (P-6.23) whenever a gateway_dir is set; this
+    // suite builds executors directly rather than through gateway bootstrap
+    // (which normally calls initialize_constitution). Best-effort, idempotent.
+    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    );
     let agent_dir = base.join(agent_id);
     std::fs::create_dir_all(agent_dir.join("history")).unwrap();
     std::fs::write(agent_dir.join("runtime.lock"), "dependencies: []\n").unwrap();
