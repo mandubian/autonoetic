@@ -49,6 +49,11 @@ pub struct AttestationInputs<'a> {
     /// without a ceiling). Empty when budgets are disabled or the
     /// session has not yet recorded any usage.
     pub budget_meters: Vec<BudgetMeter>,
+    /// RFC #778 Part D — pre-computed burn-rate forecast. The caller computes
+    /// this from `budget_meters` + `turn_counter` so this module stays pure
+    /// (no budget-registry dependency). `None` on turn 0 or when no token
+    /// budget is configured.
+    pub burn_rate: Option<BurnRateForecast>,
     /// Active constitution version label (e.g. `"2026.07.02"`). Bound into
     /// the signed block so non-retroactivity (Ri-0.10) is a verified per-turn
     /// fact, not an on-demand lookup. Fetched by the caller from
@@ -73,6 +78,30 @@ impl BudgetMeter {
     }
 }
 
+/// RFC #778 Part D — burn-rate forecast line in the P-6.23 attestation.
+///
+/// Pre-committed formula (no gateway judgment):
+/// - `tokens_per_turn` = `llm_tokens.used / turn_counter` (when turn > 0)
+/// - `remaining_tokens` = `limit - used` (when a token limit exists)
+/// - `projected_turns_remaining` = `remaining_tokens / tokens_per_turn`
+///
+/// Converts budget exhaustion from a cliff (P-7.18 degraded mode) into a
+/// re-planning trigger **while the agent still has tokens to re-plan with**.
+/// Refinement (RFC open question 5): per-role step-cost priors for
+/// heterogeneous plans — priors are config, the formula stays pre-committed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BurnRateForecast {
+    /// Average tokens consumed per turn so far (0 on turn 0).
+    pub tokens_per_turn: f64,
+    /// Remaining token budget (when a limit is configured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_tokens: Option<f64>,
+    /// How many more turns the agent can afford at the current burn rate
+    /// (when both a token limit and a nonzero burn rate exist).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projected_turns_remaining: Option<f64>,
+}
+
 /// The signed payload itself (the JSON object that gets hashed).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StateAttestationPayload {
@@ -93,6 +122,11 @@ pub struct StateAttestationPayload {
     pub pending_escalation_ids: Vec<String>,
     pub spawn_depth: u32,
     pub budget: Vec<BudgetMeter>,
+    /// RFC #778 Part D — burn-rate forecast computed from budget meters and
+    /// turn counter. `None` when there is not enough data (turn 0, no token
+    /// budget, or budgets disabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub burn_rate: Option<BurnRateForecast>,
     pub gateway_node_id: String,
     /// Active constitution version label (e.g. `"2026.07.02"`).
     pub constitution_version: String,
@@ -172,6 +206,7 @@ pub fn compose_and_sign(
         pending_escalation_ids: pending_esc_inline,
         spawn_depth,
         budget: inputs.budget_meters,
+        burn_rate: inputs.burn_rate,
         gateway_node_id: inputs.gateway_node_id.to_string(),
         constitution_version: inputs.constitution_version.to_string(),
         constitution_digest: inputs.constitution_digest.to_string(),
@@ -202,14 +237,16 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
     Ok(format!(
         "---\n\nGateway State Attestation (R++1)\n\n\
          The block below is signed by the gateway's identity key. It is the \
-         **authoritative** statement of your remaining budget, active \
-         capabilities, pending gates (approvals, user interactions, \
-         escalations), spawn depth, session ids, turn counter, and the \
-         constitution version + digest you are running under. If your own \
-         memory of these facts disagrees with the block, the block is \
-         correct. The constitution digest pins the exact law in force for \
-         this session; if it changes mid-session, the law under you \
-         changed.\n\n\
+          **authoritative** statement of your remaining budget, active \
+          capabilities, pending gates (approvals, user interactions, \
+          escalations), spawn depth, session ids, turn counter, burn-rate \
+          forecast, and the constitution version + digest you are running \
+          under. If your own memory of these facts disagrees with the block, \
+          the block is correct. The constitution digest pins the exact law \
+          in force for this session; if it changes mid-session, the law \
+          under you changed. The burn_rate field tells you how many turns \
+          you can afford at your current spending pace — re-plan before \
+          you hit the cliff.\n\n\
          <gateway_state_attestation>\n{body}\n</gateway_state_attestation>\n",
     ))
 }
@@ -348,6 +385,7 @@ mod tests {
                     used: 3.0,
                     limit: Some(20.0),
                 }],
+                burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
             },
@@ -387,6 +425,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
             },
@@ -420,6 +459,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
             },
@@ -455,6 +495,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
             },
@@ -485,6 +526,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
             },
@@ -516,6 +558,7 @@ mod tests {
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
             },
@@ -526,5 +569,55 @@ mod tests {
         let pub_bytes = key.public_key_bytes();
         let err = verify(&pub_bytes, &att).expect_err("tampered fingerprint must reject");
         assert!(err.to_string().contains("fingerprint mismatch"), "{}", err);
+    }
+
+    #[test]
+    fn burn_rate_forecast_included_in_signed_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let forecast = BurnRateForecast {
+            tokens_per_turn: 500.0,
+            remaining_tokens: Some(5000.0),
+            projected_turns_remaining: Some(10.0),
+        };
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "agent-1",
+                session_id: Some("root"),
+                root_session_id: Some("root"),
+                turn_counter: 10,
+                manifest: &manifest,
+                gateway_node_id: "node-a",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                budget_meters: vec![BudgetMeter {
+                    name: "llm_tokens".to_string(),
+                    used: 5000.0,
+                    limit: Some(10000.0),
+                }],
+                burn_rate: Some(forecast.clone()),
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+
+        // The forecast is inside the signed payload — tampering invalidates the sig.
+        assert_eq!(
+            att.payload.burn_rate.as_ref().unwrap().tokens_per_turn,
+            500.0
+        );
+        assert_eq!(
+            att.payload.burn_rate.as_ref().unwrap().projected_turns_remaining,
+            Some(10.0)
+        );
+
+        // Verify roundtrip preserves the forecast.
+        let pub_bytes = key.public_key_bytes();
+        let payload = verify(&pub_bytes, &att).expect("verify");
+        assert_eq!(payload.burn_rate, Some(forecast));
     }
 }
