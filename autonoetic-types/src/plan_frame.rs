@@ -105,6 +105,13 @@ pub struct PlanStep {
     pub notes: Option<String>,
     #[serde(default)]
     pub status: StepStatus,
+    /// RFC #777 Part C — capability type names this step requires (e.g.
+    /// `["NetworkAccess", "CodeExecution"]`). Declared by the planner so the
+    /// gateway can preflight coverage before budget is spent. Advisory: a
+    /// plan may legitimately include steps whose executor will be built
+    /// (agent-factory ladder). Empty = no preflight for this step.
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -751,6 +758,7 @@ mod tests {
                 agent_id: None,
                 notes: None,
                 status: StepStatus::Pending,
+                required_capabilities: vec![],
             }],
             validation_policy: ValidationPolicy::default(),
             capability_envelope: Vec::new(),
@@ -800,6 +808,7 @@ mod tests {
             agent_id: agent.map(str::to_string),
             notes: None,
             status: StepStatus::Pending,
+            required_capabilities: vec![],
         }
     }
 

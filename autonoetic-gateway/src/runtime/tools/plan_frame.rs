@@ -435,6 +435,7 @@ impl NativeTool for PlanFrameProposeTool {
             agent_id: Option<String>,
             depends_on: Option<Vec<String>>,
             notes: Option<String>,
+            required_capabilities: Option<Vec<String>>,
         }
 
         #[derive(Deserialize)]
@@ -512,6 +513,7 @@ impl NativeTool for PlanFrameProposeTool {
                 agent_id: s.agent_id,
                 notes: s.notes,
                 status: StepStatus::Pending,
+                required_capabilities: s.required_capabilities.unwrap_or_default(),
             })
             .collect();
 
@@ -1261,6 +1263,7 @@ impl NativeTool for PlanFrameAmendTool {
             agent_id: Option<String>,
             depends_on: Option<Vec<String>>,
             notes: Option<String>,
+            required_capabilities: Option<Vec<String>>,
             #[serde(default, alias = "status")]
             step_status: Option<String>,
         }
@@ -1420,9 +1423,10 @@ impl NativeTool for PlanFrameAmendTool {
                             agent_id,
                             notes,
                             status,
+                            required_capabilities: prev.map(|p| p.required_capabilities.clone()).unwrap_or_default(),
                         }
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             }
             (_, Some(updates)) => {
                 const VALID_STATUSES: &[&str] =
@@ -1479,9 +1483,10 @@ impl NativeTool for PlanFrameAmendTool {
                             agent_id: prev.agent_id.clone(),
                             notes,
                             status,
+                            required_capabilities: prev.required_capabilities.clone(),
                         }
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             }
             (None, None) => current.steps.clone(),
         };
