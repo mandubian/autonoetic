@@ -179,6 +179,14 @@ pub enum Capability {
     /// `docs/cognitive-capsule.md`.
     CapsuleExport,
 
+    /// Export one's *own* cognitive capsule via `capsule.export` (Ri-0.17:
+    /// emigration). A scoped companion to `CapsuleExport`: an agent holding
+    /// only this capability may export the capsule of `agent_id ==` its own
+    /// identity (`manifest.agent.id`), and no other. The broad `CapsuleExport`
+    /// remains the operator-grant path for exporting any agent. Not a default.
+    /// See `docs/cognitive-capsule.md`.
+    SelfCapsuleExport,
+
     /// Propose new wiki pages (docs) to be curated into the platform wiki.
     /// Writing durable documentation is a trust boundary — requires judgment.
     /// Only agents with this capability can call wiki.propose.
@@ -389,6 +397,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "budget.no_price_available.allow",
         "SecurityRedTeam",
         "CapsuleExport",
+        "SelfCapsuleExport",
         "PlanFrameAccess",
         "WikiContribute",
         "PromoteWith",
@@ -422,6 +431,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
         Capability::CapsuleExport => "CapsuleExport".to_string(),
+        Capability::SelfCapsuleExport => "SelfCapsuleExport".to_string(),
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
         Capability::WikiContribute => "WikiContribute".to_string(),
         Capability::PromoteWith { .. } => "PromoteWith".to_string(),
@@ -821,6 +831,7 @@ mod tests {
             Capability::BudgetNoPriceAvailableAllow,
             Capability::SecurityRedTeam,
             Capability::CapsuleExport,
+            Capability::SelfCapsuleExport,
             Capability::PlanFrameAccess { patterns: vec![] },
             Capability::WikiContribute,
             Capability::PromoteWith {

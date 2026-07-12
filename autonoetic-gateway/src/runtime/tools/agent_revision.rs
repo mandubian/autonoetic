@@ -1631,6 +1631,13 @@ fn capability_oneof_schema() -> serde_json::Value {
         },
         {
             "type": "object",
+            "description": "Export one's *own* cognitive capsule only (Ri-0.17 emigration); scoped to the caller's agent_id.",
+            "properties": { "type": { "const": "SelfCapsuleExport" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
             "description": "Propose new wiki pages to be curated into the platform wiki.",
             "properties": { "type": { "const": "WikiContribute" } },
             "required": ["type"],
@@ -5918,6 +5925,7 @@ mod capability_schema_tests {
             Capability::GithubIssueCreate { patterns: vec![] },
             Capability::SecurityRedTeam,
             Capability::CapsuleExport,
+            Capability::SelfCapsuleExport,
             Capability::WikiContribute,
             Capability::PlanFrameAccess { patterns: vec![] },
             Capability::PromoteWith { agent_id: String::new(), capabilities: vec![] },
