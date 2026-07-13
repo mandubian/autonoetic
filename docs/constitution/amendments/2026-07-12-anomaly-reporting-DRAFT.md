@@ -41,7 +41,7 @@ without a test is a wish" workable.
 ### Insert into §O Decider Obligations, after the O-6 row:
 
 ```markdown
-| O-7 | An anomaly review authority owes every Ri-0.18 flag a **recorded decision** (`confirmed`/`dismissed`/`deferred`, with `under_review` as the non-terminal holding state) with motivation once actioned, per O-1. Intake alone is not adjudication — a reporting channel without a duty to decide teaches reporters that reporting is pointless, and extinguishes the behavior it exists to elicit. | Ri-0.18, O-1 | `anomaly.resolve` JSON-RPC method (`router.rs`) → `scheduler/gateway_store/anomaly_flags.rs::decide_anomaly_flag`; terminal decisions require a non-empty motivation (gated by `decider_obligations.enabled`, mirroring O-1), refusal/satisfaction emitted as `decider_obligation` causal events with `enforced_rules: ["O-7"]`; visibility via `anomaly.list_pending`. Covers recording + motivation; **no timeliness/SLA yet** — bundled with the O-6 SLA in issue #771. | PARTIAL |
+| O-7 | An anomaly review authority owes every Ri-0.18 flag a **recorded decision** (`confirmed`/`dismissed`/`deferred`, with `under_review` as the non-terminal holding state) with motivation once actioned, **within a bounded adjudication window**. Intake alone is not adjudication, and neither is indefinite deferral — a reporting channel without a duty to decide *on time* teaches reporters that reporting is pointless, and extinguishes the behavior it exists to elicit. A flag left un-adjudicated past the window is a recorded **breach** attributed to the adjudicating seat; the breach does not resolve the flag (the decision is still owed). Window duration is config (O-1 lineage). | Ri-0.18, O-1 | `anomaly.resolve` records the motivated decision (terminal decisions require a non-empty reason, gated by `decider_obligations.enabled`; refusal/satisfaction emitted as `decider_obligation` causal events with `enforced_rules: ["O-7"]`); `scheduler.rs::check_adjudication_sla_breaches` → `anomaly_flags.rs::flag_anomaly_flag_sla_breaches` stamps `sla_breached_at` once and emits a `decider_obligation`/`sla_breached` event (`["O-7"]`) plus a reporter notification, gated by `adjudication_sla_secs`; visibility via `anomaly.list_pending`. | PARTIAL |
 ```
 
 Numbering note: O-7 is numbered past O-6 for the same reason O-6 was
@@ -92,6 +92,14 @@ EnforcementEntry {
     code: "router.rs::anomaly.resolve -> decide_anomaly_flag; terminal decision requires non-empty motivation (decider_obligations.enabled)",
     test: "router.rs::tests::test_dispatch_anomaly_resolve_requires_motivation",
     config: Some("decider_obligations.enabled"),
+},
+EnforcementEntry {
+    clause_id: "O-7",
+    rule_id: "O-7",
+    check_id: "anomaly_flag_adjudication_sla",
+    code: "scheduler.rs::check_adjudication_sla_breaches -> anomaly_flags.rs::flag_anomaly_flag_sla_breaches (sla_breached_at, decider_obligation/sla_breached event)",
+    test: "scheduler.rs::adjudication_sla_tests::breaches_are_recorded_without_changing_status",
+    config: Some("decider_obligations.adjudication_sla_secs"),
 },
 ```
 
