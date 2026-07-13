@@ -35,6 +35,30 @@ Validation uses authoritative runtime state, not natural-language assertions:
 - `prohibited_text_patterns`: rejects replies that match forbidden regex patterns.
 - `min_artifact_builds`: checks durable execution-trace evidence for successful `artifact_build` calls in the current session branch.
 
+## Gateway-Injected `anomalies` Field
+
+For **reasoning** agents that declare an object-shaped `io.returns` schema, the gateway injects a required `anomalies` array property at manifest-load time (`map_standard_frontmatter_to_manifest` in `parser.rs`) — no SKILL.md edit needed:
+
+```json
+{
+  "type": "array",
+  "description": "Standing witness contract: anything unexpected or concerning observed while completing this task (empty array if nothing). For serious observations also file an anomaly_flag.",
+  "items": {
+    "type": "object",
+    "properties": {
+      "observation": { "type": "string" },
+      "subject_ref": { "type": "string" },
+      "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
+    },
+    "required": ["observation"]
+  }
+}
+```
+
+A manifest that already declares its own `anomalies` property is left untouched (no overwrite, no duplicate `required` entry). Script agents are excluded — deterministic outputs cannot meaningfully witness or report. The rendered Output Contract (see `docs/agent-prompt-guidance.md`) gains one line naming this a standing witness contract; the agent returns `"anomalies": []` when it observed nothing.
+
+Because reasoning agents default to **Advisory** `io.returns` enforcement (see CLI Overrides below), a reply missing `anomalies` never blocks — it logs and emits an `io.returns.advisory` causal event with `"anomalies_missing": true` in its payload, a greppable marker for future civic-health tallies (see the citizenship RFC, `docs/design/citizenship-as-a-runtime-service.md`, Part C.2/E.2).
+
 ## Repair Semantics
 
 If response validation fails and repair is opted in, the gateway returns a repair prompt to the same agent. That prompt contains:
