@@ -2191,6 +2191,12 @@ pub struct LoopGuardConfig {
     /// progress). Set to 0 to disable.
     #[serde(default = "default_max_irrecoverable_repeats")]
     pub max_irrecoverable_repeats: u32,
+
+    /// RFC #776 Part B.4 — threshold for repeated spawn identity. When a
+    /// parent spawns the same agent with the same contract + input this
+    /// many times, the LoopGuard trips `RepeatedSpawnIdentity`. 0 disables.
+    #[serde(default = "default_max_spawn_identity_repeats")]
+    pub max_spawn_identity_repeats: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2222,6 +2228,7 @@ impl Default for LoopGuardConfig {
             recurring_error_window: default_recurring_error_window(),
             recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
             max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
+            max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
         }
     }
 }
@@ -2271,6 +2278,10 @@ fn default_recurring_error_distinct_tools() -> usize {
 }
 
 fn default_max_irrecoverable_repeats() -> u32 {
+    3
+}
+
+fn default_max_spawn_identity_repeats() -> u32 {
     3
 }
 
