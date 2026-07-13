@@ -1715,13 +1715,19 @@ pub fn check_output_contract(
 ) -> Vec<String> {
     expected_outputs
         .iter()
-        .filter(|expected| {
+        .filter_map(|expected| {
             let name = expected.trim();
-            !name.is_empty()
-                && !produced_content_names.iter().any(|p| p == name)
-                && !produced_artifact_files.iter().any(|p| p == name)
+            if name.is_empty()
+                || produced_content_names.iter().any(|p| p.as_str() == name)
+                || produced_artifact_files.iter().any(|p| p.as_str() == name)
+            {
+                None
+            } else {
+                // Return the trimmed name so the unmet list is self-consistent
+                // with the comparison logic (no whitespace-padding surprises).
+                Some(name.to_string())
+            }
         })
-        .cloned()
         .collect()
 }
 

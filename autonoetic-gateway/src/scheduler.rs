@@ -1858,9 +1858,23 @@ async fn spawn_task_execution(
             // is recorded on the task metadata so build_child_state_notification
             // can stamp OutputContractUnmet.
             {
-                if let Some(mut task) = workflow_store::load_task_run(
+                let task_result = workflow_store::load_task_run(
                     &cfg, store, &wf_id, &t_id,
-                ).unwrap_or(None) {
+                );
+                let task = match task_result {
+                    Ok(Some(t)) => Some(t),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "workflow",
+                            task_id = %t_id,
+                            error = %e,
+                            "Failed to load task for output contract check — enforcement skipped"
+                        );
+                        None
+                    }
+                };
+                if let Some(mut task) = task {
                     let expected: Vec<String> = task.metadata
                         .as_ref()
                         .and_then(|m| m.get("expected_outputs"))
@@ -1892,7 +1906,14 @@ async fn spawn_task_execution(
                             );
                         }
                         workflow_store::record_output_contract_check(&mut task, unmet);
-                        let _ = workflow_store::save_task_run(&cfg, store, &task);
+                        if let Err(e) = workflow_store::save_task_run(&cfg, store, &task) {
+                            tracing::warn!(
+                                target: "workflow",
+                                task_id = %t_id,
+                                error = %e,
+                                "Failed to persist output contract check — stamping may be skipped"
+                            );
+                        }
                     }
                 }
             }
