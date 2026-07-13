@@ -1423,7 +1423,8 @@ impl NativeTool for PlanFrameAmendTool {
                             agent_id,
                             notes,
                             status,
-                            required_capabilities: prev.map(|p| p.required_capabilities.clone()).unwrap_or_default(),
+                            required_capabilities: s.required_capabilities.clone()
+                                .unwrap_or_else(|| prev.map(|p| p.required_capabilities.clone()).unwrap_or_default()),
                         }
                     })
                     .collect::<Vec<_>>()

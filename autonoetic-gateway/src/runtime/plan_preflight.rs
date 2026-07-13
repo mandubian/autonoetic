@@ -24,8 +24,9 @@ pub struct PreflightFinding {
     pub step_id: String,
     pub agent_id: String,
     pub kind: PreflightKind,
-    /// The capability type names that are not covered (when `kind` is
-    /// `UncoveredCapabilities`). Empty for other kinds.
+    /// The capability type names that are not covered. Populated for both
+    /// `UncoveredCapabilities` (agent exists but lacks some) and
+    /// `AgentNotInstalled` (all required are uncovered). Empty for `Covered`.
     #[serde(default)]
     pub uncovered: Vec<String>,
     /// Human-readable detail for the operator/planner.
