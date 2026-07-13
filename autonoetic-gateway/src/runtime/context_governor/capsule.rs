@@ -604,6 +604,63 @@ impl super::ReductionStrategy for CapsuleStrategy {
         let injection_text = compile_capsule_injection(&capsule);
         let injection_msg = crate::llm::Message::system(injection_text);
 
+        // RFC #780 Part E.1: archive the full pre-compression message history
+        // to the content store BEFORE replacing it. The capsule itself is
+        // already persisted above (for structured audit); this archives the
+        // raw uncompressed messages so the exact pre-compression state can be
+        // restored. Sets `compressed_context_handle` on the metadata (previously
+        // always None — the helper existed at compression.rs:427 but was never
+        // called).
+        //
+        // Metadata is updated unconditionally when compression occurs — even
+        // if the archive write fails, the checkpoints must reflect that
+        // compression happened (compression_count, messages_summarized, turn).
+        // `compressed_context_handle` is set to the handle on success or None
+        // on failure, so the audit trail is honest about what was archived.
+        let compressible_count = compressible.len() as u64;
+        let mut archive_handle: Option<String> = None;
+        if let Some(ref dir) = self.gateway_dir {
+            match ContentStore::new(dir) {
+                Ok(store) => {
+                    match serde_json::to_vec(&ctx.history) {
+                        Ok(json) => {
+                            match store.write(&json) {
+                                Ok(handle) => {
+                                    let name = format!("compressed_context_turn_{}", ctx.turn_number);
+                                    if let Err(e) = store.register_name_with_visibility(
+                                        &ctx.session_id,
+                                        &name,
+                                        &handle,
+                                        ContentVisibility::Private,
+                                    ) {
+                                        tracing::warn!(target: "capsule", error = %e, "Failed to register compressed context name");
+                                    }
+                                    archive_handle = Some(handle);
+                                }
+                                Err(e) => tracing::warn!(target: "capsule", error = %e, "Failed to write compressed context to content store"),
+                            }
+                        }
+                        Err(e) => tracing::warn!(target: "capsule", error = %e, "Failed to serialize pre-compression history"),
+                    }
+                }
+                Err(e) => tracing::warn!(target: "capsule", error = %e, "Failed to open content store for pre-compression archive"),
+            }
+        }
+        // Update metadata unconditionally — compression IS happening
+        // regardless of whether the archive succeeded.
+        let meta = ctx.compression_metadata.get_or_insert_with(|| {
+            crate::runtime::compression::CompressionMetadata {
+                last_compression_turn: 0,
+                messages_summarized: 0,
+                compressed_context_handle: None,
+                compression_count: 0,
+            }
+        });
+        meta.compressed_context_handle = archive_handle;
+        meta.last_compression_turn = ctx.turn_number;
+        meta.messages_summarized = compressible_count;
+        meta.compression_count += 1;
+
         let mut new_history = Vec::with_capacity(kept.len() + 1);
         new_history.push(injection_msg);
         new_history.extend(kept.iter().cloned());
@@ -1099,5 +1156,79 @@ mod tests {
         assert!(!prompt.contains("operator/shared steps"));
         assert!(!prompt.contains("required validations"));
         assert!(!prompt.contains("advisory validations"));
+    }
+
+    // ---- RFC #780 Part E.1: pre-compression history archiving tests ----
+
+    #[test]
+    fn persist_compressed_context_writes_history_and_returns_handle() {
+        use crate::runtime::compression::CompressionMetadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path()).unwrap();
+        let history = vec![
+            crate::llm::Message::system("system prompt"),
+            crate::llm::Message::user("hello"),
+            crate::llm::Message::assistant("hi there"),
+        ];
+        let metadata = CompressionMetadata {
+            last_compression_turn: 5,
+            messages_summarized: 2,
+            compressed_context_handle: None,
+            compression_count: 1,
+        };
+
+        let handle = crate::runtime::compression::persist_compressed_context(
+            tmp.path(),
+            "test-session",
+            &history,
+            &metadata,
+        )
+        .unwrap();
+
+        assert!(handle.is_some(), "should return a content handle");
+        let handle = handle.unwrap();
+
+        // The content store should have the full history registered.
+        let name = "compressed_context_turn_5";
+        let resolved = store
+            .resolve_name("test-session", name)
+            .unwrap();
+        assert_eq!(resolved.to_string(), handle);
+    }
+
+    #[test]
+    fn persist_compressed_context_handle_is_round_trippable() {
+        use crate::runtime::compression::CompressionMetadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let history = vec![
+            crate::llm::Message::user("turn 1"),
+            crate::llm::Message::assistant("reply 1"),
+            crate::llm::Message::user("turn 2"),
+        ];
+        let metadata = CompressionMetadata {
+            last_compression_turn: 3,
+            messages_summarized: 3,
+            compressed_context_handle: None,
+            compression_count: 1,
+        };
+
+        let handle = crate::runtime::compression::persist_compressed_context(
+            tmp.path(),
+            "session-rt",
+            &history,
+            &metadata,
+        )
+        .unwrap()
+        .unwrap();
+
+        // Read back and verify the history round-trips.
+        let store = ContentStore::new(tmp.path()).unwrap();
+        let bytes = store.read(&handle).unwrap();
+        let restored: Vec<crate::llm::Message> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].content, "turn 1");
+        assert_eq!(restored[2].content, "turn 2");
     }
 }
