@@ -2273,6 +2273,14 @@ impl AgentExecutor {
                     Err(e) => {
                         self.guard.register_llm_failure();
                         let _ = tracer.log_llm_request_failed(&e);
+
+                        // RFC #779 Part E.2: only fail over on transient errors.
+                        // A 400/401/403 is deterministic — the same request to a
+                        // different provider will fail differently, not succeed.
+                        if !crate::llm::is_failover_eligible_error(&e) {
+                            return Err(e);
+                        }
+
                         if fallback_chain.is_empty() {
                             return Err(e);
                         }
@@ -2280,21 +2288,84 @@ impl AgentExecutor {
                             target: "autonoetic::model_routing",
                             original_model = %routed_model,
                             error = %e,
-                            "Primary model failed, trying fallback chain"
+                            "Primary model failed with transient error, trying fallback chain"
                         );
                         last_err = Some(e);
                         let mut final_response = None;
-                        for (_fb_preset, fb_provider, fb_model) in &fallback_chain {
-                            if *fb_provider != routed_llm_cfg.provider {
-                                continue;
-                            }
-                            let mut fallback_req = req.clone();
-                            fallback_req.model = fb_model.clone();
+                        for (fb_preset, fb_provider, fb_model) in &fallback_chain {
+                            // RFC #779 Part E.2: cross-provider failover is now
+                            // allowed. The same-provider restriction has been
+                            // removed — if the primary provider is down, the
+                            // whole point is to try a different one.
+                            //
+                            // The drivers use their own `provider.model`, not
+                            // `request.model`, so we must build a new driver
+                            // for each fallback entry. The preset name is the
+                            // key into `llm_presets` in the gateway config.
+                            let cross_provider = *fb_provider != routed_llm_cfg.provider;
                             tracing::info!(
                                 target: "autonoetic::model_routing",
                                 fallback_model = %fb_model,
+                                fallback_provider = %fb_provider,
+                                fallback_preset = %fb_preset,
+                                cross_provider = cross_provider,
                                 "Trying fallback model"
                             );
+
+                            // Build a driver for this fallback entry.
+                            let fb_driver = match self.config.as_ref() {
+                                Some(cfg) => {
+                                    let fb_config = cfg.llm_presets.get(fb_preset)
+                                        .map(|preset| autonoetic_types::agent::LlmConfig {
+                                            provider: preset.provider.clone().unwrap_or_else(|| fb_provider.clone()),
+                                            model: preset.model.clone().unwrap_or_else(|| fb_model.clone()),
+                                            temperature: preset.temperature.unwrap_or(0.0),
+                                            fallback_provider: None,
+                                            fallback_model: None,
+                                            chat_only: preset.chat_only.unwrap_or(false),
+                                            context_window_tokens: preset.context_window_tokens,
+                                            base_url: preset.base_url.clone(),
+                                            api_key_env: preset.api_key_env.clone(),
+                                            routing_preset: Some(fb_preset.clone()),
+                                            thinking: preset.thinking.clone(),
+                                        });
+                                    match fb_config {
+                                        Some(config) => {
+                                            match crate::llm::build_driver(
+                                                config,
+                                                self.http_client.clone(),
+                                            ) {
+                                                Ok(driver) => driver,
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        target: "autonoetic::model_routing",
+                                                        fallback_preset = %fb_preset,
+                                                        error = %e,
+                                                        "Failed to build fallback driver, skipping"
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                target: "autonoetic::model_routing",
+                                                fallback_preset = %fb_preset,
+                                                "Preset not found in llm_presets, skipping"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                None => {
+                                    tracing::warn!(
+                                        target: "autonoetic::model_routing",
+                                        "No gateway config available, cannot build fallback driver"
+                                    );
+                                    continue;
+                                }
+                            };
+
                             if let Err(e) = self
                                 .enforce_cost_catalog_preflight(fb_model, allow_unpriced_budget)
                                 .await
@@ -2314,7 +2385,7 @@ impl AgentExecutor {
                                     ));
                                 }
                             }
-                            match self.llm.complete(&fallback_req).await {
+                            match fb_driver.complete(&req).await {
                                 Ok(resp) => {
                                     tracing::info!(
                                         target: "autonoetic::model_routing",

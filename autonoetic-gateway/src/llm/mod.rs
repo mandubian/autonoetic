@@ -192,6 +192,83 @@ pub fn is_transient_server_error(status: u16, body: &str) -> bool {
     TRANSIENT_PHRASES.iter().any(|phrase| lc.contains(phrase))
 }
 
+/// RFC #779 Part E.2 — classify whether an error that escaped within-provider
+/// retry is eligible for **cross-provider failover**.
+///
+/// Only genuinely transient errors justify trying a different provider/model:
+/// a 400 (bad request), 401 (auth), or 403 (forbidden) is deterministic —
+/// the same request to a different provider will likely fail differently, not
+/// succeed. The within-provider retry already handled connection blips and
+/// transient 5xx; if the error reaches here, the provider is genuinely down
+/// or rate-limiting hard.
+///
+/// Eligible conditions:
+/// - HTTP 429 (rate limit / too many requests)
+/// - HTTP 5xx (server error) — already retried within provider, now try elsewhere
+/// - Connection-level failures (refused, reset, timeout)
+/// - Provider-specific "overloaded" signals (529, overloaded)
+///
+/// NOT eligible (deterministic errors):
+/// - 400/401/403 — bad request, auth failure, forbidden
+/// - Context overflow (handled separately by the context governor)
+/// - Validation / schema errors
+pub fn is_failover_eligible_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+
+    // Context overflow is handled separately by the context governor (P-6.9),
+    // not by provider failover — even if it arrives with a 5xx status.
+    if msg.contains("context_overflow")
+        || msg.contains("context window")
+        || msg.contains("context_length_exceeded")
+        || msg.contains("max_context_window_reached")
+        || msg.contains("resource_exhausted")
+    {
+        return false;
+    }
+
+    // Rate limiting
+    if msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("rate_limit")
+        || msg.contains("too many requests")
+    {
+        return true;
+    }
+
+    // Transient server errors (5xx) — already retried within provider
+    if msg.contains("500")
+        || msg.contains("502")
+        || msg.contains("503")
+        || msg.contains("504")
+        || msg.contains("529") // Anthropic overloaded
+        || msg.contains("overloaded")
+        || msg.contains("internal server error")
+        || msg.contains("bad gateway")
+        || msg.contains("service unavailable")
+        || msg.contains("gateway timeout")
+        || msg.contains("server_error")
+        || msg.contains("temporarily unavailable")
+    {
+        return true;
+    }
+
+    // Connection-level failures
+    if msg.contains("connection refused")
+        || msg.contains("connection reset")
+        || msg.contains("connection aborted")
+        || msg.contains("broken pipe")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("error sending request")
+        || msg.contains("dns error")
+        || msg.contains("name resolution")
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Retry decision for a transient server-error (HTTP 5xx) response.
 ///
 /// Returns `Some(wait_ms)` to retry after a backoff, or `None` to stop. Uses the
