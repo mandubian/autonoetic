@@ -685,6 +685,191 @@ impl JsonRpcRouter {
                     ),
                 }
             }
+            "anomaly.resolve" => {
+                // O-7 (future obligation, issue #770 part C.1): every
+                // anomaly flag is owed a recorded decision. Mirrors
+                // "constitution.resolve_proposal", plus a decider-obligation
+                // motivation requirement on terminal decisions (mirroring
+                // scheduler::approval::enforce_decider_motivation's
+                // presence-only semantics — never judges the reason's
+                // quality, only requires one be present).
+                #[derive(Deserialize)]
+                struct ResolveFlagParams {
+                    flag_id: String,
+                    decided_by: String,
+                    status: String,
+                    reason: Option<String>,
+                }
+                let params: ResolveFlagParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for anomaly.resolve: {}", e),
+                        );
+                    }
+                };
+                if params.flag_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "flag_id and decided_by must not be empty",
+                    );
+                }
+                if !crate::scheduler::gateway_store::anomaly_flags::FLAG_DECISION_STATUSES
+                    .contains(&params.status.as_str())
+                {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        format!(
+                            "Invalid status '{}'; expected one of {}",
+                            params.status,
+                            crate::scheduler::gateway_store::anomaly_flags::FLAG_DECISION_STATUSES
+                                .join(", "),
+                        ),
+                    );
+                }
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for anomaly.resolve",
+                    );
+                };
+                let flag = match store.get_anomaly_flag(&params.flag_id) {
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Anomaly flag '{}' not found", params.flag_id),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to look up anomaly flag: {}", e),
+                        );
+                    }
+                    Ok(Some(f)) => f,
+                };
+
+                let is_terminal =
+                    crate::scheduler::gateway_store::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
+                        .contains(&params.status.as_str());
+                let config = self.execution.config();
+                if is_terminal && config.decider_obligations.enabled {
+                    let has_reason = params
+                        .reason
+                        .as_deref()
+                        .map(|r| !r.trim().is_empty())
+                        .unwrap_or(false);
+                    if !has_reason {
+                        emit_anomaly_decider_obligation_event(
+                            &store,
+                            &flag,
+                            &params.decided_by,
+                            &params.status,
+                            "refused",
+                        );
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!(
+                                "§O decider obligation (O-7): recording anomaly flag '{}' as '{}' \
+                                 requires a motivation. Provide a non-empty reason and retry.",
+                                params.flag_id, params.status
+                            ),
+                        );
+                    }
+                }
+
+                match store.decide_anomaly_flag(
+                    &params.flag_id,
+                    &params.status,
+                    &params.decided_by,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(true) => {
+                        if is_terminal && config.decider_obligations.enabled {
+                            emit_anomaly_decider_obligation_event(
+                                &store,
+                                &flag,
+                                &params.decided_by,
+                                &params.status,
+                                "satisfied",
+                            );
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "flag_id": params.flag_id,
+                                "status": params.status,
+                                "decided_by": params.decided_by,
+                            }),
+                        )
+                    }
+                    Ok(false) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Anomaly flag '{}' not found", params.flag_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to resolve anomaly flag: {}", e),
+                    ),
+                }
+            }
+            "anomaly.list_pending" => {
+                // Visibility counterpart to anomaly.resolve, mirroring
+                // "constitution.list_pending_proposals".
+                #[derive(Deserialize)]
+                struct ListPendingFlagsParams {
+                    #[serde(default)]
+                    status: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let params: ListPendingFlagsParams = if req.params.is_null() {
+                    ListPendingFlagsParams { status: None, limit: None }
+                } else {
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for anomaly.list_pending: {}", e),
+                            );
+                        }
+                    }
+                };
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for anomaly.list_pending",
+                    );
+                };
+                let status_filter = params.status.as_deref().unwrap_or("pending");
+                match store.list_anomaly_flags(Some(status_filter), None, params.limit.unwrap_or(50))
+                {
+                    Ok(flags) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({ "flags": flags }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to list anomaly flags: {}", e),
+                    ),
+                }
+            }
             "interaction.answer" => {
                 let params: crate::interaction_answer::InteractionAnswerParams =
                     match serde_json::from_value(req.params) {
@@ -4418,6 +4603,46 @@ fn append_delegation_task_entry(
     )
 }
 
+/// Emit an `O-7`-tagged causal event recording the anomaly-flag decider
+/// obligation outcome (`decider_obligation.refused` / `…satisfied`), mirroring
+/// `scheduler::approval::emit_decider_obligation_event`'s shape so
+/// contract-health attributes it consistently once O-7 is signed. Best-effort:
+/// a store/emit failure must not change the decision outcome.
+fn emit_anomaly_decider_obligation_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    flag: &crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag,
+    decided_by: &str,
+    status: &str,
+    action: &str,
+) {
+    let now = chrono::Utc::now();
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: format!("aflag-obligation-{}", uuid::Uuid::new_v4()),
+        agent_id: flag.reporter_agent_id.clone(),
+        session_id: flag.reporter_session_id.clone().unwrap_or_default(),
+        turn_id: None,
+        event_seq: now.timestamp_millis().max(0) as u64,
+        timestamp: now.to_rfc3339(),
+        category: "decider_obligation".to_string(),
+        action: action.to_string(),
+        status: if action == "refused" { "error" } else { "success" }.to_string(),
+        enforced_rules: vec!["O-7".to_string()],
+        target: Some(flag.flag_id.clone()),
+        payload: Some(
+            serde_json::json!({
+                "flag_id": flag.flag_id,
+                "status": status,
+                "decided_by": decided_by,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(format!("§O (O-7) decider motivation {action}")),
+    };
+    let _ = store.create_causal_event(&event);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4684,6 +4909,176 @@ mod tests {
         };
         let resp = router.dispatch(req).await;
         assert!(resp.error.is_some(), "resolving an unknown proposal must error, not succeed");
+    }
+
+    fn sample_flag(flag_id: &str) -> crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag {
+        crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag {
+            flag_id: flag_id.to_string(),
+            reporter_agent_id: "witness.default".to_string(),
+            reporter_session_id: Some("witness-session".to_string()),
+            subject_ref: "sess-target-1".to_string(),
+            observation: "tool call bypassed policy check".to_string(),
+            evidence_json: serde_json::json!([]),
+            severity: "high".to_string(),
+            status: "pending".to_string(),
+            decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    // O-7 (future obligation, issue #770 part C.1): every anomaly flag is
+    // owed a recorded decision. These tests pin the adjudication path.
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_happy_path_with_reason() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_anomaly_flag(&sample_flag("aflag-1"))
+            .expect("insert should succeed");
+
+        let list_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp1".to_string(),
+            method: "anomaly.list_pending".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result = router
+            .dispatch(list_req)
+            .await
+            .result
+            .expect("list should return payload");
+        let flags = list_result["flags"].as_array().expect("flags array");
+        assert!(flags.iter().any(|f| f["flag_id"] == "aflag-1"));
+
+        let resolve_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "rf1".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "aflag-1",
+                "decided_by": "operator",
+                "status": "confirmed",
+                "reason": "verified via causal trace",
+            }),
+            auth_token: None,
+        };
+        let resolve_resp = router.dispatch(resolve_req).await;
+        assert!(resolve_resp.error.is_none(), "unexpected error: {:?}", resolve_resp.error);
+        let result = resolve_resp.result.expect("resolve should return payload");
+        assert_eq!(result["status"], "confirmed");
+        assert_eq!(result["decided_by"], "operator");
+
+        let list_req2 = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp2".to_string(),
+            method: "anomaly.list_pending".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result2 = router.dispatch(list_req2).await.result.unwrap();
+        let flags2 = list_result2["flags"].as_array().unwrap();
+        assert!(!flags2.iter().any(|f| f["flag_id"] == "aflag-1"));
+
+        let stored = store
+            .get_anomaly_flag("aflag-1")
+            .unwrap()
+            .expect("flag should still exist");
+        assert_eq!(stored.status, "confirmed");
+        assert_eq!(stored.decided_by.as_deref(), Some("operator"));
+        assert_eq!(stored.decision_reason.as_deref(), Some("verified via causal trace"));
+        assert!(stored.decided_at.is_some());
+
+        // O-7 decider-obligation event was emitted, tagged with the future rule id.
+        let events = store
+            .search_causal_events(None, None, 100)
+            .expect("search events");
+        let obligation = events
+            .iter()
+            .find(|e| e.category == "decider_obligation" && e.action == "satisfied")
+            .expect("decider_obligation.satisfied event exists");
+        assert_eq!(obligation.enforced_rules, vec!["O-7".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_rejects_unknown_status() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_anomaly_flag(&sample_flag("aflag-bad-status"))
+            .expect("insert should succeed");
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "bad".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "aflag-bad-status",
+                "decided_by": "operator",
+                "status": "maybe",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32602));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_not_found() {
+        let (_temp, router, _store) = test_router_with_store();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "nf".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "does-not-exist",
+                "decided_by": "operator",
+                "status": "confirmed",
+                "reason": "x",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert!(resp.error.is_some(), "resolving an unknown flag must error, not succeed");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_terminal_decision_without_reason_rejected() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_anomaly_flag(&sample_flag("aflag-no-reason"))
+            .expect("insert should succeed");
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "unmotivated".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "aflag-no-reason",
+                "decided_by": "operator",
+                "status": "dismissed",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        let err = resp.error.expect("unmotivated terminal decision must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("O-7"),
+            "error must cite the O-7 decider obligation: {}",
+            err.message
+        );
+
+        // Row must remain pending — the refusal must not have applied the decision.
+        let row = store.get_anomaly_flag("aflag-no-reason").unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+
+        // A refused decider-obligation event was emitted.
+        let events = store.search_causal_events(None, None, 100).expect("search events");
+        let obligation = events
+            .iter()
+            .find(|e| e.category == "decider_obligation" && e.action == "refused")
+            .expect("decider_obligation.refused event exists");
+        assert_eq!(obligation.enforced_rules, vec!["O-7".to_string()]);
     }
 
     #[tokio::test]

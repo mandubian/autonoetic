@@ -30,6 +30,7 @@ are in [`archived/`](archived/).
 
 ## Runtime, Storage, and Budgets
 
+- [`gateway-store-schema.md`](./gateway-store-schema.md) — **SQLite schema reference**: every table, column, owner module, relation, and usage status (audited against `migrate.rs`).
 - [`content-store.md`](./content-store.md) — Content addressing and visibility.
 - [`cognitive-capsule.md`](./cognitive-capsule.md) — Portable agent capsule export/import (implemented).
 - [`agent-learning.md`](./agent-learning.md) — Learning and memory retrieval.

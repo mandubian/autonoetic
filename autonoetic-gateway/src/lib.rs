@@ -12,6 +12,7 @@ pub mod causal_chain;
 pub mod config;
 pub mod constitution_digest;
 pub mod constitution_glossary;
+pub mod denial_affordances;
 pub mod enforcement_register;
 pub mod exec_request;
 pub mod execution;

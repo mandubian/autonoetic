@@ -95,6 +95,27 @@ impl std::fmt::Display for ToolErrorType {
     }
 }
 
+/// A lawful next move the agent can take from inside a denial itself:
+/// propose an amendment, delegate to a capable agent, or inspect itself.
+/// Static and pre-committed (Ri-0.3) — the gateway maps rule IDs to
+/// affordances mechanically, it never judges which move is "best".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AvailableAction {
+    /// Machine key: "propose_amendment" | "delegate" | "self_describe".
+    pub action: String,
+    /// One sentence, imperative.
+    pub description: String,
+    /// Exact tool name the agent can call, if one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Constitutional clause backing the affordance, e.g. "Ri-0.8".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clause: Option<String>,
+    /// Capability type name required, e.g. "ConstitutionalProposal".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_capability: Option<String>,
+}
+
 /// Structured tool error response for agent feedback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolError {
@@ -114,6 +135,11 @@ pub struct ToolError {
     /// Specific constitutional or policy rule IDs enforced for this error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enforced_rules: Vec<String>,
+    /// Lawful next moves available to the agent from inside this denial
+    /// (Ri-0.3 named rejection): propose an amendment, delegate, or inspect
+    /// itself. Populated mechanically from `enforced_rules`; never judged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_actions: Vec<AvailableAction>,
     /// Mechanical failure classification used by workflow orchestration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<FailureClass>,
@@ -157,6 +183,7 @@ impl ToolError {
             repair_hint,
             details,
             enforced_rules: Vec::new(),
+            available_actions: Vec::new(),
             failure_class: None,
             retry_advice: None,
             retryable: None,
@@ -245,6 +272,11 @@ impl ToolError {
 
     pub fn with_enforced_rules(mut self, enforced_rules: Vec<String>) -> Self {
         self.enforced_rules = enforced_rules;
+        self
+    }
+
+    pub fn with_available_actions(mut self, actions: Vec<AvailableAction>) -> Self {
+        self.available_actions = actions;
         self
     }
 
@@ -836,6 +868,32 @@ mod tests {
         let plain = ToolError::permission("denied");
         let v2: serde_json::Value = serde_json::from_str(&plain.to_json_string()).unwrap();
         assert!(v2.get("error").is_none(), "error code omitted when absent: {v2}");
+    }
+
+    #[test]
+    fn available_actions_serialize_when_present_and_omitted_when_absent() {
+        let action = AvailableAction {
+            action: "propose_amendment".to_string(),
+            description: "propose an amendment".to_string(),
+            tool: Some("constitution_propose_amendment".to_string()),
+            clause: Some("Ri-0.8".to_string()),
+            requires_capability: Some("ConstitutionalProposal".to_string()),
+        };
+        let with_actions = ToolError::permission("denied").with_available_actions(vec![action]);
+        let v: serde_json::Value = serde_json::from_str(&with_actions.to_json_string()).unwrap();
+        let actions = v["available_actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["action"], "propose_amendment");
+        assert_eq!(actions[0]["clause"], "Ri-0.8");
+
+        // Absent → key omitted entirely (additive, mirrors enforced_rules).
+        let without_actions = ToolError::permission("denied");
+        let v2: serde_json::Value =
+            serde_json::from_str(&without_actions.to_json_string()).unwrap();
+        assert!(
+            v2.get("available_actions").is_none(),
+            "available_actions omitted when empty: {v2}"
+        );
     }
 
     #[test]

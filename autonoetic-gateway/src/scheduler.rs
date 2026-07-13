@@ -2350,6 +2350,7 @@ async fn process_pending_notifications(
             }
             autonoetic_types::notification::NotificationType::AdminProposal => None,
             autonoetic_types::notification::NotificationType::ConstitutionalProposal => None,
+            autonoetic_types::notification::NotificationType::AnomalyFlag => None,
         };
 
         if let Some(signal) = signal {

@@ -456,6 +456,11 @@ pub struct AutoLearningConfig {
     /// Default: every 4 hours ("0 */4 * * *").
     #[serde(default = "default_curation_schedule")]
     pub curation_schedule: String,
+
+    /// Score wake-time memory priming (context.rs) against the incoming task
+    /// text (Jaccard token overlap) instead of pure recency. Default: true.
+    #[serde(default = "default_true")]
+    pub task_matched_recall: bool,
 }
 
 fn default_auto_learning_enabled() -> bool {
@@ -472,6 +477,7 @@ impl Default for AutoLearningConfig {
             enabled: default_auto_learning_enabled(),
             quality_signals: default_auto_learning_enabled(),
             curation_schedule: default_curation_schedule(),
+            task_matched_recall: default_true(),
         }
     }
 }

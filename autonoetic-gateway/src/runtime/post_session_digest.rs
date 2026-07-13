@@ -258,6 +258,9 @@ async fn apply_digest_output(
         let mut tags = m.tags.clone();
         tags.push("source:post_session_digest".to_string());
         tags.push(format!("session:{base}"));
+        // Without this, agent-scoped recall queries (context.rs) can only find
+        // this agent's own digests via the global fallback, not the scoped tag.
+        tags.push(format!("agent:{source_agent_id}"));
 
         let memory_id = digest_memory_id(base, session_id, idx, &m.content);
         let mut obj = MemoryObject::new(

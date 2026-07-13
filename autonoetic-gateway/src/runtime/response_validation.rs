@@ -1333,6 +1333,21 @@ impl GatewayExecutionService {
                     violations = %summary,
                     "response.validation.advisory: io.returns schema violations ignored (advisory mode)"
                 );
+                // Greppable marker for future civic-health tallies (#772): flag
+                // when the gateway-injected `anomalies` witness field (RFC C.2)
+                // is the (or a) missing-required violation.
+                let anomalies_missing = schema_violations
+                    .iter()
+                    .any(|v| v.message.contains("'anomalies'"));
+                let mut payload = serde_json::json!({
+                    "contract": "io.returns",
+                    "enforcement": "advisory",
+                    "result": "advisory_skip",
+                    "violations": schema_violations.iter().map(|v| &v.message).collect::<Vec<_>>(),
+                });
+                if anomalies_missing {
+                    payload["anomalies_missing"] = serde_json::json!(true);
+                }
                 log_contract_enforcement_event_to_gateway(
                     self.gateway_store().as_deref(),
                     agent_id,
@@ -1340,12 +1355,7 @@ impl GatewayExecutionService {
                     "io.returns.advisory",
                     EntryStatus::Success,
                     source_agent_id,
-                    serde_json::json!({
-                        "contract": "io.returns",
-                        "enforcement": "advisory",
-                        "result": "advisory_skip",
-                        "violations": schema_violations.iter().map(|v| &v.message).collect::<Vec<_>>(),
-                    }),
+                    payload,
                 );
             }
 

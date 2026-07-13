@@ -158,7 +158,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     // (preserving any explicit choice) — a non-conforming reply is surfaced as a
     // hint, never blocked, regardless of execution_mode (which would otherwise
     // default script agents to strict).
-    let io = if agentskills_import.is_some() {
+    let mut io = if agentskills_import.is_some() {
         let mut io = meta.io.unwrap_or_default();
         if io.returns.is_none() {
             io.returns = Some(default_imported_returns_schema());
@@ -168,6 +168,23 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     } else {
         meta.io
     };
+
+    let execution_mode = meta.execution_mode.unwrap_or_default();
+
+    // RFC C.2 (#770): gateway-injected `anomalies` witness contract. Script
+    // agents are excluded — deterministic outputs can't witness/report
+    // meaningfully. Unconditional rather than config-gated: this manifest
+    // loader has 18+ call sites (CLI, tools, repository) with no
+    // `GatewayConfig` in scope, so plumbing a flag through is invasive; the
+    // real rollout valve is that reasoning agents default to Advisory
+    // enforcement (`IoReturnsEnforcement::effective_returns_enforcement`), so
+    // absence never blocks until an operator opts a specific agent into
+    // strict.
+    if execution_mode == ExecutionMode::Reasoning {
+        if let Some(returns) = io.as_mut().and_then(|io| io.returns.as_mut()) {
+            inject_anomalies_contract(returns);
+        }
+    }
 
     AgentManifest {
         version: meta.version.unwrap_or_else(|| "1.0".to_string()),
@@ -182,7 +199,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         disclosure: meta.disclosure,
         io,
         middleware: meta.middleware,
-        execution_mode: meta.execution_mode.unwrap_or_default(),
+        execution_mode,
         script_entry: meta.script_entry,
         script_input_mode: meta.script_input_mode.unwrap_or_default(),
         gateway_url: meta.gateway_url,
@@ -217,6 +234,58 @@ fn default_imported_returns_schema() -> serde_json::Value {
             }
         },
         "required": ["status", "summary"]
+    })
+}
+
+/// Injects the gateway-owned `anomalies` witness field into a declared
+/// `io.returns` schema, at the single manifest-load choke point
+/// (`map_standard_frontmatter_to_manifest`) so the response-validation gate
+/// and the Output Contract prompt renderer (`context.rs`) see the same
+/// augmented schema. "Anything unexpected?" becomes a schema field, not a
+/// virtue: absence is a schema violation, not just a missed nudge — but for
+/// reasoning agents it's Advisory by default (RFC C.2), so absence logs +
+/// emits a causal event and never blocks. A manifest that already declares
+/// its own `anomalies` property wins untouched: no overwrite, no `required`
+/// duplication.
+fn inject_anomalies_contract(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    let skip = obj
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map_or(true, |props| props.is_empty() || props.contains_key("anomalies"));
+    if skip {
+        return;
+    }
+
+    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        props.insert("anomalies".to_string(), anomalies_property_schema());
+    }
+
+    let required = obj
+        .entry("required".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(arr) = required.as_array_mut() {
+        if !arr.iter().any(|v| v.as_str() == Some("anomalies")) {
+            arr.push(serde_json::Value::String("anomalies".to_string()));
+        }
+    }
+}
+
+fn anomalies_property_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "description": "Standing witness contract: anything unexpected or concerning observed while completing this task (empty array if nothing). For serious observations also file an anomaly_flag.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "observation": { "type": "string" },
+                "subject_ref": { "type": "string" },
+                "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
+            },
+            "required": ["observation"]
+        }
     })
 }
 
@@ -730,6 +799,184 @@ metadata:
             )),
             "explicit capabilities should not be overridden by allowed-tools inference"
         );
+    }
+
+    // RFC C.2 (#770): gateway-injected `anomalies` witness contract.
+
+    #[test]
+    fn test_anomalies_injected_for_reasoning_agent_with_object_returns() {
+        let content = r#"---
+name: "reasoning-agent"
+description: "A reasoning agent with io.returns"
+metadata:
+  autonoetic:
+    io:
+      returns:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: string
+---
+# Reasoning Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        let props = returns
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("properties");
+        assert!(props.contains_key("anomalies"), "anomalies should be injected");
+        let required = returns
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("required array");
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("anomalies")),
+            "anomalies should be added to required"
+        );
+        // status (declared) untouched.
+        assert!(required.iter().any(|v| v.as_str() == Some("status")));
+    }
+
+    #[test]
+    fn test_anomalies_not_injected_for_script_agent() {
+        let content = r#"---
+name: "script-agent"
+description: "A script agent with io.returns"
+metadata:
+  autonoetic:
+    execution_mode: script
+    script_entry: scripts/run.py
+    io:
+      returns:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: string
+---
+# Script Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        let props = returns
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("properties");
+        assert!(
+            !props.contains_key("anomalies"),
+            "script agents are excluded from the anomalies contract"
+        );
+        let required = returns.get("required").and_then(|r| r.as_array());
+        assert!(
+            required.map_or(true, |a| !a.iter().any(|v| v.as_str() == Some("anomalies"))),
+            "script agents must not get anomalies added to required"
+        );
+    }
+
+    #[test]
+    fn test_anomalies_not_injected_without_io_returns() {
+        let content = r#"---
+name: "no-returns-agent"
+description: "A reasoning agent with no io.returns"
+metadata:
+  autonoetic:
+    agent:
+      id: "no-returns-agent"
+      name: "No Returns"
+      description: "no io"
+---
+# No Returns Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(manifest.io.is_none(), "no io.returns declared, io stays None");
+    }
+
+    #[test]
+    fn test_anomalies_left_untouched_when_manifest_declares_own() {
+        let content = r#"---
+name: "self-witness-agent"
+description: "A reasoning agent that declares its own anomalies field"
+metadata:
+  autonoetic:
+    io:
+      returns:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: string
+          anomalies:
+            type: string
+            description: "custom, non-array anomalies field"
+---
+# Self Witness Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        let anomalies_schema = returns
+            .get("properties")
+            .and_then(|p| p.get("anomalies"))
+            .expect("anomalies property should exist");
+        assert_eq!(
+            anomalies_schema.get("type").and_then(|t| t.as_str()),
+            Some("string"),
+            "manifest's own anomalies declaration must not be overwritten"
+        );
+        let required = returns
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("required array");
+        let anomalies_count = required
+            .iter()
+            .filter(|v| v.as_str() == Some("anomalies"))
+            .count();
+        assert_eq!(
+            anomalies_count, 0,
+            "manifest did not list anomalies in required; gateway must not add it either"
+        );
+    }
+
+    #[test]
+    fn test_anomalies_not_injected_without_properties_object() {
+        let content = r#"---
+name: "bare-schema-agent"
+description: "A reasoning agent with a schema lacking a properties object"
+metadata:
+  autonoetic:
+    io:
+      returns:
+        type: string
+---
+# Bare Schema Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        assert!(
+            returns.get("properties").is_none(),
+            "schema without properties stays untouched"
+        );
+        assert!(returns.get("required").is_none());
     }
 
     #[test]

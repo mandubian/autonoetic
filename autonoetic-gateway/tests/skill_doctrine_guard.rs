@@ -60,6 +60,10 @@ const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
         "its rights bind the gateway as its rules bind you",
         "foundation_core.md §7 (community / social-contract framing)",
     ),
+    (
+        "standing witness contract",
+        "the io.returns Output Contract renderer (context.rs) — `anomalies` is gateway-injected (RFC C.2, #770), declare it in your own schema only if you need custom fields",
+    ),
 ];
 
 fn agents_root() -> PathBuf {

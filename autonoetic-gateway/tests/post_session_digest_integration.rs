@@ -189,6 +189,11 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         .memory_get_unrestricted(&ids[0])?
         .expect("memory must exist");
     assert!(m.content.contains("Always test digest"));
+    assert!(
+        m.tags.contains(&"agent:digest.agent".to_string()),
+        "digest memory must be tagged with its source agent: {:?}",
+        m.tags
+    );
     Ok(())
 }
 
