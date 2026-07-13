@@ -418,6 +418,9 @@ async fn async_main() -> anyhow::Result<()> {
                     *json,
                 )?;
             }
+            cli::common::TraceCommands::CivicHealth { since, json } => {
+                cli::trace::handle_trace_civic_health(&config_path, since.as_deref(), *json)?;
+            }
         },
 
         Commands::Room(args) => {

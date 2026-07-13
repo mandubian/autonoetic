@@ -2,6 +2,7 @@ use super::{GatewayStore, LiveDigestEventRecord, LIVE_DIGEST_BUFFER_CAPACITY};
 use anyhow::Result;
 use autonoetic_types::config::RetentionConfig;
 use rusqlite::params;
+use std::collections::BTreeMap;
 
 fn looks_like_fts_syntax(query: &str) -> bool {
     query
@@ -21,6 +22,26 @@ fn is_sqlite_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<rusqlite::Error>()
         .map(|e| matches!(e, rusqlite::Error::SqliteFailure(_, _)))
         .unwrap_or(false)
+}
+
+/// Per-agent tally for the **civic-health** view (#772 E.2). See
+/// [`GatewayStore::civic_health`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CivicHealthEntry {
+    pub agent_id: String,
+    pub proposals_filed: u64,
+    pub proposals_pending: u64,
+    pub flags_filed: u64,
+    pub flags_pending: u64,
+}
+
+/// Standing civic-health view: how often each agent exercises its civic
+/// affordances (constitutional proposals, anomaly flags), and how much of
+/// that is still awaiting a decision. See [`GatewayStore::civic_health`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CivicHealth {
+    /// Sorted by (proposals_filed + flags_filed) desc, then agent_id asc.
+    pub by_agent: Vec<CivicHealthEntry>,
 }
 
 impl GatewayStore {
@@ -412,6 +433,87 @@ impl GatewayStore {
         }
 
         Ok(crate::enforcement_register::contract_health(rule_ids))
+    }
+
+    /// Standing **civic-health** view (#772 E.2): the dual of contract-health.
+    /// Contract-health measures whether the *gateway* honors the law;
+    /// civic-health measures whether *agents* use it — tallying each agent's
+    /// constitutional proposals and anomaly flags, filed vs still-pending, so
+    /// both that agents exercise voice/witnessing and whether it is being
+    /// answered are visible in one view.
+    ///
+    /// `since` is an optional RFC3339 lower bound on `created_at`, compared
+    /// by absolute instant like `contract_health`; items whose own timestamp
+    /// fails to parse are kept rather than dropped.
+    pub fn civic_health(&self, since: Option<&str>) -> Result<CivicHealth> {
+        let since_dt = match since {
+            Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                anyhow::anyhow!("invalid `since` timestamp {ts:?}: {e} (expected RFC3339)")
+            })?),
+            None => None,
+        };
+
+        const CIVIC_SCAN_LIMIT: usize = 100_000;
+        let proposals = self.list_constitutional_proposals(None, None, CIVIC_SCAN_LIMIT)?;
+        let flags = self.list_anomaly_flags(None, None, CIVIC_SCAN_LIMIT)?;
+
+        let in_window = |ts: &str| -> bool {
+            match since_dt {
+                Some(bound) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                    Ok(dt) => dt >= bound,
+                    Err(_) => true,
+                },
+                None => true,
+            }
+        };
+
+        let mut by_agent: BTreeMap<String, CivicHealthEntry> = BTreeMap::new();
+
+        for p in proposals.into_iter().filter(|p| in_window(&p.created_at)) {
+            let entry = by_agent
+                .entry(p.proposer_agent_id.clone())
+                .or_insert_with(|| CivicHealthEntry {
+                    agent_id: p.proposer_agent_id.clone(),
+                    proposals_filed: 0,
+                    proposals_pending: 0,
+                    flags_filed: 0,
+                    flags_pending: 0,
+                });
+            entry.proposals_filed += 1;
+            if !super::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
+                .contains(&p.status.as_str())
+            {
+                entry.proposals_pending += 1;
+            }
+        }
+
+        for f in flags.into_iter().filter(|f| in_window(&f.created_at)) {
+            let entry = by_agent
+                .entry(f.reporter_agent_id.clone())
+                .or_insert_with(|| CivicHealthEntry {
+                    agent_id: f.reporter_agent_id.clone(),
+                    proposals_filed: 0,
+                    proposals_pending: 0,
+                    flags_filed: 0,
+                    flags_pending: 0,
+                });
+            entry.flags_filed += 1;
+            if !super::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES.contains(&f.status.as_str())
+            {
+                entry.flags_pending += 1;
+            }
+        }
+
+        let mut by_agent: Vec<CivicHealthEntry> = by_agent.into_values().collect();
+        by_agent.sort_by(|a, b| {
+            let a_total = a.proposals_filed + a.flags_filed;
+            let b_total = b.proposals_filed + b.flags_filed;
+            b_total
+                .cmp(&a_total)
+                .then_with(|| a.agent_id.cmp(&b.agent_id))
+        });
+
+        Ok(CivicHealth { by_agent })
     }
 
     /// List curator decision events (`category = 'curator'`, `action = 'decision'`)
@@ -1636,5 +1738,219 @@ mod sandbox_escape_timeline_tests {
         assert!(matches!(ev.role, SessionRole::Specialist { .. }));
         assert_eq!(ev.principal.id, "coder.default");
         assert!(ev.payload.as_deref().unwrap().contains("ptrace syscall"));
+    }
+}
+
+/// Civic-health view (#772 E.2): the dual of contract-health. Tallies each
+/// agent's constitutional proposals and anomaly flags, filed vs pending.
+#[cfg(test)]
+mod civic_health_tests {
+    use super::*;
+    use crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag;
+    use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
+    use tempfile::tempdir;
+
+    fn proposal(id: &str, proposer: &str, status: &str, created_at: &str) -> ConstitutionalProposal {
+        ConstitutionalProposal {
+            proposal_id: id.to_string(),
+            proposer_agent_id: proposer.to_string(),
+            proposer_session_id: None,
+            kind: "add_right".to_string(),
+            target_id: None,
+            proposed_text: Some("agents may do X".to_string()),
+            justification: "closes a gap".to_string(),
+            evidence_json: serde_json::json!({}),
+            status: status.to_string(),
+            operator_decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            published_in_release: None,
+            created_at: created_at.to_string(),
+        }
+    }
+
+    fn flag(id: &str, reporter: &str, status: &str, created_at: &str) -> AnomalyFlag {
+        AnomalyFlag {
+            flag_id: id.to_string(),
+            reporter_agent_id: reporter.to_string(),
+            reporter_session_id: None,
+            subject_ref: "sess-target".to_string(),
+            observation: "tool call bypassed policy check".to_string(),
+            evidence_json: serde_json::json!([]),
+            severity: "high".to_string(),
+            status: status.to_string(),
+            decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            created_at: created_at.to_string(),
+        }
+    }
+
+    /// Two agents with mixed proposal/flag statuses: filed totals count
+    /// every item; pending excludes terminal statuses but *includes*
+    /// `under_review` (a non-terminal review-start transition). A third,
+    /// more active agent proves the by-total-desc sort, and a tie between
+    /// the first two proves the agent-id-asc tiebreak.
+    #[test]
+    fn civic_health_tallies_filed_and_pending_by_agent() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        // alpha.agent: 1 proposal (under_review, non-terminal -> pending) +
+        // 2 flags (1 confirmed terminal, 1 pending non-terminal). total = 3.
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-alpha-1",
+                "alpha.agent",
+                "under_review",
+                "2026-05-01T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .insert_anomaly_flag(&flag(
+                "flag-alpha-1",
+                "alpha.agent",
+                "confirmed",
+                "2026-05-01T00:00:01Z",
+            ))
+            .unwrap();
+        store
+            .insert_anomaly_flag(&flag(
+                "flag-alpha-2",
+                "alpha.agent",
+                "pending",
+                "2026-05-01T00:00:02Z",
+            ))
+            .unwrap();
+
+        // beta.agent: 2 proposals (1 pending non-terminal, 1 approved
+        // terminal) + 1 flag (dismissed terminal). total = 3 (tie w/ alpha).
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-beta-1",
+                "beta.agent",
+                "pending",
+                "2026-05-01T00:00:03Z",
+            ))
+            .unwrap();
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-beta-2",
+                "beta.agent",
+                "approved",
+                "2026-05-01T00:00:04Z",
+            ))
+            .unwrap();
+        store
+            .insert_anomaly_flag(&flag(
+                "flag-beta-1",
+                "beta.agent",
+                "dismissed",
+                "2026-05-01T00:00:05Z",
+            ))
+            .unwrap();
+
+        // gamma.agent: 5 pending proposals, no flags. total = 5 (highest).
+        for i in 0..5 {
+            store
+                .insert_constitutional_proposal(&proposal(
+                    &format!("prop-gamma-{i}"),
+                    "gamma.agent",
+                    "pending",
+                    "2026-05-01T00:00:06Z",
+                ))
+                .unwrap();
+        }
+
+        let health = store.civic_health(None).unwrap();
+        assert_eq!(
+            health
+                .by_agent
+                .iter()
+                .map(|e| e.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gamma.agent", "alpha.agent", "beta.agent"],
+            "sorted by total-filed desc, ties broken by agent_id asc"
+        );
+
+        let alpha = health
+            .by_agent
+            .iter()
+            .find(|e| e.agent_id == "alpha.agent")
+            .unwrap();
+        assert_eq!(alpha.proposals_filed, 1);
+        assert_eq!(alpha.proposals_pending, 1); // under_review counts as pending
+        assert_eq!(alpha.flags_filed, 2);
+        assert_eq!(alpha.flags_pending, 1); // confirmed is terminal, pending is not
+
+        let beta = health
+            .by_agent
+            .iter()
+            .find(|e| e.agent_id == "beta.agent")
+            .unwrap();
+        assert_eq!(beta.proposals_filed, 2);
+        assert_eq!(beta.proposals_pending, 1);
+        assert_eq!(beta.flags_filed, 1);
+        assert_eq!(beta.flags_pending, 0); // dismissed is terminal
+
+        let gamma = health
+            .by_agent
+            .iter()
+            .find(|e| e.agent_id == "gamma.agent")
+            .unwrap();
+        assert_eq!(gamma.proposals_filed, 5);
+        assert_eq!(gamma.proposals_pending, 5);
+        assert_eq!(gamma.flags_filed, 0);
+        assert_eq!(gamma.flags_pending, 0);
+    }
+
+    /// `since` excludes an old item and includes a recent one, compared by
+    /// absolute instant like `contract_health`.
+    #[test]
+    fn civic_health_since_filters_by_absolute_instant() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-old",
+                "delta.agent",
+                "pending",
+                "2020-01-01T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-recent",
+                "delta.agent",
+                "pending",
+                "2026-06-01T00:00:00Z",
+            ))
+            .unwrap();
+
+        let health = store
+            .civic_health(Some("2025-01-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(health.by_agent.len(), 1);
+        assert_eq!(health.by_agent[0].proposals_filed, 1);
+        assert_eq!(health.by_agent[0].proposals_pending, 1);
+
+        let health_all = store.civic_health(None).unwrap();
+        assert_eq!(health_all.by_agent[0].proposals_filed, 2);
+    }
+
+    #[test]
+    fn civic_health_invalid_since_errors_clearly() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let err = store
+            .civic_health(Some("not-a-timestamp"))
+            .expect_err("invalid since must error");
+        assert!(
+            err.to_string().contains("invalid `since` timestamp"),
+            "unexpected error: {err}"
+        );
     }
 }
