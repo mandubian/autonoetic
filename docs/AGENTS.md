@@ -413,12 +413,27 @@ It takes no arguments, reports only your own self and the public constitution, a
 
 An agent can report unexpected or concerning behavior — its own, another agent's, or the gateway's — in a single call, **holding zero capabilities**: the agent most likely to witness misbehavior may be the least privileged in the room, so reporting must never be capability-gated.
 
+**Arguments:**
+
 | Field | Required | Description |
 |-------|----------|--------------|
 | `subject_ref` | Yes | What the observation is about: a session id, agent id, artifact ref, or tool-call ref |
 | `observation` | Yes | What you observed and why it is unexpected or concerning |
 | `evidence_refs` | No | Causal-event IDs, execution-trace IDs, or artifact refs supporting the observation |
 | `severity` | No | `low` / `medium` / `high` / `critical`, default `medium` |
+
+Example call:
+
+```json
+{
+  "subject_ref": "session-9f3a2b",
+  "observation": "Child evaluator reported pass=true but produced no test-execution trace.",
+  "evidence_refs": ["tr-7c1d99"],
+  "severity": "high"
+}
+```
+
+Response:
 
 ```json
 {
