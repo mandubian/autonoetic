@@ -204,39 +204,27 @@ impl GatewayStore {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        let ids: Vec<String> = {
-            let sql = format!(
-                "SELECT flag_id FROM anomaly_flags \
-                 WHERE sla_breached_at IS NULL \
-                   AND status NOT IN ({terminal_placeholders}) \
-                   AND created_at < ?"
-            );
-            let mut stmt = tx.prepare(&sql)?;
-            let mut param_vals: Vec<&dyn rusqlite::types::ToSql> = FLAG_TERMINAL_DECISION_STATUSES
-                .iter()
-                .map(|s| s as &dyn rusqlite::types::ToSql)
-                .collect();
-            param_vals.push(&cutoff);
-            let rows = stmt.query_map(param_vals.as_slice(), |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-
-        let mut breached = Vec::with_capacity(ids.len());
-        for id in &ids {
-            tx.execute(
-                "UPDATE anomaly_flags SET sla_breached_at = ?1 WHERE flag_id = ?2",
-                params![now_rfc3339, id],
-            )?;
-            let row = tx.query_row(
-                &format!("SELECT {FLAG_COLUMNS} FROM anomaly_flags WHERE flag_id = ?1"),
-                params![id],
-                row_to_flag,
-            )?;
-            breached.push(row);
+        // Single atomic UPDATE … RETURNING: `sla_breached_at IS NULL` in the
+        // WHERE clause guarantees stamp-once even under concurrent schedulers —
+        // only the caller whose UPDATE actually flips the row from NULL gets it
+        // back, so a breach fires exactly once (mirrors publish_approved_proposals).
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "UPDATE anomaly_flags SET sla_breached_at = ? \
+             WHERE sla_breached_at IS NULL \
+               AND status NOT IN ({terminal_placeholders}) \
+               AND created_at < ? \
+             RETURNING {FLAG_COLUMNS}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut param_vals: Vec<&dyn rusqlite::types::ToSql> = vec![&now_rfc3339];
+        for s in FLAG_TERMINAL_DECISION_STATUSES {
+            param_vals.push(s as &dyn rusqlite::types::ToSql);
         }
-        tx.commit()?;
+        param_vals.push(&cutoff);
+        let breached = stmt
+            .query_map(param_vals.as_slice(), row_to_flag)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(breached)
     }
 }
