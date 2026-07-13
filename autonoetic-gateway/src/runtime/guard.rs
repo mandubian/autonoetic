@@ -93,6 +93,17 @@ pub enum LoopGuardTripReason {
         error_hash: u64,
         occurrences: u32,
     },
+    /// Trip condition #10 — RFC #776 Part B.4: the parent has spawned the
+    /// same agent with the same structural identity (alias + contract hash +
+    /// input digest) `occurrences` times. Each spawn may have "succeeded"
+    /// (per-tool budget untouched), but the pattern is a delegation loop —
+    /// the parent is re-trying the same child hoping for a different result.
+    /// Graduated response: escalate to a human with the attempt history.
+    RepeatedSpawnIdentity {
+        agent_id: String,
+        identity_hash: u64,
+        occurrences: u32,
+    },
 }
 
 impl LoopGuardTripReason {
@@ -111,6 +122,9 @@ impl LoopGuardTripReason {
             }
             LoopGuardTripReason::RepeatedIrrecoverableRejection { .. } => {
                 "repeated_irrecoverable_rejection"
+            }
+            LoopGuardTripReason::RepeatedSpawnIdentity { .. } => {
+                "repeated_spawn_identity"
             }
         }
     }
@@ -144,6 +158,8 @@ impl LoopGuardTripReason {
             // Re-asking one gate that already gave a deterministic answer is
             // the single-tool sibling of NoMeaningfulProgress.
             LoopGuardTripReason::RepeatedIrrecoverableRejection { .. } => "P-7.7",
+            // RFC #776 Part B.4: delegation loop — same child, same contract.
+            LoopGuardTripReason::RepeatedSpawnIdentity { .. } => "P-7.19",
         }
     }
 }
@@ -235,6 +251,16 @@ pub struct LoopGuard {
     /// Not present in legacy `LoopGuard` snapshots; defaulted to `None`.
     #[serde(default)]
     pub trip_reason: Option<LoopGuardTripReason>,
+    /// Trip condition #10 — RFC #776 Part B.4: per-spawn-identity counts.
+    /// Keyed by `hash(agent_id + expected_outputs + message_digest)`.
+    /// When a count reaches `max_spawn_identity_repeats`, the guard trips
+    /// `RepeatedSpawnIdentity` — the parent is stuck re-spawning the same
+    /// child with the same contract. 0 disables the detector.
+    #[serde(default)]
+    pub spawn_identity_counts: HashMap<String, u32>,
+    /// Trip condition #10 — threshold for repeated spawn identity.
+    #[serde(default = "default_max_spawn_identity_repeats")]
+    pub max_spawn_identity_repeats: u32,
 }
 
 impl LoopGuard {
@@ -264,6 +290,8 @@ impl LoopGuard {
             irrecoverable_repeat_counts: HashMap::new(),
             max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             trip_reason: None,
+            spawn_identity_counts: HashMap::new(),
+            max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -294,8 +322,10 @@ impl LoopGuard {
             recurring_error_window: cfg.recurring_error_window,
             recurring_error_distinct_tools: cfg.recurring_error_distinct_tools,
             irrecoverable_repeat_counts: HashMap::new(),
-            max_irrecoverable_repeats: cfg.max_irrecoverable_repeats,
+            max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             trip_reason: None,
+            spawn_identity_counts: HashMap::new(),
+            max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -469,6 +499,44 @@ impl LoopGuard {
         self.current_loops = self
             .current_loops
             .saturating_add(self.child_failure_loop_penalty);
+    }
+
+    /// RFC #776 Part B.4 — register a spawn attempt with its structural
+    /// identity. Returns `Some(LoopGuardTripReason)` when the identity has
+    /// been spawned `max_spawn_identity_repeats` times — the caller should
+    /// emit a causal event and escalate. No-ops when the detector is
+    /// disabled (`max_spawn_identity_repeats == 0`) or the guard has tripped.
+    ///
+    /// Structural identity = `hash(agent_id + expected_outputs + message)`.
+    /// Start strict (trivial input rewording evades it) — measure evasion
+    /// before loosening (RFC open question 3).
+    pub fn register_spawn_attempt(
+        &mut self,
+        agent_id: &str,
+        expected_outputs: &[String],
+        message: &str,
+    ) -> Option<LoopGuardTripReason> {
+        if self.max_spawn_identity_repeats == 0 || self.trip_reason.is_some() {
+            return None;
+        }
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&agent_id, &mut hasher);
+        std::hash::Hash::hash(&expected_outputs, &mut hasher);
+        std::hash::Hash::hash(&message, &mut hasher);
+        let identity_hash = std::hash::Hasher::finish(&hasher);
+        let key = format!("{agent_id}:{identity_hash}");
+
+        let count = self.spawn_identity_counts.entry(key).and_modify(|c| *c += 1).or_insert(1);
+        if *count >= self.max_spawn_identity_repeats {
+            self.trip_reason = Some(LoopGuardTripReason::RepeatedSpawnIdentity {
+                agent_id: agent_id.to_string(),
+                identity_hash,
+                occurrences: *count,
+            });
+            return self.trip_reason.clone();
+        }
+        None
     }
 
     /// Track an error tool-result for the recurring-unrecoverable-error
@@ -748,6 +816,8 @@ impl Default for LoopGuard {
             irrecoverable_repeat_counts: HashMap::new(),
             max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             trip_reason: None,
+            spawn_identity_counts: HashMap::new(),
+            max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -839,6 +909,20 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
             tool,
             occurrences
         ),
+        LoopGuardTripReason::RepeatedSpawnIdentity {
+            agent_id,
+            occurrences,
+            ..
+        } => anyhow::anyhow!(
+            "LoopGuard tripped: spawned '{}' with the same structural identity \
+             (agent + contract + input) {} times. Each spawn may have succeeded, \
+             but the delegation is looping — the same child cannot produce a \
+             different result from the same input. Change something structural: \
+             re-delegate to a differently-skilled agent, decompose smaller, relax \
+             the contract, or escalate (RFC #776 Part B.4).",
+            agent_id,
+            occurrences
+        ),
     }
 }
 
@@ -871,6 +955,12 @@ fn default_recurring_error_distinct_tools() -> usize {
 }
 
 fn default_max_irrecoverable_repeats() -> u32 {
+    3
+}
+
+/// RFC #776 Part B.4 — default threshold for repeated spawn identity.
+/// 3 spawns of the same agent with the same contract + input → trip.
+fn default_max_spawn_identity_repeats() -> u32 {
     3
 }
 
@@ -2058,5 +2148,65 @@ mod tests {
         assert_eq!(guard.current_loops, 4, "outer current_loops must be preserved");
         assert!(!guard.repair_mode);
         assert_eq!(guard.repair_loops, 0);
+    }
+
+    // ---- RFC #776 Part B.4: spawn identity tracking tests ----
+
+    #[test]
+    fn spawn_identity_does_not_trip_below_threshold() {
+        let mut guard = LoopGuard::new(5);
+        let expected = vec!["main.py".to_string()];
+        assert!(guard
+            .register_spawn_attempt("coder.default", &expected, "build the thing")
+            .is_none());
+        assert!(guard
+            .register_spawn_attempt("coder.default", &expected, "build the thing")
+            .is_none());
+    }
+
+    #[test]
+    fn spawn_identity_trips_at_threshold() {
+        let mut guard = LoopGuard::new(5);
+        let expected = vec!["main.py".to_string()];
+        guard.register_spawn_attempt("coder.default", &expected, "build the thing");
+        guard.register_spawn_attempt("coder.default", &expected, "build the thing");
+        let trip = guard.register_spawn_attempt("coder.default", &expected, "build the thing");
+        assert!(trip.is_some());
+        assert!(matches!(
+            trip.unwrap(),
+            LoopGuardTripReason::RepeatedSpawnIdentity { agent_id, occurrences: 3, .. }
+                if agent_id == "coder.default"
+        ));
+    }
+
+    #[test]
+    fn spawn_identity_different_input_does_not_trip() {
+        let mut guard = LoopGuard::new(5);
+        let expected = vec!["main.py".to_string()];
+        guard.register_spawn_attempt("coder.default", &expected, "build version 1");
+        guard.register_spawn_attempt("coder.default", &expected, "build version 2");
+        let trip = guard.register_spawn_attempt("coder.default", &expected, "build version 3");
+        assert!(trip.is_none(), "different input = different identity");
+    }
+
+    #[test]
+    fn spawn_identity_different_agent_does_not_trip() {
+        let mut guard = LoopGuard::new(5);
+        let expected = vec!["main.py".to_string()];
+        guard.register_spawn_attempt("coder.default", &expected, "build the thing");
+        let trip = guard.register_spawn_attempt("researcher.default", &expected, "build the thing");
+        assert!(trip.is_none(), "different agent = different identity");
+    }
+
+    #[test]
+    fn spawn_identity_disabled_when_threshold_zero() {
+        let mut guard = LoopGuard::new(5);
+        guard.max_spawn_identity_repeats = 0;
+        let expected = vec!["main.py".to_string()];
+        for _ in 0..10 {
+            assert!(guard
+                .register_spawn_attempt("coder.default", &expected, "same")
+                .is_none());
+        }
     }
 }

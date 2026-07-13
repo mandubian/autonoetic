@@ -1851,6 +1851,52 @@ async fn spawn_task_execution(
                     format!("{}…", safe)
                 }
             });
+
+            // RFC #776 Part B.1: existence check — verify declared
+            // expected_outputs resolve to produced content/artifact handles.
+            // Existence only, never quality (invariant 5). The check result
+            // is recorded on the task metadata so build_child_state_notification
+            // can stamp OutputContractUnmet.
+            {
+                if let Some(mut task) = workflow_store::load_task_run(
+                    &cfg, store, &wf_id, &t_id,
+                ).unwrap_or(None) {
+                    let expected: Vec<String> = task.metadata
+                        .as_ref()
+                        .and_then(|m| m.get("expected_outputs"))
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect())
+                        .unwrap_or_default();
+
+                    if !expected.is_empty() {
+                        let content_names: Vec<String> = spawn_result.files
+                            .iter()
+                            .map(|f| f.name.clone())
+                            .collect();
+                        let artifact_files: Vec<String> = spawn_result.artifacts
+                            .iter()
+                            .flat_map(|a| a.files.iter().cloned())
+                            .collect();
+                        let unmet = workflow_store::check_output_contract(
+                            &expected, &content_names, &artifact_files,
+                        );
+                        if !unmet.is_empty() {
+                            tracing::info!(
+                                target: "workflow",
+                                task_id = %t_id,
+                                unmet = ?unmet,
+                                expected = ?expected,
+                                "Output contract check: some expected outputs missing"
+                            );
+                        }
+                        workflow_store::record_output_contract_check(&mut task, unmet);
+                        let _ = workflow_store::save_task_run(&cfg, store, &task);
+                    }
+                }
+            }
+
             if let Err(e) = workflow_store::update_task_run_status(
                 &cfg,
                 store,

@@ -1702,6 +1702,49 @@ fn child_state_event_type(status: TaskRunStatus) -> Option<&'static str> {
     }
 }
 
+/// RFC #776 Part B.1 — compute whether declared `expected_outputs` are
+/// covered by the child's actual production. Purely mechanical: checks
+/// name existence against content files and artifact file lists, never
+/// quality (invariant 5: check existence, not truth).
+///
+/// Returns the list of unmet output names (empty = all covered).
+pub fn check_output_contract(
+    expected_outputs: &[String],
+    produced_content_names: &[String],
+    produced_artifact_files: &[String],
+) -> Vec<String> {
+    expected_outputs
+        .iter()
+        .filter(|expected| {
+            let name = expected.trim();
+            !name.is_empty()
+                && !produced_content_names.iter().any(|p| p == name)
+                && !produced_artifact_files.iter().any(|p| p == name)
+        })
+        .cloned()
+        .collect()
+}
+
+/// RFC #776 Part B.1 — record the output contract check result on a task's
+/// metadata so `build_child_state_notification` can stamp
+/// `OutputContractUnmet`. Called by the scheduler after child completion,
+/// before `update_task_run_status`.
+pub fn record_output_contract_check(
+    task: &mut TaskRun,
+    unmet: Vec<String>,
+) {
+    let metadata = task.metadata.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "output_contract_check".to_string(),
+            serde_json::json!({
+                "unmet": unmet,
+                "checked_at": now_rfc3339(),
+            }),
+        );
+    }
+}
+
 fn build_child_state_notification(
     task: &TaskRun,
     status: TaskRunStatus,
@@ -1720,6 +1763,36 @@ fn build_child_state_notification(
     };
 
     let mut failure_class = task_failure.and_then(|failure| failure.failure_class);
+
+    // RFC #776 Part B.1: check if the output contract was unmet. The
+    // scheduler records the check result in the task metadata before
+    // calling update_task_run_status. If any declared expected_outputs
+    // are missing, stamp OutputContractUnmet (no blind retry — invariant 1).
+    if matches!(status, TaskRunStatus::Succeeded) && failure_class.is_none() {
+        if let Some(unmet) = task
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("output_contract_check"))
+            .and_then(|v| v.get("unmet"))
+            .and_then(|v| v.as_array())
+            .filter(|arr| !arr.is_empty())
+        {
+            let names: Vec<String> = unmet
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if !names.is_empty() {
+                tracing::info!(
+                    target: "workflow",
+                    task_id = %task.task_id,
+                    unmet = ?names,
+                    "Output contract unmet — stamping failure_class"
+                );
+                failure_class =
+                    Some(autonoetic_types::tool_error::FailureClass::OutputContractUnmet);
+            }
+        }
+    }
 
     // RFC #775 Part A: detect "gave up" — child succeeded but produced no
     // recognizable result or account. This is distinct from Unknown (an
@@ -6649,5 +6722,55 @@ mod tests {
         assert_eq!(meta.failure_class, Some(FailureClass::ChildGaveUp));
         assert_eq!(meta.retry_advice, Some(RetryAdvice::DoNotRetry));
         assert_eq!(meta.retryable, Some(false));
+    }
+
+    // ---- RFC #776 Part B.1: output contract existence check tests ----
+
+    #[test]
+    fn check_output_contract_all_covered() {
+        let expected = vec!["main.py".to_string(), "SKILL.md".to_string()];
+        let produced = vec!["main.py".to_string(), "SKILL.md".to_string()];
+        let unmet = check_output_contract(&expected, &produced, &[]);
+        assert!(unmet.is_empty());
+    }
+
+    #[test]
+    fn check_output_contract_finds_missing() {
+        let expected = vec!["main.py".to_string(), "SKILL.md".to_string(), "tests.py".to_string()];
+        let produced = vec!["main.py".to_string()];
+        let unmet = check_output_contract(&expected, &produced, &[]);
+        assert_eq!(unmet, vec!["SKILL.md".to_string(), "tests.py".to_string()]);
+    }
+
+    #[test]
+    fn check_output_contract_covers_artifact_files() {
+        let expected = vec!["handler.py".to_string()];
+        let content = vec![];
+        let artifacts = vec!["handler.py".to_string(), "utils.py".to_string()];
+        let unmet = check_output_contract(&expected, &content, &artifacts);
+        assert!(unmet.is_empty(), "expected output found in artifact files");
+    }
+
+    #[test]
+    fn check_output_contract_empty_expected_is_clean() {
+        let unmet = check_output_contract(&[], &["main.py".to_string()], &[]);
+        assert!(unmet.is_empty());
+    }
+
+    #[test]
+    fn notification_stamps_output_contract_unmet_from_metadata() {
+        let mut task = dummy_task();
+        task.metadata = Some(serde_json::json!({
+            "output_contract_check": {
+                "unmet": ["missing_file.py"],
+            }
+        }));
+        let notif = build_child_state_notification(
+            &task,
+            TaskRunStatus::Succeeded,
+            Some("{\"status\":\"ok\"}"),
+            None,
+        );
+        assert_eq!(notif.failure_class, Some(FailureClass::OutputContractUnmet));
     }
 }
