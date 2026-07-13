@@ -653,6 +653,40 @@ impl AgentExecutor {
             .transpose()?
             .unwrap_or_default();
 
+        // #772 A.2: surface this agent's own still-pending constitutional
+        // proposals and anomaly flags in its signed per-turn block —
+        // "voice with amnesia is no voice". Mirrors the pending_escalation_ids
+        // gathering above.
+        let (pending_proposal_ids, pending_flag_ids) = match self.gateway_store.as_deref() {
+            Some(store) => {
+                let proposals = store
+                    .list_constitutional_proposals(None, Some(&self.manifest.agent.id), 64)
+                    .unwrap_or_default();
+                let flags = store
+                    .list_anomaly_flags(None, Some(&self.manifest.agent.id), 64)
+                    .unwrap_or_default();
+                (
+                    proposals
+                        .into_iter()
+                        .filter(|p| {
+                            !crate::scheduler::gateway_store::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
+                                .contains(&p.status.as_str())
+                        })
+                        .map(|p| p.proposal_id)
+                        .collect(),
+                    flags
+                        .into_iter()
+                        .filter(|f| {
+                            !crate::scheduler::gateway_store::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
+                                .contains(&f.status.as_str())
+                        })
+                        .map(|f| f.flag_id)
+                        .collect(),
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+
         let budget_meters = self.snapshot_budget_meters();
 
         // RFC #778 Part D: compute burn-rate forecast from the budget meters
@@ -683,6 +717,8 @@ impl AgentExecutor {
                 pending_approval_ids,
                 pending_user_interaction_ids,
                 pending_escalation_ids,
+                pending_proposal_ids,
+                pending_flag_ids,
                 budget_meters,
                 burn_rate,
                 constitution_version: &constitution_version,
