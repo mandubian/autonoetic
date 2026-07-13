@@ -129,6 +129,38 @@ impl WorkflowFailureMetadata {
         }
     }
 
+    /// RFC #775/#776 Part B: declared `expected_outputs` missing at child
+    /// completion. The child ran to completion but did not produce what the
+    /// parent declared it would. No blind retry — invariant 1: retrying
+    /// identical spawn against an unmet output contract is provably futile.
+    /// Parent must change something structural (re-delegate, decompose,
+    /// relax, or escalate) before any respawn.
+    fn output_contract_unmet() -> Self {
+        Self {
+            failure_class: Some(FailureClass::OutputContractUnmet),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
+            requires_external_event: Some(false),
+            requires_human: Some(false),
+            side_effect_state: Some(SideEffectState::Unknown),
+        }
+    }
+
+    /// RFC #775 Part A: child session ended cleanly but produced no
+    /// recognizable result or account. Distinct from `Unknown` (which is an
+    /// unclassifiable error) — this is a child that gave up silently.
+    /// No retry; counts toward the parent loop guard (Part B.4).
+    fn child_gave_up() -> Self {
+        Self {
+            failure_class: Some(FailureClass::ChildGaveUp),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
+            requires_external_event: Some(false),
+            requires_human: Some(false),
+            side_effect_state: Some(SideEffectState::Unknown),
+        }
+    }
+
     pub(crate) fn apply_to_tool_error(&self, tool_error: &mut ToolError) {
         if tool_error.failure_class.is_none() {
             tool_error.failure_class = self.failure_class;
@@ -419,6 +451,10 @@ pub(crate) fn metadata_for_failure_class(failure_class: FailureClass) -> Workflo
         FailureClass::Timeout => WorkflowFailureMetadata::timeout(),
         FailureClass::TransientInfra => WorkflowFailureMetadata::transient_infra(),
         FailureClass::SchemaValidationFailed => WorkflowFailureMetadata::schema_validation_failed(),
+        FailureClass::OutputContractUnmet => {
+            WorkflowFailureMetadata::output_contract_unmet()
+        }
+        FailureClass::ChildGaveUp => WorkflowFailureMetadata::child_gave_up(),
         FailureClass::AwaitingUserInput
         | FailureClass::ArtifactInvalid
         | FailureClass::DependencyMissing

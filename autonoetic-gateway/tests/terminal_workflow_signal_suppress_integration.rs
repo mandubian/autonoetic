@@ -83,6 +83,7 @@ async fn signal_to_terminal_workflow_is_suppressed_and_consumed() -> anyhow::Res
                 install_conflict_detail: None,
                 retry_advice: None,
                 side_effect_state: None,
+                agent_outcome: None,
                 summary: Some("done".to_string()),
             },
             message: "child completed after workflow terminal".to_string(),

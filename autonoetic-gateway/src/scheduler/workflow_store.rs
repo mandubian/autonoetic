@@ -65,8 +65,19 @@ pub(crate) fn retry_policy_from_metadata(
 }
 
 /// Gateway default retry policy for spawned child tasks when the spawner did
-/// not provide one. Only covers transient infrastructure failures and timeouts,
-/// with a small blast radius (one retry each).
+/// not provide one. Only genuinely transient failure kinds auto-retry —
+/// everything else requires parent action (RFC #775 Part A taxonomy):
+///
+/// | FailureClass          | Auto-retry? | Rationale                                  |
+/// |-----------------------|-------------|--------------------------------------------|
+/// | `transient_infra`     | 1 attempt   | Provider 5xx, rate limit — likely recovers |
+/// | `timeout`             | 1 attempt   | May be a transient slow-down               |
+/// | `schema_validation_*` | 0 (parent)  | Parent should repair payload               |
+/// | `policy_denied`       | 0 (parent)  | Capability gap — re-delegate/escalate      |
+/// | `output_contract_*`   | 0 (parent)  | No blind retry (RFC invariant 1)           |
+/// | `child_gave_up`       | 0 (parent)  | Silent failure — parent must investigate   |
+/// | `install_conflict`    | 0 (parent)  | State conflict — operator resolution       |
+/// | all others            | 0           | Unknown — escalate to parent               |
 pub(crate) fn default_child_retry_policy() -> Option<serde_json::Value> {
     Some(serde_json::json!({
         "transient_infra": { "max_retries": 1 },
@@ -1697,7 +1708,32 @@ fn build_child_state_notification(
     result_summary: Option<&str>,
     task_failure: Option<&crate::runtime::failure_classification::WorkflowFailureMetadata>,
 ) -> ChildStateNotification {
-    let failure_class = task_failure.and_then(|failure| failure.failure_class);
+    // RFC #775 Part A: extract the normalized agent outcome from the summary
+    // so the parent can branch on a typed signal instead of re-deriving it
+    // from prose. ClarificationNeeded is the key case — penalty-free, not a
+    // failure, but the parent needs to know mechanically.
+    let agent_outcome = if matches!(status, TaskRunStatus::Succeeded) {
+        result_summary
+            .and_then(autonoetic_types::task_completion::extract_agent_outcome)
+    } else {
+        None
+    };
+
+    let mut failure_class = task_failure.and_then(|failure| failure.failure_class);
+
+    // RFC #775 Part A: detect "gave up" — child succeeded but produced no
+    // recognizable result or account. This is distinct from Unknown (an
+    // unclassifiable error). The child ended cleanly but said nothing useful.
+    if matches!(status, TaskRunStatus::Succeeded) && failure_class.is_none() {
+        let summary_blank = result_summary
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        let no_outcome = agent_outcome.is_none();
+        if summary_blank && no_outcome {
+            failure_class = Some(autonoetic_types::tool_error::FailureClass::ChildGaveUp);
+        }
+    }
+
     let install_conflict_detail =
         if failure_class == Some(autonoetic_types::tool_error::FailureClass::InstallConflict) {
             result_summary
@@ -1708,6 +1744,23 @@ fn build_child_state_notification(
             None
         };
 
+    // For gave_up, provide retry advice/retryable since there's no
+    // task_failure entry (evaluate_stage_retry doesn't fire on Succeeded).
+    let gave_up_advice = if failure_class
+        == Some(autonoetic_types::tool_error::FailureClass::ChildGaveUp)
+    {
+        Some(autonoetic_types::tool_error::RetryAdvice::DoNotRetry)
+    } else {
+        None
+    };
+    let gave_up_side_effect = if failure_class
+        == Some(autonoetic_types::tool_error::FailureClass::ChildGaveUp)
+    {
+        Some(autonoetic_types::tool_error::SideEffectState::Unknown)
+    } else {
+        None
+    };
+
     ChildStateNotification {
         workflow_id: task.workflow_id.clone(),
         task_id: task.task_id.clone(),
@@ -1715,8 +1768,13 @@ fn build_child_state_notification(
         child_status: status.as_str().to_string(),
         failure_class,
         install_conflict_detail,
-        retry_advice: task_failure.and_then(|failure| failure.retry_advice),
-        side_effect_state: task_failure.and_then(|failure| failure.side_effect_state),
+        retry_advice: task_failure
+            .and_then(|failure| failure.retry_advice)
+            .or(gave_up_advice),
+        side_effect_state: task_failure
+            .and_then(|failure| failure.side_effect_state)
+            .or(gave_up_side_effect),
+        agent_outcome,
         summary: result_summary.map(ToString::to_string),
     }
 }
@@ -6467,5 +6525,129 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated_live.status, TaskRunStatus::Running);
+    }
+
+    // ---- RFC #775 Part A: typed failure taxonomy tests ----
+
+    use autonoetic_types::task_completion::AgentOutcome;
+    use autonoetic_types::tool_error::{FailureClass, RetryAdvice};
+
+    fn dummy_task() -> TaskRun {
+        TaskRun {
+            task_id: "task-test".to_string(),
+            workflow_id: "wf-test".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root/coder-test".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Running,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        }
+    }
+
+    #[test]
+    fn build_notification_surfaces_clarification_needed_as_typed_outcome() {
+        let task = dummy_task();
+        let summary = r#"{"status":"clarification_needed","clarification_request":{"question":"which API?"}}"#;
+        let notif = build_child_state_notification(
+            &task,
+            TaskRunStatus::Succeeded,
+            Some(summary),
+            None,
+        );
+        assert_eq!(notif.agent_outcome, Some(AgentOutcome::ClarificationNeeded));
+        assert_eq!(notif.child_status, "succeeded");
+        assert!(
+            notif.failure_class.is_none(),
+            "clarification_needed is penalty-free, not a failure_class"
+        );
+    }
+
+    #[test]
+    fn build_notification_detects_gave_up_on_empty_success() {
+        let task = dummy_task();
+        let notif = build_child_state_notification(
+            &task,
+            TaskRunStatus::Succeeded,
+            None,
+            None,
+        );
+        assert_eq!(notif.failure_class, Some(FailureClass::ChildGaveUp));
+        assert_eq!(notif.retry_advice, Some(RetryAdvice::DoNotRetry));
+        assert_eq!(notif.agent_outcome, None);
+    }
+
+    #[test]
+    fn build_notification_detects_gave_up_on_blank_summary() {
+        let task = dummy_task();
+        let notif = build_child_state_notification(
+            &task,
+            TaskRunStatus::Succeeded,
+            Some("   "),
+            None,
+        );
+        assert_eq!(notif.failure_class, Some(FailureClass::ChildGaveUp));
+    }
+
+    #[test]
+    fn build_notification_no_gave_up_when_summary_has_content() {
+        let task = dummy_task();
+        let notif = build_child_state_notification(
+            &task,
+            TaskRunStatus::Succeeded,
+            Some("task completed successfully"),
+            None,
+        );
+        assert!(
+            notif.failure_class.is_none(),
+            "non-empty summary should not trigger gave_up"
+        );
+        assert_eq!(notif.agent_outcome, None);
+    }
+
+    #[test]
+    fn build_notification_no_gave_up_when_agent_outcome_parsed() {
+        let task = dummy_task();
+        // A pass verdict has a recognizable outcome — not gave_up even though
+        // the summary is short.
+        let summary = r#"{"status":"ok","evaluator_pass":true}"#;
+        let notif = build_child_state_notification(
+            &task,
+            TaskRunStatus::Succeeded,
+            Some(summary),
+            None,
+        );
+        assert!(
+            notif.failure_class.is_none(),
+            "recognizable outcome should not trigger gave_up"
+        );
+    }
+
+    #[test]
+    fn output_contract_unmet_has_correct_metadata() {
+        use crate::runtime::failure_classification::metadata_for_failure_class;
+        let meta = metadata_for_failure_class(FailureClass::OutputContractUnmet);
+        assert_eq!(meta.failure_class, Some(FailureClass::OutputContractUnmet));
+        assert_eq!(meta.retry_advice, Some(RetryAdvice::DoNotRetry));
+        assert_eq!(meta.retryable, Some(false));
+    }
+
+    #[test]
+    fn child_gave_up_has_correct_metadata() {
+        use crate::runtime::failure_classification::metadata_for_failure_class;
+        let meta = metadata_for_failure_class(FailureClass::ChildGaveUp);
+        assert_eq!(meta.failure_class, Some(FailureClass::ChildGaveUp));
+        assert_eq!(meta.retry_advice, Some(RetryAdvice::DoNotRetry));
+        assert_eq!(meta.retryable, Some(false));
     }
 }

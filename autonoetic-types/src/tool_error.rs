@@ -19,6 +19,14 @@ pub enum FailureClass {
     PolicyDenied,
     SchemaValidationFailed,
     TaskContractInvalid,
+    /// Declared `expected_outputs` missing at child completion (RFC #775/#776 Part B).
+    /// The child "succeeded" but did not produce what the parent declared it would.
+    /// No blind retry — parent must change something structural.
+    OutputContractUnmet,
+    /// Child session ended cleanly but produced no recognizable result or account
+    /// (RFC #775 Part A). Distinct from `Unknown` (unclassifiable error) — this is
+    /// a child that gave up without explanation. Counts toward the parent loop guard.
+    ChildGaveUp,
     Unknown,
 }
 

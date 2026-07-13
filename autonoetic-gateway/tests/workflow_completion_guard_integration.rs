@@ -416,6 +416,7 @@ fn try_complete_workflow_suppresses_pending_notifications() -> anyhow::Result<()
             install_conflict_detail: None,
             retry_advice: None,
             side_effect_state: None,
+            agent_outcome: None,
             summary: Some("done".to_string()),
         },
         timestamp: chrono::Utc::now().to_rfc3339(),

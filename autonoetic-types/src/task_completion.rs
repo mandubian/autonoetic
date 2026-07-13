@@ -5,10 +5,12 @@
 //! that distinction so gateways, reports, and channel adapters (TUI, WhatsApp, …)
 //! share one interpretation without embedding transport-specific formatting.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Normalized gate / verdict outcome from an agent's final reply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentOutcome {
     Pass,
     Fail,
