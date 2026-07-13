@@ -81,9 +81,11 @@ impl BudgetMeter {
 /// RFC #778 Part D — burn-rate forecast line in the P-6.23 attestation.
 ///
 /// Pre-committed formula (no gateway judgment):
-/// - `tokens_per_turn` = `llm_tokens.used / turn_counter` (when turn > 0)
-/// - `remaining_tokens` = `limit - used` (when a token limit exists)
+/// - `tokens_per_turn` = `llm_tokens.used / turn_counter` (0.0 when turn=0
+///   or no tokens used yet)
+/// - `remaining_tokens` = `limit - used` (when a token limit is configured)
 /// - `projected_turns_remaining` = `remaining_tokens / tokens_per_turn`
+///   (None when `tokens_per_turn` is 0 or no limit is configured)
 ///
 /// Converts budget exhaustion from a cliff (P-7.18 degraded mode) into a
 /// re-planning trigger **while the agent still has tokens to re-plan with**.
@@ -91,13 +93,16 @@ impl BudgetMeter {
 /// heterogeneous plans — priors are config, the formula stays pre-committed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BurnRateForecast {
-    /// Average tokens consumed per turn so far (0 on turn 0).
+    /// Average tokens consumed per turn so far. 0.0 when no tokens have been
+    /// used yet (early turns or metering delay).
     pub tokens_per_turn: f64,
-    /// Remaining token budget (when a limit is configured).
+    /// Remaining token budget (when a limit is configured). None when no
+    /// token cap is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_tokens: Option<f64>,
-    /// How many more turns the agent can afford at the current burn rate
-    /// (when both a token limit and a nonzero burn rate exist).
+    /// How many more turns the agent can afford at the current burn rate.
+    /// None when `tokens_per_turn` is 0 (no burn rate data yet) or when no
+    /// token limit is configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projected_turns_remaining: Option<f64>,
 }
@@ -244,9 +249,9 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
           under. If your own memory of these facts disagrees with the block, \
           the block is correct. The constitution digest pins the exact law \
           in force for this session; if it changes mid-session, the law \
-          under you changed. The burn_rate field tells you how many turns \
-          you can afford at your current spending pace — re-plan before \
-          you hit the cliff.\n\n\
+          under you changed.           The burn_rate field tells you your current spending pace and, when a \
+          token limit is configured, how many turns you can afford at that \
+          rate — re-plan before you hit the cliff.\n\n\
          <gateway_state_attestation>\n{body}\n</gateway_state_attestation>\n",
     ))
 }

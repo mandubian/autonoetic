@@ -941,6 +941,22 @@ mod workflow_status_chat_tests {
     }
 
     #[test]
+    fn burn_rate_shows_remaining_even_when_no_usage() {
+        // On turn 1 with no tokens used yet, the forecast still shows
+        // remaining_tokens so the agent knows its ceiling.
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_tokens".to_string(),
+            used: 0.0,
+            limit: Some(10000.0),
+        }];
+        let forecast = compute_burn_rate(&meters, 1).expect("forecast");
+        assert_eq!(forecast.tokens_per_turn, 0.0);
+        assert_eq!(forecast.remaining_tokens, Some(10000.0));
+        assert!(forecast.projected_turns_remaining.is_none());
+    }
+
+    #[test]
     fn burn_rate_computes_projected_turns() {
         use crate::runtime::state_attestation::BudgetMeter;
         // 5000 tokens used over 10 turns = 500 tokens/turn.
@@ -1002,10 +1018,9 @@ fn compute_burn_rate(
     let token_meter = budget_meters
         .iter()
         .find(|m| m.name == "llm_tokens")?;
-    if token_meter.used <= 0.0 {
-        return None;
-    }
 
+    // tokens_per_turn is 0.0 when no tokens have been used yet — the forecast
+    // still carries remaining_tokens so the agent can see its budget ceiling.
     let tokens_per_turn = token_meter.used / turn_counter as f64;
     let remaining_tokens = token_meter.remaining();
     let projected_turns_remaining = match remaining_tokens {
