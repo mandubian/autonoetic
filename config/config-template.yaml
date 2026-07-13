@@ -247,6 +247,11 @@ operator_activity:
 # is present, never its quality. Default: enabled.
 decider_obligations:
   enabled: true
+  # SLA (secs) before an un-adjudicated constitutional proposal (O-6) or
+  # anomaly flag (O-7) is flagged as an adjudication SLA breach. The item's
+  # status is unchanged — the decision is still owed. 0 disables the check.
+  # Default: 604800 (7 days).
+  adjudication_sla_secs: 604800
 
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.

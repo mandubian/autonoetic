@@ -44,7 +44,10 @@ fn pending_sandbox_approval(id: &str) -> ApprovalRequest {
 fn config_with_obligations(agents_dir: std::path::PathBuf, enabled: bool) -> GatewayConfig {
     GatewayConfig {
         agents_dir,
-        decider_obligations: DeciderObligationsConfig { enabled },
+        decider_obligations: DeciderObligationsConfig {
+            enabled,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

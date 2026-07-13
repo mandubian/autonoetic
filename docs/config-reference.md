@@ -841,12 +841,14 @@ A decision is BLOCKING when made by a *principal* (operator / agent — mechanic
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `decider_obligations.enabled` | bool | `true` | Require a motivation for BLOCKING-tier decisions. `false` disables enforcement (decisions may be recorded without a reason). |
+| `decider_obligations.adjudication_sla_secs` | u64 | `604800` | Adjudication SLA (#771 D.1): a constitutional proposal (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is stamped `sla_breached_at` and a causal event + notification are emitted. The item's status is unchanged — the decision is still owed. `0` disables the check. |
 
 Example:
 
 ```yaml
 decider_obligations:
   enabled: true
+  adjudication_sla_secs: 604800
 ```
 
 ---

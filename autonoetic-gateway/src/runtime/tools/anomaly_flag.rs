@@ -161,6 +161,7 @@ impl NativeTool for AnomalyFlagTool {
             decided_by: None,
             decided_at: None,
             created_at: now,
+            sla_breached_at: None,
         };
 
         // Un-droppable means durably recorded: a failed insert is a tool

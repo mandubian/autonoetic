@@ -2084,6 +2084,7 @@ mod tests {
         let cfg_off = GatewayConfig {
             decider_obligations: autonoetic_types::config::DeciderObligationsConfig {
                 enabled: false,
+                ..Default::default()
             },
             ..Default::default()
         };

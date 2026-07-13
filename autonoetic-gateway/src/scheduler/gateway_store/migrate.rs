@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 66;
+const SCHEMA_VERSION_LATEST: i64 = 67;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -551,6 +551,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_lifecycle_state_v64(conn)?;
     apply_workflow_tasks_sqlite_v65(conn)?;
     apply_anomaly_flags_v66(conn)?;
+    apply_adjudication_sla_v67(conn)?;
 
     Ok(())
 }
@@ -3076,6 +3077,32 @@ fn apply_anomaly_flags_v66(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![66_i64, "anomaly_flags", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// #771 D.1 — adjudication SLA. `sla_breached_at` is stamped once a
+/// constitutional proposal (O-6) or anomaly flag (O-7) sits un-adjudicated
+/// past the configured deadline. The breach does not change `status` — the
+/// decision is still owed.
+fn apply_adjudication_sla_v67(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 67 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE constitutional_proposals ADD COLUMN sla_breached_at TEXT;
+         ALTER TABLE anomaly_flags ADD COLUMN sla_breached_at TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![67_i64, "adjudication_sla", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

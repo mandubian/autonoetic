@@ -292,6 +292,12 @@ async fn run_scheduler_tick_common(
         tracing::warn!(error = %e, "Failed to check wiki proposal expiry");
     }
 
+    // Adjudication SLA (#771 D.1): flag constitutional proposals (O-6) and
+    // anomaly flags (O-7) that have sat un-adjudicated past the deadline.
+    if let Err(e) = check_adjudication_sla_breaches(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to check adjudication SLA breaches");
+    }
+
     // Detect and resolve tasks stuck in Running state (child session completed but task status not updated).
     if let Err(e) = check_stuck_running_tasks(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to check stuck running tasks");
@@ -402,6 +408,169 @@ async fn check_wiki_proposal_expiry(
     if expired > 0 {
         tracing::info!(target: "wiki_proposal_expiry", expired, "Wiki proposal auto-expiry sweep completed");
     }
+    Ok(())
+}
+
+/// Adjudication SLA (#771 D.1, O-6 / O-7): flag constitutional proposals and
+/// anomaly flags that have sat un-adjudicated past `adjudication_sla_secs`.
+/// A breach is idempotent (stamped once) and does NOT change the item's
+/// status — the decision is still owed.
+async fn check_adjudication_sla_breaches(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    if !config.decider_obligations.enabled || config.decider_obligations.adjudication_sla_secs == 0
+    {
+        return Ok(());
+    }
+    let sla_secs = config.decider_obligations.adjudication_sla_secs;
+
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let breached_proposals = store.flag_proposal_sla_breaches(sla_secs, &now)?;
+    for proposal in &breached_proposals {
+        let age_secs = chrono::DateTime::parse_from_rfc3339(&proposal.created_at)
+            .ok()
+            .map(|created| (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(sla_secs as i64);
+
+        // O-6 is not yet in the enforcement register (amendment pending
+        // signing); this event buckets as `unattributed` in contract-health
+        // until then, but carries the ID so attribution is ready at enactment.
+        let event = CausalEventRecord {
+            event_id: format!("sla-ev-{}", uuid::Uuid::new_v4()),
+            agent_id: proposal.proposer_agent_id.clone(),
+            session_id: proposal
+                .proposer_session_id
+                .clone()
+                .unwrap_or_else(|| "system".to_string()),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: now.clone(),
+            category: "decider_obligation".to_string(),
+            action: "sla_breached".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec!["O-6".to_string()],
+            target: Some(proposal.proposal_id.clone()),
+            payload: Some(
+                serde_json::json!({
+                    "id": proposal.proposal_id,
+                    "kind": "constitutional_proposal",
+                    "age_secs": age_secs,
+                    "sla_secs": sla_secs,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("adjudication SLA breached — decision still owed".to_string()),
+        };
+        if let Err(e) = store.create_causal_event(&event) {
+            tracing::warn!(
+                proposal_id = %proposal.proposal_id,
+                error = %e,
+                "Failed to emit adjudication SLA breach causal event for constitutional proposal"
+            );
+        }
+
+        let notification = autonoetic_types::notification::NotificationRecord::new(
+            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::notification::NotificationType::ConstitutionalProposal,
+            // Gateway-detected breach, not tied to a session — mirror the
+            // filing-notification pattern ("system"); the owed party lives in
+            // the payload (`owed_to`) rather than the session-id field.
+            "system".to_string(),
+            serde_json::json!({
+                "event": "sla_breached",
+                "id": proposal.proposal_id,
+                "owed_to": proposal.proposer_agent_id,
+                "age_secs": age_secs,
+                "sla_secs": sla_secs,
+            }),
+        );
+        if let Err(e) = store.create_notification_record(&notification) {
+            tracing::warn!(
+                proposal_id = %proposal.proposal_id,
+                error = %e,
+                "Failed to create adjudication SLA breach notification for constitutional proposal"
+            );
+        }
+    }
+
+    let breached_flags = store.flag_anomaly_flag_sla_breaches(sla_secs, &now)?;
+    for flag in &breached_flags {
+        let age_secs = chrono::DateTime::parse_from_rfc3339(&flag.created_at)
+            .ok()
+            .map(|created| (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(sla_secs as i64);
+
+        // O-7 is not yet in the enforcement register (amendment pending
+        // signing); this event buckets as `unattributed` in contract-health
+        // until then, but carries the ID so attribution is ready at enactment.
+        let event = CausalEventRecord {
+            event_id: format!("sla-ev-{}", uuid::Uuid::new_v4()),
+            agent_id: flag.reporter_agent_id.clone(),
+            session_id: flag
+                .reporter_session_id
+                .clone()
+                .unwrap_or_else(|| "system".to_string()),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: now.clone(),
+            category: "decider_obligation".to_string(),
+            action: "sla_breached".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec!["O-7".to_string()],
+            target: Some(flag.flag_id.clone()),
+            payload: Some(
+                serde_json::json!({
+                    "id": flag.flag_id,
+                    "kind": "anomaly_flag",
+                    "age_secs": age_secs,
+                    "sla_secs": sla_secs,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("adjudication SLA breached — decision still owed".to_string()),
+        };
+        if let Err(e) = store.create_causal_event(&event) {
+            tracing::warn!(
+                flag_id = %flag.flag_id,
+                error = %e,
+                "Failed to emit adjudication SLA breach causal event for anomaly flag"
+            );
+        }
+
+        let notification = autonoetic_types::notification::NotificationRecord::new(
+            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::notification::NotificationType::AnomalyFlag,
+            // Gateway-detected breach, not tied to a session — see the
+            // proposal branch above; owed party is carried in `owed_to`.
+            "system".to_string(),
+            serde_json::json!({
+                "event": "sla_breached",
+                "id": flag.flag_id,
+                "owed_to": flag.reporter_agent_id,
+                "age_secs": age_secs,
+                "sla_secs": sla_secs,
+            }),
+        );
+        if let Err(e) = store.create_notification_record(&notification) {
+            tracing::warn!(
+                flag_id = %flag.flag_id,
+                error = %e,
+                "Failed to create adjudication SLA breach notification for anomaly flag"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -3029,5 +3198,173 @@ mod stuck_task_tests {
             cp.is_some(),
             "checkpoint must be preserved for late approval"
         );
+    }
+}
+
+#[cfg(test)]
+mod adjudication_sla_tests {
+    use super::*;
+    use autonoetic_types::config::{DeciderObligationsConfig, GatewayConfig};
+    use crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag;
+    use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn old_rfc3339(secs_ago: u64) -> String {
+        (chrono::Utc::now() - chrono::Duration::seconds(secs_ago as i64)).to_rfc3339()
+    }
+
+    fn test_config(agents_dir: &Path, sla_secs: u64) -> GatewayConfig {
+        GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            decider_obligations: DeciderObligationsConfig {
+                enabled: true,
+                adjudication_sla_secs: sla_secs,
+            },
+            ..GatewayConfig::default()
+        }
+    }
+
+    fn sample_proposal(proposal_id: &str) -> ConstitutionalProposal {
+        ConstitutionalProposal {
+            proposal_id: proposal_id.to_string(),
+            proposer_agent_id: "auditor.default".to_string(),
+            proposer_session_id: Some("sess-proposer".to_string()),
+            kind: "add_right".to_string(),
+            target_id: None,
+            proposed_text: Some("Agents may do X".to_string()),
+            justification: "closes a gap".to_string(),
+            evidence_json: serde_json::json!([]),
+            status: "pending".to_string(),
+            operator_decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            published_in_release: None,
+            created_at: old_rfc3339(1_000),
+            sla_breached_at: None,
+        }
+    }
+
+    fn sample_flag(flag_id: &str) -> AnomalyFlag {
+        AnomalyFlag {
+            flag_id: flag_id.to_string(),
+            reporter_agent_id: "witness.default".to_string(),
+            reporter_session_id: Some("sess-reporter".to_string()),
+            subject_ref: "sess-target-1".to_string(),
+            observation: "tool call bypassed policy check".to_string(),
+            evidence_json: serde_json::json!([]),
+            severity: "high".to_string(),
+            status: "pending".to_string(),
+            decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            created_at: old_rfc3339(1_000),
+            sla_breached_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn breaches_are_recorded_without_changing_status() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents, 100);
+
+        let gateway_dir = cfg.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store =
+            std::sync::Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        store
+            .insert_constitutional_proposal(&sample_proposal("cprop-sla-1"))
+            .unwrap();
+        store.insert_anomaly_flag(&sample_flag("aflag-sla-1")).unwrap();
+
+        let exec = std::sync::Arc::new(crate::execution::GatewayExecutionService::new(
+            cfg,
+            Some(store.clone()),
+        ));
+
+        check_adjudication_sla_breaches(exec).await.unwrap();
+
+        // (b) sla_breached_at now set, (c) status unchanged.
+        let proposal = store.get_constitutional_proposal("cprop-sla-1").unwrap().unwrap();
+        assert!(proposal.sla_breached_at.is_some());
+        assert_eq!(proposal.status, "pending");
+
+        let flag = store.get_anomaly_flag("aflag-sla-1").unwrap().unwrap();
+        assert!(flag.sla_breached_at.is_some());
+        assert_eq!(flag.status, "pending");
+
+        // (a) causal events tagged with the obligation IDs.
+        let proposal_events = store
+            .search_causal_events(None, Some("auditor.default"), 50)
+            .unwrap();
+        assert!(proposal_events.iter().any(|e| e.category == "decider_obligation"
+            && e.action == "sla_breached"
+            && e.enforced_rules == vec!["O-6".to_string()]
+            && e.target.as_deref() == Some("cprop-sla-1")));
+
+        let flag_events = store
+            .search_causal_events(None, Some("witness.default"), 50)
+            .unwrap();
+        assert!(flag_events.iter().any(|e| e.category == "decider_obligation"
+            && e.action == "sla_breached"
+            && e.enforced_rules == vec!["O-7".to_string()]
+            && e.target.as_deref() == Some("aflag-sla-1")));
+
+        // (d) a notification row exists for each, addressed to "system"
+        // (gateway-detected, not session-bound) with the owed party in the
+        // payload's `owed_to`.
+        let pending_notifications = store.list_pending_notifications().unwrap();
+        assert!(pending_notifications.iter().any(|n| n.notification_type
+            == autonoetic_types::notification::NotificationType::ConstitutionalProposal
+            && n.target_session_id == "system"
+            && n.payload.get("owed_to").and_then(|v| v.as_str()) == Some("auditor.default")));
+        assert!(pending_notifications.iter().any(|n| n.notification_type
+            == autonoetic_types::notification::NotificationType::AnomalyFlag
+            && n.target_session_id == "system"
+            && n.payload.get("owed_to").and_then(|v| v.as_str()) == Some("witness.default")));
+
+        // Deferred-attribution contract: O-6/O-7 are not yet in the code
+        // enforcement register, so they must bucket as `unattributed` in
+        // contract-health, not silently vanish or misattribute.
+        let health = store.contract_health(None).unwrap();
+        assert!(!health.by_clause.iter().any(|(clause, _)| clause == "O-6" || clause == "O-7"));
+        assert!(health.unattributed >= 2);
+    }
+
+    #[tokio::test]
+    async fn second_tick_does_not_re_emit() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents, 100);
+
+        let gateway_dir = cfg.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store =
+            std::sync::Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        store
+            .insert_constitutional_proposal(&sample_proposal("cprop-sla-2"))
+            .unwrap();
+
+        let exec = std::sync::Arc::new(crate::execution::GatewayExecutionService::new(
+            cfg,
+            Some(store.clone()),
+        ));
+
+        check_adjudication_sla_breaches(exec.clone()).await.unwrap();
+        check_adjudication_sla_breaches(exec).await.unwrap();
+
+        let events = store
+            .search_causal_events(None, Some("auditor.default"), 50)
+            .unwrap();
+        let sla_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.category == "decider_obligation" && e.action == "sla_breached")
+            .collect();
+        assert_eq!(sla_events.len(), 1, "breach must be recorded exactly once");
     }
 }
