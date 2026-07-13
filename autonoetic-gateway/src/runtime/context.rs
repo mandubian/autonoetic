@@ -654,6 +654,13 @@ impl AgentExecutor {
             .unwrap_or_default();
 
         let budget_meters = self.snapshot_budget_meters();
+
+        // RFC #778 Part D: compute burn-rate forecast from the budget meters
+        // and turn counter. Pre-committed formula, no gateway judgment:
+        // tokens_per_turn = used_tokens / turn_counter (turn > 0)
+        // projected_turns_remaining = remaining_tokens / tokens_per_turn
+        let burn_rate = compute_burn_rate(&budget_meters, self.turn_counter);
+
         let gateway_node_id = crate::execution::gateway_actor_id();
 
         // Bind the active constitution (version + digest) into the signed
@@ -677,6 +684,7 @@ impl AgentExecutor {
                 pending_user_interaction_ids,
                 pending_escalation_ids,
                 budget_meters,
+                burn_rate,
                 constitution_version: &constitution_version,
                 constitution_digest: &constitution_digest,
             },
@@ -1090,6 +1098,116 @@ mod workflow_status_chat_tests {
         let tmpl = generate_json_template(&schema);
         assert_eq!(tmpl, "{}");
     }
+
+    #[test]
+    fn burn_rate_none_on_turn_zero() {
+        assert!(compute_burn_rate(&[], 0).is_none());
+    }
+
+    #[test]
+    fn burn_rate_none_without_token_meter() {
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_rounds".to_string(),
+            used: 5.0,
+            limit: Some(20.0),
+        }];
+        assert!(compute_burn_rate(&meters, 5).is_none());
+    }
+
+    #[test]
+    fn burn_rate_shows_remaining_even_when_no_usage() {
+        // On turn 1 with no tokens used yet, the forecast still shows
+        // remaining_tokens so the agent knows its ceiling.
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_tokens".to_string(),
+            used: 0.0,
+            limit: Some(10000.0),
+        }];
+        let forecast = compute_burn_rate(&meters, 1).expect("forecast");
+        assert_eq!(forecast.tokens_per_turn, 0.0);
+        assert_eq!(forecast.remaining_tokens, Some(10000.0));
+        assert!(forecast.projected_turns_remaining.is_none());
+    }
+
+    #[test]
+    fn burn_rate_computes_projected_turns() {
+        use crate::runtime::state_attestation::BudgetMeter;
+        // 5000 tokens used over 10 turns = 500 tokens/turn.
+        // Limit 10000, used 5000 → remaining 5000.
+        // Projected turns = 5000 / 500 = 10.
+        let meters = vec![
+            BudgetMeter {
+                name: "llm_rounds".to_string(),
+                used: 10.0,
+                limit: Some(20.0),
+            },
+            BudgetMeter {
+                name: "llm_tokens".to_string(),
+                used: 5000.0,
+                limit: Some(10000.0),
+            },
+        ];
+        let forecast = compute_burn_rate(&meters, 10).expect("forecast");
+        assert!((forecast.tokens_per_turn - 500.0).abs() < 0.01);
+        assert_eq!(forecast.remaining_tokens, Some(5000.0));
+        assert_eq!(forecast.projected_turns_remaining, Some(10.0));
+    }
+
+    #[test]
+    fn burn_rate_no_projection_without_limit() {
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_tokens".to_string(),
+            used: 5000.0,
+            limit: None,
+        }];
+        let forecast = compute_burn_rate(&meters, 10).expect("forecast");
+        assert!((forecast.tokens_per_turn - 500.0).abs() < 0.01);
+        assert!(forecast.remaining_tokens.is_none());
+        assert!(forecast.projected_turns_remaining.is_none());
+    }
+}
+
+/// RFC #778 Part D — compute the burn-rate forecast from budget meters and
+/// the current turn counter.
+///
+/// Pre-committed formula (no gateway judgment):
+/// - `tokens_per_turn` = `llm_tokens.used / turn_counter` (when turn > 0)
+/// - `remaining_tokens` = `llm_tokens.limit - llm_tokens.used`
+/// - `projected_turns_remaining` = `remaining_tokens / tokens_per_turn`
+///
+/// Returns `None` when there is not enough data (turn 0, no token budget, or
+/// budgets disabled).
+fn compute_burn_rate(
+    budget_meters: &[crate::runtime::state_attestation::BudgetMeter],
+    turn_counter: u64,
+) -> Option<crate::runtime::state_attestation::BurnRateForecast> {
+    use crate::runtime::state_attestation::BurnRateForecast;
+
+    if turn_counter == 0 {
+        return None;
+    }
+
+    let token_meter = budget_meters
+        .iter()
+        .find(|m| m.name == "llm_tokens")?;
+
+    // tokens_per_turn is 0.0 when no tokens have been used yet — the forecast
+    // still carries remaining_tokens so the agent can see its budget ceiling.
+    let tokens_per_turn = token_meter.used / turn_counter as f64;
+    let remaining_tokens = token_meter.remaining();
+    let projected_turns_remaining = match remaining_tokens {
+        Some(rem) if tokens_per_turn > 0.0 => Some(rem / tokens_per_turn),
+        _ => None,
+    };
+
+    Some(BurnRateForecast {
+        tokens_per_turn,
+        remaining_tokens,
+        projected_turns_remaining,
+    })
 }
 
 #[cfg(test)]
