@@ -1,13 +1,27 @@
 # Citizenship as a Runtime Service
 
-> **Status:** Draft RFC (2026-07-12) — design exploration, not yet a proposal.
-> Tracking issue: [#774](https://github.com/mandubian/autonoetic/issues/774)
+> **Status:** Partial — Parts A.1, B.1, C.1, and C.2 are **SHIPPED** (PR #782,
+> merged into `main`); the rest remains design exploration, not yet a
+> proposal. Tracking issue: [#774](https://github.com/mandubian/autonoetic/issues/774)
 > (workstreams #768–#773). Companion to the principal-model RFC
 > ([`principal-model-and-symmetric-obligations.md`](principal-model-and-symmetric-obligations.md), #359):
 > that RFC defines *who* a citizen is; this one is about making citizens
 > actually *behave* like citizens. Nothing here amends the constitution;
-> clauses proposed below (an anomaly-report right, an O-6 SLA) would go
-> through the normal amendment process.
+> clauses proposed below (an anomaly-report right, an O-6 SLA) are drafted,
+> ready-to-apply, and **awaiting signing** —
+> [`docs/constitution/amendments/2026-07-12-anomaly-reporting-DRAFT.md`](../constitution/amendments/2026-07-12-anomaly-reporting-DRAFT.md)
+> — but not yet enacted; they would go through the normal amendment process.
+>
+> | Part | Status |
+> |---|---|
+> | A.1 denial affordances (`available_actions`) | **SHIPPED** |
+> | A.2 civic line in turn attestation | Not started |
+> | B.1 injected recall at wake | **SHIPPED** |
+> | B.2 lessons crystallize into revisions | Not started |
+> | C.1 `anomaly_flag` tool + adjudication RPC | **SHIPPED** (code); constitutional enactment pending signing |
+> | C.2 `anomalies` schema field | **SHIPPED** |
+> | C.3 precision-scored civic record | Deferred — needs adjudication volume first |
+> | D, E, F | Not started |
 
 ---
 
@@ -71,7 +85,7 @@ outcome."
 
 *Rights become reflexes when the affordance arrives inside the trigger.*
 
-### A.1 Every denial is a doorway
+### A.1 Every denial is a doorway — **SHIPPED**
 
 Ri-0.3 already names the violated rule in every rejection. Extend the
 structured error with a machine-readable `available_actions` field:
@@ -110,7 +124,7 @@ demand via existing tools.
 
 *Learning must be pushed, not pulled.*
 
-### B.1 Injected recall at wake
+### B.1 Injected recall at wake — **SHIPPED**
 
 At session start the gateway runs a cheap retrieval over the agent's Tier-2
 memories and past digests matched against the incoming task, and injects a
@@ -139,7 +153,7 @@ policy for when a memory graduates from injected context to instruction text.
 
 ## Part C — Witnessing: cheap, capability-free, structural
 
-### C.1 An `anomaly_flag` Core-tier tool
+### C.1 An `anomaly_flag` Core-tier tool — **SHIPPED** (code); constitutional enactment pending
 
 One call, always available, no capability required (invariant 3):
 
@@ -155,7 +169,7 @@ vanishes teaches the model that reporting is pointless, and LLMs generalize
 that fast. Constitutionally this is a new declared right (an agent may
 report, and is owed adjudication) — amendment-shaped work.
 
-### C.2 "Anything unexpected?" as a schema field, not a virtue
+### C.2 "Anything unexpected?" as a schema field, not a virtue — **SHIPPED**
 
 Every specialist's `io.returns` contract gains a required `anomalies` field
 (empty list allowed; *absence* not). The existing response-validation gate
