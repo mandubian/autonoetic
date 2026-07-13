@@ -215,6 +215,17 @@ pub fn is_transient_server_error(status: u16, body: &str) -> bool {
 pub fn is_failover_eligible_error(err: &anyhow::Error) -> bool {
     let msg = err.to_string().to_lowercase();
 
+    // Context overflow is handled separately by the context governor (P-6.9),
+    // not by provider failover — even if it arrives with a 5xx status.
+    if msg.contains("context_overflow")
+        || msg.contains("context window")
+        || msg.contains("context_length_exceeded")
+        || msg.contains("max_context_window_reached")
+        || msg.contains("resource_exhausted")
+    {
+        return false;
+    }
+
     // Rate limiting
     if msg.contains("429")
         || msg.contains("rate limit")

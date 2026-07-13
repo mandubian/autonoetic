@@ -974,4 +974,20 @@ mod tests {
         let err = anyhow::anyhow!("response validation failed: missing required field");
         assert!(!crate::llm::is_failover_eligible_error(&err));
     }
+
+    #[test]
+    fn failover_not_eligible_on_context_overflow() {
+        // Context overflow is handled by the context governor (P-6.9), not
+        // by failover — even if the message contains a 5xx status.
+        let err = anyhow::anyhow!(
+            "context_length_exceeded: status=400 context_overflow"
+        );
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_resource_exhausted() {
+        let err = anyhow::anyhow!("RESOURCE_EXHAUSTED: context window exceeded");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
 }
