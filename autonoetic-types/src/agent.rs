@@ -852,6 +852,14 @@ pub struct AgentSkillsImportMetadata {
     pub allowed_tools: Vec<String>,
     /// Whether tool name bridging should be injected into the system prompt.
     pub needs_tool_bridging: bool,
+    /// True when `manifest.capabilities` was *inferred* from `allowed-tools`
+    /// rather than explicitly declared under
+    /// `metadata.autonoetic.capabilities`. Recorded at the single place that
+    /// knows (the parser), so downstream trust decisions (e.g.
+    /// `skill_install`'s strict-mode high-risk clamp) never have to guess
+    /// from the shape of the capability set.
+    #[serde(default)]
+    pub capabilities_inferred: bool,
 }
 
 #[cfg(test)]
