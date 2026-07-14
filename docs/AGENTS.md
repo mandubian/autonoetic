@@ -462,7 +462,7 @@ Terminal decisions (`confirmed`/`dismissed`/`deferred`) require a non-empty `rea
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `skill_install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and immediately bootstrap + promote it as a new local agent. Requires `SkillInstall` capability. |
+| `skill_install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and bootstrap it as a **Candidate** revision of a new local agent — it is NOT activated. Requires `SkillInstall` capability. Rejects `execution_mode: script` skills (skill_install fetches only the SKILL.md; a script entrypoint would never be fetched). |
 
 **Parameters:**
 
@@ -470,14 +470,16 @@ Terminal decisions (`confirmed`/`dismissed`/`deferred`) require a non-empty `rea
 |-----------|----------|-------------|
 | `url` | Yes | Full URL to a SKILL.md file, e.g. `https://agentskills.io/skills/web-researcher/SKILL.md` |
 | `agent_id` | Yes | ID for the new agent. May only contain ASCII letters, digits, `.`, `-`, `_`. |
-| `trust_mode` | No | How to treat imported capabilities: `generous` (keep as-is), `strict` (add approval gate, **default**), `audit` (drop to read-only + approval). |
+| `trust_mode` | No | Which capabilities the Candidate carries into the promotion gate: `generous` (as declared/inferred), `strict` (drop inferred high-risk capabilities, **default**), `audit` (drop to read-only + approval). |
 
 **Trust mode behavior:**
 
+One door (below) is the real protection: every install — regardless of `trust_mode` — lands as a Candidate and must clear the standard promotion gates before it runs. `trust_mode` only decides which capabilities the Candidate *carries into* that gate.
+
 | Mode | Capabilities applied | When to use |
 |------|----------------------|-------------|
-| `generous` | Use capabilities declared in remote SKILL.md (minimal defaults if none declared) | Trusted internal sources |
-| `strict` | Preserve declared capabilities + add `ApprovalQueue` for all actions | Default for third-party skills |
+| `generous` | Use capabilities declared/inferred from the remote SKILL.md as-is (minimal defaults if none declared) | Trusted internal sources |
+| `strict` | Preserve declared capabilities; drop any high-risk capability (`NetworkAccess`/`CodeExecution`/`ArtifactExecution`/`AgentSpawn`) that was *inferred* from `allowed-tools` rather than explicitly declared; add `ApprovalQueue` (enables admin-proposal filing + the Workflow tool tier — it does not gate declared capabilities) | Default for third-party skills |
 | `audit` | `ReadAccess(self.*)` + `ApprovalQueue` only — declared capabilities ignored | Untrusted or high-risk skills |
 
 **Return value:**
@@ -486,16 +488,21 @@ Terminal decisions (`confirmed`/`dismissed`/`deferred`) require a non-empty `rea
   "ok": true,
   "agent_id": "web-researcher.default",
   "trust_mode": "strict",
-  "activated": true,
-  "message": "Skill installed and promoted as agent 'web-researcher.default'"
+  "activated": false,
+  "status": "candidate",
+  "revision_id": "rev_sha256:...",
+  "message": "Skill 'web-researcher.default' installed as a candidate revision; it is NOT active.",
+  "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent)."
 }
 ```
 
 **Security model:**
 - The installing agent must declare `SkillInstall` in its capabilities with `allowed_sources` matching the URL host.
 - The gateway policy engine enforces this before any HTTP request is made.
-- No remote code is executed during install — the SKILL.md is parsed and written to disk, then bootstrapped like any local agent.
-- `strict` mode (the default) ensures the new agent cannot take any privileged action without an approval gate, limiting blast radius from untrusted skills.
+- No remote code is executed during install — the SKILL.md is parsed and written to disk as a Candidate revision, never promoted by this tool.
+- **One door**: activation happens only through `agent_revision_promote`, which applies the same risk-graduated evidence gates (P-9.9) and P-2.25 operator approval of the capability delta as any other newborn agent — there is no `skill_install`-specific shortcut.
+- `trust_mode` narrows or preserves which capabilities the Candidate carries into that gate (see table above); it is not itself an approval-gate-for-all-actions mechanism. `ApprovalQueue` (added by `strict`/`audit`) only unlocks the Workflow tool tier and gates `admin_proposal_*` calls.
+- Import provenance (source URL, content digest, install time) is recorded durably on the revision and emitted as a causal event (`agent_install`/`skill_imported`), so imported agents are attributable forever.
 
 ### Revision Tools
 
@@ -885,7 +892,7 @@ llm_config:
 
 ### Installing a Remote Skill
 
-An agent with `SkillInstall` capability can pull a SKILL.md from a URL and register it as a live local agent in a single step — no CLI intervention required.
+An agent with `SkillInstall` capability can pull a SKILL.md from a URL and register it as a Candidate revision of a new local agent — no CLI intervention required. The Candidate is not active: it still has to clear `agent_revision_promote`'s standard gates like any other newborn agent (one door).
 
 **SKILL.md capability declaration:**
 ```yaml
@@ -907,24 +914,25 @@ capabilities:
 **What happens under the hood:**
 1. Gateway verifies the URL host against `allowed_sources` in the `SkillInstall` capability.
 2. Fetches the remote SKILL.md over HTTPS (15 s timeout).
-3. Parses frontmatter with `SkillParser`; applies the requested `trust_mode` to the capability set.
-4. Writes `SKILL.md` + a fresh `runtime.lock` into `agents_dir/web-researcher-default/`.
-5. Calls `bootstrap_single_agent()` — computes the content digest, creates a revision, auto-promotes to Active.
-6. Returns `{ ok, agent_id, trust_mode, activated }`.
+3. Parses frontmatter with `SkillParser`; rejects `execution_mode: script` manifests (a fetched-SKILL.md-only import can never ship the entrypoint a script needs).
+4. Applies the requested `trust_mode` to the capability set (see above).
+5. Writes `SKILL.md` + a fresh `runtime.lock` into `agents_dir/web-researcher-default/`.
+6. Calls `bootstrap_single_agent_candidate_only()` — computes the content digest, creates a **Candidate** revision carrying import provenance (source URL + SHA-256 of the fetched bytes, installing agent id), and emits an `agent_install`/`skill_imported` causal event. No alias move, no promotion.
+7. Returns `{ ok, agent_id, trust_mode, activated: false, status: "candidate", revision_id, message, next }`.
 
-The installed agent is immediately available for `agent_spawn` calls. No separate `autonoetic agent bootstrap` step is needed.
+The installed agent is **not** available for `agent_spawn` calls until it clears `agent_revision_promote` — a zero/low-capability import faces only the P-2.25 approval; a high-risk import (`NetworkAccess`, `CodeExecution`, ...) faces the same evidence gate as a high-risk built agent.
 
 **Compared to `credential_setup(skill_url)`:**
 
 | | `credential_setup(skill_url)` | `skill_install` |
 |---|---|---|
-| **Purpose** | Onboard API credentials from a service's SKILL.md | Install the skill itself as a runnable agent |
-| **Output** | `credential_id` stored in vault | New agent directory + active revision |
+| **Purpose** | Onboard API credentials from a service's SKILL.md | Install the skill itself as a candidate agent revision |
+| **Output** | `credential_id` stored in vault | New agent directory + Candidate revision (not active) |
 | **Secrets** | Extracted and vault-stored | Not applicable |
-| **User interaction** | May pause for API keys | None |
+| **User interaction** | May pause for API keys | None (promotion is a separate, later step) |
 | **Capability required** | `CredentialAccess` + `NetworkAccess` | `SkillInstall` |
 
-Both can be used together: `registration.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it.
+Both can be used together: `registration.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it (as a Candidate — promote it before use).
 
 ### Activating Agents
 
