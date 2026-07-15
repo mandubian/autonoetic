@@ -225,6 +225,8 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
             created_at: now,
             created_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
             created_by_id: "capsule_import".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
             source_kind: "capsule_import".to_string(),
             source_ref: Some(manifest.capsule_id.clone()),
             origin_node_id: manifest.provenance.origin_node_id.clone(),

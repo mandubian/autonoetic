@@ -163,6 +163,17 @@ pub struct AgentRevisionRecord {
     pub created_by_type: String,
     /// Actor ID that created this revision.
     pub created_by_id: String,
+    /// The designing/requesting principal: the agent (or human principal) whose
+    /// delegation initiated this revision's creation. Derived by the gateway
+    /// from the calling session's spawn lineage (never from LLM-supplied tool
+    /// arguments); `None` when underivable. Distinct from `created_by_*`, which
+    /// names the installer that actually called the tool (in practice always
+    /// `specialized_builder.default`).
+    #[serde(default)]
+    pub requested_by_type: Option<String>,
+    /// See [`requested_by_type`](Self::requested_by_type).
+    #[serde(default)]
+    pub requested_by_id: Option<String>,
     /// Source kind: `artifact`, `capsule_import`, `peer_import`.
     pub source_kind: String,
     /// Source reference (artifact id, capsule id, or peer ref).

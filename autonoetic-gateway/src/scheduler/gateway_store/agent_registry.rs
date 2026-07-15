@@ -17,7 +17,8 @@ pub struct PromotedAgent {
 const AGENT_REVISION_SELECT: &str = "SELECT revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
-                    short_id, signature, signer_id, detected_network_hosts
+                    short_id, signature, signer_id, detected_network_hosts,
+                    requested_by_type, requested_by_id
              FROM agent_revisions";
 
 fn map_agent_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRevisionRecord> {
@@ -65,6 +66,8 @@ fn map_agent_revision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRevi
         signature: row.get(17).ok().flatten(),
         signer_id: row.get(18).ok().flatten(),
         detected_network_hosts,
+        requested_by_type: row.get(20).ok().flatten(),
+        requested_by_id: row.get(21).ok().flatten(),
     })
 }
 
@@ -106,8 +109,9 @@ impl GatewayStore {
                     revision_id, agent_id, base_revision_id, artifact_id, content_digest,
                     runtime_lock_hash, manifest_hash, created_at, created_by_type, created_by_id,
                     source_kind, source_ref, origin_node_id, trust_domain, status, metadata_json,
-                    short_id, signature, signer_id, detected_network_hosts
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    short_id, signature, signer_id, detected_network_hosts,
+                    requested_by_type, requested_by_id
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     &rev.revision_id,
                     &rev.agent_id,
@@ -129,6 +133,8 @@ impl GatewayStore {
                     rev.signature,
                     rev.signer_id,
                     detected_network_hosts,
+                    rev.requested_by_type,
+                    rev.requested_by_id,
                 ],
             )?;
         let now = chrono::Utc::now().to_rfc3339();
@@ -1032,5 +1038,70 @@ impl GatewayStore {
             results.push(r?);
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scheduler::gateway_store::GatewayStore;
+    use tempfile::tempdir;
+
+    fn revision(revision_id: &str) -> AgentRevisionRecord {
+        AgentRevisionRecord {
+            revision_id: revision_id.to_string(),
+            agent_id: "coder.default".to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: format!("sha256:{}", revision_id),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: "autonoetic_agent".to_string(),
+            created_by_id: "specialized_builder.default".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: AgentRevisionStatus::Candidate,
+            metadata_json: serde_json::json!({}),
+            short_id: String::new(),
+            detected_network_hosts: None,
+            signature: None,
+            signer_id: None,
+        }
+    }
+
+    /// #803 — requested_by_* lineage survives an insert/select roundtrip.
+    #[test]
+    fn agent_revision_requested_by_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        let mut with = revision("rev-with-requester");
+        with.requested_by_type = Some("autonoetic_agent".to_string());
+        with.requested_by_id = Some("agent-factory.default".to_string());
+        store.insert_agent_revision(&with).unwrap();
+
+        let read = store
+            .get_agent_revision("rev-with-requester")
+            .unwrap()
+            .expect("revision should exist");
+        assert_eq!(read.requested_by_type.as_deref(), Some("autonoetic_agent"));
+        assert_eq!(
+            read.requested_by_id.as_deref(),
+            Some("agent-factory.default")
+        );
+
+        let without = revision("rev-without-requester");
+        store.insert_agent_revision(&without).unwrap();
+        let read = store
+            .get_agent_revision("rev-without-requester")
+            .unwrap()
+            .expect("revision should exist");
+        assert!(read.requested_by_type.is_none());
+        assert!(read.requested_by_id.is_none());
     }
 }

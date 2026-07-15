@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 67;
+const SCHEMA_VERSION_LATEST: i64 = 68;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -552,6 +552,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_workflow_tasks_sqlite_v65(conn)?;
     apply_anomaly_flags_v66(conn)?;
     apply_adjudication_sla_v67(conn)?;
+    apply_revision_requested_by_v68(conn)?;
 
     Ok(())
 }
@@ -3105,4 +3106,69 @@ fn apply_adjudication_sla_v67(conn: &mut Connection) -> Result<()> {
         params![67_i64, "adjudication_sla", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+/// #803 — designer/requester lineage on agent revisions. `created_by_*`
+/// records the installer (in practice always `specialized_builder.default`,
+/// the sole holder of AgentRevision capability); `requested_by_*` records the
+/// delegating principal (e.g. `agent-factory.default`) derived by the gateway
+/// from the calling session's spawn lineage, so it survives past the causal
+/// chain's retention window.
+fn apply_revision_requested_by_v68(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 68 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE agent_revisions ADD COLUMN requested_by_type TEXT;
+         ALTER TABLE agent_revisions ADD COLUMN requested_by_id TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            68_i64,
+            "revision_requested_by",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #803 — v68 adds requested_by_* columns to agent_revisions and is
+    /// recorded in schema_migrations. Running migrate twice must be a no-op.
+    #[test]
+    fn v68_adds_agent_revisions_requested_by_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agent_revisions')
+                 WHERE name IN ('requested_by_type', 'requested_by_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 2);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
 }

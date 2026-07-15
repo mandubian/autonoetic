@@ -357,6 +357,8 @@ fn bootstrap_agent_inner(
         created_at: now.clone(),
         created_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
         created_by_id: "cli".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "bootstrap".to_string(),
         source_ref: None,
         origin_node_id: config.node_id.clone(),

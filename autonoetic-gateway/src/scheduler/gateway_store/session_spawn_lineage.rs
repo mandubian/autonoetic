@@ -35,6 +35,21 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Immediate parent session of `child_session_id` (the session that
+    /// spawned it), if recorded. Distinct from `root_session_id`, which is
+    /// the top of the whole delegation chain, not the direct delegator.
+    pub fn parent_session_id(&self, child_session_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT parent_session_id FROM session_spawn_lineage WHERE child_session_id = ?1",
+            params![child_session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn list_session_spawn_lineage(
         &self,
         root_session_id: &str,
@@ -97,5 +112,26 @@ mod tests {
         assert_eq!(listed[0].spawned_at_turn, 3);
         assert_eq!(listed[0].target_agent_id, "coder.default");
         assert!(store.list_session_spawn_lineage("other").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parent_session_id_resolves_immediate_delegator() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        store
+            .upsert_session_spawn_lineage(
+                "root/coder-abc",
+                "root",
+                "root",
+                3,
+                "coder.default",
+                "2026-06-01T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            store.parent_session_id("root/coder-abc").unwrap().as_deref(),
+            Some("root")
+        );
+        assert!(store.parent_session_id("no-such-session").unwrap().is_none());
     }
 }

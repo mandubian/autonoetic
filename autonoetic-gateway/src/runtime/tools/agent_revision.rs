@@ -787,9 +787,38 @@ fn parse_agent_owned_lock_sections_strict(
     Ok((agent_deps, agent_arts))
 }
 
+/// #803 — derive the designing/requesting principal from the calling
+/// session's spawn lineage, as tracked by the gateway store. Rule: the
+/// requester is the agent bound to the PARENT session of the session that
+/// invoked this tool (the delegator that spawned the installer, e.g.
+/// `agent-factory.default`). If the calling session has no recorded parent
+/// (invoked at root, e.g. directly by the operator via CLI/chat), or the
+/// lineage/owner can't be resolved, this returns `None` — it never falls
+/// back to LLM-supplied tool arguments, since an agent must not be able to
+/// assert an arbitrary requester.
+fn derive_requested_by(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    session_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(session_id) = session_id else {
+        return (None, None);
+    };
+    let Ok(Some(parent_session_id)) = gateway_store.parent_session_id(session_id) else {
+        return (None, None);
+    };
+    match gateway_store.session_owner_agent(&parent_session_id) {
+        Ok(Some(agent_id)) => (
+            Some(PrincipalKind::AutonoeticAgent.tag().to_string()),
+            Some(agent_id),
+        ),
+        _ => (None, None),
+    }
+}
+
 fn create_revision_from_files(
     common: &RevisionCreateCommonArgs,
     created_by_id: &str,
+    session_id: Option<&str>,
     gateway_dir: &Path,
     gateway_store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
     bundle: Option<&ArtifactBundle>,
@@ -920,6 +949,8 @@ fn create_revision_from_files(
         }
     });
 
+    let (requested_by_type, requested_by_id) = derive_requested_by(gateway_store, session_id);
+
     let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
         revision_id: revision_id.clone(),
         agent_id: common.agent_id.clone(),
@@ -931,6 +962,8 @@ fn create_revision_from_files(
         created_at: now,
         created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
         created_by_id: created_by_id.to_string(),
+        requested_by_type,
+        requested_by_id,
         source_kind: common.source_kind.clone(),
         source_ref: common.source_ref.clone(),
         origin_node_id: "gateway".to_string(),
@@ -1182,7 +1215,7 @@ impl NativeTool for AgentRevisionCreateTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -1374,6 +1407,7 @@ impl NativeTool for AgentRevisionCreateTool {
         let persisted = create_revision_from_files(
             &common,
             &manifest.agent.id,
+            session_id,
             gateway_dir,
             &gateway_store,
             Some(&bundle),
@@ -2184,6 +2218,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let persisted = create_revision_from_files(
             &common,
             &manifest.agent.id,
+            session_id,
             gateway_dir,
             &gateway_store,
             bundle_opt.as_ref(),
@@ -2528,6 +2563,8 @@ impl NativeTool for AgentRevisionInspectTool {
                 "created_at": rev.created_at,
                 "created_by_type": rev.created_by_type,
                 "created_by_id": rev.created_by_id,
+                "requested_by_type": rev.requested_by_type,
+                "requested_by_id": rev.requested_by_id,
                 "base_revision_id": rev.base_revision_id,
                 "content_digest": rev.content_digest,
                 "runtime_lock_hash": rev.runtime_lock_hash,
@@ -5226,6 +5263,59 @@ mod approval_execution_context_tests {
         assert_eq!(root.as_deref(), Some("session-root"));
         assert!(wf.is_none());
         assert!(task.is_none());
+    }
+}
+
+#[cfg(test)]
+mod derive_requested_by_tests {
+    use super::derive_requested_by;
+    use crate::scheduler::gateway_store::GatewayStore;
+    use tempfile::tempdir;
+
+    /// #803 — the requester is the agent bound to the parent session of the
+    /// calling session (spawn lineage), derived from the store — never from
+    /// tool arguments.
+    #[test]
+    fn requester_derived_from_parent_session_lineage() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // root spawned agent-factory, which spawned the builder.
+        store
+            .upsert_session_spawn_lineage(
+                "root/factory-1",
+                "root",
+                "root",
+                2,
+                "agent-factory.default",
+                "2026-07-01T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .upsert_session_spawn_lineage(
+                "root/factory-1/builder-2",
+                "root/factory-1",
+                "root",
+                4,
+                "specialized_builder.default",
+                "2026-07-01T00:00:01Z",
+            )
+            .unwrap();
+
+        let (kind, id) = derive_requested_by(&store, Some("root/factory-1/builder-2"));
+        assert_eq!(kind.as_deref(), Some("autonoetic_agent"));
+        assert_eq!(id.as_deref(), Some("agent-factory.default"));
+    }
+
+    #[test]
+    fn requester_none_when_no_parent_or_no_session() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // No spawn lineage recorded — builder invoked at root (e.g. operator CLI).
+        assert_eq!(derive_requested_by(&store, Some("root")), (None, None));
+        // No session at all.
+        assert_eq!(derive_requested_by(&store, None), (None, None));
     }
 }
 
