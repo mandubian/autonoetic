@@ -237,7 +237,7 @@ impl NativeTool for SkillInstallTool {
                 .as_ref()
                 .map(|m| m.allowed_tools.clone())
                 .unwrap_or_default();
-            capability_inference_warnings(&allowed_tools)
+            capability_inference_warnings(&allowed_tools, trust_mode)
         } else {
             Vec::new()
         };
@@ -1067,8 +1067,12 @@ fn url_scheme_is_fetch_safe(url: &str) -> bool {
 /// `allowed-tools` asked for shell or network tools but the capability set
 /// was *inferred* (not declared), the operator gets told exactly what was
 /// clamped rather than silently granted a narrower power than the tool name
-/// suggests.
-fn capability_inference_warnings(allowed_tools: &[String]) -> Vec<String> {
+/// suggests. `trust_mode` is threaded in because the network wording differs:
+/// `strict` drops the inferred (high-risk) `NetworkAccess` entirely, whereas
+/// `generous` keeps it with an empty hosts list — the warning must not imply
+/// the Candidate carries network access it doesn't. (`SandboxFunctions` is not
+/// high-risk, so the shell wording holds for both modes.)
+fn capability_inference_warnings(allowed_tools: &[String], trust_mode: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     let wants_bash = allowed_tools
         .iter()
@@ -1084,12 +1088,17 @@ fn capability_inference_warnings(allowed_tools: &[String]) -> Vec<String> {
         );
     }
     if wants_network {
-        warnings.push(
+        warnings.push(if trust_mode == "strict" {
+            "allowed-tools requested network tools, but strict trust_mode dropped the inferred \
+             NetworkAccess entirely; declare NetworkAccess with concrete hosts in \
+             metadata.autonoetic.capabilities to grant it."
+                .to_string()
+        } else {
             "allowed-tools requested network tools: NetworkAccess inferred with an empty hosts \
              list — declare concrete hosts in metadata.autonoetic.capabilities to enable network \
              access."
-                .to_string(),
-        );
+                .to_string()
+        });
     }
     warnings
 }

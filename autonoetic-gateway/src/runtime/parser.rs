@@ -340,9 +340,9 @@ pub fn split_extended_instructions(body: &str) -> (&str, Option<&str>) {
 /// that the promotion gate can weigh — a grant minted from a tool-name
 /// mapping table has nobody to attribute it to (Ri-0.11).
 ///
-/// - `Bash(...)` → `SandboxFunctions` for the named prefixes only (or `*`
-///   if none named). **Never** `CodeExecution`: shell execution requires an
-///   explicit `CodeExecution` declaration.
+/// - `Bash` / `Bash(...)` → `SandboxFunctions` for the named prefixes only
+///   (or `*` for bare `Bash` / `Bash(*)`). **Never** `CodeExecution`: shell
+///   execution requires an explicit `CodeExecution` declaration.
 /// - `Read`/`View` → covered by baseline `ReadAccess`
 /// - `Write`/`Edit` → `WriteAccess`
 /// - `WebSearch`/`WebFetch`/`Fetch` → `NetworkAccess` with an **empty**
@@ -360,7 +360,15 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
 
     for tool in allowed_tools {
         let t = tool.trim();
-        if let Some(rest) = t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')) {
+        // A bare `Bash` is the Claude-style "all shell" form, equivalent to
+        // `Bash(*)`; `Bash(a:*|b)` names scoped prefixes. Both are the same
+        // request — keep this in lockstep with `capability_inference_warnings`.
+        let bash_inner = if t == "Bash" {
+            Some("")
+        } else {
+            t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')'))
+        };
+        if let Some(rest) = bash_inner {
             has_sandbox = true;
             if !rest.is_empty() && rest != "*" {
                 for pattern in rest.split('|').map(|s| s.trim().to_string()) {
@@ -1037,6 +1045,26 @@ metadata:
             .unwrap();
         assert_eq!(sandbox.len(), 1);
         assert_eq!(sandbox[0], "*");
+    }
+
+    /// A bare `Bash` entry (Claude-style "all shell") is equivalent to
+    /// `Bash(*)`: wildcard `SandboxFunctions`, not a literal `"Bash"` prefix,
+    /// and never `CodeExecution`.
+    #[test]
+    fn test_infer_capabilities_bare_bash_is_wildcard() {
+        let caps = infer_capabilities(&["Bash".to_string()]);
+        let sandbox = caps
+            .iter()
+            .find_map(|c| match c {
+                Capability::SandboxFunctions { allowed } => Some(allowed),
+                _ => None,
+            })
+            .expect("bare Bash should infer SandboxFunctions");
+        assert_eq!(sandbox, &vec!["*".to_string()], "bare Bash must map to wildcard, not [\"Bash\"]");
+        assert!(
+            !caps.iter().any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "bare Bash must not infer CodeExecution, got: {caps:?}"
+        );
     }
 
     /// RFC Part C: `Bash(...)` in allowed-tools proposes `SandboxFunctions`
