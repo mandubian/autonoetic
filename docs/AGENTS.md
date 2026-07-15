@@ -496,7 +496,7 @@ One door (below) is the real protection: every install — regardless of `trust_
   "message": "Skill 'web-researcher.default' installed as a candidate revision; it is NOT active.",
   "warnings": [
     "allowed-tools requested Bash: shell execution requires an explicit CodeExecution declaration; granted SandboxFunctions prefixes only.",
-    "allowed-tools requested network tools: NetworkAccess inferred with an empty hosts list — declare concrete hosts in metadata.autonoetic.capabilities to enable network access."
+    "allowed-tools requested network tools, but strict trust_mode dropped the inferred NetworkAccess entirely; declare NetworkAccess with concrete hosts in metadata.autonoetic.capabilities to grant it."
   ],
   "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent)."
 }
@@ -965,6 +965,10 @@ Planner: "Create a weather agent"
   → specialized_builder calls agent_revision_promote
   → Agent is active and discoverable
 ```
+
+**Creation lineage (installer vs. designer):**
+
+A revision records two distinct principals. `created_by` is the **installer** — the agent that called the revision tool, in practice almost always `specialized_builder.default` (the sole holder of the `AgentRevision` capability). `requested_by` is the **designer** — the delegating principal (e.g. `agent-factory.default`) that spawned the installer, derived by the gateway from the calling session's spawn lineage, never from tool arguments (an agent cannot assert an arbitrary requester). It is `None` when the builder was invoked at the session root (e.g. directly by the operator) or the lineage is unresolvable. This survives past the causal chain's retention window, so "which agent designed this agent" stays answerable from the revision alone. (Creation is not delegation: a newborn's capabilities come from the promotion gate, never inherited from or bounded by its creator's — proposed invariant I-13.)
 
 **Promotion evidence binding (high-risk capabilities):**
 
