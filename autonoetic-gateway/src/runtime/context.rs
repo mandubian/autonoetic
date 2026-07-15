@@ -656,32 +656,22 @@ impl AgentExecutor {
         // #772 A.2: surface this agent's own still-pending constitutional
         // proposals and anomaly flags in its signed per-turn block —
         // "voice with amnesia is no voice". Mirrors the pending_escalation_ids
-        // gathering above.
+        // gathering above. The store queries filter to non-terminal statuses
+        // in SQL (before the LIMIT) so terminal decisions can't displace
+        // still-pending items from the bounded window, and errors propagate:
+        // a signed "authoritative" attestation must not silently omit civic
+        // items because a query failed.
         let (pending_proposal_ids, pending_flag_ids) = match self.gateway_store.as_deref() {
             Some(store) => {
-                let proposals = store
-                    .list_constitutional_proposals(None, Some(&self.manifest.agent.id), 64)
-                    .unwrap_or_default();
-                let flags = store
-                    .list_anomaly_flags(None, Some(&self.manifest.agent.id), 64)
-                    .unwrap_or_default();
+                let proposals = store.list_pending_constitutional_proposals(
+                    Some(&self.manifest.agent.id),
+                    64,
+                )?;
+                let flags =
+                    store.list_pending_anomaly_flags(Some(&self.manifest.agent.id), 64)?;
                 (
-                    proposals
-                        .into_iter()
-                        .filter(|p| {
-                            !crate::scheduler::gateway_store::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
-                                .contains(&p.status.as_str())
-                        })
-                        .map(|p| p.proposal_id)
-                        .collect(),
-                    flags
-                        .into_iter()
-                        .filter(|f| {
-                            !crate::scheduler::gateway_store::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
-                                .contains(&f.status.as_str())
-                        })
-                        .map(|f| f.flag_id)
-                        .collect(),
+                    proposals.into_iter().map(|p| p.proposal_id).collect(),
+                    flags.into_iter().map(|f| f.flag_id).collect(),
                 )
             }
             None => (Vec::new(), Vec::new()),

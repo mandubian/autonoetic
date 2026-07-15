@@ -445,6 +445,11 @@ impl GatewayStore {
     /// `since` is an optional RFC3339 lower bound on `created_at`, compared
     /// by absolute instant like `contract_health`; items whose own timestamp
     /// fails to parse are kept rather than dropped.
+    ///
+    /// Full scan over both tables streaming only the columns the tally needs
+    /// (mirrors `contract_health` above) — deliberately no row cap: a hard
+    /// `LIMIT` would silently truncate the view once a table grew past it
+    /// and present partial counts as complete.
     pub fn civic_health(&self, since: Option<&str>) -> Result<CivicHealth> {
         let since_dt = match since {
             Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
@@ -452,10 +457,6 @@ impl GatewayStore {
             })?),
             None => None,
         };
-
-        const CIVIC_SCAN_LIMIT: usize = 100_000;
-        let proposals = self.list_constitutional_proposals(None, None, CIVIC_SCAN_LIMIT)?;
-        let flags = self.list_anomaly_flags(None, None, CIVIC_SCAN_LIMIT)?;
 
         let in_window = |ts: &str| -> bool {
             match since_dt {
@@ -467,40 +468,73 @@ impl GatewayStore {
             }
         };
 
+        let conn = self.conn.lock().unwrap();
         let mut by_agent: BTreeMap<String, CivicHealthEntry> = BTreeMap::new();
 
-        for p in proposals.into_iter().filter(|p| in_window(&p.created_at)) {
-            let entry = by_agent
-                .entry(p.proposer_agent_id.clone())
-                .or_insert_with(|| CivicHealthEntry {
-                    agent_id: p.proposer_agent_id.clone(),
-                    proposals_filed: 0,
-                    proposals_pending: 0,
-                    flags_filed: 0,
-                    flags_pending: 0,
-                });
-            entry.proposals_filed += 1;
-            if !super::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
-                .contains(&p.status.as_str())
-            {
-                entry.proposals_pending += 1;
+        {
+            let mut stmt = conn.prepare(
+                "SELECT proposer_agent_id, status, created_at FROM constitutional_proposals",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (agent_id, status, created_at) = r?;
+                if !in_window(&created_at) {
+                    continue;
+                }
+                let entry = by_agent
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| CivicHealthEntry {
+                        agent_id,
+                        proposals_filed: 0,
+                        proposals_pending: 0,
+                        flags_filed: 0,
+                        flags_pending: 0,
+                    });
+                entry.proposals_filed += 1;
+                if !super::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
+                    .contains(&status.as_str())
+                {
+                    entry.proposals_pending += 1;
+                }
             }
         }
 
-        for f in flags.into_iter().filter(|f| in_window(&f.created_at)) {
-            let entry = by_agent
-                .entry(f.reporter_agent_id.clone())
-                .or_insert_with(|| CivicHealthEntry {
-                    agent_id: f.reporter_agent_id.clone(),
-                    proposals_filed: 0,
-                    proposals_pending: 0,
-                    flags_filed: 0,
-                    flags_pending: 0,
-                });
-            entry.flags_filed += 1;
-            if !super::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES.contains(&f.status.as_str())
-            {
-                entry.flags_pending += 1;
+        {
+            let mut stmt =
+                conn.prepare("SELECT reporter_agent_id, status, created_at FROM anomaly_flags")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (agent_id, status, created_at) = r?;
+                if !in_window(&created_at) {
+                    continue;
+                }
+                let entry = by_agent
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| CivicHealthEntry {
+                        agent_id,
+                        proposals_filed: 0,
+                        proposals_pending: 0,
+                        flags_filed: 0,
+                        flags_pending: 0,
+                    });
+                entry.flags_filed += 1;
+                if !super::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
+                    .contains(&status.as_str())
+                {
+                    entry.flags_pending += 1;
+                }
             }
         }
 

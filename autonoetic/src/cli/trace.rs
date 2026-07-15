@@ -632,7 +632,7 @@ pub fn handle_trace_civic_health(
             "since": since,
             "by_agent": health.by_agent.iter().map(|e| {
                 serde_json::json!({
-                    "agent_id": e.agent_id,
+                    "agent_id": e.agent_id.as_str(),
                     "proposals_filed": e.proposals_filed,
                     "proposals_pending": e.proposals_pending,
                     "flags_filed": e.flags_filed,
