@@ -4801,6 +4801,7 @@ mod tests {
             decided_at: None,
             published_in_release: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
         }
     }
 
@@ -4926,6 +4927,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
         }
     }
 

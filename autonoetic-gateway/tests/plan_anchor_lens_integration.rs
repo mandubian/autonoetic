@@ -79,6 +79,7 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 agent_id: None,
                 notes: None,
                 status: StepStatus::Pending,
+                required_capabilities: vec![],
             },
             PlanStep {
                 step_id: "agent_oauth".to_string(),
@@ -88,6 +89,7 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 agent_id: None,
                 notes: None,
                 status: StepStatus::Pending,
+                required_capabilities: vec![],
             },
         ],
         validation_policy: ValidationPolicy {

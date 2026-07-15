@@ -48,9 +48,13 @@ pub struct AnomalyFlag {
     pub decided_by: Option<String>,
     pub decided_at: Option<String>,
     pub created_at: String,
+    /// Stamped once by [`GatewayStore::flag_anomaly_flag_sla_breaches`] when
+    /// the flag sits un-adjudicated past the configured SLA (O-7). `None`
+    /// means either not yet overdue or the SLA check hasn't run.
+    pub sla_breached_at: Option<String>,
 }
 
-const FLAG_COLUMNS: &str = "flag_id, reporter_agent_id, reporter_session_id, subject_ref, observation, evidence_json, severity, status, decision, decision_reason, decided_by, decided_at, created_at";
+const FLAG_COLUMNS: &str = "flag_id, reporter_agent_id, reporter_session_id, subject_ref, observation, evidence_json, severity, status, decision, decision_reason, decided_by, decided_at, created_at, sla_breached_at";
 
 fn row_to_flag(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnomalyFlag> {
     let evidence_str: String = row.get(5)?;
@@ -69,6 +73,7 @@ fn row_to_flag(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnomalyFlag> {
         decided_by: row.get(10)?,
         decided_at: row.get(11)?,
         created_at: row.get(12)?,
+        sla_breached_at: row.get(13)?,
     })
 }
 
@@ -79,7 +84,7 @@ impl GatewayStore {
         conn.execute(
             &format!(
                 "INSERT INTO anomaly_flags ({FLAG_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
             ),
             params![
                 f.flag_id,
@@ -95,6 +100,9 @@ impl GatewayStore {
                 f.decided_by,
                 f.decided_at,
                 f.created_at,
+                // sla_breached_at: always NULL at insert; stamped later by
+                // flag_anomaly_flag_sla_breaches, never at filing time.
+                None::<String>,
             ],
         )?;
         Ok(())
@@ -218,6 +226,50 @@ impl GatewayStore {
         };
         Ok(rows > 0)
     }
+
+    /// Stamp `sla_breached_at` on flags overdue for adjudication, returning
+    /// the rows first breached by THIS call (so the caller emits one event +
+    /// notification per breach, never repeating on later ticks). A breach does
+    /// NOT change status — the decision is still owed (O-7).
+    pub fn flag_anomaly_flag_sla_breaches(
+        &self,
+        sla_secs: u64,
+        now_rfc3339: &str,
+    ) -> Result<Vec<AnomalyFlag>> {
+        let now = chrono::DateTime::parse_from_rfc3339(now_rfc3339)
+            .map_err(|e| anyhow::anyhow!("invalid `now_rfc3339` {now_rfc3339:?}: {e}"))?
+            .with_timezone(&chrono::Utc);
+        let cutoff = (now - chrono::Duration::seconds(sla_secs as i64)).to_rfc3339();
+
+        let terminal_placeholders = FLAG_TERMINAL_DECISION_STATUSES
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // Single atomic UPDATE … RETURNING: `sla_breached_at IS NULL` in the
+        // WHERE clause guarantees stamp-once even under concurrent schedulers —
+        // only the caller whose UPDATE actually flips the row from NULL gets it
+        // back, so a breach fires exactly once (mirrors publish_approved_proposals).
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "UPDATE anomaly_flags SET sla_breached_at = ? \
+             WHERE sla_breached_at IS NULL \
+               AND status NOT IN ({terminal_placeholders}) \
+               AND created_at < ? \
+             RETURNING {FLAG_COLUMNS}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut param_vals: Vec<&dyn rusqlite::types::ToSql> = vec![&now_rfc3339];
+        for s in FLAG_TERMINAL_DECISION_STATUSES {
+            param_vals.push(s as &dyn rusqlite::types::ToSql);
+        }
+        param_vals.push(&cutoff);
+        let breached = stmt
+            .query_map(param_vals.as_slice(), row_to_flag)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(breached)
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +291,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
         }
     }
 
@@ -311,25 +364,39 @@ mod tests {
         Ok(())
     }
 
+    fn sample_flag_with(flag_id: &str, created_at: &str, status: &str) -> AnomalyFlag {
+        let mut f = sample_flag(flag_id);
+        f.created_at = created_at.to_string();
+        f.status = status.to_string();
+        f
+    }
+
+    fn old_rfc3339(secs_ago: u64) -> String {
+        (chrono::Utc::now() - chrono::Duration::seconds(secs_ago as i64)).to_rfc3339()
+    }
+
     #[test]
     fn list_pending_excludes_terminal_and_resists_displacement() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let store = GatewayStore::open(temp.path())?;
 
-        let mut pending = sample_flag("aflag-pending");
-        pending.created_at = "2025-01-01T00:00:00Z".to_string();
-        let mut review = sample_flag("aflag-review");
-        review.status = "under_review".to_string();
-        review.created_at = "2025-01-02T00:00:00Z".to_string();
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-pending",
+            "2025-01-01T00:00:00Z",
+            "pending",
+        ))?;
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-review",
+            "2025-01-02T00:00:00Z",
+            "under_review",
+        ))?;
         // Newest row is a terminal decision: an all-statuses query with a
         // tight LIMIT would crowd the older pending rows out of the window.
-        let mut confirmed = sample_flag("aflag-confirmed");
-        confirmed.status = "confirmed".to_string();
-        confirmed.created_at = "2025-01-03T00:00:00Z".to_string();
-
-        store.insert_anomaly_flag(&pending)?;
-        store.insert_anomaly_flag(&review)?;
-        store.insert_anomaly_flag(&confirmed)?;
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-confirmed",
+            "2025-01-03T00:00:00Z",
+            "confirmed",
+        ))?;
 
         let listed = store.list_pending_anomaly_flags(Some("auditor.default"), 64)?;
         let ids: Vec<&str> = listed.iter().map(|f| f.flag_id.as_str()).collect();
@@ -340,6 +407,74 @@ mod tests {
         let tight = store.list_pending_anomaly_flags(Some("auditor.default"), 1)?;
         assert_eq!(tight.len(), 1);
         assert_eq!(tight[0].flag_id, "aflag-review");
+
+        Ok(())
+    }
+
+    #[test]
+    fn breach_is_flagged_once_and_idempotent() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.insert_anomaly_flag(&sample_flag_with("aflag-old", &old_rfc3339(1_000), "pending"))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let first = store.flag_anomaly_flag_sla_breaches(100, &now)?;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].flag_id, "aflag-old");
+        assert!(first[0].sla_breached_at.is_some());
+        assert_eq!(first[0].status, "pending", "breach must not change status");
+
+        // Second tick: already flagged, must not repeat.
+        let second = store.flag_anomaly_flag_sla_breaches(100, &now)?;
+        assert!(second.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn within_sla_is_not_flagged() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.insert_anomaly_flag(&sample_flag_with("aflag-fresh", &old_rfc3339(10), "pending"))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let breached = store.flag_anomaly_flag_sla_breaches(1_000, &now)?;
+        assert!(breached.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_status_is_never_flagged() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-confirmed",
+            &old_rfc3339(1_000),
+            "confirmed",
+        ))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let breached = store.flag_anomaly_flag_sla_breaches(100, &now)?;
+        assert!(breached.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn under_review_old_flag_is_flagged() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-review",
+            &old_rfc3339(1_000),
+            "under_review",
+        ))?;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let breached = store.flag_anomaly_flag_sla_breaches(100, &now)?;
+        assert_eq!(breached.len(), 1);
+        assert_eq!(breached[0].flag_id, "aflag-review");
 
         Ok(())
     }

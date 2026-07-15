@@ -1801,6 +1801,7 @@ mod civic_health_tests {
             decided_at: None,
             published_in_release: None,
             created_at: created_at.to_string(),
+            sla_breached_at: None,
         }
     }
 
@@ -1819,6 +1820,7 @@ mod civic_health_tests {
             decided_by: None,
             decided_at: None,
             created_at: created_at.to_string(),
+            sla_breached_at: None,
         }
     }
 

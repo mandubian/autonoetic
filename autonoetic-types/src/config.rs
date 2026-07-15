@@ -1730,18 +1730,30 @@ pub struct DeciderObligationsConfig {
     /// Require a motivation for BLOCKING-tier decisions. Default: true.
     #[serde(default = "default_decider_obligations_enabled")]
     pub enabled: bool,
+
+    /// Adjudication SLA in seconds (#771 D.1): a constitutional proposal
+    /// (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is
+    /// flagged as an SLA breach (does not change status). `0` disables the
+    /// check. Default: 7 days.
+    #[serde(default = "default_adjudication_sla_secs")]
+    pub adjudication_sla_secs: u64,
 }
 
 impl Default for DeciderObligationsConfig {
     fn default() -> Self {
         Self {
             enabled: default_decider_obligations_enabled(),
+            adjudication_sla_secs: default_adjudication_sla_secs(),
         }
     }
 }
 
 fn default_decider_obligations_enabled() -> bool {
     true
+}
+
+fn default_adjudication_sla_secs() -> u64 {
+    604800
 }
 
 /// Configuration for the operator activity feed (Phase 4 hardening).
@@ -2179,6 +2191,12 @@ pub struct LoopGuardConfig {
     /// progress). Set to 0 to disable.
     #[serde(default = "default_max_irrecoverable_repeats")]
     pub max_irrecoverable_repeats: u32,
+
+    /// RFC #776 Part B.4 — threshold for repeated spawn identity. When a
+    /// parent spawns the same agent with the same contract + input this
+    /// many times, the LoopGuard trips `RepeatedSpawnIdentity`. 0 disables.
+    #[serde(default = "default_max_spawn_identity_repeats")]
+    pub max_spawn_identity_repeats: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2210,6 +2228,7 @@ impl Default for LoopGuardConfig {
             recurring_error_window: default_recurring_error_window(),
             recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
             max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
+            max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
         }
     }
 }
@@ -2259,6 +2278,10 @@ fn default_recurring_error_distinct_tools() -> usize {
 }
 
 fn default_max_irrecoverable_repeats() -> u32 {
+    3
+}
+
+fn default_max_spawn_identity_repeats() -> u32 {
     3
 }
 
@@ -3657,5 +3680,13 @@ mod tests {
         let parsed: GatewayConfig = serde_json::from_value(j).expect("parse json");
         assert!(parsed.validation_waivers.enabled);
         assert!(parsed.validation_waivers.auto_propose_after_reconcile);
+    }
+
+    #[test]
+    fn decider_obligations_adjudication_sla_secs_defaults_to_seven_days() {
+        assert_eq!(
+            DeciderObligationsConfig::default().adjudication_sla_secs,
+            604800
+        );
     }
 }

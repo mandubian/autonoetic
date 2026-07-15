@@ -299,6 +299,26 @@ agents declare; constitution-named capabilities (cited by `P-*` / `Ri-*` in
 | `ArtifactExecution` | Content-addressed entrypoint execution via `artifact_exec` and preflight via `artifact_prepare` |
 | `AgentSpawn` | Creating new agent sessions |
 
+### Denials Carry Lawful Next Moves
+
+Every capability/policy denial is a structured `ToolError` naming the violated rule (`enforced_rules`, Ri-0.3) *and* a machine-readable `available_actions` list — the agent finds its lawful next move inside the denial itself, without having to recall it from a prompt:
+
+```json
+{
+  "ok": false,
+  "error_type": "permission",
+  "message": "NetworkAccess required for host api.example.com",
+  "enforced_rules": ["P-1.5"],
+  "available_actions": [
+    { "action": "propose_amendment", "tool": "constitution_propose_amendment", "clause": "Ri-0.8", "requires_capability": "ConstitutionalProposal", "description": "..." },
+    { "action": "delegate", "tool": "agent_spawn", "requires_capability": "AgentSpawn", "description": "Find an installed agent that declares NetworkAccess (agent_discover) and delegate the step to it (agent_spawn)." },
+    { "action": "self_describe", "tool": "self_describe", "description": "Inspect your own declared capabilities and rights before retrying; do not retry the identical call." }
+  ]
+}
+```
+
+The table is **static and pre-committed** — the gateway maps rule IDs to affordances mechanically (Lawful Executor, §14); it never judges which move is best. `propose_amendment` and `self_describe` are always present; `delegate`'s description names the missing capability when derivable from the rule ID. An `escalate` affordance is deliberately absent until P-2.21 escalation gets an agent-callable tool.
+
 ### Scoping
 
 Capabilities use pattern-based scoping:
@@ -373,6 +393,7 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | `agent_discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
 | `agent_inspect` | `(agent_id: string, ...) → metadata` | Inspect *any* installed agent's metadata/capabilities/revision |
 | `self_describe` | `() → self` | Describe *yourself* — see below |
+| `anomaly_flag` | `(subject_ref, observation, evidence_refs?, severity?) → {flag_id, status}` | Report unexpected/concerning behavior in one call — see below |
 
 ### Self-Awareness (`self_describe`)
 
@@ -387,6 +408,55 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 It takes no arguments, reports only your own self and the public constitution, and is **always available** — an agent always has the standing to know itself. Rights are sourced from the enforcement register (`docs/constitution/enforcement-register.md`), so they stay in sync with what the gateway actually upholds.
 
 `self_describe` is **Core tier** (like `constitution_read`) so it is visible to every agent including child sessions. **Use `self_describe` to inspect yourself; use `agent_inspect` only for *other* agents** — do not `agent_inspect` your own id.
+
+### Anomaly Reporting (`anomaly_flag`)
+
+An agent can report unexpected or concerning behavior — its own, another agent's, or the gateway's — in a single call, **holding zero capabilities**: the agent most likely to witness misbehavior may be the least privileged in the room, so reporting must never be capability-gated.
+
+**Arguments:**
+
+| Field | Required | Description |
+|-------|----------|--------------|
+| `subject_ref` | Yes | What the observation is about: a session id, agent id, artifact ref, or tool-call ref |
+| `observation` | Yes | What you observed and why it is unexpected or concerning |
+| `evidence_refs` | No | Causal-event IDs, execution-trace IDs, or artifact refs supporting the observation |
+| `severity` | No | `low` / `medium` / `high` / `critical`, default `medium` |
+
+Example call:
+
+```json
+{
+  "subject_ref": "session-9f3a2b",
+  "observation": "Child evaluator reported pass=true but produced no test-execution trace.",
+  "evidence_refs": ["tr-7c1d99"],
+  "severity": "high"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "flag_id": "aflag-a1b2c3d4e5f6",
+  "status": "pending",
+  "severity": "medium",
+  "message": "Anomaly flag recorded durably; it cannot be silently dropped and is owed an adjudication decision."
+}
+```
+
+`anomaly_flag` is **Core tier**, `is_available` unconditionally `true` — like `self_describe`, always available including to child sessions. The flag is durably recorded (a failed insert fails the tool call — it is never silently dropped) and emits a causal event (`category: "anomaly_flag"`, `action: "filed"`) attributed to the reporting agent. **Filing a flag is never itself grounds for sanction.**
+
+An anomaly review authority (today: the operator) adjudicates pending flags via JSON-RPC:
+
+| Method | Params | Description |
+|--------|--------|-------------|
+| `anomaly.list_pending` | `status?` (default `pending`), `limit?` | List flags awaiting a decision |
+| `anomaly.resolve` | `flag_id, decided_by, status, reason?` | Record a decision: `confirmed` / `dismissed` / `deferred` (+ `under_review`) |
+
+Terminal decisions (`confirmed`/`dismissed`/`deferred`) require a non-empty `reason` when `decider_obligations.enabled` (mirrors the O-1 decider-motivation requirement for approvals) — a decision without motivation is rejected, not silently accepted.
+
+> **Constitutional status:** this tool implements the citizenship RFC's proposed rights `Ri-0.18` (right to report) and `O-7` (duty to adjudicate reports) — see [`docs/design/citizenship-as-a-runtime-service.md`](design/citizenship-as-a-runtime-service.md). These clauses are **not yet enacted**: causal events already carry the rule IDs so history is attributed from the moment the distinction is conceivable, but they are bucketed `unattributed` in contract health until the amendment (drafted in `docs/constitution/amendments/`) is signed.
 
 ### Skill Install Tool
 

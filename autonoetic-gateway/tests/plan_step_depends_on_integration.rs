@@ -86,6 +86,7 @@ fn mk_step(id: &str, deps: &[&str]) -> PlanStep {
         agent_id: None,
         notes: None,
         status: StepStatus::Pending,
+        required_capabilities: vec![],
     }
 }
 
@@ -877,6 +878,7 @@ fn mk_plan(steps: &[((&str, &[&str]), StepStatus)]) -> PlanFrame {
                 agent_id: None,
                 notes: None,
                 status: *status,
+                required_capabilities: vec![],
             })
             .collect(),
         validation_policy: Default::default(),

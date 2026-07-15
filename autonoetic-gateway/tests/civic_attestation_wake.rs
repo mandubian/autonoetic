@@ -4,18 +4,14 @@
 //!
 //! Exercises the store + `compose_and_sign` path directly (the cheapest
 //! reliable seam — mirrors `context.rs::build_state_attestation_tail`'s own
-//! query-then-filter logic) rather than standing up a full executor.
+//! store queries) rather than standing up a full executor.
 
 use autonoetic_gateway::runtime::crypto::GatewayIdentityKey;
 use autonoetic_gateway::runtime::state_attestation::{
     compose_and_sign, render_tail, AttestationInputs, BudgetMeter,
 };
-use autonoetic_gateway::scheduler::gateway_store::anomaly_flags::{
-    AnomalyFlag, FLAG_TERMINAL_DECISION_STATUSES,
-};
-use autonoetic_gateway::scheduler::gateway_store::constitutional_proposals::{
-    ConstitutionalProposal, PROPOSAL_TERMINAL_DECISION_STATUSES,
-};
+use autonoetic_gateway::scheduler::gateway_store::anomaly_flags::AnomalyFlag;
+use autonoetic_gateway::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
 use autonoetic_gateway::scheduler::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use tempfile::tempdir;
@@ -84,6 +80,7 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
             decided_at: None,
             published_in_release: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
         })
         .expect("insert proposal");
 
@@ -102,24 +99,23 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
             decided_by: None,
             decided_at: None,
             created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
         })
         .expect("insert flag");
 
-    // Same query-then-filter logic as
-    // `context.rs::build_state_attestation_tail`: only non-terminal items
-    // ride along in the signed block.
+    // Same queries as `context.rs::build_state_attestation_tail`: only
+    // non-terminal items ride along in the signed block, status-filtered
+    // in SQL so terminal decisions can't displace them from the window.
     let pending_proposal_ids: Vec<String> = store
-        .list_constitutional_proposals(None, Some(agent_id), 64)
+        .list_pending_constitutional_proposals(Some(agent_id), 64)
         .expect("list proposals")
         .into_iter()
-        .filter(|p| !PROPOSAL_TERMINAL_DECISION_STATUSES.contains(&p.status.as_str()))
         .map(|p| p.proposal_id)
         .collect();
     let pending_flag_ids: Vec<String> = store
-        .list_anomaly_flags(None, Some(agent_id), 64)
+        .list_pending_anomaly_flags(Some(agent_id), 64)
         .expect("list flags")
         .into_iter()
-        .filter(|f| !FLAG_TERMINAL_DECISION_STATUSES.contains(&f.status.as_str()))
         .map(|f| f.flag_id)
         .collect();
 

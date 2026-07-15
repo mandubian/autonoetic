@@ -3607,6 +3607,43 @@ impl AgentExecutor {
                                 self.guard
                                     .register_progress(&tc.name, &tc.arguments);
                             }
+
+                            // RFC #776 Part B.4: track spawn structural identity
+                            // to catch delegation loops (parent re-spawning the
+                            // same child with the same contract + input).
+                            if tc.name == "agent_spawn" {
+                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(&tc.arguments) {
+                                    let spawn_agent_id = args.get("agent_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let message_str = args.get("message")
+                                        .map(|v| v.to_string())
+                                        .unwrap_or_default();
+                                    let expected: Vec<String> = args
+                                        .pointer("/metadata/expected_outputs")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| arr.iter()
+                                            .filter_map(|v| v.as_str().map(str::to_string))
+                                            .collect())
+                                        .unwrap_or_default();
+                                    if !spawn_agent_id.is_empty() {
+                                        if let Some(reason) = self.guard
+                                            .register_spawn_attempt(
+                                                spawn_agent_id,
+                                                &expected,
+                                                &message_str,
+                                            )
+                                        {
+                                            tracing::warn!(
+                                                target: "autonoetic::guard",
+                                                reason = ?reason,
+                                                "Spawn identity loop guard tripped"
+                                            );
+                                            self.guard.trip(reason);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     if parsed.get("any_failed") == Some(&serde_json::Value::Bool(true)) {

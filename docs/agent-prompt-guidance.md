@@ -141,6 +141,16 @@ default envelope (`{status, summary, result}`), and `returns_enforcement`
 schema never hard-fails output from a skill we don't control, while the skill
 still hands off a predictable shape and inherits the Output Contract instruction.
 
+**Gateway-injected `anomalies` field.** The same parser choke point that
+synthesizes the imported-skill envelope also augments any **reasoning**
+agent's *declared* object-shaped `io.returns` with a required `anomalies`
+array — "anything unexpected?" as a schema field rather than a virtue (see
+`docs/response-validation-gate.md` for the schema shape). A manifest
+declaring its own `anomalies` property wins untouched; script agents are
+excluded. The rendered Output Contract gets one extra line naming it a
+standing witness contract. This doctrine sentence is fingerprinted in
+`skill_doctrine_guard.rs` — do not restate it in a SKILL.md body either.
+
 ## The regression guard
 
 `tests/skill_doctrine_guard.rs` scans every `agents/**/SKILL.md` and fails if it
