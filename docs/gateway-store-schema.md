@@ -438,6 +438,7 @@ Immutable, content-addressed revisions (P-9.3).
 | `metadata_json`, `short_id` | TEXT | |
 | `signature`, `signer_id` | TEXT | added v24 |
 | `detected_network_hosts` | TEXT | added v56 (pragma-guarded) |
+| `requested_by_type`, `requested_by_id` | TEXT | added v68 — designer/requester lineage (#803): the delegating principal (e.g. `agent-factory.default`) derived from spawn lineage, distinct from `created_by_*` (the installer) |
 
 Indexes: unique `idx_agent_revisions_agent_content ON (agent_id, content_digest)`, `idx_agent_revisions_agent`, `idx_agent_revisions_status`. Reclaims archived rows in `reclamation.rs:41` (skipping revisions still referenced by `session_agent_bindings`).
 

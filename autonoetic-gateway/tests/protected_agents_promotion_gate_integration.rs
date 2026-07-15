@@ -107,6 +107,8 @@ fn make_revision_record(agent_id: &str, revision_id: &str) -> AgentRevisionRecor
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "artifact".to_string(),
         source_ref: None,
         origin_node_id: "local".to_string(),

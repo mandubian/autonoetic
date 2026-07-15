@@ -247,6 +247,8 @@ impl NativeTool for AgentInspectTool {
                 "created_at": rev.created_at,
                 "created_by_type": rev.created_by_type,
                 "created_by_id": rev.created_by_id,
+                "requested_by_type": rev.requested_by_type,
+                "requested_by_id": rev.requested_by_id,
                 "trust_domain": rev.trust_domain,
                 "source_kind": rev.source_kind,
                 "base_revision_id": rev.base_revision_id,

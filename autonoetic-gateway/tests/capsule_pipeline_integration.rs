@@ -54,6 +54,8 @@ fn make_fixture(agent_id: &str, revision_id: &str) -> Fixture {
         created_at: "2026-05-28T00:00:00Z".to_string(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "artifact".to_string(),
         source_ref: Some("art_test".to_string()),
         origin_node_id: "node-A".to_string(),

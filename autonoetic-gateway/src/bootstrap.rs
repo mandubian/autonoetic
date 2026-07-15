@@ -459,6 +459,11 @@ fn bootstrap_agent_inner(
         created_at: now.clone(),
         created_by_type: created_by_type.to_string(),
         created_by_id: created_by_id.to_string(),
+        // #803: bootstrap paths (reference-bundle startup, skill_install
+        // candidate) carry no designing-agent lineage — the requester is
+        // derived only on the create_from_intent tool path (agent_revision.rs).
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: source_kind.to_string(),
         source_ref: source_ref.map(|s| s.to_string()),
         origin_node_id: config.node_id.clone(),
