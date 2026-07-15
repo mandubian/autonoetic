@@ -913,7 +913,7 @@ capabilities:
 
 **What happens under the hood:**
 1. Gateway verifies the URL host against `allowed_sources` in the `SkillInstall` capability.
-2. Fetches the remote SKILL.md over HTTPS (15 s timeout).
+2. Fetches the remote SKILL.md over HTTPS — plain HTTP is accepted only for loopback hosts (local dev/tests); anything else is rejected with `skill_install_insecure_scheme` (15 s timeout).
 3. Parses frontmatter with `SkillParser`; rejects `execution_mode: script` manifests (a fetched-SKILL.md-only import can never ship the entrypoint a script needs).
 4. Applies the requested `trust_mode` to the capability set (see above).
 5. Writes `SKILL.md` + a fresh `runtime.lock` into `agents_dir/web-researcher-default/`.

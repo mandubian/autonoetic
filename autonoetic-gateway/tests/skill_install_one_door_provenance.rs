@@ -136,6 +136,21 @@ fn run_skill_install(
     skill_body: String,
     trust_mode: Option<&str>,
 ) -> (serde_json::Value, Arc<GatewayStore>) {
+    let (base_url, handle) = spawn_one_shot_http_server(skill_body);
+    let url = format!("{base_url}/SKILL.md");
+    let out = run_skill_install_url(new_agent_id, &url, trust_mode);
+    handle.join().expect("mock server thread should join");
+    out
+}
+
+/// Same dispatch path as `run_skill_install` but against a caller-provided
+/// URL, without a mock server — for requests the gateway must reject before
+/// any fetch happens.
+fn run_skill_install_url(
+    new_agent_id: &str,
+    url: &str,
+    trust_mode: Option<&str>,
+) -> (serde_json::Value, Arc<GatewayStore>) {
     let manifest = installer_manifest(vec![Capability::SkillInstall {
         allowed_sources: vec!["127.0.0.1".to_string()],
     }]);
@@ -159,9 +174,6 @@ fn run_skill_install(
     std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
     let caller_dir = config.agents_dir.join(INSTALLER_ID);
     std::fs::create_dir_all(&caller_dir).expect("caller dir should create");
-
-    let (base_url, handle) = spawn_one_shot_http_server(skill_body);
-    let url = format!("{base_url}/SKILL.md");
 
     let mut args = serde_json::json!({
         "url": url,
@@ -188,8 +200,6 @@ fn run_skill_install(
             None,
         )
         .expect("skill_install should return a response");
-
-    handle.join().expect("mock server thread should join");
 
     let parsed: serde_json::Value =
         serde_json::from_str(&result).expect("skill_install response should be JSON");
@@ -272,6 +282,32 @@ fn provenance_recorded_on_revision_and_causal_event() {
     assert_eq!(payload["trust_mode"], serde_json::json!("generous"));
     assert!(payload["sha256"].as_str().is_some_and(|s| !s.is_empty()));
     assert!(payload["url"].as_str().unwrap().contains("/SKILL.md"));
+}
+
+/// Transport safety (#802 review): a non-loopback plain-HTTP URL is
+/// rejected before any fetch or disk write — a remote SKILL.md is a whole
+/// agent definition, so plaintext transport would allow MITM substitution.
+#[serial]
+#[test]
+fn remote_plain_http_rejected_before_fetch() {
+    let agent_id = "genesis-one-door-http-rejected.default";
+    let (resp, _store) =
+        run_skill_install_url(agent_id, "http://skills.example.com/SKILL.md", None);
+
+    assert_eq!(resp["ok"], serde_json::json!(false), "resp: {resp}");
+    assert_eq!(
+        resp["error"],
+        serde_json::json!("skill_install_insecure_scheme"),
+        "resp: {resp}"
+    );
+
+    let ws = workspace();
+    let target_dir = ws.agents_dir.join(agent_id.replace('.', "-"));
+    assert!(
+        !target_dir.exists(),
+        "scheme rejection must happen before any disk write, found: {}",
+        target_dir.display()
+    );
 }
 
 /// (c) Script-mode imports are rejected before any disk write.

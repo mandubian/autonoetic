@@ -120,7 +120,22 @@ impl NativeTool for SkillInstallTool {
         // ── 1. Validate agent_id ──────────────────────────────────────────────
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
 
-        // ── 2. Policy: SkillInstall capability must permit this URL host ──────
+        // ── 2. Transport: HTTPS only beyond loopback ──────────────────────────
+        // A remote SKILL.md is a whole agent definition — fetched over
+        // plaintext HTTP, a network MITM could substitute it wholesale
+        // (#802 review). Plain HTTP is accepted only for loopback hosts
+        // (local dev / tests). Checked before the capability gate: request
+        // shape validation precedes authorization.
+        if !url_scheme_is_fetch_safe(&args.url) {
+            return Ok(ToolError::validation(
+                format!("skill_install fetches SKILL.md over HTTPS only (got '{}') — plain HTTP is accepted only for loopback hosts", args.url),
+                Some("Serve the skill over HTTPS, or use a loopback address for local development."),
+            )
+            .with_code("skill_install_insecure_scheme")
+            .to_error_response());
+        }
+
+        // ── 2b. Policy: SkillInstall capability must permit this URL host ─────
         let url_host = extract_host(&args.url)?;
         if !policy.can_install_skill(&url_host).is_allowed() {
             return Ok(ToolError::permission(format!("SkillInstall capability does not permit fetching from host '{}'", url_host)).with_code("skill_install_host_denied").to_error_response());
@@ -143,19 +158,19 @@ impl NativeTool for SkillInstallTool {
 
         // ── 4. Fetch the remote SKILL.md ──────────────────────────────────────
         let url_clone = args.url.clone();
-        let (http_status, skill_content) = {
-            let result: anyhow::Result<(u16, String)> = (|| {
+        let (http_status, fetched_bytes) = {
+            let result: anyhow::Result<(u16, Vec<u8>)> = (|| {
                 let client = reqwest::blocking::Client::builder()
                     .timeout(std::time::Duration::from_secs(15))
                     .build()?;
                 let resp = client.get(url_clone.as_str()).send()?;
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
-                    let _ = resp.text()?;
-                    return Ok((status, String::new()));
+                    let _ = resp.bytes()?;
+                    return Ok((status, Vec::new()));
                 }
-                let content = resp.text()?;
-                Ok((status, content))
+                let content = resp.bytes()?;
+                Ok((status, content.to_vec()))
             })();
             result?
         };
@@ -167,10 +182,18 @@ impl NativeTool for SkillInstallTool {
         // Provenance (RFC Part D): digest the exact fetched bytes, reusing the
         // content store's own SHA-256 helper rather than hashing ad hoc.
         let fetched_sha256_hex = crate::runtime::content_store::ContentStore::compute_handle(
-            skill_content.as_bytes(),
+            &fetched_bytes,
         )
         .trim_start_matches("sha256:")
         .to_string();
+
+        // Decode the SKILL.md text from the same byte buffer the provenance
+        // digest was computed over — hashing already-decoded text instead
+        // could diverge from the exact fetched bytes (charset decoding /
+        // invalid-byte replacement), weakening the provenance guarantee.
+        let skill_content = String::from_utf8(fetched_bytes).map_err(|_| {
+            anyhow::anyhow!("SKILL.md from {} is not valid UTF-8", args.url)
+        })?;
 
         // ── 5. Parse the SKILL.md ─────────────────────────────────────────────
         let (parsed_manifest, body) = crate::runtime::parser::SkillParser::parse(&skill_content)
@@ -998,6 +1021,23 @@ impl NativeTool for SkillNormalizeTool {
             },
         })
         .to_string())
+    }
+}
+
+/// `true` when a SKILL.md URL may be fetched: always `https://`, or
+/// `http://` only for loopback hosts (local dev / tests). Any other scheme
+/// (`file:`, `ftp:`, …) is rejected as well.
+fn url_scheme_is_fetch_safe(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => true,
+        "http" => matches!(
+            parsed.host_str(),
+            Some("127.0.0.1") | Some("::1") | Some("localhost")
+        ),
+        _ => false,
     }
 }
 
