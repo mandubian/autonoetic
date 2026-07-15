@@ -3124,10 +3124,22 @@ fn apply_revision_requested_by_v68(conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute_batch(
-        "ALTER TABLE agent_revisions ADD COLUMN requested_by_type TEXT;
-         ALTER TABLE agent_revisions ADD COLUMN requested_by_id TEXT;",
-    )?;
+    // Guard each ADD COLUMN independently so a partial application (crash
+    // between the two ALTERs, before the schema_migrations insert) is
+    // recovered on restart instead of failing with a duplicate-column error
+    // (mirrors the v56 pragma_table_info idiom above).
+    for col in ["requested_by_type", "requested_by_id"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('agent_revisions') WHERE name = ?1",
+            params![col],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE agent_revisions ADD COLUMN {col} TEXT;"
+            ))?;
+        }
+    }
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",

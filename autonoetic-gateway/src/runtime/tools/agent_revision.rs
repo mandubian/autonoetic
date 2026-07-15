@@ -803,15 +803,37 @@ fn derive_requested_by(
     let Some(session_id) = session_id else {
         return (None, None);
     };
-    let Ok(Some(parent_session_id)) = gateway_store.parent_session_id(session_id) else {
-        return (None, None);
+    // A missing parent (root-invoked) is expected and silent; a *lookup error*
+    // silently dropping lineage would undermine the durability goal, so warn.
+    let parent_session_id = match gateway_store.parent_session_id(session_id) {
+        Ok(Some(parent)) => parent,
+        Ok(None) => return (None, None),
+        Err(e) => {
+            tracing::warn!(
+                target: "agent_revision",
+                session_id,
+                error = %e,
+                "#803: parent-session lookup failed; recording revision without requester lineage"
+            );
+            return (None, None);
+        }
     };
     match gateway_store.session_owner_agent(&parent_session_id) {
         Ok(Some(agent_id)) => (
             Some(PrincipalKind::AutonoeticAgent.tag().to_string()),
             Some(agent_id),
         ),
-        _ => (None, None),
+        Ok(None) => (None, None),
+        Err(e) => {
+            tracing::warn!(
+                target: "agent_revision",
+                session_id,
+                parent_session_id,
+                error = %e,
+                "#803: parent-session owner lookup failed; recording revision without requester lineage"
+            );
+            (None, None)
+        }
     }
 }
 
