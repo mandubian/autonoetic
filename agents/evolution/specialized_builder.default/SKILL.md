@@ -97,15 +97,20 @@ If the artifact is malformed, missing files, or has wrong metadata, tell the pla
 
 Agent installation is a two-step workflow:
 
-### Reasoning-Only Agent Installation (no artifact)
+### Reasoning-Only Agent Installation (intent-only artifact)
 
 For agents that only use existing gateway tools (`credential_request`, `memory.*`,
-`web_fetch`, `scheduler.cron.*`, etc.) and contain **no custom code**:
+`web_fetch`, `scheduler.cron.*`, etc.) and contain **no custom code**, `artifact_ref`
+is still required whenever the agent declares any capability — there is no
+promotion-gate exemption for reasoning-only agents. Build an **intent-only
+bundle** (the SKILL body only, no `script_entry`, no executable code) per
+"Intent-only bundles" below, then:
 
-1. Call `agent_revision_create_from_intent` **without** `artifact_ref`:
+1. Call `agent_revision_create_from_intent` **with** the intent-only `artifact_ref`:
    ```json
    {
      "agent_id": "moltbook-ops",
+     "artifact_ref": "ar.example-intent-only",
      "description": "Operational Moltbook agent — posts to feed and monitors replies",
      "instructions": "# Moltbook Operations\n\n...",
      "execution_mode": "reasoning",
@@ -130,15 +135,21 @@ For agents that only use existing gateway tools (`credential_request`, `memory.*
    }
    ```
 
-2. Call `agent_revision_promote` with the returned `revision_id`.
+2. Have the auditor record a `promotion_record` against the same `artifact_ref`
+   (required by the promotion gate for the declared capabilities — see below).
+3. Call `agent_revision_promote` with the returned `revision_id`.
 
-**Rules for artifact-free agents:**
-- `execution_mode` must be `reasoning` (script agents always need artifacts)
+**Rules for intent-only agents:**
+- `execution_mode` must be `reasoning` (script agents always need a code artifact)
 - `llm_preset` is required (names a gateway `llm_presets` key)
-- `CodeExecution` and `AgentSpawn` are forbidden (these require code review)
+- `CodeExecution` and `AgentSpawn` are forbidden without a real code artifact (they require the Full evidence+audit gate)
 - All other capabilities work: `CredentialAccess`, `NetworkAccess`, `ReadAccess`,
   `WriteAccess`, `MemoryAccess`, `BackgroundReevaluation`, `SchedulerAccess`
-- No promotion gate: capability enforcement on every tool call is the security guarantee
+- Promotion gate: a non-empty capability set with an artifact is gated (Full for
+  `NetworkAccess`; audit-only otherwise — see `agent_revision_create_from_intent`'s
+  tool description for the exact matrix) before `agent_revision_promote` succeeds.
+  Only a genuinely **empty** capability set may direct-promote without an artifact,
+  and only when the gateway config allows it (`allow_zero_capability_direct_promote`).
 
 ---
 

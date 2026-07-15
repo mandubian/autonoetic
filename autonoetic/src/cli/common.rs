@@ -1367,6 +1367,15 @@ pub enum TraceCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Civic-health view: how often each agent exercises its civic affordances (proposals, anomaly flags) (#772)
+    CivicHealth {
+        /// Only count filed items at or after this RFC3339 timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

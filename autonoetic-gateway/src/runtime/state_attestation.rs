@@ -44,6 +44,12 @@ pub struct AttestationInputs<'a> {
     pub pending_user_interaction_ids: Vec<String>,
     /// Pending escalation IDs (GateKind::Escalation).
     pub pending_escalation_ids: Vec<String>,
+    /// Non-terminal constitutional proposal IDs filed by this agent (#772
+    /// A.2 — "voice with amnesia is no voice"). Lets the agent see, every
+    /// turn, that its own proposals are still awaiting a decision.
+    pub pending_proposal_ids: Vec<String>,
+    /// Non-terminal anomaly flag IDs filed by this agent (#772 A.2).
+    pub pending_flag_ids: Vec<String>,
     /// Named budget meters from the session registry. `limit` is `None`
     /// when no cap is configured for that meter (e.g. price tracking
     /// without a ceiling). Empty when budgets are disabled or the
@@ -125,6 +131,17 @@ pub struct StateAttestationPayload {
     pub pending_user_interaction_ids: Vec<String>,
     pub pending_escalation_count: usize,
     pub pending_escalation_ids: Vec<String>,
+    /// Non-terminal constitutional proposals filed by this agent (#772 A.2).
+    /// `#[serde(default)]` keeps older persisted payloads deserializable.
+    #[serde(default)]
+    pub pending_proposal_count: usize,
+    #[serde(default)]
+    pub pending_proposal_ids: Vec<String>,
+    /// Non-terminal anomaly flags filed by this agent (#772 A.2).
+    #[serde(default)]
+    pub pending_flag_count: usize,
+    #[serde(default)]
+    pub pending_flag_ids: Vec<String>,
     pub spawn_depth: u32,
     pub budget: Vec<BudgetMeter>,
     /// RFC #778 Part D — burn-rate forecast computed from budget meters and
@@ -159,6 +176,11 @@ pub struct StateAttestation {
 /// bounded.
 pub const MAX_PENDING_APPROVALS_INLINE: usize = 32;
 
+/// Maximum number of civic (proposal/flag) IDs surfaced inline — same
+/// bounding idiom as `MAX_PENDING_APPROVALS_INLINE`, smaller ceiling since
+/// civic items are expected to be rarer.
+pub const MAX_CIVIC_ITEMS_INLINE: usize = 16;
+
 /// Compose, sign, and return the wrapper.
 pub fn compose_and_sign(
     inputs: AttestationInputs<'_>,
@@ -185,6 +207,20 @@ pub fn compose_and_sign(
         .take(MAX_PENDING_APPROVALS_INLINE)
         .collect();
 
+    let pending_proposal_count = inputs.pending_proposal_ids.len();
+    let pending_proposal_ids: Vec<String> = inputs
+        .pending_proposal_ids
+        .into_iter()
+        .take(MAX_CIVIC_ITEMS_INLINE)
+        .collect();
+
+    let pending_flag_count = inputs.pending_flag_ids.len();
+    let pending_flag_ids: Vec<String> = inputs
+        .pending_flag_ids
+        .into_iter()
+        .take(MAX_CIVIC_ITEMS_INLINE)
+        .collect();
+
     let active_capabilities = inputs
         .manifest
         .capabilities
@@ -209,6 +245,10 @@ pub fn compose_and_sign(
         pending_user_interaction_ids: pending_ui_inline,
         pending_escalation_count: pending_esc_total,
         pending_escalation_ids: pending_esc_inline,
+        pending_proposal_count,
+        pending_proposal_ids,
+        pending_flag_count,
+        pending_flag_ids,
         spawn_depth,
         budget: inputs.budget_meters,
         burn_rate: inputs.burn_rate,
@@ -244,9 +284,11 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
          The block below is signed by the gateway's identity key. It is the \
           **authoritative** statement of your remaining budget, active \
           capabilities, pending gates (approvals, user interactions, \
-          escalations), spawn depth, session ids, turn counter, burn-rate \
-          forecast, and the constitution version + digest you are running \
-          under. If your own memory of these facts disagrees with the block, \
+          escalations), any constitutional proposals or anomaly flags you \
+          filed that are still awaiting a decision, spawn depth, session \
+          ids, turn counter, burn-rate forecast, and the constitution \
+          version + digest you are running under. If your own memory of \
+          these facts disagrees with the block, \
           the block is correct. The constitution digest pins the exact law \
           in force for this session; if it changes mid-session, the law \
           under you changed.           The burn_rate field tells you your current spending pace and, when a \
@@ -386,6 +428,8 @@ mod tests {
                 pending_approval_ids: vec!["apr-aaa".to_string(), "apr-bbb".to_string()],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_rounds".to_string(),
                     used: 3.0,
@@ -430,6 +474,8 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -464,6 +510,8 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -500,6 +548,8 @@ mod tests {
                 pending_approval_ids: lots,
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -513,6 +563,83 @@ mod tests {
             att.payload.pending_approval_ids.len(),
             MAX_PENDING_APPROVALS_INLINE
         );
+    }
+
+    /// #772 A.2 — "voice with amnesia is no voice": an agent's own pending
+    /// proposals/flags are bounded inline the same way pending approvals are.
+    #[test]
+    fn pending_proposals_truncated_with_count_preserved() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let lots_proposals: Vec<String> = (0..40).map(|i| format!("prop-{:03}", i)).collect();
+        let lots_flags: Vec<String> = (0..40).map(|i| format!("flag-{:03}", i)).collect();
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: lots_proposals,
+                pending_flag_ids: lots_flags,
+                budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(att.payload.pending_proposal_count, 40);
+        assert_eq!(
+            att.payload.pending_proposal_ids.len(),
+            MAX_CIVIC_ITEMS_INLINE
+        );
+        assert_eq!(att.payload.pending_flag_count, 40);
+        assert_eq!(att.payload.pending_flag_ids.len(), MAX_CIVIC_ITEMS_INLINE);
+    }
+
+    /// Civic ids are part of the signed payload — verify roundtrips them
+    /// unchanged (and would reject tampering, per the same mechanism as
+    /// `tampered_payload_fails_verify`).
+    #[test]
+    fn civic_ids_roundtrip_through_sign_and_verify() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: vec!["prop-aaa".to_string()],
+                pending_flag_ids: vec!["flag-bbb".to_string()],
+                budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+
+        let pub_bytes = key.public_key_bytes();
+        let payload = verify(&pub_bytes, &att).expect("verify");
+        assert_eq!(payload.pending_proposal_ids, vec!["prop-aaa"]);
+        assert_eq!(payload.pending_proposal_count, 1);
+        assert_eq!(payload.pending_flag_ids, vec!["flag-bbb"]);
+        assert_eq!(payload.pending_flag_count, 1);
     }
 
     #[test]
@@ -531,6 +658,8 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -563,6 +692,8 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -598,6 +729,8 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_tokens".to_string(),
                     used: 5000.0,

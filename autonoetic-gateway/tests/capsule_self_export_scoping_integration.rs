@@ -47,6 +47,7 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: SandboxNetworkPolicy::default(),
+        excluded_tools: vec![],
     }
 }
 
