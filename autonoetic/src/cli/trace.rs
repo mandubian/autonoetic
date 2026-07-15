@@ -611,6 +611,90 @@ pub fn handle_trace_contract_health(
     Ok(())
 }
 
+/// `autonoetic trace civic-health` — the standing civic-health view (#772
+/// E.2). The dual of contract-health: contract-health measures whether the
+/// *gateway* honors the law, civic-health measures whether *agents* use it.
+/// Tallies each agent's constitutional proposals and anomaly flags, filed vs
+/// still-pending, so both that agents exercise voice/witnessing and whether
+/// those are being answered are visible in one view.
+pub fn handle_trace_civic_health(
+    config_path: &Path,
+    since: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+    let health = store.civic_health(since)?;
+
+    if json_output {
+        let body = serde_json::json!({
+            "since": since,
+            "by_agent": health.by_agent.iter().map(|e| {
+                serde_json::json!({
+                    "agent_id": e.agent_id.as_str(),
+                    "proposals_filed": e.proposals_filed,
+                    "proposals_pending": e.proposals_pending,
+                    "flags_filed": e.flags_filed,
+                    "flags_pending": e.flags_pending,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    println!(
+        "{}Civic health{} {}",
+        color::BOLD,
+        color::RESET,
+        match since {
+            Some(ts) => color::dim(&format!("(since {ts})")),
+            None => color::dim("(all retained items)"),
+        }
+    );
+    println!();
+
+    if health.by_agent.is_empty() {
+        println!(
+            "{}No civic activity recorded (no constitutional proposals or anomaly flags filed).{}",
+            color::DIM,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}{}{:<28} {:<20} {}{}",
+            color::DIM,
+            color::BOLD,
+            "AGENT",
+            "PROPOSALS(pending)",
+            "FLAGS(pending)",
+            color::RESET
+        );
+        println!("{}", color::separator(72));
+        for e in &health.by_agent {
+            println!(
+                "{}{:<28}{} {} ({} pending)   {} ({} pending)",
+                color::BRIGHT_CYAN,
+                e.agent_id,
+                color::RESET,
+                e.proposals_filed,
+                e.proposals_pending,
+                e.flags_filed,
+                e.flags_pending,
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "{}Precision-of-adjudication and invitation-response metrics are not yet tracked here (RFC E.1/E.3, D.2).{}",
+        color::DIM,
+        color::RESET
+    );
+    Ok(())
+}
+
 pub fn load_agent_traces(
     config_path: &Path,
     requested_agent: Option<&str>,

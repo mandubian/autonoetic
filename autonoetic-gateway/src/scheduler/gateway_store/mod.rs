@@ -21,6 +21,7 @@ pub use operator_activity::OperatorActivityInsert;
 pub use agent_registry::PromotedAgent;
 pub use workflow_tasks::TaskExecutionClaim;
 mod observability;
+pub use observability::{CivicHealth, CivicHealthEntry};
 pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;

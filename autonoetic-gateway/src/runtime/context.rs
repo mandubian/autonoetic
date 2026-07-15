@@ -653,6 +653,30 @@ impl AgentExecutor {
             .transpose()?
             .unwrap_or_default();
 
+        // #772 A.2: surface this agent's own still-pending constitutional
+        // proposals and anomaly flags in its signed per-turn block —
+        // "voice with amnesia is no voice". Mirrors the pending_escalation_ids
+        // gathering above. The store queries filter to non-terminal statuses
+        // in SQL (before the LIMIT) so terminal decisions can't displace
+        // still-pending items from the bounded window, and errors propagate:
+        // a signed "authoritative" attestation must not silently omit civic
+        // items because a query failed.
+        let (pending_proposal_ids, pending_flag_ids) = match self.gateway_store.as_deref() {
+            Some(store) => {
+                let proposals = store.list_pending_constitutional_proposals(
+                    Some(&self.manifest.agent.id),
+                    64,
+                )?;
+                let flags =
+                    store.list_pending_anomaly_flags(Some(&self.manifest.agent.id), 64)?;
+                (
+                    proposals.into_iter().map(|p| p.proposal_id).collect(),
+                    flags.into_iter().map(|f| f.flag_id).collect(),
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+
         let budget_meters = self.snapshot_budget_meters();
 
         // RFC #778 Part D: compute burn-rate forecast from the budget meters
@@ -683,6 +707,8 @@ impl AgentExecutor {
                 pending_approval_ids,
                 pending_user_interaction_ids,
                 pending_escalation_ids,
+                pending_proposal_ids,
+                pending_flag_ids,
                 budget_meters,
                 burn_rate,
                 constitution_version: &constitution_version,

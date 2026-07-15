@@ -153,6 +153,49 @@ impl GatewayStore {
         Ok(out)
     }
 
+    /// List only **non-terminal** flags (`pending`, `under_review`) — the
+    /// ones still awaiting a decision. Used by the signed per-turn state
+    /// attestation (#772 A.2): the status filter must happen in SQL, before
+    /// the `LIMIT`, so newer terminal decisions can never displace older
+    /// still-pending flags from the bounded query window.
+    pub fn list_pending_anomaly_flags(
+        &self,
+        reporter_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AnomalyFlag>> {
+        let conn = self.conn.lock().unwrap();
+        let placeholders = FLAG_TERMINAL_DECISION_STATUSES
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!(
+            "SELECT {FLAG_COLUMNS} FROM anomaly_flags \
+             WHERE status NOT IN ({placeholders})"
+        );
+        let mut param_vals: Vec<Box<dyn rusqlite::types::ToSql>> =
+            FLAG_TERMINAL_DECISION_STATUSES
+                .iter()
+                .map(|s| Box::new(s.to_string()) as Box<dyn rusqlite::types::ToSql>)
+                .collect();
+        if let Some(rf) = reporter_filter {
+            sql.push_str(" AND reporter_agent_id = ?");
+            param_vals.push(Box::new(rf.to_string()));
+        }
+        sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+        param_vals.push(Box::new(limit as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_vals.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), row_to_flag)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Apply a status transition to an anomaly flag.
     ///
     /// Terminal decisions (`confirmed`, `dismissed`, `deferred`) stamp
@@ -330,6 +373,42 @@ mod tests {
 
     fn old_rfc3339(secs_ago: u64) -> String {
         (chrono::Utc::now() - chrono::Duration::seconds(secs_ago as i64)).to_rfc3339()
+    }
+
+    #[test]
+    fn list_pending_excludes_terminal_and_resists_displacement() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-pending",
+            "2025-01-01T00:00:00Z",
+            "pending",
+        ))?;
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-review",
+            "2025-01-02T00:00:00Z",
+            "under_review",
+        ))?;
+        // Newest row is a terminal decision: an all-statuses query with a
+        // tight LIMIT would crowd the older pending rows out of the window.
+        store.insert_anomaly_flag(&sample_flag_with(
+            "aflag-confirmed",
+            "2025-01-03T00:00:00Z",
+            "confirmed",
+        ))?;
+
+        let listed = store.list_pending_anomaly_flags(Some("auditor.default"), 64)?;
+        let ids: Vec<&str> = listed.iter().map(|f| f.flag_id.as_str()).collect();
+        assert_eq!(ids, vec!["aflag-review", "aflag-pending"]);
+
+        // Even with a limit below the total row count, terminal decisions
+        // never displace still-pending flags (SQL-level status filter).
+        let tight = store.list_pending_anomaly_flags(Some("auditor.default"), 1)?;
+        assert_eq!(tight.len(), 1);
+        assert_eq!(tight[0].flag_id, "aflag-review");
+
+        Ok(())
     }
 
     #[test]
