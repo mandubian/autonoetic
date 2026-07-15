@@ -1713,6 +1713,11 @@ pub fn handle_agent_import_skill(
             compatibility: import_compatibility.clone(),
             allowed_tools: import_allowed_tools.clone(),
             needs_tool_bridging: !import_allowed_tools.is_empty(),
+            // Propagate the parser's inferred-vs-declared record verbatim.
+            capabilities_inferred: parsed_manifest
+                .agentskills_import
+                .as_ref()
+                .is_some_and(|ai| ai.capabilities_inferred),
         })
     } else {
         parsed_manifest.agentskills_import.clone()

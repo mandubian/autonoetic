@@ -133,12 +133,13 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     let has_agentskills_fields =
         standard.license.is_some() || standard.compatibility.is_some() || !allowed_tools.is_empty();
 
-    let capabilities =
-        if meta.capabilities.as_ref().map_or(true, |c| c.is_empty()) && !allowed_tools.is_empty() {
-            infer_capabilities(&allowed_tools)
-        } else {
-            meta.capabilities.unwrap_or_default()
-        };
+    let capabilities_inferred =
+        meta.capabilities.as_ref().map_or(true, |c| c.is_empty()) && !allowed_tools.is_empty();
+    let capabilities = if capabilities_inferred {
+        infer_capabilities(&allowed_tools)
+    } else {
+        meta.capabilities.unwrap_or_default()
+    };
 
     let agentskills_import = if has_agentskills_fields {
         Some(AgentSkillsImportMetadata {
@@ -146,6 +147,10 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
             compatibility: standard.compatibility,
             allowed_tools: allowed_tools.clone(),
             needs_tool_bridging: !allowed_tools.is_empty(),
+            // Recorded here — the only place that knows — so downstream trust
+            // decisions (skill_install's strict clamp) never guess
+            // inferred-vs-declared from the capability set's shape.
+            capabilities_inferred,
         })
     } else {
         None

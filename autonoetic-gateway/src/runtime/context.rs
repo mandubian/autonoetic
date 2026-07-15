@@ -840,6 +840,7 @@ mod agentskills_bridging_tests {
             compatibility: Some("claude-code".to_string()),
             allowed_tools: vec!["Bash(*)".to_string(), "Read".to_string()],
             needs_tool_bridging: true,
+            capabilities_inferred: true,
         });
 
         let output = compose_system_instructions_with_metadata(

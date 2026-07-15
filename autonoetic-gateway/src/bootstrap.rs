@@ -81,7 +81,22 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
             .ok_or_else(|| anyhow::anyhow!("Invalid agent dir name: {}", agent_dir.display()))?
             .to_string();
 
-        if bootstrap_agent_inner(config, gateway_dir, &store, &agent_id)? {
+        // Startup bootstrap of the repo's own reference bundles under
+        // agents/** is the sole, explicitly-scoped exception to the one-door
+        // invariant (P-9.15 draft): it installs the operator's own local
+        // code before any session exists, so it auto-promotes directly.
+        let outcome = bootstrap_agent_inner(
+            config,
+            gateway_dir,
+            &store,
+            &agent_id,
+            true,
+            autonoetic_types::principal::PrincipalKind::Script.tag(),
+            "cli",
+            "bootstrap",
+            None,
+        )?;
+        if outcome.created {
             activated += 1;
         }
     }
@@ -89,8 +104,11 @@ pub fn bootstrap_agents(config: &GatewayConfig, gateway_dir: &Path) -> Result<us
     Ok(activated)
 }
 
-/// Bootstrap a single named agent from `config.agents_dir` into the gateway store.
-/// Returns `true` if a new revision was activated, `false` if skipped (already exists).
+/// Bootstrap a single named agent from `config.agents_dir` into the gateway store,
+/// auto-promoting it. Returns `true` if a new revision was activated, `false` if
+/// skipped (already exists). Callers other than reference-bundle startup
+/// bootstrap that must not auto-promote (e.g. `skill_install`) should use
+/// [`bootstrap_single_agent_candidate_only`] instead.
 pub fn bootstrap_single_agent(
     config: &GatewayConfig,
     gateway_dir: &Path,
@@ -103,16 +121,97 @@ pub fn bootstrap_single_agent(
     bootstrap_wiki_snapshot(gateway_dir)?;
     crate::sandbox::init_sdk_deployed_path(gateway_dir);
     let store = GatewayStore::open(gateway_dir)?;
-    bootstrap_agent_inner(config, gateway_dir, &store, agent_id)
+    // Sole scoped exception to the one-door invariant (P-9.15 draft): see
+    // the comment in `bootstrap_agents` above.
+    let outcome = bootstrap_agent_inner(
+        config,
+        gateway_dir,
+        &store,
+        agent_id,
+        true,
+        autonoetic_types::principal::PrincipalKind::Script.tag(),
+        "cli",
+        "bootstrap",
+        None,
+    )?;
+    Ok(outcome.created)
 }
 
-/// Inner bootstrap logic shared by `bootstrap_agents` and `bootstrap_single_agent`.
+/// Outcome of [`bootstrap_single_agent_candidate_only`]: the revision id and
+/// whether a new revision was actually inserted (`false` = an identical
+/// revision already existed and bootstrap was a no-op).
+pub struct CandidateBootstrapOutcome {
+    pub revision_id: String,
+    pub created: bool,
+}
+
+/// Candidate-only counterpart of [`bootstrap_single_agent`]: writes the agent
+/// bundle to a revision with status `Candidate` and does **not** call
+/// `atomic_promote` or move any alias (one door — P-9.15 draft). Activation
+/// then flows through the standard `agent_revision_promote` gates. Used by
+/// `skill_install` so an imported skill faces the same promotion gates as
+/// any other newborn agent. `created_by_type`/`created_by_id`/`source_kind`/
+/// `source_ref` carry the real installer identity and import provenance
+/// (P-9.16 draft) instead of the generic `"cli"`/`"bootstrap"` used by
+/// reference-bundle startup bootstrap.
+pub fn bootstrap_single_agent_candidate_only(
+    config: &GatewayConfig,
+    gateway_dir: &Path,
+    agent_id: &str,
+    created_by_type: &str,
+    created_by_id: &str,
+    source_kind: &str,
+    source_ref: Option<&str>,
+) -> Result<CandidateBootstrapOutcome> {
+    ensure_vault_key_for_bootstrap_workspace(config)?;
+    write_gateway_identity(gateway_dir)?;
+    bootstrap_constitution_snapshot(config, gateway_dir)?;
+    bootstrap_sdk_snapshot(gateway_dir)?;
+    bootstrap_wiki_snapshot(gateway_dir)?;
+    crate::sandbox::init_sdk_deployed_path(gateway_dir);
+    let store = GatewayStore::open(gateway_dir)?;
+    let outcome = bootstrap_agent_inner(
+        config,
+        gateway_dir,
+        &store,
+        agent_id,
+        false,
+        created_by_type,
+        created_by_id,
+        source_kind,
+        source_ref,
+    )?;
+    Ok(CandidateBootstrapOutcome {
+        revision_id: outcome.revision_id,
+        created: outcome.created,
+    })
+}
+
+/// Outcome of [`bootstrap_agent_inner`].
+struct InnerBootstrapOutcome {
+    /// Whether a new revision was inserted (`false` = an identical revision
+    /// already existed and bootstrap was a no-op).
+    created: bool,
+    revision_id: String,
+}
+
+/// Inner bootstrap logic shared by `bootstrap_agents`, `bootstrap_single_agent`,
+/// and `bootstrap_single_agent_candidate_only`. `auto_promote` is the explicit
+/// one-door switch (P-9.15 draft): only reference-bundle startup bootstrap
+/// passes `true`. `created_by_type`/`created_by_id`/`source_kind`/`source_ref`
+/// are recorded on the revision for provenance (P-9.16 draft).
+#[allow(clippy::too_many_arguments)]
 fn bootstrap_agent_inner(
     config: &GatewayConfig,
     gateway_dir: &Path,
     store: &GatewayStore,
     agent_id: &str,
-) -> Result<bool> {
+    auto_promote: bool,
+    created_by_type: &str,
+    created_by_id: &str,
+    source_kind: &str,
+    source_ref: Option<&str>,
+) -> Result<InnerBootstrapOutcome> {
     let agent_dir = config.agents_dir.join(agent_id);
     let skill_path = agent_dir.join("SKILL.md");
 
@@ -317,7 +416,10 @@ fn bootstrap_agent_inner(
 
     // Skip if this exact revision already exists
     if store.get_agent_revision(&revision_id)?.is_some() {
-        return Ok(false);
+        return Ok(InnerBootstrapOutcome {
+            created: false,
+            revision_id,
+        });
     }
 
     let revision_dir = gateway_dir
@@ -355,10 +457,10 @@ fn bootstrap_agent_inner(
         runtime_lock_hash,
         manifest_hash,
         created_at: now.clone(),
-        created_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
-        created_by_id: "cli".to_string(),
-        source_kind: "bootstrap".to_string(),
-        source_ref: None,
+        created_by_type: created_by_type.to_string(),
+        created_by_id: created_by_id.to_string(),
+        source_kind: source_kind.to_string(),
+        source_ref: source_ref.map(|s| s.to_string()),
         origin_node_id: config.node_id.clone(),
         trust_domain: "local".to_string(),
         status: AgentRevisionStatus::Candidate,
@@ -384,23 +486,31 @@ fn bootstrap_agent_inner(
 
     store.insert_agent_revision_transactional(&rev)?;
 
-    let promotion_id =
-        mint_hashed_prefixed_id("prom-", &format!("{}-{}-{}", agent_id, revision_id, now));
+    // One door (P-9.15 draft): only the explicitly-scoped startup-bootstrap
+    // exception auto-promotes. Every other caller (e.g. `skill_install`)
+    // stops here at Candidate and must go through `agent_revision_promote`.
+    if auto_promote {
+        let promotion_id =
+            mint_hashed_prefixed_id("prom-", &format!("{}-{}-{}", agent_id, revision_id, now));
 
-    store.atomic_promote(
-        agent_id,
-        &revision_id,
-        &promotion_id,
-        "bootstrap",
-        "cli",
-        Some("Auto-promoted during agent bootstrap"),
-        None,
-        None,
-    )?;
+        store.atomic_promote(
+            agent_id,
+            &revision_id,
+            &promotion_id,
+            "bootstrap",
+            "cli",
+            Some("Auto-promoted during agent bootstrap"),
+            None,
+            None,
+        )?;
 
-    update_latest_symlink(gateway_dir, agent_id, &revision_id);
+        update_latest_symlink(gateway_dir, agent_id, &revision_id);
+    }
 
-    Ok(true)
+    Ok(InnerBootstrapOutcome {
+        created: true,
+        revision_id,
+    })
 }
 
 pub fn update_latest_symlink(gateway_dir: &Path, agent_id: &str, revision_id: &str) {
@@ -988,7 +1098,7 @@ mod tests {
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, agent_id).unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, agent_id, true, autonoetic_types::principal::PrincipalKind::Script.tag(), "cli", "bootstrap", None).unwrap();
         (dir, agent_dir)
     }
 
@@ -1006,7 +1116,7 @@ mod tests {
         let config = minimal_config(&agents_dir);
         let gateway_dir = agents_dir.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent").unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent", true, autonoetic_types::principal::PrincipalKind::Script.tag(), "cli", "bootstrap", None).unwrap();
         let written = std::fs::read_to_string(agent_dir.join("runtime.lock")).unwrap();
         let current_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
         assert!(
@@ -1030,7 +1140,7 @@ mod tests {
         let config = minimal_config(&agents_dir);
         let gateway_dir = agents_dir.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent").unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent", true, autonoetic_types::principal::PrincipalKind::Script.tag(), "cli", "bootstrap", None).unwrap();
         let written = std::fs::read_to_string(agent_dir.join("runtime.lock")).unwrap();
         let current_sha = crate::runtime::install_contract::GATEWAY_BUILD_SHA256;
         assert!(
@@ -1057,7 +1167,7 @@ mod tests {
         let config = minimal_config(&agents_dir);
         let gateway_dir = agents_dir.join(".gateway");
         let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent").unwrap();
+        let _ = bootstrap_agent_inner(&config, &gateway_dir, &store, "test-agent", true, autonoetic_types::principal::PrincipalKind::Script.tag(), "cli", "bootstrap", None).unwrap();
         let written = std::fs::read_to_string(agent_dir.join("runtime.lock")).unwrap();
         assert_eq!(
             written, original_lock,

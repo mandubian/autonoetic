@@ -1685,7 +1685,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         let capability_branches = capability_oneof_schema();
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_ref — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, pass the artifact_ref returned by artifact_build.".to_string(),
+            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. Every promotion of a revision with a non-empty capability set requires a reviewed artifact_ref (from artifact_build): CodeExecution/AgentSpawn, and NetworkAccess when an artifact is present, face the Full evidence+audit gate; other non-empty capability sets with an artifact face an audit-only gate. Only a revision with an empty capability set may direct-promote without an artifact (and only when the gateway config allows it). Pass the artifact_ref returned by artifact_build whenever the agent declares any capability.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
