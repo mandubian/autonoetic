@@ -482,6 +482,8 @@ One door (below) is the real protection: every install — regardless of `trust_
 | `strict` | Preserve declared capabilities; drop any high-risk capability (`NetworkAccess`/`CodeExecution`/`ArtifactExecution`/`AgentSpawn`) that was *inferred* from `allowed-tools` rather than explicitly declared; add `ApprovalQueue` (enables admin-proposal filing + the Workflow tool tier — it does not gate declared capabilities) | Default for third-party skills |
 | `audit` | `ReadAccess(self.*)` + `ApprovalQueue` only — declared capabilities ignored | Untrusted or high-risk skills |
 
+**Inference clamping (RFC Part C):** capability *inference* from `allowed-tools` (as opposed to an explicit `metadata.autonoetic.capabilities` declaration) never mints a wildcard. `Bash(...)` proposes `SandboxFunctions` for the named prefixes only — never `CodeExecution`; a skill that genuinely needs shell execution must declare `CodeExecution` explicitly. `WebSearch`/`WebFetch`/`Fetch` propose `NetworkAccess` with an **empty** hosts list (deny-all) rather than `hosts: ["*"]` — concrete hosts require an explicit declaration too. A wildcard grant minted from a tool-name mapping table would have nobody to attribute it to (Ri-0.11); wildcard power must always be a visible, explicit act the promotion gate can weigh. When inference clamps something, the response's `warnings` array names it.
+
 **Return value:**
 ```json
 {
@@ -492,6 +494,10 @@ One door (below) is the real protection: every install — regardless of `trust_
   "status": "candidate",
   "revision_id": "rev_sha256:...",
   "message": "Skill 'web-researcher.default' installed as a candidate revision; it is NOT active.",
+  "warnings": [
+    "allowed-tools requested Bash: shell execution requires an explicit CodeExecution declaration; granted SandboxFunctions prefixes only.",
+    "allowed-tools requested network tools: NetworkAccess inferred with an empty hosts list — declare concrete hosts in metadata.autonoetic.capabilities to enable network access."
+  ],
   "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent)."
 }
 ```
