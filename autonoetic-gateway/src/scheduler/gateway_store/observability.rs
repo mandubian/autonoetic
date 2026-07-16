@@ -24,7 +24,7 @@ fn is_sqlite_error(err: &anyhow::Error) -> bool {
         .unwrap_or(false)
 }
 
-/// Per-agent tally for the **civic-health** view (#772 E.2). See
+/// Per-agent tally for the **civic-health** view (#772 E.2 / #771 D.2). See
 /// [`GatewayStore::civic_health`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CivicHealthEntry {
@@ -33,6 +33,11 @@ pub struct CivicHealthEntry {
     pub proposals_pending: u64,
     pub flags_filed: u64,
     pub flags_pending: u64,
+    /// #771 D.2: mechanical amendment invitations issued to this agent
+    /// (all-time in window) and how many are open vs answered.
+    pub invitations_issued: u64,
+    pub invitations_open: u64,
+    pub invitations_answered: u64,
 }
 
 /// Standing civic-health view: how often each agent exercises its civic
@@ -495,6 +500,9 @@ impl GatewayStore {
                         proposals_pending: 0,
                         flags_filed: 0,
                         flags_pending: 0,
+                        invitations_issued: 0,
+                        invitations_open: 0,
+                        invitations_answered: 0,
                     });
                 entry.proposals_filed += 1;
                 if !super::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
@@ -528,12 +536,52 @@ impl GatewayStore {
                         proposals_pending: 0,
                         flags_filed: 0,
                         flags_pending: 0,
+                        invitations_issued: 0,
+                        invitations_open: 0,
+                        invitations_answered: 0,
                     });
                 entry.flags_filed += 1;
                 if !super::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
                     .contains(&status.as_str())
                 {
                     entry.flags_pending += 1;
+                }
+            }
+        }
+
+        {
+            let mut stmt = conn.prepare(
+                "SELECT agent_id, status, created_at FROM amendment_invitations",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (agent_id, status, created_at) = r?;
+                if !in_window(&created_at) {
+                    continue;
+                }
+                let entry = by_agent
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| CivicHealthEntry {
+                        agent_id,
+                        proposals_filed: 0,
+                        proposals_pending: 0,
+                        flags_filed: 0,
+                        flags_pending: 0,
+                        invitations_issued: 0,
+                        invitations_open: 0,
+                        invitations_answered: 0,
+                    });
+                entry.invitations_issued += 1;
+                match status.as_str() {
+                    "open" => entry.invitations_open += 1,
+                    "answered" => entry.invitations_answered += 1,
+                    _ => {}
                 }
             }
         }
@@ -548,6 +596,76 @@ impl GatewayStore {
         });
 
         Ok(CivicHealth { by_agent })
+    }
+
+    /// **DISCRETION LEAK register** read side (#771 D.3): tally
+    /// `discretion_leak` causal events by (rule, kind) — the "top leaks
+    /// this window" standing agenda the steward office (RFC Part F) drafts
+    /// amendments against. `since` is an optional RFC3339 lower bound,
+    /// compared by absolute instant like `contract_health`; events whose
+    /// own timestamp fails to parse are kept rather than dropped. Sorted
+    /// by descending count, then (rule, kind) for stable output.
+    pub fn discretion_leak_summary(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<crate::runtime::discretion_leak::DiscretionLeakTally>> {
+        let since_dt = match since {
+            Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                anyhow::anyhow!("invalid `since` timestamp {ts:?}: {e} (expected RFC3339)")
+            })?),
+            None => None,
+        };
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT enforced_rules, action, timestamp FROM causal_events \
+             WHERE category = 'discretion_leak'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut counts: BTreeMap<(String, String), u64> = BTreeMap::new();
+        for r in rows {
+            let (raw_rules, kind, ts) = r?;
+            if let Some(bound) = since_dt {
+                if let Ok(event_dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    if event_dt < bound {
+                        continue;
+                    }
+                }
+            }
+            // Tolerate malformed rule cells by skipping the row rather than
+            // failing the whole tally (mirrors `contract_health`).
+            let Ok(rule_ids) = serde_json::from_str::<Vec<String>>(&raw_rules) else {
+                continue;
+            };
+            for rule_id in rule_ids {
+                *counts.entry((rule_id, kind.clone())).or_insert(0) += 1;
+            }
+        }
+
+        let mut out: Vec<crate::runtime::discretion_leak::DiscretionLeakTally> = counts
+            .into_iter()
+            .map(
+                |((rule_id, kind), count)| crate::runtime::discretion_leak::DiscretionLeakTally {
+                    rule_id,
+                    kind,
+                    count,
+                },
+            )
+            .collect();
+        out.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.rule_id.cmp(&b.rule_id))
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+        Ok(out)
     }
 
     /// List curator decision events (`category = 'curator'`, `action = 'decision'`)
@@ -1780,6 +1898,7 @@ mod sandbox_escape_timeline_tests {
 #[cfg(test)]
 mod civic_health_tests {
     use super::*;
+    use crate::scheduler::gateway_store::amendment_invitations::AmendmentInvitation;
     use crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag;
     use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
     use tempfile::tempdir;
@@ -1821,6 +1940,27 @@ mod civic_health_tests {
             decided_at: None,
             created_at: created_at.to_string(),
             sla_breached_at: None,
+        }
+    }
+
+    fn invitation(
+        id: &str,
+        agent: &str,
+        rule: &str,
+        status: &str,
+        created_at: &str,
+    ) -> AmendmentInvitation {
+        AmendmentInvitation {
+            invitation_id: id.to_string(),
+            agent_id: agent.to_string(),
+            rule_id: rule.to_string(),
+            denial_count: 3,
+            threshold: 3,
+            window_secs: 604800,
+            status: status.to_string(),
+            answered_proposal_id: None,
+            created_at: created_at.to_string(),
+            resolved_at: None,
         }
     }
 
@@ -1920,6 +2060,9 @@ mod civic_health_tests {
         assert_eq!(alpha.proposals_pending, 1); // under_review counts as pending
         assert_eq!(alpha.flags_filed, 2);
         assert_eq!(alpha.flags_pending, 1); // confirmed is terminal, pending is not
+        assert_eq!(alpha.invitations_issued, 0);
+        assert_eq!(alpha.invitations_open, 0);
+        assert_eq!(alpha.invitations_answered, 0);
 
         let beta = health
             .by_agent
@@ -1930,6 +2073,9 @@ mod civic_health_tests {
         assert_eq!(beta.proposals_pending, 1);
         assert_eq!(beta.flags_filed, 1);
         assert_eq!(beta.flags_pending, 0); // dismissed is terminal
+        assert_eq!(beta.invitations_issued, 0);
+        assert_eq!(beta.invitations_open, 0);
+        assert_eq!(beta.invitations_answered, 0);
 
         let gamma = health
             .by_agent
@@ -1940,6 +2086,75 @@ mod civic_health_tests {
         assert_eq!(gamma.proposals_pending, 5);
         assert_eq!(gamma.flags_filed, 0);
         assert_eq!(gamma.flags_pending, 0);
+        assert_eq!(gamma.invitations_issued, 0);
+        assert_eq!(gamma.invitations_open, 0);
+        assert_eq!(gamma.invitations_answered, 0);
+    }
+
+    /// #771 D.2: invitations are tallied alongside proposals/flags, with
+    /// issued/open/answered split. Expired invitations count as issued but
+    /// neither open nor answered.
+    #[test]
+    fn civic_health_tallies_invitations() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-1",
+                "agent-a",
+                "P-1.5",
+                "open",
+                "2026-05-01T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-2",
+                "agent-a",
+                "P-1.9",
+                "open",
+                "2026-05-01T00:00:01Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-3",
+                "agent-a",
+                "P-1.5",
+                "answered",
+                "2026-05-01T00:00:02Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-4",
+                "agent-a",
+                "P-7.5",
+                "expired",
+                "2026-05-01T00:00:03Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-5",
+                "agent-b",
+                "P-1.5",
+                "open",
+                "2026-05-01T00:00:04Z",
+            ))
+            .unwrap();
+
+        let health = store.civic_health(None).unwrap();
+        assert_eq!(health.by_agent.len(), 2);
+        let a = health.by_agent.iter().find(|e| e.agent_id == "agent-a").unwrap();
+        assert_eq!(a.invitations_issued, 4);
+        assert_eq!(a.invitations_open, 2);
+        assert_eq!(a.invitations_answered, 1);
+        let b = health.by_agent.iter().find(|e| e.agent_id == "agent-b").unwrap();
+        assert_eq!(b.invitations_issued, 1);
+        assert_eq!(b.invitations_open, 1);
+        assert_eq!(b.invitations_answered, 0);
     }
 
     /// `since` excludes an old item and includes a recent one, compared by
@@ -1983,6 +2198,113 @@ mod civic_health_tests {
         let store = GatewayStore::open(temp.path()).unwrap();
         let err = store
             .civic_health(Some("not-a-timestamp"))
+            .expect_err("invalid since must error");
+        assert!(
+            err.to_string().contains("invalid `since` timestamp"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+/// DISCRETION LEAK register read side (#771 D.3): "top leaks this window".
+#[cfg(test)]
+mod discretion_leak_summary_tests {
+    use super::*;
+    use crate::runtime::discretion_leak::DiscretionLeakTally;
+    use autonoetic_types::causal_chain::CausalEventRecord;
+    use tempfile::tempdir;
+
+    fn leak(seq: u64, rule: &str, kind: &str, secs_ago: i64) -> CausalEventRecord {
+        CausalEventRecord {
+            event_id: format!("leak-{seq}"),
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-1".to_string(),
+            turn_id: None,
+            event_seq: seq,
+            timestamp: (chrono::Utc::now() - chrono::Duration::seconds(secs_ago)).to_rfc3339(),
+            category: "discretion_leak".to_string(),
+            action: kind.to_string(),
+            status: "recorded".to_string(),
+            enforced_rules: vec![rule.to_string()],
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn summary_tallies_by_rule_and_kind_with_window() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        store.create_causal_event(&leak(1, "P-5.2", "lenient_string_coercion", 10)).unwrap();
+        store.create_causal_event(&leak(2, "P-5.2", "lenient_string_coercion", 20)).unwrap();
+        store.create_causal_event(&leak(3, "P-5.2", "fuzzy_patch_match", 30)).unwrap();
+        store.create_causal_event(&leak(4, "P-5.8", "gateway_authored_repair", 40)).unwrap();
+        // A non-leak event in the same window must not be tallied.
+        store
+            .create_causal_event(&CausalEventRecord {
+                event_id: "not-a-leak".to_string(),
+                agent_id: "coder.default".to_string(),
+                session_id: "sess-1".to_string(),
+                turn_id: None,
+                event_seq: 99,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "tool".to_string(),
+                action: "failure".to_string(),
+                status: "ERROR".to_string(),
+                enforced_rules: vec!["P-1.5".to_string()],
+                target: None,
+                payload: None,
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            })
+            .unwrap();
+
+        let all = store.discretion_leak_summary(None).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                DiscretionLeakTally {
+                    rule_id: "P-5.2".to_string(),
+                    kind: "lenient_string_coercion".to_string(),
+                    count: 2,
+                },
+                DiscretionLeakTally {
+                    rule_id: "P-5.2".to_string(),
+                    kind: "fuzzy_patch_match".to_string(),
+                    count: 1,
+                },
+                DiscretionLeakTally {
+                    rule_id: "P-5.8".to_string(),
+                    kind: "gateway_authored_repair".to_string(),
+                    count: 1,
+                },
+            ]
+        );
+
+        // Window bound: only the last 15s — one coercion event remains.
+        let since = (chrono::Utc::now() - chrono::Duration::seconds(15)).to_rfc3339();
+        let windowed = store.discretion_leak_summary(Some(&since)).unwrap();
+        assert_eq!(
+            windowed,
+            vec![DiscretionLeakTally {
+                rule_id: "P-5.2".to_string(),
+                kind: "lenient_string_coercion".to_string(),
+                count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn summary_invalid_since_errors_clearly() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let err = store
+            .discretion_leak_summary(Some("not-a-timestamp"))
             .expect_err("invalid since must error");
         assert!(
             err.to_string().contains("invalid `since` timestamp"),

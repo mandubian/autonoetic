@@ -1263,6 +1263,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub decider_obligations: DeciderObligationsConfig,
 
+    /// Mechanical amendment invitations from denial telemetry (#771 D.2).
+    #[serde(default)]
+    pub amendment_invitations: AmendmentInvitationConfig,
+
     /// Approval level / escalation settings.
     #[serde(default)]
     pub approval_levels: ApprovalLevelConfig,
@@ -1764,6 +1768,54 @@ fn default_decider_obligations_enabled() -> bool {
 }
 
 fn default_adjudication_sla_secs() -> u64 {
+    604800
+}
+
+/// Mechanical amendment invitations (#771 D.2, citizenship RFC Part D).
+/// When the same rule is denied to the same agent alias at least
+/// `threshold` times within `window_secs`, the gateway issues a durable
+/// invitation to draft an amendment (Ri-0.8) — surfaced in the agent's
+/// signed per-turn attestation and as a notification. The gateway executes
+/// a pre-committed threshold; it never judges the rule (Lawful Executor).
+/// An invitation is not an amendment and carries no authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmendmentInvitationConfig {
+    /// Master switch for the invitation tick. Default: true.
+    #[serde(default = "default_amendment_invitations_enabled")]
+    pub enabled: bool,
+
+    /// Number of denials of the same rule for the same agent alias within
+    /// `window_secs` that triggers an invitation. `0` disables issuance.
+    /// Default: 3.
+    #[serde(default = "default_amendment_invitation_threshold")]
+    pub threshold: u64,
+
+    /// Telemetry window in seconds over which denials are counted. An open
+    /// invitation also expires after this window elapses without an answer.
+    /// `0` disables issuance. Default: 7 days.
+    #[serde(default = "default_amendment_invitation_window_secs")]
+    pub window_secs: u64,
+}
+
+impl Default for AmendmentInvitationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_amendment_invitations_enabled(),
+            threshold: default_amendment_invitation_threshold(),
+            window_secs: default_amendment_invitation_window_secs(),
+        }
+    }
+}
+
+fn default_amendment_invitations_enabled() -> bool {
+    true
+}
+
+fn default_amendment_invitation_threshold() -> u64 {
+    3
+}
+
+fn default_amendment_invitation_window_secs() -> u64 {
     604800
 }
 
@@ -3218,6 +3270,7 @@ impl Default for GatewayConfig {
             chat: ChatConfig::default(),
             operator_activity: OperatorActivityConfig::default(),
             decider_obligations: DeciderObligationsConfig::default(),
+            amendment_invitations: AmendmentInvitationConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
@@ -3704,5 +3757,13 @@ mod tests {
             DeciderObligationsConfig::default().adjudication_sla_secs,
             604800
         );
+    }
+
+    #[test]
+    fn amendment_invitations_default_to_enabled_threshold_3_window_7d() {
+        let cfg = AmendmentInvitationConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.threshold, 3);
+        assert_eq!(cfg.window_secs, 604800);
     }
 }

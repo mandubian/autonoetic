@@ -677,6 +677,25 @@ impl AgentExecutor {
             None => (Vec::new(), Vec::new()),
         };
 
+        // #771 D.2: surface open amendment invitations addressed to this
+        // agent in the same signed civic line. Carried as one-line
+        // summaries (rule + denial count) rather than bare ids — the agent
+        // did not file these, so the friction evidence IS the message.
+        // Same error-propagation contract as proposals/flags above: a
+        // signed attestation must not silently omit civic items.
+        let pending_invitations = match self.gateway_store.as_deref() {
+            Some(store) => store
+                .list_amendment_invitations(Some("open"), Some(&self.manifest.agent.id), 64)?
+                .into_iter()
+                .map(|inv| crate::runtime::state_attestation::InvitationSummary {
+                    invitation_id: inv.invitation_id,
+                    rule_id: inv.rule_id,
+                    denial_count: inv.denial_count,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         let budget_meters = self.snapshot_budget_meters();
 
         // RFC #778 Part D: compute burn-rate forecast from the budget meters
@@ -709,6 +728,7 @@ impl AgentExecutor {
                 pending_escalation_ids,
                 pending_proposal_ids,
                 pending_flag_ids,
+                pending_invitations,
                 budget_meters,
                 burn_rate,
                 constitution_version: &constitution_version,

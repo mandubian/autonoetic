@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-3 principle(s) (bind the agent), 7 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+4 principle(s) (bind the agent), 7 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -15,6 +15,15 @@ Promotion and gate actions are bounded so that repeated mechanical rejection can
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `P-2.29` | `promotion_attempts_exhausted` | `runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt` | `promotion_attempt_exhaustion_integration.rs` | `promotion_governor.max_promotion_attempts_per_revision` |
+
+### P-5 — Deterministic coercion and response validation
+
+The gateway normalizes model I/O only through deterministic, pre-committed tolerances; every such intervention is observable and counted as a named discretion leak (§14). No gateway judgment about the agent's output is silent or hidden.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `P-5.2` | `input_normalization_leak` | `runtime/discretion_leak.rs::record_discretion_leak (tokio::task_local scope) + runtime/tool_call_processor.rs::note_llm_normalization + runtime/response_validation.rs::strip_markdown_code_fences` | `runtime::discretion_leak::tests` | — |
+| `P-5.8` | `gateway_authored_repair_leak` | `runtime/response_validation.rs::validate_and_maybe_repair (gateway-authored repair prompt) + runtime/discretion_leak.rs::record_discretion_leak` | `runtime::discretion_leak::tests` | `response_validation.repair_enabled, response_validation.max_validation_loops, max_validation_duration_ms` |
 
 ### P-7 — Bounded progress
 
