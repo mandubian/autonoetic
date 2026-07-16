@@ -482,6 +482,8 @@ One door (below) is the real protection: every install — regardless of `trust_
 | `strict` | Preserve declared capabilities; drop any high-risk capability (`NetworkAccess`/`CodeExecution`/`ArtifactExecution`/`AgentSpawn`) that was *inferred* from `allowed-tools` rather than explicitly declared; add `ApprovalQueue` (enables admin-proposal filing + the Workflow tool tier — it does not gate declared capabilities) | Default for third-party skills |
 | `audit` | `ReadAccess(self.*)` + `ApprovalQueue` only — declared capabilities ignored | Untrusted or high-risk skills |
 
+**Inference clamping (RFC Part C):** capability *inference* from `allowed-tools` (as opposed to an explicit `metadata.autonoetic.capabilities` declaration) never mints a wildcard. `Bash(...)` proposes `SandboxFunctions` for the named prefixes only — never `CodeExecution`; a skill that genuinely needs shell execution must declare `CodeExecution` explicitly. `WebSearch`/`WebFetch`/`Fetch` propose `NetworkAccess` with an **empty** hosts list (deny-all) rather than `hosts: ["*"]` — concrete hosts require an explicit declaration too. A wildcard grant minted from a tool-name mapping table would have nobody to attribute it to (Ri-0.11); wildcard power must always be a visible, explicit act the promotion gate can weigh. When inference clamps something, the response's `warnings` array names it.
+
 **Return value:**
 ```json
 {
@@ -492,6 +494,10 @@ One door (below) is the real protection: every install — regardless of `trust_
   "status": "candidate",
   "revision_id": "rev_sha256:...",
   "message": "Skill 'web-researcher.default' installed as a candidate revision; it is NOT active.",
+  "warnings": [
+    "allowed-tools requested Bash: shell execution requires an explicit CodeExecution declaration; granted SandboxFunctions prefixes only.",
+    "allowed-tools requested network tools, but strict trust_mode dropped the inferred NetworkAccess entirely; declare NetworkAccess with concrete hosts in metadata.autonoetic.capabilities to grant it."
+  ],
   "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent)."
 }
 ```
@@ -959,6 +965,10 @@ Planner: "Create a weather agent"
   → specialized_builder calls agent_revision_promote
   → Agent is active and discoverable
 ```
+
+**Creation lineage (installer vs. designer):**
+
+A revision records two distinct principals. `created_by` is the **installer** — the agent that called the revision tool, in practice almost always `specialized_builder.default` (the sole holder of the `AgentRevision` capability). `requested_by` is the **designer** — the delegating principal (e.g. `agent-factory.default`) that spawned the installer, derived by the gateway from the calling session's spawn lineage, never from tool arguments (an agent cannot assert an arbitrary requester). It is `None` when the builder was invoked at the session root (e.g. directly by the operator) or the lineage is unresolvable. This survives past the causal chain's retention window, so "which agent designed this agent" stays answerable from the revision alone. (Creation is not delegation: a newborn's capabilities come from the promotion gate, never inherited from or bounded by its creator's — proposed invariant I-13.)
 
 **Promotion evidence binding (high-risk capabilities):**
 

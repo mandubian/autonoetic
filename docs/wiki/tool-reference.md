@@ -144,4 +144,4 @@ Agents interact with the gateway through tools. This page lists the major tool c
 
 | Tool | Description |
 |------|-------------|
-| `skill_install` | Fetch a remote SKILL.md and install it as a new local agent |
+| `skill_install` | Fetch a remote SKILL.md and register it as a **Candidate** revision of a new local agent (not activated — must clear the standard promotion gates) |

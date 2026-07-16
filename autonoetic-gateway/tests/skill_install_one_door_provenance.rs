@@ -130,12 +130,15 @@ fn script_mode_skill() -> String {
 
 /// Run `skill_install` through the native tool registry (the real dispatch
 /// path) against the shared workspace, returning the parsed JSON response,
-/// the gateway config, and the opened store for further assertions.
+/// the opened store, and the gateway dir (so callers can read the revision's
+/// materialized SKILL.md for full capability detail metadata_json doesn't
+/// carry — it only records capability type names, not e.g. NetworkAccess
+/// hosts).
 fn run_skill_install(
     new_agent_id: &str,
     skill_body: String,
     trust_mode: Option<&str>,
-) -> (serde_json::Value, Arc<GatewayStore>) {
+) -> (serde_json::Value, Arc<GatewayStore>, std::path::PathBuf) {
     let (base_url, handle) = spawn_one_shot_http_server(skill_body);
     let url = format!("{base_url}/SKILL.md");
     let out = run_skill_install_url(new_agent_id, &url, trust_mode);
@@ -150,7 +153,7 @@ fn run_skill_install_url(
     new_agent_id: &str,
     url: &str,
     trust_mode: Option<&str>,
-) -> (serde_json::Value, Arc<GatewayStore>) {
+) -> (serde_json::Value, Arc<GatewayStore>, std::path::PathBuf) {
     let manifest = installer_manifest(vec![Capability::SkillInstall {
         allowed_sources: vec!["127.0.0.1".to_string()],
     }]);
@@ -203,7 +206,29 @@ fn run_skill_install_url(
 
     let parsed: serde_json::Value =
         serde_json::from_str(&result).expect("skill_install response should be JSON");
-    (parsed, gateway_store)
+    (parsed, gateway_store, gateway_dir)
+}
+
+/// Re-parse the SKILL.md materialized on disk for a revision, to inspect
+/// full capability data (e.g. `NetworkAccess.hosts`) that the store's
+/// `metadata_json.manifest.capabilities` deliberately reduces to type names.
+fn read_revision_capabilities(
+    gateway_dir: &std::path::Path,
+    new_agent_id: &str,
+    revision_id: &str,
+) -> Vec<Capability> {
+    let dir_name = new_agent_id.replace('.', "-");
+    let skill_path = gateway_dir
+        .join("revisions")
+        .join("agents")
+        .join(dir_name)
+        .join(revision_id)
+        .join("SKILL.md");
+    let content = std::fs::read_to_string(&skill_path)
+        .unwrap_or_else(|e| panic!("reading materialized {}: {e}", skill_path.display()));
+    let (manifest, _body) = autonoetic_gateway::runtime::parser::SkillParser::parse(&content)
+        .expect("materialized SKILL.md should parse");
+    manifest.capabilities
 }
 
 /// (a) One door: a declared-NetworkAccess skill installed via `generous`
@@ -212,7 +237,8 @@ fn run_skill_install_url(
 #[test]
 fn one_door_generous_install_stays_candidate_and_unpromoted() {
     let agent_id = "genesis-one-door-generous.default";
-    let (resp, store) = run_skill_install(agent_id, declared_network_skill(), Some("generous"));
+    let (resp, store, _gateway_dir) =
+        run_skill_install(agent_id, declared_network_skill(), Some("generous"));
 
     assert_eq!(resp["ok"], serde_json::json!(true), "resp: {resp}");
     assert_eq!(resp["activated"], serde_json::json!(false), "resp: {resp}");
@@ -244,7 +270,8 @@ fn one_door_generous_install_stays_candidate_and_unpromoted() {
 #[test]
 fn provenance_recorded_on_revision_and_causal_event() {
     let agent_id = "genesis-one-door-provenance.default";
-    let (resp, store) = run_skill_install(agent_id, declared_network_skill(), Some("generous"));
+    let (resp, store, _gateway_dir) =
+        run_skill_install(agent_id, declared_network_skill(), Some("generous"));
 
     let revision_id = resp["revision_id"].as_str().unwrap().to_string();
     let rev = store
@@ -291,7 +318,7 @@ fn provenance_recorded_on_revision_and_causal_event() {
 #[test]
 fn remote_plain_http_rejected_before_fetch() {
     let agent_id = "genesis-one-door-http-rejected.default";
-    let (resp, _store) =
+    let (resp, _store, _gateway_dir) =
         run_skill_install_url(agent_id, "http://skills.example.com/SKILL.md", None);
 
     assert_eq!(resp["ok"], serde_json::json!(false), "resp: {resp}");
@@ -315,7 +342,7 @@ fn remote_plain_http_rejected_before_fetch() {
 #[test]
 fn script_mode_import_rejected_before_disk_write() {
     let agent_id = "genesis-one-door-script-rejected.default";
-    let (resp, _store) = run_skill_install(agent_id, script_mode_skill(), None);
+    let (resp, _store, _gateway_dir) = run_skill_install(agent_id, script_mode_skill(), None);
 
     assert_eq!(resp["ok"], serde_json::json!(false), "resp: {resp}");
     assert_eq!(
@@ -335,13 +362,16 @@ fn script_mode_import_rejected_before_disk_write() {
 }
 
 /// (d) `strict` drops inferred high-risk capabilities (`CodeExecution`,
-/// `NetworkAccess`); `generous` keeps them. Neither mode ever promotes
-/// (covered by the one-door test above).
+/// `NetworkAccess`); `generous` keeps what inference actually proposes —
+/// which, per the RFC Part C clamp, is never `CodeExecution` and never a
+/// wildcard `NetworkAccess`. Neither mode ever promotes (covered by the
+/// one-door test above).
 #[serial]
 #[test]
 fn strict_drops_inferred_high_risk_capabilities_generous_keeps_them() {
     let strict_id = "genesis-one-door-strict-clamp.default";
-    let (strict_resp, strict_store) = run_skill_install(strict_id, inferred_high_risk_skill(), None);
+    let (strict_resp, strict_store, _strict_gateway_dir) =
+        run_skill_install(strict_id, inferred_high_risk_skill(), None);
     assert_eq!(strict_resp["trust_mode"], serde_json::json!("strict"));
     let strict_rev_id = strict_resp["revision_id"].as_str().unwrap().to_string();
     let strict_rev = strict_store.get_agent_revision(&strict_rev_id).unwrap().unwrap();
@@ -363,7 +393,7 @@ fn strict_drops_inferred_high_risk_capabilities_generous_keeps_them() {
     );
 
     let generous_id = "genesis-one-door-generous-clamp.default";
-    let (generous_resp, generous_store) =
+    let (generous_resp, generous_store, generous_gateway_dir) =
         run_skill_install(generous_id, inferred_high_risk_skill(), Some("generous"));
     let generous_rev_id = generous_resp["revision_id"].as_str().unwrap().to_string();
     let generous_rev = generous_store
@@ -374,13 +404,43 @@ fn strict_drops_inferred_high_risk_capabilities_generous_keeps_them() {
         generous_rev.metadata_json["manifest"]["capabilities"].clone(),
     )
     .expect("capabilities should be a string array");
+    // RFC Part C: inference never mints CodeExecution — generous carries
+    // only the narrower SandboxFunctions inference proposes instead.
     assert!(
-        generous_caps.contains(&"CodeExecution".to_string()),
-        "generous must keep inferred CodeExecution, got: {generous_caps:?}"
+        !generous_caps.contains(&"CodeExecution".to_string()),
+        "generous must NOT carry CodeExecution — inference never mints it \
+         (RFC Part C clamp), got: {generous_caps:?}"
+    );
+    assert!(
+        generous_caps.contains(&"SandboxFunctions".to_string()),
+        "generous must keep inferred SandboxFunctions, got: {generous_caps:?}"
     );
     assert!(
         generous_caps.contains(&"NetworkAccess".to_string()),
         "generous must keep inferred NetworkAccess, got: {generous_caps:?}"
+    );
+
+    // metadata_json only records capability type names; read the full
+    // struct from the revision's materialized SKILL.md to confirm the
+    // NetworkAccess hosts are empty, not a wildcard (RFC Part C).
+    let generous_full_caps =
+        read_revision_capabilities(&generous_gateway_dir, generous_id, &generous_rev_id);
+    let network_hosts = generous_full_caps
+        .iter()
+        .find_map(|c| match c {
+            Capability::NetworkAccess { hosts } => Some(hosts),
+            _ => None,
+        })
+        .expect("generous capabilities should include NetworkAccess");
+    assert!(
+        network_hosts.is_empty(),
+        "generous inferred NetworkAccess must have empty hosts, not a wildcard, got: {network_hosts:?}"
+    );
+    assert!(
+        !generous_full_caps
+            .iter()
+            .any(|c| matches!(c, Capability::CodeExecution { .. })),
+        "no inference path may ever yield CodeExecution, got: {generous_full_caps:?}"
     );
 }
 
@@ -399,7 +459,8 @@ fn standard_agentskills_high_risk_skill() -> String {
 #[test]
 fn strict_clamp_applies_to_standard_frontmatter_parser_inferred_capabilities() {
     let agent_id = "genesis-one-door-standard-strict.default";
-    let (resp, store) = run_skill_install(agent_id, standard_agentskills_high_risk_skill(), None);
+    let (resp, store, _gateway_dir) =
+        run_skill_install(agent_id, standard_agentskills_high_risk_skill(), None);
     assert_eq!(resp["trust_mode"], serde_json::json!("strict"));
     let rev_id = resp["revision_id"].as_str().unwrap().to_string();
     let rev = store.get_agent_revision(&rev_id).unwrap().unwrap();

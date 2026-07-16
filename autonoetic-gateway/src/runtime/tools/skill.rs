@@ -64,7 +64,12 @@ impl NativeTool for SkillInstallTool {
                 inferred rather than explicitly declared, then adds ApprovalQueue, which enables \
                 admin-proposal filing and the Workflow tool tier — it does not gate declared \
                 capabilities), audit (ReadAccess(self.*) + ApprovalQueue only, declared \
-                capabilities ignored)."
+                capabilities ignored). Inference from allowed-tools never mints wildcard power: \
+                Bash proposes SandboxFunctions prefixes only (never CodeExecution), and \
+                WebSearch/WebFetch/Fetch propose NetworkAccess with an empty hosts list — shell \
+                execution and concrete network hosts require an explicit \
+                metadata.autonoetic.capabilities declaration. See the response's `warnings` \
+                field for what was clamped."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -220,6 +225,22 @@ impl NativeTool for SkillInstallTool {
         // ── 6. Apply trust mode ───────────────────────────────────────────────
         let trust_mode = args.trust_mode.as_deref().unwrap_or("strict");
         let (capabilities, capabilities_source) = apply_trust_mode(trust_mode, &parsed_manifest)?;
+
+        // Install-time warnings (RFC Part C): when the applied set came from
+        // allowed-tools inference rather than an explicit declaration, tell
+        // the operator which power was clamped, so the gap is visible at
+        // install rather than discovered later as "why can't this agent run
+        // shell / reach the network".
+        let inference_warnings = if capabilities_source == "inferred" {
+            let allowed_tools: Vec<String> = parsed_manifest
+                .agentskills_import
+                .as_ref()
+                .map(|m| m.allowed_tools.clone())
+                .unwrap_or_default();
+            capability_inference_warnings(&allowed_tools, trust_mode)
+        } else {
+            Vec::new()
+        };
 
         // ── 7. Build target manifest ──────────────────────────────────────────
         let llm_config = parsed_manifest.llm_config.clone().or_else(|| {
@@ -383,6 +404,7 @@ impl NativeTool for SkillInstallTool {
             "status": "candidate",
             "revision_id": outcome.revision_id,
             "message": message,
+            "warnings": inference_warnings,
             "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent).",
         })
         .to_string())
@@ -1039,6 +1061,46 @@ fn url_scheme_is_fetch_safe(url: &str) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Structured install-time warnings for the RFC Part C inference clamp: when
+/// `allowed-tools` asked for shell or network tools but the capability set
+/// was *inferred* (not declared), the operator gets told exactly what was
+/// clamped rather than silently granted a narrower power than the tool name
+/// suggests. `trust_mode` is threaded in because the network wording differs:
+/// `strict` drops the inferred (high-risk) `NetworkAccess` entirely, whereas
+/// `generous` keeps it with an empty hosts list — the warning must not imply
+/// the Candidate carries network access it doesn't. (`SandboxFunctions` is not
+/// high-risk, so the shell wording holds for both modes.)
+fn capability_inference_warnings(allowed_tools: &[String], trust_mode: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let wants_bash = allowed_tools
+        .iter()
+        .any(|t| t.trim() == "Bash" || t.trim().starts_with("Bash("));
+    let wants_network = allowed_tools
+        .iter()
+        .any(|t| matches!(t.trim(), "WebSearch" | "WebFetch" | "Fetch"));
+    if wants_bash {
+        warnings.push(
+            "allowed-tools requested Bash: shell execution requires an explicit CodeExecution \
+             declaration; granted SandboxFunctions prefixes only."
+                .to_string(),
+        );
+    }
+    if wants_network {
+        warnings.push(if trust_mode == "strict" {
+            "allowed-tools requested network tools, but strict trust_mode dropped the inferred \
+             NetworkAccess entirely; declare NetworkAccess with concrete hosts in \
+             metadata.autonoetic.capabilities to grant it."
+                .to_string()
+        } else {
+            "allowed-tools requested network tools: NetworkAccess inferred with an empty hosts \
+             list — declare concrete hosts in metadata.autonoetic.capabilities to enable network \
+             access."
+                .to_string()
+        });
+    }
+    warnings
 }
 
 /// Map a trust_mode string to the capability set the Candidate carries into

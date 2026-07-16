@@ -330,11 +330,24 @@ pub fn split_extended_instructions(body: &str) -> (&str, Option<&str>) {
     (body, None)
 }
 ///
-/// Maps known AgentSkills tool names to Autonoetic capability types:
-/// - `Bash(*)` → `SandboxFunctions` / `CodeExecution`
+/// Maps known AgentSkills tool names to Autonoetic capability types.
+///
+/// Inference proposes narrow capabilities only; it may never mint a
+/// wildcard capability from third-party frontmatter text (RFC Part C,
+/// docs/design/agent-genesis-one-door.md — "capability is never inferred
+/// into wildcards from untrusted text"). Wildcard power must always be an
+/// explicit, visible declaration under `metadata.autonoetic.capabilities`
+/// that the promotion gate can weigh — a grant minted from a tool-name
+/// mapping table has nobody to attribute it to (Ri-0.11).
+///
+/// - `Bash` / `Bash(...)` → `SandboxFunctions` for the named prefixes only
+///   (or `*` for bare `Bash` / `Bash(*)`). **Never** `CodeExecution`: shell
+///   execution requires an explicit `CodeExecution` declaration.
 /// - `Read`/`View` → covered by baseline `ReadAccess`
 /// - `Write`/`Edit` → `WriteAccess`
-/// - `WebSearch`/`WebFetch` → `NetworkAccess`
+/// - `WebSearch`/`WebFetch`/`Fetch` → `NetworkAccess` with an **empty**
+///   hosts list (deny-all until an operator or the gate explicitly widens
+///   it) — never `hosts: ["*"]`.
 pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
     let mut caps = vec![Capability::ReadAccess {
         scopes: vec!["self.*".into()],
@@ -347,7 +360,15 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
 
     for tool in allowed_tools {
         let t = tool.trim();
-        if let Some(rest) = t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')) {
+        // A bare `Bash` is the Claude-style "all shell" form, equivalent to
+        // `Bash(*)`; `Bash(a:*|b)` names scoped prefixes. Both are the same
+        // request — keep this in lockstep with `capability_inference_warnings`.
+        let bash_inner = if t == "Bash" {
+            Some("")
+        } else {
+            t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')'))
+        };
+        if let Some(rest) = bash_inner {
             has_sandbox = true;
             if !rest.is_empty() && rest != "*" {
                 for pattern in rest.split('|').map(|s| s.trim().to_string()) {
@@ -377,10 +398,9 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
         caps.push(Capability::SandboxFunctions {
             allowed: sandbox_patterns,
         });
-        caps.push(Capability::CodeExecution {
-            patterns: vec!["*".to_string()],
-            commands: vec![],
-        });
+        // No CodeExecution here (RFC Part C): shell execution requires an
+        // explicit metadata.autonoetic.capabilities declaration, not a
+        // Bash(...) mention in allowed-tools.
     }
 
     if has_write {
@@ -390,9 +410,9 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
     }
 
     if has_network {
-        caps.push(Capability::NetworkAccess {
-            hosts: vec!["*".to_string()],
-        });
+        // Empty hosts, not "*" (RFC Part C): deny-all until an operator or
+        // the gate explicitly widens it with concrete hosts.
+        caps.push(Capability::NetworkAccess { hosts: vec![] });
     }
 
     caps
@@ -713,6 +733,19 @@ Use Bash(git log) to inspect history.
         assert!(caps
             .iter()
             .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+        // RFC Part C clamp: allowed-tools inference never mints CodeExecution
+        // or a wildcard NetworkAccess — only an explicit declaration may.
+        assert!(
+            !caps.iter().any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "inference must not mint CodeExecution from Bash in allowed-tools, got: {caps:?}"
+        );
+        assert!(
+            caps.iter().any(|c| matches!(
+                c,
+                Capability::NetworkAccess { hosts } if hosts.is_empty()
+            )),
+            "inference must produce an empty-hosts NetworkAccess, not a wildcard, got: {caps:?}"
+        );
 
         // Imported skill with no declared schema gets a default io.returns
         // envelope with enforcement FORCED to advisory (not mode-derived), so it
@@ -1012,6 +1045,64 @@ metadata:
             .unwrap();
         assert_eq!(sandbox.len(), 1);
         assert_eq!(sandbox[0], "*");
+    }
+
+    /// A bare `Bash` entry (Claude-style "all shell") is equivalent to
+    /// `Bash(*)`: wildcard `SandboxFunctions`, not a literal `"Bash"` prefix,
+    /// and never `CodeExecution`.
+    #[test]
+    fn test_infer_capabilities_bare_bash_is_wildcard() {
+        let caps = infer_capabilities(&["Bash".to_string()]);
+        let sandbox = caps
+            .iter()
+            .find_map(|c| match c {
+                Capability::SandboxFunctions { allowed } => Some(allowed),
+                _ => None,
+            })
+            .expect("bare Bash should infer SandboxFunctions");
+        assert_eq!(sandbox, &vec!["*".to_string()], "bare Bash must map to wildcard, not [\"Bash\"]");
+        assert!(
+            !caps.iter().any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "bare Bash must not infer CodeExecution, got: {caps:?}"
+        );
+    }
+
+    /// RFC Part C: `Bash(...)` in allowed-tools proposes `SandboxFunctions`
+    /// only; `CodeExecution` must never be inferred — a skill that needs
+    /// shell execution must declare `CodeExecution` explicitly.
+    #[test]
+    fn test_infer_capabilities_bash_never_mints_code_execution() {
+        let caps = infer_capabilities(&["Bash(*)".to_string()]);
+        assert!(
+            !caps
+                .iter()
+                .any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "Bash(*) must not infer CodeExecution, got: {caps:?}"
+        );
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+    }
+
+    /// RFC Part C: `WebSearch`/`WebFetch`/`Fetch` infer `NetworkAccess` with
+    /// an empty hosts list (deny-all) — never `hosts: ["*"]`.
+    #[test]
+    fn test_infer_capabilities_network_empty_hosts_never_wildcard() {
+        for tool in ["WebSearch", "WebFetch", "Fetch"] {
+            let caps = infer_capabilities(&[tool.to_string()]);
+            let network = caps
+                .iter()
+                .filter_map(|c| match c {
+                    Capability::NetworkAccess { hosts } => Some(hosts),
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| panic!("{tool} should infer NetworkAccess"));
+            assert!(
+                network.is_empty(),
+                "{tool} must infer empty hosts, not a wildcard, got: {network:?}"
+            );
+        }
     }
 
     #[test]
