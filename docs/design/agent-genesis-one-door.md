@@ -1,7 +1,11 @@
 # Agent Genesis — One Door
 
-> **Status:** Draft RFC (2026-07-14) — with a **fix-now security core** (Parts
-> A, B, D, E.1, F.1 ship immediately; the rest is staged). Tracking issue:
+> **Status:** Partial — the security core **shipped** (Parts A, B, C, D, E.1,
+> F.1, merged via #802/#805; plus designer lineage #803/#804). **Remaining:**
+> F.3/F.4 birth quality (#799, staged), and the P-9.15/P-9.16/I-13 amendment
+> (#800, drafted in `docs/constitution/amendments/2026-07-14-genesis-one-door-DRAFT.md`,
+> awaiting signing). F.5 probation is deliberately routed to the citizenship
+> RFC's E.3, not here. Tracking issue:
 > [#801](https://github.com/mandubian/autonoetic/issues/801)
 > (workstreams #793–#800). Companion to
 > [`citizenship-as-a-runtime-service.md`](citizenship-as-a-runtime-service.md)
