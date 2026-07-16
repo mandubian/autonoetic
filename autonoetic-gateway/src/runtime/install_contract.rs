@@ -760,13 +760,28 @@ pub struct BundleHealthReport {
 ///
 /// `script_entry`: when `Some(path)`, import scanning is limited to that file only,
 /// avoiding false positives from test helpers in the bundle. Pass `None` to scan all Python files.
+///
+/// `execution_mode` / `declares_io_returns`: advisory birth-quality check (RFC #799 F.4a) —
+/// a reasoning agent with no `io.returns` hands back unstructured text, since the
+/// gateway-injected `anomalies` witness contract and the Output Contract both key off it.
 pub fn analyze_bundle_health(
     file_map: &BTreeMap<String, Vec<u8>>,
     capabilities: &[Capability],
     has_layers: bool,
     script_entry: Option<&str>,
+    execution_mode: autonoetic_types::agent::ExecutionMode,
+    declares_io_returns: bool,
 ) -> BundleHealthReport {
     let mut report = BundleHealthReport::default();
+
+    if execution_mode == autonoetic_types::agent::ExecutionMode::Reasoning && !declares_io_returns {
+        report.warnings.push(
+            "Reasoning agents should declare io.returns — the gateway-injected `anomalies` \
+             witness contract and the Output Contract both key off it; without it the agent \
+             hands back unstructured text."
+                .to_string(),
+        );
+    }
 
     let found_dep_files: Vec<(&str, &str)> = DEPENDENCY_FILES
         .iter()
@@ -810,6 +825,26 @@ pub fn analyze_bundle_health(
     }
 
     report
+}
+
+/// Scan a SKILL.md body for re-pasted centralized doctrine (RFC #799 F.4b).
+///
+/// Mirrors `tests/skill_doctrine_guard.rs`, which runs the same scan over
+/// repo-authored `agents/**/SKILL.md` files at CI time — but that guard never
+/// sees runtime-born agents created via `create_from_intent`, so this is the
+/// create-time counterpart. Case-sensitive substring match against the same
+/// fingerprint list, so the two checks never drift apart.
+pub fn scan_body_for_migrated_doctrine(body: &str) -> Vec<String> {
+    crate::runtime::guidance::MIGRATED_DOCTRINE_FINGERPRINTS
+        .iter()
+        .filter(|(phrase, _)| body.contains(phrase))
+        .map(|(phrase, owner)| {
+            format!(
+                "SKILL.md body re-pastes centralized doctrine (\"{phrase}\"...); \
+                 it already lives in {owner} — remove it from the manifest body."
+            )
+        })
+        .collect()
 }
 
 /// Scan Python files for external (non-stdlib, non-local) imports.
@@ -1330,7 +1365,14 @@ artifacts: "not_a_sequence"
     fn test_analyze_bundle_health_warns_on_requirements_without_layers() {
         let mut file_map = BTreeMap::new();
         file_map.insert("requirements.txt".to_string(), b"requests\n".to_vec());
-        let report = analyze_bundle_health(&file_map, &[], false, None);
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
         assert!(report.has_unresolved_dependencies);
         assert!(report
             .dependency_files
@@ -1348,7 +1390,14 @@ artifacts: "not_a_sequence"
             mount_path: "/deps".to_string(),
             digest: "sha256:abc".to_string(),
         }];
-        let report = analyze_bundle_health(&file_map, &[], true, None);
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            true,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
         assert!(!report.has_unresolved_dependencies);
         assert!(report
             .warnings
@@ -1368,9 +1417,83 @@ artifacts: "not_a_sequence"
                 commands: vec![],
             },
         ];
-        let report = analyze_bundle_health(&file_map, &caps, false, None);
+        let report = analyze_bundle_health(
+            &file_map,
+            &caps,
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
         assert!(report.declares_network_access);
         assert!(report.declares_code_execution);
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_warns_reasoning_without_io_returns() {
+        let file_map = BTreeMap::new();
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Reasoning,
+            false,
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("Reasoning agents should declare io.returns")));
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_no_warning_reasoning_with_io_returns() {
+        let file_map = BTreeMap::new();
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Reasoning,
+            true,
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .all(|w| !w.contains("Reasoning agents should declare io.returns")));
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_no_warning_script_without_io_returns() {
+        let file_map = BTreeMap::new();
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            false,
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .all(|w| !w.contains("Reasoning agents should declare io.returns")));
+    }
+
+    #[test]
+    fn test_scan_body_for_migrated_doctrine_flags_reintroduced_phrase() {
+        let body = "Some instructions.\n\nReturn a single raw JSON object with your findings.";
+        let warnings = scan_body_for_migrated_doctrine(body);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Return a single raw JSON object"));
+        assert!(warnings[0].contains("io.returns Output Contract renderer"));
+    }
+
+    #[test]
+    fn test_scan_body_for_migrated_doctrine_clean_body_has_no_warnings() {
+        let body = "You are a helpful specialist agent. Follow your declared io.returns schema.";
+        let warnings = scan_body_for_migrated_doctrine(body);
+        assert!(warnings.is_empty());
     }
 
     #[test]

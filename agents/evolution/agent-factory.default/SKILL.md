@@ -393,6 +393,22 @@ Each required gate must call `promotion_record` against the same
 - **Auditor**: set `pass` explicitly; findings are advisory except `critical` vetoes.
 specialized_builder verifies these records exist against the artifact_ref being installed.
 
+#### Step 4c: Baseline eval suite (expected practice — not yet gate-enforced)
+
+When you spawn `auditor.default` in Step 4b, also ask it to call `eval_suite_publish`
+for the new agent: a handful of representative cases exercising its declared
+`io.returns` contract, with `evaluated_targets: ["<agent_id>"]`. You do not hold the
+`Evaluation` capability yourself and cannot call this tool directly — auditor already
+does, and it is reviewing the new agent rather than itself, so the self-evaluation
+ownership invariant holds.
+
+There is no mechanical promotion gate requiring this suite today — nothing blocks
+install if it's skipped, and P-9.7 eval-gating currently has nothing to check without
+one. Publishing a minimal baseline here gives it something to bite on later, and gives
+future behavioral-drift detection a starting point to compare against. If the review
+gate cannot produce assertable cases for this agent (e.g. purely conversational, no
+stable output shape), proceed without blocking the install.
+
 **Do NOT iterate on gate failures.** The agent-factory is an orchestrator,
 not a debugger. When any gate fails, report the findings to the planner
 and stop. The planner decides whether to re-spawn `coder.default` with
