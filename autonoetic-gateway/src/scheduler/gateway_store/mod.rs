@@ -136,6 +136,7 @@ pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
     approval_flood_cap: std::sync::atomic::AtomicUsize,
     escalation_flood_cap: std::sync::atomic::AtomicUsize,
+    anomaly_flag_flood_cap: std::sync::atomic::AtomicUsize,
     /// Weak ref avoids an `Arc` cycle with [`crate::scheduler::hooks::HookExecutor`], which may
     /// hold an `Arc<GatewayStore>` for other hooks.
     policy_hook_executor: Mutex<Option<Weak<crate::scheduler::hooks::HookExecutor>>>,
@@ -154,6 +155,11 @@ pub struct GatewayStore {
     /// every rejected create while a root stays flooded; a root is removed when
     /// a create for it next succeeds (the window reset).
     flood_alerted_roots: Mutex<std::collections::HashSet<String>>,
+    /// Reporters currently at the anomaly-flag flood cap that have already had
+    /// an operator notification emitted (#770). Mirrors `flood_alerted_roots`:
+    /// the alert fires once per flood window, and a reporter is removed when
+    /// one of its filings next succeeds (capacity freed by adjudication).
+    flood_alerted_flag_reporters: Mutex<std::collections::HashSet<String>>,
 }
 
 impl GatewayStore {
@@ -176,6 +182,7 @@ impl GatewayStore {
             conn: std::sync::Mutex::new(conn),
             approval_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             escalation_flood_cap: std::sync::atomic::AtomicUsize::new(0),
+            anomaly_flag_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             policy_hook_executor: Mutex::new(None),
             task_notify: crate::scheduler::task_notify::TaskNotifyRegistry::new(),
             session_read_cache:
@@ -183,6 +190,7 @@ impl GatewayStore {
             live_digest_buffer: Mutex::new(Vec::with_capacity(LIVE_DIGEST_BUFFER_CAPACITY)),
             config: Mutex::new(None),
             flood_alerted_roots: Mutex::new(std::collections::HashSet::new()),
+            flood_alerted_flag_reporters: Mutex::new(std::collections::HashSet::new()),
         };
         {
             let mut conn = store.conn.lock().unwrap();

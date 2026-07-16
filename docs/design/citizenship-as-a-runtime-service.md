@@ -306,7 +306,15 @@ anyone else's.
    scoring (C.3) demotes the noise *after* adjudication, but the ombudsman
    queue needs a mechanical triage bound (rate limits per principal are a
    config knob; is that acceptable, or does the bound itself need to be
-   constitutional?).
+   constitutional?). **Resolved (code):** config knob
+   `max_pending_anomaly_flags_per_reporter` (default 50, 0 disables) caps
+   un-adjudicated flags per reporter — the O-1 lineage answer, same shape as
+   the P-7.17 approval flood cap and O-7's SLA window: operational bounds
+   are config; only *scoring* formulas must be constitutional (invariant 4).
+   Over-cap filings are rejected loudly with `anomaly_flag_flood` plus a
+   once-per-window operator notification — never silently dropped (Ri-0.18) —
+   and terminal adjudications free capacity, so the bound is a triage depth,
+   not a lifetime quota.
 3. **Invitation threshold gaming.** D.2's pre-committed threshold is visible
    law — an agent could deliberately accumulate denials to force an
    invitation. Probably harmless (an invitation is not an amendment), but the

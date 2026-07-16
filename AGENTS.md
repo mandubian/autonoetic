@@ -129,6 +129,9 @@ Additional approval features:
 - **Continuation HMAC**: signed with `continuation_key` (or derived from `node_id`); verified on resume; action-equality check vs stored approval.
 - **Continuation cleanup**: on resume, reject/cancel/withdraw, gateway startup reaper, emergency stop, task cancellation.
 
+### Anomaly flag flood cap
+`anomaly_flag` intake is capability-free (Ri-0.18), so un-adjudicated flags (`pending`/`under_review`) are capped per reporter (`max_pending_anomaly_flags_per_reporter`, default 50, 0 disables) — the #770 spam triage bound, same shape as the P-7.17 approval flood cap. Over-cap filings in `gateway_store/anomaly_flags.rs::insert_anomaly_flag` are rejected loudly with `anomaly_flag_flood` plus an operator notification (deduped per reporter until a filing succeeds); terminal adjudications free capacity.
+
 ### Promotion severity gating
 `promotion.record` mechanically rejects:
 - `pass=true` with any `error` or `critical` finding

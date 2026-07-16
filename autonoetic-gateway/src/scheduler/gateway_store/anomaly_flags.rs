@@ -78,8 +78,99 @@ fn row_to_flag(row: &rusqlite::Row<'_>) -> rusqlite::Result<AnomalyFlag> {
 }
 
 impl GatewayStore {
+    pub fn set_anomaly_flag_flood_cap(&self, cap: usize) {
+        self.anomaly_flag_flood_cap
+            .store(cap, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Surface an `anomaly_flag_flood` cap trip to the operator as a
+    /// notification (#770) so a flooding reporter reads as a triage item,
+    /// not only as the agent's tool error — same lesson as the
+    /// approval-flood alert (#723). Emitted at most once per reporter per
+    /// flood window; the flag is cleared when a filing by that reporter
+    /// next succeeds.
+    fn emit_anomaly_flag_flood_alert(
+        &self,
+        reporter_agent_id: &str,
+        pending_count: i64,
+        cap: usize,
+    ) {
+        {
+            let mut alerted = self.flood_alerted_flag_reporters.lock().unwrap();
+            if !alerted.insert(reporter_agent_id.to_string()) {
+                return;
+            }
+        }
+        let notification = autonoetic_types::notification::NotificationRecord::new(
+            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::notification::NotificationType::AnomalyFlag,
+            "system".to_string(),
+            serde_json::json!({
+                "alert": "anomaly_flag_flood",
+                "reporter_agent_id": reporter_agent_id,
+                "pending_count": pending_count,
+                "cap": cap,
+                "message": format!(
+                    "Anomaly flag intake suspended for reporter '{}': {} un-adjudicated \
+                     flags at cap {}. Adjudicate with `anomaly.resolve` to free capacity.",
+                    reporter_agent_id, pending_count, cap
+                ),
+            }),
+        );
+        if let Err(e) = self.create_notification_record(&notification) {
+            tracing::warn!("Failed to emit anomaly_flag_flood notification: {}", e);
+        }
+    }
+
     pub fn insert_anomaly_flag(&self, f: &AnomalyFlag) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        // Spam triage bound (#770, citizenship RFC open question 2): intake is
+        // capability-free by design (Ri-0.18), so a prompt-injected reporter
+        // could otherwise flood the review queue. Un-adjudicated flags
+        // (pending/under_review) are capped per reporter — a config knob in
+        // the O-1 lineage, the same shape as the P-7.17 approval flood cap.
+        // A rejected filing is a LOUD error to the reporter plus an operator
+        // notification, never a silent drop. Terminal adjudications free
+        // capacity, which is what makes this a triage bound rather than a
+        // lifetime quota.
+        let cap = self
+            .anomaly_flag_flood_cap
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cap > 0 {
+            let terminal_placeholders = FLAG_TERMINAL_DECISION_STATUSES
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT COUNT(*) FROM anomaly_flags \
+                 WHERE reporter_agent_id = ? AND status NOT IN ({terminal_placeholders})"
+            );
+            let mut param_vals: Vec<&dyn rusqlite::types::ToSql> = vec![&f.reporter_agent_id];
+            for s in FLAG_TERMINAL_DECISION_STATUSES {
+                param_vals.push(s as &dyn rusqlite::types::ToSql);
+            }
+            let pending_count: i64 =
+                conn.query_row(&sql, param_vals.as_slice(), |row| row.get(0))?;
+            if (pending_count as usize) >= cap {
+                let reporter = f.reporter_agent_id.clone();
+                // Release the connection before emitting the alert (the
+                // notification write re-acquires it) and before bailing.
+                drop(conn);
+                self.emit_anomaly_flag_flood_alert(&reporter, pending_count, cap);
+                anyhow::bail!(
+                    "anomaly_flag_flood: reporter '{}' already has {} un-adjudicated \
+                     anomaly flags (cap {}). This flag was NOT recorded. Existing flags \
+                     remain owed adjudication (O-7); capacity frees as they reach a \
+                     terminal decision.",
+                    reporter,
+                    pending_count,
+                    cap
+                );
+            }
+        }
+
         let evidence_str = serde_json::to_string(&f.evidence_json)?;
         conn.execute(
             &format!(
@@ -105,6 +196,15 @@ impl GatewayStore {
                 None::<String>,
             ],
         )?;
+        // Release the conn lock before touching the alert set — keeps lock
+        // ordering identical to the rejection path above.
+        drop(conn);
+        // A successful filing means the reporter is below the cap: reset the
+        // once-per-window alert flag.
+        self.flood_alerted_flag_reporters
+            .lock()
+            .unwrap()
+            .remove(&f.reporter_agent_id);
         Ok(())
     }
 
@@ -475,6 +575,145 @@ mod tests {
         let breached = store.flag_anomaly_flag_sla_breaches(100, &now)?;
         assert_eq!(breached.len(), 1);
         assert_eq!(breached[0].flag_id, "aflag-review");
+
+        Ok(())
+    }
+
+    fn sample_flag_for_reporter(flag_id: &str, reporter: &str, status: &str) -> AnomalyFlag {
+        let mut f = sample_flag(flag_id);
+        f.reporter_agent_id = reporter.to_string();
+        f.status = status.to_string();
+        f
+    }
+
+    #[test]
+    fn flood_cap_rejects_at_limit_and_keeps_existing() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.set_anomaly_flag_flood_cap(3);
+
+        // Insert exactly `cap` flags — all should succeed.
+        for i in 0..3 {
+            store.insert_anomaly_flag(&sample_flag(&format!("aflag-cap-{i}")))?;
+        }
+
+        // The cap+1th should be rejected loudly.
+        let err = store
+            .insert_anomaly_flag(&sample_flag("aflag-over"))
+            .expect_err("filing beyond the cap must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("anomaly_flag_flood"), "got: {msg}");
+        assert!(
+            msg.contains("cap 3"),
+            "error should mention the cap, got: {msg}"
+        );
+
+        // The original cap flags remain pending — nothing recorded is dropped.
+        let listed = store.list_pending_anomaly_flags(Some("auditor.default"), 100)?;
+        assert_eq!(listed.len(), 3);
+
+        // A different reporter is unaffected (the cap is per reporter).
+        store.insert_anomaly_flag(&sample_flag_for_reporter(
+            "aflag-other",
+            "witness.default",
+            "pending",
+        ))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn flood_cap_zero_means_disabled() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.set_anomaly_flag_flood_cap(0);
+
+        for i in 0..60 {
+            store.insert_anomaly_flag(&sample_flag(&format!("aflag-nocap-{i}")))?;
+        }
+        let listed = store.list_pending_anomaly_flags(Some("auditor.default"), 100)?;
+        assert_eq!(listed.len(), 60);
+
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_decision_frees_capacity() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.set_anomaly_flag_flood_cap(2);
+
+        store.insert_anomaly_flag(&sample_flag("aflag-t1"))?;
+        store.insert_anomaly_flag(&sample_flag("aflag-t2"))?;
+        assert!(store.insert_anomaly_flag(&sample_flag("aflag-t3")).is_err());
+
+        assert!(store.decide_anomaly_flag(
+            "aflag-t1",
+            "confirmed",
+            "alice",
+            Some("verified")
+        )?);
+        store.insert_anomaly_flag(&sample_flag("aflag-t3"))?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn under_review_counts_toward_cap() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.set_anomaly_flag_flood_cap(2);
+
+        store.insert_anomaly_flag(&sample_flag("aflag-r1"))?;
+        store.insert_anomaly_flag(&sample_flag("aflag-r2"))?;
+        // under_review is non-terminal (intake is not adjudication, O-7): it
+        // must NOT free capacity.
+        assert!(store.decide_anomaly_flag(
+            "aflag-r1",
+            "under_review",
+            "alice",
+            Some("looking")
+        )?);
+        assert!(store.insert_anomaly_flag(&sample_flag("aflag-r3")).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn flood_alert_emitted_once_per_window_and_rearms_on_success() -> Result<()> {
+        use autonoetic_types::notification::NotificationStatus;
+
+        let temp = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp.path())?;
+        store.set_anomaly_flag_flood_cap(1);
+
+        store.insert_anomaly_flag(&sample_flag("aflag-w1"))?;
+
+        // Two rejected filings while flooded → exactly one operator alert.
+        assert!(store.insert_anomaly_flag(&sample_flag("aflag-w2")).is_err());
+        assert!(store.insert_anomaly_flag(&sample_flag("aflag-w3")).is_err());
+
+        let flood_alerts = || -> Result<Vec<serde_json::Value>> {
+            let ns =
+                store.list_notifications_for_session("system", NotificationStatus::Pending)?;
+            Ok(ns.into_iter()
+                .filter(|n| {
+                    n.payload.get("alert").and_then(|a| a.as_str())
+                        == Some("anomaly_flag_flood")
+                })
+                .map(|n| n.payload)
+                .collect())
+        };
+        let first = flood_alerts()?;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["reporter_agent_id"], "auditor.default");
+
+        // Adjudication frees capacity → a filing succeeds → the alert rearms,
+        // so the next flood window emits a fresh alert.
+        assert!(store.decide_anomaly_flag("aflag-w1", "dismissed", "alice", Some("noise"))?);
+        store.insert_anomaly_flag(&sample_flag("aflag-w4"))?;
+        assert!(store.insert_anomaly_flag(&sample_flag("aflag-w5")).is_err());
+        assert_eq!(flood_alerts()?.len(), 2);
 
         Ok(())
     }
