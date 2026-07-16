@@ -32,7 +32,6 @@
 //! failure and must not page the policy-decision hooks), `enforced_rules`
 //! naming the closest constitutional site.
 
-use anyhow::Result;
 use autonoetic_types::causal_chain::CausalEventRecord;
 
 tokio::task_local! {
@@ -97,7 +96,8 @@ pub(crate) fn record_discretion_leak(
         target: "llm_normalization",
         kind,
         detail,
-        "tolerated model non-conformance (normalized)"
+        "tolerated model non-conformance ({})",
+        kind
     );
 
     let recorded = LEAK_SCOPE.try_with(|scope| {

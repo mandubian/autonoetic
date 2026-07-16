@@ -204,7 +204,8 @@ impl GatewayStore {
             "UPDATE amendment_invitations \
              SET status = 'answered', answered_proposal_id = ?1, resolved_at = ?2 \
              WHERE status = 'open' AND agent_id = ?3 \
-               AND (rule_id = ?4 OR substr(rule_id, 1, instr(rule_id, '.') - 1) = ?4)",
+               AND (rule_id = ?4 OR (instr(rule_id, '.') > 0 \
+                                    AND substr(rule_id, 1, instr(rule_id, '.') - 1) = ?4))",
             params![proposal_id, now_rfc3339, agent_id, target],
         )?;
         Ok(rows as u64)

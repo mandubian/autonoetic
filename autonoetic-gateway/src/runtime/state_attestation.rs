@@ -735,7 +735,8 @@ mod tests {
     }
 
     #[test]
-    fn render_tail_contains_authoritative_marker_and_json() {        let temp = tempfile::tempdir().expect("tempdir");
+    fn render_tail_contains_authoritative_marker_and_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
         let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
         let manifest = manifest_with_caps(vec![]);
         let att = compose_and_sign(
