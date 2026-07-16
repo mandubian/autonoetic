@@ -344,6 +344,8 @@ Before `agent_revision_promote`, call `promotion_query({artifact_ref})` and conf
 
 Pure-reasoning intent-only bundles may have auditor record only — execution roles correctly absent.
 
+(Expected practice, not yet gate-enforced: agent-factory's pipeline asks the auditor to also publish a minimal `eval_suite_publish` baseline for the new agent before you promote — see agent-factory.default's Step 4c. You don't need to check for it; nothing here depends on it existing.)
+
 If `promotion_query` is missing required records, stop and report to the spawner. Do not invent evidence or retry promote in a loop.
 
 #### `remote_access_detected` (install analysis, not promotion_record)
