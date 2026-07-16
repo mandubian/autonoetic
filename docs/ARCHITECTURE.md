@@ -459,6 +459,10 @@ eval_suite_publish()  →  eval_run(suite, agent_ref)  →  agent_revision_promo
 
 If the eval run's subject revision does not match the promote target, the promote is rejected.
 
+See [eval-suites.md](eval-suites.md) for the full lifecycle (asynchronous
+background runner, one fresh session per case), the assertion vocabulary
+including gateway-state `session_events_*` keys, and the indicator levels.
+
 ---
 
 ## Content Storage

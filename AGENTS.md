@@ -171,6 +171,7 @@ SDKs live outside the Rust workspace:
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow, emergency stop
 - `docs/approval-system.md` — Full approval lifecycle, session grants, promotion gating
+- `docs/eval-suites.md` — Eval suite lifecycle (async runner, per-case sessions), assertion vocabulary, indicators, promotion gating
 - `docs/plan-capability-grants.md` — Plan-as-capability-grant: materialization, revocation, dedup layer
 - `docs/remote-access-approval.md` — Static analysis detection, approval flow diagram
 - `docs/credential-management.md` — Credential vault, `credential_env` injection, CLI credential commands
