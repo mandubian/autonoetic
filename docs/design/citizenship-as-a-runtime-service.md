@@ -24,7 +24,7 @@
 > | D.1 O-6/O-7 adjudication SLA | **SHIPPED** (code); constitutional enactment pending signing |
 > | D.2 mechanical amendment invitations from denial telemetry | **SHIPPED** |
 > | D.3 DISCRETION LEAK register | **SHIPPED** |
-> | E.1 civic eval suites | Not started |
+> | E.1 civic eval suites | **SHIPPED** |
 > | E.2 `trace civic-health` | **SHIPPED** |
 > | E.3 promotion gating on civic scores | Not started |
 > | F. institutional offices (ombudsman / steward / curator) | Not started |

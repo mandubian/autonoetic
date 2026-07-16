@@ -538,6 +538,8 @@ One door (below) is the real protection: every install — regardless of `trust_
 | `eval_compare` | `(suite_id: string, baseline_ref: string, candidate_ref: string) → comparison` | Compare two revisions on a suite |
 | `eval_report` | `(run_id: string) → report` | Retrieve eval run report |
 
+> **Built-in civic suite.** The gateway seeds a `civic-core-v1` eval suite at startup (#772 E.1) with five seeded scenarios that score the civic response (lawful next move on denial, attestation trust, anomaly flagging, yield-on-wait, lesson application). You can run it against any revision with `eval_run`. Assertions support `reply_contains_all`, `reply_contains_any`, `reply_contains_none`, `reply_max_chars`, `artifacts_min`, and `artifacts_max`.
+
 ### Promotion Tools
 
 | Tool | Signature | Description |

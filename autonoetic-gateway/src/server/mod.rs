@@ -104,6 +104,18 @@ impl GatewayServer {
         gateway_store
             .set_anomaly_flag_flood_cap(self.config.max_pending_anomaly_flags_per_reporter);
 
+        // Seed the built-in civic eval suite (#772 E.1). Idempotent.
+        if let Err(e) = crate::runtime::civic_evals::ensure_civic_eval_suite(
+            &gateway_store,
+            &node_id,
+        ) {
+            tracing::warn!(
+                target: "bootstrap",
+                error = %e,
+                "Failed to seed civic eval suite"
+            );
+        }
+
         {
             let probe_result = crate::vault::probe_master_key(&self.config.agents_dir);
             gateway_store.emit_vault_key_probe_event(&probe_result);

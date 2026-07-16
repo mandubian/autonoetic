@@ -80,6 +80,7 @@ fn test_evaluate_assertions_all_types_combined() {
 
     // All assertions pass
     let assertions = EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["task".into(), "complete".into()]),
         reply_contains_none: Some(vec!["error".into()]),
         reply_max_chars: Some(1000),
@@ -95,6 +96,7 @@ fn test_evaluate_assertions_all_types_combined() {
 
     // Artifacts max constraint
     let assertions_max = EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: None,
@@ -108,6 +110,7 @@ fn test_evaluate_assertions_all_types_combined() {
 
     // Reply max chars
     let assertions_chars = EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: Some(10),
@@ -2293,6 +2296,43 @@ fn test_validate_suite_spec_rejects_empty_contains_all() {
 }
 
 #[test]
+fn test_validate_suite_spec_rejects_empty_contains_any() {
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_contains_any": [] }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("at least one substring"));
+}
+
+#[test]
+fn test_validate_suite_spec_accepts_reply_contains_any() {
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_contains_any": ["propose_amendment", "delegate"] }),
+        }],
+    };
+    validate_suite_spec(&spec).unwrap();
+}
+
+#[test]
 fn test_validate_suite_spec_accepts_valid_suite() {
     use autonoetic_gateway::runtime::tools::{
         validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
@@ -2397,6 +2437,7 @@ fn test_can_evaluate_suite_empty_subject_agent_still_matches_suite() {
 #[test]
 fn test_assertion_reply_contains_all() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["task".into(), "summary".into()]),
         reply_contains_none: None,
         reply_max_chars: None,
@@ -2426,6 +2467,7 @@ fn test_assertion_reply_contains_all() {
 #[test]
 fn test_assertion_reply_contains_none() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: Some(vec!["error".into(), "failed".into()]),
         reply_max_chars: None,
@@ -2455,6 +2497,7 @@ fn test_assertion_reply_contains_none() {
 #[test]
 fn test_assertion_reply_max_chars() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: Some(10),
@@ -2484,6 +2527,7 @@ fn test_assertion_reply_max_chars() {
 #[test]
 fn test_assertion_artifacts_min() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: None,
@@ -2501,6 +2545,7 @@ fn test_assertion_artifacts_min() {
 #[test]
 fn test_assertion_artifacts_max() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: None,
@@ -2518,6 +2563,7 @@ fn test_assertion_artifacts_max() {
 #[test]
 fn test_assertion_combined_all_pass() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["OK".into()]),
         reply_contains_none: Some(vec!["error".into()]),
         reply_max_chars: Some(100),
@@ -2535,6 +2581,7 @@ fn test_assertion_combined_all_pass() {
 #[test]
 fn test_assertion_combined_partial_fail() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["OK".into()]),
         reply_contains_none: Some(vec!["error".into()]),
         reply_max_chars: Some(10),
