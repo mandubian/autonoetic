@@ -2965,90 +2965,39 @@ impl JsonRpcRouter {
                     }
                 };
 
-                // Mirror the source timeline into the forked session up to the
-                // fork turn (best effort) so the Session Room shows the inherited
-                // history immediately instead of an empty timeline. A fork writes
-                // a checkpoint but no `live_digest_events` of its own.
-                let mut mirrored_events = 0usize;
-                if let Some(store) = self.execution.gateway_store() {
-                    match store.clone_timeline_for_fork(
-                        &params.source_session_id,
-                        &fork.new_session_id,
-                        fork.fork_turn as u64,
-                    ) {
-                        Ok(n) => mirrored_events = n,
-                        Err(e) => tracing::warn!(
-                            target: "session.fork",
-                            source = %params.source_session_id,
-                            new = %fork.new_session_id,
-                            error = %e,
-                            "Failed to mirror source timeline into fork"
-                        ),
-                    }
-
-                    // Record fork lineage so artifact refs created in the parent
-                    // resolve from the forked session. Without this, the fork
-                    // can't see its parent's `ar.*` refs because it has a
-                    // different root session id.
-                    if let Err(e) = store.record_fork_lineage(
-                        &fork.new_session_id,
-                        &params.source_session_id,
-                    ) {
-                        tracing::warn!(
-                            target: "session.fork",
-                            new = %fork.new_session_id,
-                            source = %params.source_session_id,
-                            error = %e,
-                            "Failed to record fork lineage"
-                        );
-                    }
-                }
-
                 // Determine target agent
                 let target_agent_id = params
                     .target_agent_id
                     .unwrap_or_else(|| params.source_session_id.clone());
 
-                // Log fork as a causal event directly in gateway.db.
-                // (`log_gateway_causal_event` is a no-op — this is the real write.)
-                let branch_message_sha256 = params.branch_message.as_ref().map(|m| {
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(m.as_bytes());
-                    format!("{:x}", hasher.finalize())
-                });
-                if let Some(store) = self.execution.gateway_store() {
-                    let payload = serde_json::json!({
-                        "source_session_id": params.source_session_id,
-                        "fork_turn": fork.fork_turn,
-                        "history_handle": fork.history_handle,
-                        "branch_message_sha256": branch_message_sha256,
-                    });
-                    let event = autonoetic_types::causal_chain::CausalEventRecord {
-                        event_id: uuid::Uuid::new_v4().to_string(),
-                        agent_id: target_agent_id.clone(),
-                        session_id: fork.new_session_id.clone(),
-                        turn_id: Some("turn-000001".to_string()),
-                        event_seq: 1,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                        category: "session".to_string(),
-                        action: "session.forked".to_string(),
-                        status: "success".to_string(),
-                        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
-                        target: None,
-                        payload: Some(payload.to_string()),
-                        payload_ref: None,
-                        evidence_ref: None,
-                        reason: None,
-                    };
-                    if let Err(e) = store.create_causal_event(&event) {
-                        tracing::warn!(
-                            target: "session.fork",
-                            error = %e,
-                            "Failed to write session.forked causal event"
-                        );
-                    }
-                }
+                // Single choke point for every fork side effect (timeline
+                // mirror, lineage row, both causal events) — shared with
+                // `trace fork` (CLI) so the two paths can't drift (#814).
+                // The lineage row is load-bearing (artifact-ref resolution
+                // across fork boundaries depends on it), so a failure there
+                // is logged loudly; but the fork itself already succeeded on
+                // disk, so we still return success with mirrored_events = 0
+                // rather than fail an otherwise-complete operation.
+                let mirrored_events = match self.execution.gateway_store() {
+                    Some(store) => match store.record_session_fork(
+                        &fork,
+                        params.branch_message.as_deref(),
+                        &target_agent_id,
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::error!(
+                                target: "session.fork",
+                                new = %fork.new_session_id,
+                                source = %params.source_session_id,
+                                error = %e,
+                                "Failed to record fork lineage"
+                            );
+                            0
+                        }
+                    },
+                    None => 0,
+                };
 
                 JsonRpcResponse::success(
                     req.id,

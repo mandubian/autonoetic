@@ -63,8 +63,8 @@ and I/O for little benefit.
 
 The forked session gets a new, independent `root_session_id` (e.g.
 `fork-ab12cd34`). It does **not** inherit the parent's root id — each branch is a
-self-contained root. (A lineage/children view linking a fork back to its parent
-would be a future enhancement.)
+self-contained root. The link back to the parent is recorded separately (see
+below) rather than by sharing a root id.
 
 ## Timeline mirroring
 
@@ -107,6 +107,43 @@ configurable retention policy. The cost is bounded row duplication (timeline
 rows are small and capped at the fork turn). If duplication ever becomes a
 concern, reuse-by-reference remains a viable evolution.
 
+## Lineage: linking a fork back to its parent (#814)
+
+Because a fork gets its own independent root session id, something has to
+record that it *was* forked, and from where — both so artifact refs created by
+the parent can still resolve from the fork, and so a fork tree can be queried
+later. That something is `session_fork_lineage`
+(`autonoetic-gateway/src/scheduler/gateway_store/fork_lineage.rs`): one row per
+fork, keyed by `forked_session_id`, storing `source_session_id`, `fork_turn`,
+`branch_message_sha256` (a digest, not the raw text), `agent_id` (who
+performed the fork), and `created_at`.
+
+Every fork writes this row plus two causal events, all through a single choke
+point, `GatewayStore::record_session_fork`, used identically by the
+`session.fork` RPC handler and the `trace fork` CLI command (before #814, the
+CLI path recorded neither — a fork made from the CLI couldn't resolve its
+parent's artifact refs and was invisible to any lineage query):
+
+1. **Timeline mirror** — as above, best effort.
+2. **The lineage row** — NOT best effort. It's what
+   `fork_ancestor_roots`/`resolve_artifact_ref_any_scope` walk to resolve a
+   parent's artifact refs across the fork boundary, so a write failure here is
+   propagated as an error rather than silently swallowed.
+3. **`session.forked`** — written on the NEW session (`turn_id: "turn-000001"`,
+   `event_seq: 1`), payload `source_session_id`, `fork_turn`, `history_handle`,
+   `branch_message_sha256`.
+4. **`session.fork_created`** — written on the SOURCE session (`turn_id:
+   null`, `event_seq: 0`), payload `forked_session_id`, `fork_turn`,
+   `branch_message_sha256`. This is what lets the parent's own causal chain
+   show it was forked, without having to look the fork up separately.
+
+Causal-event write failures (steps 3–4) are logged and swallowed — they're an
+observability nicety, not load-bearing state, unlike the lineage row.
+
+Query the lineage programmatically with `GatewayStore::get_fork_lineage`
+(single row) and `GatewayStore::list_fork_children` (all direct forks of a
+session), or from the CLI with `trace fork-tree` (below).
+
 ## Surfaces
 
 Forking is exposed three ways, all backed by the same mechanism:
@@ -118,6 +155,8 @@ autonoetic trace fork <session_id>                       # fork from the latest 
 autonoetic trace fork <session_id> --at-turn 5           # fork from a specific turn
 autonoetic trace fork <session_id> --message "try B"     # append a branch message
 autonoetic trace fork <session_id> --at-turn 5 --interactive
+autonoetic trace fork-tree <session_id>                  # show ancestor chain + descendant fork tree
+autonoetic trace fork-tree <session_id> --json
 ```
 
 ### JSON-RPC

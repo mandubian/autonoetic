@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 68;
+const SCHEMA_VERSION_LATEST: i64 = 69;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -553,6 +553,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_anomaly_flags_v66(conn)?;
     apply_adjudication_sla_v67(conn)?;
     apply_revision_requested_by_v68(conn)?;
+    apply_fork_lineage_enrichment_v69(conn)?;
 
     Ok(())
 }
@@ -3152,6 +3153,52 @@ fn apply_revision_requested_by_v68(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// #814 — enrich `session_fork_lineage` (added by v54) with the turn a fork
+/// branched from, the branch message's digest, and the acting agent, so a
+/// `session.fork` (RPC) and `trace fork` (CLI) side effect can be unified into
+/// one choke point (`GatewayStore::record_session_fork`) that writes the same
+/// enriched row regardless of caller.
+fn apply_fork_lineage_enrichment_v69(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 69 {
+        return Ok(());
+    }
+
+    // Guard each ADD COLUMN independently (mirrors the v68 pragma_table_info
+    // idiom) so a partial application recovers cleanly on restart instead of
+    // failing with a duplicate-column error.
+    for (col, ty) in [
+        ("fork_turn", "INTEGER"),
+        ("branch_message_sha256", "TEXT"),
+        ("agent_id", "TEXT"),
+    ] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_fork_lineage') WHERE name = ?1",
+            params![col],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE session_fork_lineage ADD COLUMN {col} {ty};"
+            ))?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            69_i64,
+            "fork_lineage_enrichment",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3173,6 +3220,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cols, 2);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// #814 — v69 adds fork_turn/branch_message_sha256/agent_id to
+    /// session_fork_lineage (nullable) and is recorded in schema_migrations.
+    /// Running migrate twice must be a no-op.
+    #[test]
+    fn v69_adds_fork_lineage_enrichment_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_fork_lineage')
+                 WHERE name IN ('fork_turn', 'branch_message_sha256', 'agent_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 3);
 
         let version: i64 = conn
             .query_row(

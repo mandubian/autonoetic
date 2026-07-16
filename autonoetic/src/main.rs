@@ -421,6 +421,9 @@ async fn async_main() -> anyhow::Result<()> {
             cli::common::TraceCommands::CivicHealth { since, json } => {
                 cli::trace::handle_trace_civic_health(&config_path, since.as_deref(), *json)?;
             }
+            cli::common::TraceCommands::ForkTree { session_id, json } => {
+                cli::trace::handle_trace_fork_tree(&config_path, session_id, *json)?;
+            }
         },
 
         Commands::Room(args) => {

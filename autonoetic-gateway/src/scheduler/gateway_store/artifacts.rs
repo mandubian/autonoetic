@@ -2,101 +2,15 @@ use super::GatewayStore;
 use anyhow::Result;
 use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashSet;
 
 impl GatewayStore {
-    // --- Fork lineage ---
-
-    /// Record that `forked_session_id` was forked from `source_session_id`.
-    /// Enables artifact-ref resolution across fork boundaries: a fork inherits
-    /// its parent's artifact refs even though it has a different root session id.
-    pub fn record_fork_lineage(
-        &self,
-        forked_session_id: &str,
-        source_session_id: &str,
-    ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO session_fork_lineage
-                (forked_session_id, source_session_id, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![
-                forked_session_id,
-                source_session_id,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Look up the immediate source session for a forked session.
-    /// Returns `None` if the session was not forked.
-    pub fn get_fork_source(&self, forked_session_id: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let source = conn
-            .query_row(
-                "SELECT source_session_id FROM session_fork_lineage
-                 WHERE forked_session_id = ?1",
-                params![forked_session_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        Ok(source)
-    }
-
-    /// Backfill `session_fork_lineage` from existing `session.forked` causal
-    /// events. Used by migration v54 to repair forks created before the
-    /// lineage table existed. Returns the number of rows inserted.
-    pub fn backfill_fork_lineage_from_causal_events(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn.execute(
-            "INSERT OR IGNORE INTO session_fork_lineage (forked_session_id, source_session_id, created_at)
-             SELECT
-                 ce.session_id,
-                 json_extract(ce.payload, '$.source_session_id'),
-                 ce.timestamp
-             FROM causal_events ce
-             WHERE ce.action = 'session.forked'
-               AND ce.session_id IS NOT NULL
-               AND json_extract(ce.payload, '$.source_session_id') IS NOT NULL",
-            [],
-        )?;
-        Ok(n)
-    }
-
-    /// Walk the fork chain starting from `session_id`'s root, yielding each
-    /// ancestor source session's root. Stops at cycles or depth 16.
-    fn fork_ancestor_roots(&self, conn: &Connection, session_id: &str) -> Vec<String> {
-        let mut ancestors = Vec::new();
-        let mut visited = HashSet::new();
-        // Start from the ROOT of the session — fork lineage is recorded under
-        // the fork's root id, so a child ("fork-abc/T5") must look up its
-        // root ("fork-abc") to find the lineage entry.
-        let mut cursor = crate::runtime::content_store::root_session_id(session_id).to_string();
-        for _ in 0..16 {
-            let Ok(source) = conn
-                .query_row(
-                    "SELECT source_session_id FROM session_fork_lineage
-                     WHERE forked_session_id = ?1",
-                    params![&cursor],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-            else {
-                break;
-            };
-            let Some(source) = source else { break };
-            let source_root = crate::runtime::content_store::root_session_id(&source).to_string();
-            if !visited.insert(source_root.clone()) {
-                break; // cycle guard
-            }
-            ancestors.push(source_root);
-            cursor = source;
-        }
-        ancestors
-    }
-
     // --- Artifact refs ---
+    //
+    // Fork lineage (`record_fork_lineage`, `get_fork_source`,
+    // `backfill_fork_lineage_from_causal_events`, `fork_ancestor_roots`) moved
+    // to `fork_lineage.rs` (#814). `fork_ancestor_roots` stays `pub(super)` so
+    // it can still be used below for artifact-ref resolution across fork
+    // boundaries.
 
     pub fn create_artifact_ref(&self, record: &ArtifactRefRecord) -> Result<()> {
         if record.ref_id.is_empty() {

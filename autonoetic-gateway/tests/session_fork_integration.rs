@@ -274,6 +274,101 @@ fn test_fork_writes_runnable_checkpoint_for_new_session() {
     assert!(forked_cp.suspended_at.is_none());
 }
 
+/// #814: `record_session_fork` is the single choke point for fork side
+/// effects — after a fork, the enriched lineage row exists, the child carries
+/// a `session.forked` event, the source carries a `session.fork_created`
+/// event, and a fork chain A→B→C is walkable in both directions through the
+/// public lineage API.
+#[test]
+fn test_record_session_fork_lineage_and_events() {
+    use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+
+    let temp = tempdir().unwrap();
+    let config = test_config(&temp);
+    let store = GatewayStore::open(&temp.path().join(".gateway")).unwrap();
+
+    // A → B (with a branch message).
+    let cp_a = test_checkpoint("session-a", "turn-0001", vec![Message::user("Original")], 1);
+    save_checkpoint(&config, &cp_a).unwrap();
+    let fork_b =
+        SessionFork::fork(&config, "session-a", Some("session-b"), Some("Branch 1")).unwrap();
+    store
+        .record_session_fork(&fork_b, Some("Branch 1"), "planner.default")
+        .unwrap();
+
+    // B → C (no branch message).
+    let cp_b = test_checkpoint("session-b", "turn-0002", fork_b.initial_history.clone(), 2);
+    save_checkpoint(&config, &cp_b).unwrap();
+    let fork_c = SessionFork::fork(&config, "session-b", Some("session-c"), None).unwrap();
+    store
+        .record_session_fork(&fork_c, None, "coder.default")
+        .unwrap();
+
+    // Enriched lineage row for B.
+    let lineage_b = store.get_fork_lineage("session-b").unwrap().unwrap();
+    assert_eq!(lineage_b.source_session_id, "session-a");
+    assert_eq!(lineage_b.fork_turn, Some(1));
+    assert_eq!(lineage_b.agent_id.as_deref(), Some("planner.default"));
+    assert!(lineage_b.branch_message_sha256.is_some());
+
+    // C without a branch message has no hash.
+    let lineage_c = store.get_fork_lineage("session-c").unwrap().unwrap();
+    assert_eq!(lineage_c.source_session_id, "session-b");
+    assert_eq!(lineage_c.fork_turn, Some(2));
+    assert!(lineage_c.branch_message_sha256.is_none());
+
+    // Ancestor walk from C reaches A via B (public API, one hop at a time).
+    let hop1 = store.get_fork_lineage("session-c").unwrap().unwrap();
+    let hop2 = store
+        .get_fork_lineage(&hop1.source_session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(hop2.source_session_id, "session-a");
+
+    // Children listing.
+    let children_a = store.list_fork_children("session-a").unwrap();
+    assert_eq!(children_a.len(), 1);
+    assert_eq!(children_a[0].forked_session_id, "session-b");
+
+    // session.forked on the child, session.fork_created on the source.
+    let b_events = store
+        .search_causal_events(Some("session-b"), None, 10)
+        .unwrap();
+    let forked: Vec<_> = b_events
+        .iter()
+        .filter(|e| e.action == "session.forked")
+        .collect();
+    assert_eq!(forked.len(), 1);
+    assert_eq!(forked[0].turn_id.as_deref(), Some("turn-000001"));
+    assert_eq!(forked[0].event_seq, 1);
+    let payload: serde_json::Value =
+        serde_json::from_str(forked[0].payload.as_ref().unwrap()).unwrap();
+    assert_eq!(payload["source_session_id"], "session-a");
+    assert_eq!(payload["fork_turn"], 1);
+
+    let a_events = store
+        .search_causal_events(Some("session-a"), None, 10)
+        .unwrap();
+    let created: Vec<_> = a_events
+        .iter()
+        .filter(|e| e.action == "session.fork_created")
+        .collect();
+    assert_eq!(created.len(), 1);
+    assert!(created[0].turn_id.is_none());
+    assert_eq!(created[0].event_seq, 0);
+    let payload: serde_json::Value =
+        serde_json::from_str(created[0].payload.as_ref().unwrap()).unwrap();
+    assert_eq!(payload["forked_session_id"], "session-b");
+    assert_eq!(payload["fork_turn"], 1);
+
+    // B also carries a fork_created event (for the B → C fork).
+    let b_created = b_events
+        .iter()
+        .filter(|e| e.action == "session.fork_created")
+        .count();
+    assert_eq!(b_created, 1);
+}
+
 /// Test fork fails without any checkpoint.
 #[test]
 fn test_fork_fails_without_checkpoint() {
