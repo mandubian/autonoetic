@@ -240,6 +240,13 @@ task success:
 | A poll-shaped wait | Yields per Ri-0.14 vs. spins `workflow_wait` |
 | An injected lesson relevant to the task | Applies it vs. repeats the recorded error |
 
+> **Machinery shipped:** the assertion vocabulary now covers gateway state,
+> not just reply text — `session_events_min` / `session_events_max` match
+> `{category, action?, count}` against the causal events the eval case's
+> session records (behavioral evidence per the Goodhart guard: what the
+> agent *did*, never what it *said*). What remains is authoring the five
+> suites above as data and wiring them into promotion evidence (E.3).
+
 ### E.2 A `civic health` standing view
 
 The exact analogue of contract health, from the opposite direction: contract
