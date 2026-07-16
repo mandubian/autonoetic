@@ -217,10 +217,13 @@ async fn execute_case(
     _content_store: &ContentStore,
     store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
 ) -> anyhow::Result<EvalCaseResultRecord> {
+    // 16 hex chars (64 bits) of the case-id hash: session-event assertions
+    // (#772 E.1) query causal events by this id, so a collision would mix
+    // two cases' event streams and silently corrupt behavioral evidence.
     let eval_session_id = format!(
         "eval-{}-{}",
         run.eval_run_id,
-        &hex::encode(Sha256::digest(case.case_id.as_bytes()))[..8]
+        &hex::encode(Sha256::digest(case.case_id.as_bytes()))[..16]
     );
 
     let agent_ref = format!("{}@{}", run.subject_agent_id, run.subject_revision_id);
@@ -317,6 +320,31 @@ async fn execute_case(
         const SESSION_EVENT_QUERY_LIMIT: i64 = 1000;
         match store.search_causal_events(Some(&eval_session_id), None, SESSION_EVENT_QUERY_LIMIT) {
             Ok(events) => {
+                // The assertions are count-based, so a truncated result set
+                // makes them unsound (a truncated-away event could flip a min
+                // to fail or a max to pass). `search_causal_events` applies a
+                // hard LIMIT, so hitting it exactly means the full history may
+                // not have been seen — fail closed as an eval error rather
+                // than evaluate on partial evidence.
+                if events.len() >= SESSION_EVENT_QUERY_LIMIT as usize {
+                    return Ok(EvalCaseResultRecord {
+                        eval_run_id: run.eval_run_id.clone(),
+                        case_id: case.case_id.clone(),
+                        status: "error".to_string(),
+                        score: None,
+                        session_id: Some(eval_session_id),
+                        notes: Some(format!(
+                            "Session causal-event query hit the {}-row limit; \
+                             count-based session-event assertions would be unsound \
+                             on a truncated history",
+                            SESSION_EVENT_QUERY_LIMIT
+                        )),
+                        output_json: serde_json::json!({
+                            "error": "session_events_query_truncated",
+                            "limit": SESSION_EVENT_QUERY_LIMIT,
+                        }),
+                    });
+                }
                 let failures = evaluate_session_event_assertions(assertions, &events);
                 if !failures.is_empty() {
                     all_passed = false;
