@@ -1,5 +1,6 @@
 pub mod admin_proposals;
 mod agent_registry;
+pub mod amendment_invitations;
 pub mod anomaly_flags;
 mod approvals;
 mod artifacts;

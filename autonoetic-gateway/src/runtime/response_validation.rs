@@ -1230,6 +1230,69 @@ impl GatewayExecutionService {
     pub(crate) async fn validate_and_maybe_repair(
         &self,
         agent_id: &str,
+        result: SpawnResult,
+        output_schema: Option<&serde_json::Value>,
+        output_policy: &autonoetic_types::agent::OutputPolicy,
+        returns_enforcement: IoReturnsEnforcement,
+        source_agent_id: Option<&str>,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+        agent_is_spawn_capable: bool,
+        feedback_out: Option<&mut Vec<FeedbackEvent>>,
+    ) -> anyhow::Result<SpawnResult> {
+        // #771 D.3: response validation is a leak region — the gateway may
+        // normalize the agent's reply (markdown-fence stripping) and may
+        // drive a repair loop on the agent's behalf (P-5.8). Install the
+        // ambient LeakScope so both are recorded in the register with this
+        // session's attribution, not just traced.
+        let leak_scope = self.gateway_store().map(|store| {
+            crate::runtime::discretion_leak::LeakScope::new(
+                store,
+                agent_id.to_string(),
+                result.session_id.clone(),
+                None,
+            )
+        });
+        match leak_scope {
+            Some(scope) => {
+                crate::runtime::discretion_leak::with_leak_scope(scope, async move {
+                    self.validate_and_maybe_repair_inner(
+                        agent_id,
+                        result,
+                        output_schema,
+                        output_policy,
+                        returns_enforcement,
+                        source_agent_id,
+                        workflow_id,
+                        task_id,
+                        agent_is_spawn_capable,
+                        feedback_out,
+                    )
+                    .await
+                })
+                .await
+            }
+            None => {
+                self.validate_and_maybe_repair_inner(
+                    agent_id,
+                    result,
+                    output_schema,
+                    output_policy,
+                    returns_enforcement,
+                    source_agent_id,
+                    workflow_id,
+                    task_id,
+                    agent_is_spawn_capable,
+                    feedback_out,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn validate_and_maybe_repair_inner(
+        &self,
+        agent_id: &str,
         mut result: SpawnResult,
         output_schema: Option<&serde_json::Value>,
         output_policy: &autonoetic_types::agent::OutputPolicy,
@@ -1443,6 +1506,22 @@ impl GatewayExecutionService {
                     attempt = attempt,
                     max_repair_rounds = max_repair_rounds,
                     "response.repair.start"
+                );
+
+                // #771 D.3 (P-5.8, named DISCRETION LEAK): the gateway
+                // authors the repair prompt and drives the correction of
+                // the agent's output — an intervention the constitution
+                // names as the enforcer's own debt. Record it in the
+                // register (durable inside the ambient LeakScope installed
+                // by `validate_and_maybe_repair`). `detail` carries only
+                // rule names, never the reply body.
+                crate::runtime::discretion_leak::record_discretion_leak(
+                    "gateway_authored_repair",
+                    &format!(
+                        "authored repair prompt (attempt {attempt}/{max_repair_rounds}) for violations: {}",
+                        violations.iter().map(|v| v.rule.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                    &["P-5.8"],
                 );
 
                 let base = base_session_id(&result.session_id);

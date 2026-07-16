@@ -2,14 +2,20 @@
 //! a constitutional proposal or an anomaly flag sees it in its own signed
 //! state block every turn ("voice with amnesia is no voice").
 //!
+//! #771 D.2 — the same line also surfaces open amendment invitations
+//! addressed to the agent, carried as one-line summaries (rule + denial
+//! count) because the agent did not file them: the friction evidence IS the
+//! message.
+//!
 //! Exercises the store + `compose_and_sign` path directly (the cheapest
 //! reliable seam — mirrors `context.rs::build_state_attestation_tail`'s own
 //! store queries) rather than standing up a full executor.
 
 use autonoetic_gateway::runtime::crypto::GatewayIdentityKey;
 use autonoetic_gateway::runtime::state_attestation::{
-    compose_and_sign, render_tail, AttestationInputs, BudgetMeter,
+    compose_and_sign, render_tail, AttestationInputs, BudgetMeter, InvitationSummary,
 };
+use autonoetic_gateway::scheduler::gateway_store::amendment_invitations::AmendmentInvitation;
 use autonoetic_gateway::scheduler::gateway_store::anomaly_flags::AnomalyFlag;
 use autonoetic_gateway::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
 use autonoetic_gateway::scheduler::GatewayStore;
@@ -139,6 +145,7 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
             pending_escalation_ids: vec![],
             pending_proposal_ids,
             pending_flag_ids,
+            pending_invitations: vec![],
             budget_meters: vec![BudgetMeter {
                 name: "llm_rounds".to_string(),
                 used: 1.0,
@@ -165,5 +172,122 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
     assert!(
         tail.contains("flag-wake-1"),
         "rendered attestation tail must surface the agent's own pending flag id: {tail}"
+    );
+}
+
+/// #771 D.2 — an open amendment invitation rides the same signed civic
+/// line as the agent's own filings, but as a one-line summary (rule +
+/// denial count): the agent did not file the invitation, so the friction
+/// evidence must travel with it. Answered/expired invitations drop off the
+/// line (SQL-level status filter, same displacement contract as flags).
+#[test]
+fn attestation_tail_surfaces_open_amendment_invitations() {
+    let store_dir = tempdir().expect("store dir");
+    let store = GatewayStore::open(store_dir.path()).expect("open store");
+
+    let agent_id = "citizen.agent";
+
+    store
+        .insert_amendment_invitation(&AmendmentInvitation {
+            invitation_id: "ainv-wake-1".to_string(),
+            agent_id: agent_id.to_string(),
+            rule_id: "P-1.5".to_string(),
+            denial_count: 4,
+            threshold: 3,
+            window_secs: 604800,
+            status: "open".to_string(),
+            answered_proposal_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            resolved_at: None,
+        })
+        .expect("insert invitation");
+
+    // An answered invitation for the same agent must NOT surface.
+    store
+        .insert_amendment_invitation(&AmendmentInvitation {
+            invitation_id: "ainv-wake-2".to_string(),
+            agent_id: agent_id.to_string(),
+            rule_id: "P-7.5".to_string(),
+            denial_count: 3,
+            threshold: 3,
+            window_secs: 604800,
+            status: "answered".to_string(),
+            answered_proposal_id: Some("cprop-x".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            resolved_at: Some(chrono::Utc::now().to_rfc3339()),
+        })
+        .expect("insert answered invitation");
+
+    // An open invitation for a DIFFERENT agent must NOT surface.
+    store
+        .insert_amendment_invitation(&AmendmentInvitation {
+            invitation_id: "ainv-wake-3".to_string(),
+            agent_id: "other.agent".to_string(),
+            rule_id: "P-1.9".to_string(),
+            denial_count: 7,
+            threshold: 3,
+            window_secs: 604800,
+            status: "open".to_string(),
+            answered_proposal_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            resolved_at: None,
+        })
+        .expect("insert other-agent invitation");
+
+    // Same query as `context.rs::build_state_attestation_tail`.
+    let pending_invitations: Vec<InvitationSummary> = store
+        .list_amendment_invitations(Some("open"), Some(agent_id), 64)
+        .expect("list invitations")
+        .into_iter()
+        .map(|inv| InvitationSummary {
+            invitation_id: inv.invitation_id,
+            rule_id: inv.rule_id,
+            denial_count: inv.denial_count,
+        })
+        .collect();
+
+    assert_eq!(pending_invitations.len(), 1);
+    assert_eq!(pending_invitations[0].invitation_id, "ainv-wake-1");
+    assert_eq!(pending_invitations[0].rule_id, "P-1.5");
+    assert_eq!(pending_invitations[0].denial_count, 4);
+
+    let key_dir = tempdir().expect("key dir");
+    let key = GatewayIdentityKey::load_or_generate(key_dir.path()).expect("key");
+    let manifest = manifest_for(agent_id);
+
+    let att = compose_and_sign(
+        AttestationInputs {
+            agent_id,
+            session_id: Some("root"),
+            root_session_id: Some("root"),
+            turn_counter: 1,
+            manifest: &manifest,
+            gateway_node_id: "node-a",
+            pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations,
+            budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
+        },
+        &key,
+    )
+    .expect("compose");
+
+    assert_eq!(att.payload.pending_invitation_count, 1);
+    assert_eq!(att.payload.pending_invitations[0].rule_id, "P-1.5");
+
+    let tail = render_tail(&att).expect("render");
+    assert!(
+        tail.contains("ainv-wake-1") && tail.contains("P-1.5"),
+        "rendered attestation tail must surface the open invitation id and its rule: {tail}"
+    );
+    assert!(
+        !tail.contains("ainv-wake-2") && !tail.contains("ainv-wake-3"),
+        "answered and other-agent invitations must not surface: {tail}"
     );
 }

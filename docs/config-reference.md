@@ -844,12 +844,23 @@ A decision is BLOCKING when made by a *principal* (operator / agent — mechanic
 | `decider_obligations.enabled` | bool | `true` | Require a motivation for BLOCKING-tier decisions. `false` disables enforcement (decisions may be recorded without a reason). |
 | `decider_obligations.adjudication_sla_secs` | u64 | `604800` | Adjudication SLA (#771 D.1): a constitutional proposal (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is stamped `sla_breached_at` and a causal event + notification are emitted. The item's status is unchanged — the decision is still owed. `0` disables the check. |
 
+### Amendment Invitations
+
+Mechanical civic invitation from repeated friction (#771 D.2). When the same rule is denied to the same agent alias at least `threshold` times within `window_secs`, the gateway issues a durable invitation to draft an amendment (Ri-0.8). The gateway executes a pre-committed threshold and never judges the rule (Lawful Executor). An invitation is not an amendment and carries no authority; it is surfaced in the agent's signed turn attestation as a one-line summary (rule + denial count) and as a `ConstitutionalProposal` notification. Open invitations expire after `window_secs` elapses.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `amendment_invitations.enabled` | bool | `true` | Master switch for the invitation tick. `false` disables issuance entirely. |
+| `amendment_invitations.threshold` | u64 | `3` | Number of denials of the same rule for the same agent alias within `window_secs` that triggers an invitation. `0` disables issuance. |
+| `amendment_invitations.window_secs` | u64 | `604800` | Telemetry window in seconds. An open invitation also expires after this window elapses without an answer. `0` disables issuance. |
+
 Example:
 
 ```yaml
-decider_obligations:
+amendment_invitations:
   enabled: true
-  adjudication_sla_secs: 604800
+  threshold: 3
+  window_secs: 604800
 ```
 
 ---

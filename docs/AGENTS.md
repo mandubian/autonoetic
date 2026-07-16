@@ -319,6 +319,10 @@ Every capability/policy denial is a structured `ToolError` naming the violated r
 
 The table is **static and pre-committed** — the gateway maps rule IDs to affordances mechanically (Lawful Executor, §14); it never judges which move is best. `propose_amendment` and `self_describe` are always present; `delegate`'s description names the missing capability when derivable from the rule ID. An `escalate` affordance is deliberately absent until P-2.21 escalation gets an agent-callable tool.
 
+> **Repeated friction becomes an invitation.** If the same rule denies you at least `amendment_invitations.threshold` times within the configured window, the gateway will issue a durable amendment invitation (Ri-0.8) addressed to you. It appears as a one-line summary in the signed P-6.23 state attestation (`pending_invitations`: rule + denial count) and as a `ConstitutionalProposal` notification. The invitation itself is not an amendment and carries no authority, but it makes the friction pattern explicit so you can decide whether to propose a change. See #771 D.2 and `docs/design/citizenship-as-a-runtime-service.md`.
+
+> **The gateway also reports on itself.** The DISCRETION LEAK register (§5.4, #771 D.3) counts every place the gateway normalizes your input or authors a repair prompt on your behalf. These are named constitutional debts (P-5.2 / P-5.8), not hidden conveniences. You can inspect the standing agenda via `autonoetic trace contract-health` — the steward office uses it to draft amendments against the enforcer's own improvisations.
+
 ### Scoping
 
 Capabilities use pattern-based scoping:

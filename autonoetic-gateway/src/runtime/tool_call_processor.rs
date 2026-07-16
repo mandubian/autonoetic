@@ -87,13 +87,15 @@ pub fn is_degraded_mode_tool_blocked(
 /// arguments or results (they can carry secrets). Emitted at `info` so it is
 /// visible under the default `EnvFilter` (global INFO), not only under DEBUG —
 /// observability is the whole point.
+///
+/// Since #771 D.3 this also feeds the DISCRETION LEAK register: when the
+/// executor's ambient [`discretion_leak::LeakScope`] is installed (tool-call
+/// processing, response validation), the normalization is recorded as a
+/// durable `discretion_leak` causal event attributed to P-5.2 — the
+/// constitutional site that names gateway-side reshaping of agent input.
+/// Outside a scope the trace line remains the record (never silent).
 pub(crate) fn note_llm_normalization(kind: &'static str, detail: &str) {
-    tracing::info!(
-        target: "llm_normalization",
-        kind,
-        detail,
-        "tolerated model non-conformance (normalized)"
-    );
+    crate::runtime::discretion_leak::record_discretion_leak(kind, detail, &["P-5.2"]);
 }
 
 fn strip_gemma_token_artifacts(s: &str) -> String {
@@ -185,7 +187,44 @@ impl<'a> ToolCallProcessor<'a> {
     /// the execution loop uses this to decide whether to reset the loop-guard counter.
     /// Recoverable errors are returned as structured error JSON in the result.
     /// Only fatal errors cause the entire operation to fail.
+    ///
+    /// The whole batch runs inside the executor's ambient
+    /// [`crate::runtime::discretion_leak::LeakScope`] (#771 D.3): any
+    /// normalization tolerated downstream (argument coercion in serde
+    /// deserializers, fuzzy patch matching, vendor-token stripping, tool-name
+    /// aliasing) is recorded in the DISCRETION LEAK register with this
+    /// session's attribution, not just traced.
     pub async fn process_tool_calls(
+        &mut self,
+        tool_calls: &[ToolCall],
+        agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        tracer: &mut SessionTracer,
+    ) -> anyhow::Result<(bool, Vec<(String, String, String)>)> {
+        let leak_scope = self.gateway_store.as_ref().map(|store| {
+            crate::runtime::discretion_leak::LeakScope::new(
+                store.clone(),
+                self.manifest.agent.id.clone(),
+                self.session_id.clone().unwrap_or_default(),
+                self.turn_id.clone(),
+            )
+        });
+        match leak_scope {
+            Some(scope) => {
+                crate::runtime::discretion_leak::with_leak_scope(scope, async move {
+                    self.process_tool_calls_inner(tool_calls, agent_dir, gateway_dir, tracer)
+                        .await
+                })
+                .await
+            }
+            None => {
+                self.process_tool_calls_inner(tool_calls, agent_dir, gateway_dir, tracer)
+                    .await
+            }
+        }
+    }
+
+    async fn process_tool_calls_inner(
         &mut self,
         tool_calls: &[ToolCall],
         agent_dir: &Path,

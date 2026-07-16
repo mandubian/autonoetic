@@ -50,6 +50,13 @@ pub struct AttestationInputs<'a> {
     pub pending_proposal_ids: Vec<String>,
     /// Non-terminal anomaly flag IDs filed by this agent (#772 A.2).
     pub pending_flag_ids: Vec<String>,
+    /// Open amendment invitations addressed to this agent (#771 D.2):
+    /// repeated denials of the same rule crossed the pre-committed
+    /// threshold, so the gateway invites the agent to draft an amendment
+    /// (Ri-0.8). Carried as one-line summaries (not bare ids) because the
+    /// agent did not file these — the rule and the friction evidence ARE
+    /// the message. Bounded by the caller like the other civic items.
+    pub pending_invitations: Vec<InvitationSummary>,
     /// Named budget meters from the session registry. `limit` is `None`
     /// when no cap is configured for that meter (e.g. price tracking
     /// without a ceiling). Empty when budgets are disabled or the
@@ -76,6 +83,18 @@ pub struct BudgetMeter {
     pub name: String,
     pub used: f64,
     pub limit: Option<f64>,
+}
+
+/// One open amendment invitation in the signed attestation (#771 D.2).
+/// Compact by design: the rule under friction, how often it was denied in
+/// the window, and the invitation id for lookup. The agent acts through the
+/// ordinary Ri-0.8 proposal path; the invitation itself carries no
+/// authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InvitationSummary {
+    pub invitation_id: String,
+    pub rule_id: String,
+    pub denial_count: u64,
 }
 
 impl BudgetMeter {
@@ -142,6 +161,11 @@ pub struct StateAttestationPayload {
     pub pending_flag_count: usize,
     #[serde(default)]
     pub pending_flag_ids: Vec<String>,
+    /// Open amendment invitations addressed to this agent (#771 D.2).
+    #[serde(default)]
+    pub pending_invitation_count: usize,
+    #[serde(default)]
+    pub pending_invitations: Vec<InvitationSummary>,
     pub spawn_depth: u32,
     pub budget: Vec<BudgetMeter>,
     /// RFC #778 Part D — burn-rate forecast computed from budget meters and
@@ -221,6 +245,13 @@ pub fn compose_and_sign(
         .take(MAX_CIVIC_ITEMS_INLINE)
         .collect();
 
+    let pending_invitation_count = inputs.pending_invitations.len();
+    let pending_invitations: Vec<InvitationSummary> = inputs
+        .pending_invitations
+        .into_iter()
+        .take(MAX_CIVIC_ITEMS_INLINE)
+        .collect();
+
     let active_capabilities = inputs
         .manifest
         .capabilities
@@ -249,6 +280,8 @@ pub fn compose_and_sign(
         pending_proposal_ids,
         pending_flag_count,
         pending_flag_ids,
+        pending_invitation_count,
+        pending_invitations,
         spawn_depth,
         budget: inputs.budget_meters,
         burn_rate: inputs.burn_rate,
@@ -283,9 +316,12 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
         "---\n\nGateway State Attestation (R++1)\n\n\
          The block below is signed by the gateway's identity key. It is the \
           **authoritative** statement of your remaining budget, active \
-          capabilities, pending gates (approvals, user interactions, \
-          escalations), any constitutional proposals or anomaly flags you \
-          filed that are still awaiting a decision, spawn depth, session \
+         capabilities, pending gates (approvals, user interactions, \
+         escalations), any constitutional proposals or anomaly flags you \
+         filed that are still awaiting a decision, any amendment \
+         invitations issued to you from repeated rule denials (each naming \
+         the rule and the denial count — you may answer by filing a \
+         proposal through the ordinary Ri-0.8 path), spawn depth, session \
           ids, turn counter, burn-rate forecast, and the constitution \
           version + digest you are running under. If your own memory of \
           these facts disagrees with the block, \
@@ -430,6 +466,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_rounds".to_string(),
                     used: 3.0,
@@ -476,6 +513,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -512,6 +550,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -550,6 +589,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -587,6 +627,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: lots_proposals,
                 pending_flag_ids: lots_flags,
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -625,6 +666,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec!["prop-aaa".to_string()],
                 pending_flag_ids: vec!["flag-bbb".to_string()],
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -642,9 +684,58 @@ mod tests {
         assert_eq!(payload.pending_flag_count, 1);
     }
 
+    /// #771 D.2 — open amendment invitations ride the same signed civic
+    /// line: bounded inline, count preserved, and roundtripped through
+    /// sign/verify (tampering would reject, per the shared mechanism).
     #[test]
-    fn render_tail_contains_authoritative_marker_and_json() {
+    fn invitations_bounded_and_roundtrip_through_sign_and_verify() {
         let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let lots: Vec<InvitationSummary> = (0..40)
+            .map(|i| InvitationSummary {
+                invitation_id: format!("ainv-{:03}", i),
+                rule_id: "P-1.5".to_string(),
+                denial_count: 3,
+            })
+            .collect();
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: lots,
+                budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(att.payload.pending_invitation_count, 40);
+        assert_eq!(
+            att.payload.pending_invitations.len(),
+            MAX_CIVIC_ITEMS_INLINE
+        );
+        assert_eq!(att.payload.pending_invitations[0].rule_id, "P-1.5");
+
+        let pub_bytes = key.public_key_bytes();
+        let payload = verify(&pub_bytes, &att).expect("verify");
+        assert_eq!(payload.pending_invitation_count, 40);
+        assert_eq!(payload.pending_invitations[0].invitation_id, "ainv-000");
+    }
+
+    #[test]
+    fn render_tail_contains_authoritative_marker_and_json() {        let temp = tempfile::tempdir().expect("tempdir");
         let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
         let manifest = manifest_with_caps(vec![]);
         let att = compose_and_sign(
@@ -660,6 +751,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -694,6 +786,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
                 burn_rate: None,
                 constitution_version: "2026.07.02",
@@ -731,6 +824,7 @@ mod tests {
                 pending_escalation_ids: vec![],
                 pending_proposal_ids: vec![],
                 pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_tokens".to_string(),
                     used: 5000.0,

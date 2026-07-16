@@ -15,13 +15,19 @@
 > | Part | Status |
 > |---|---|
 > | A.1 denial affordances (`available_actions`) | **SHIPPED** |
-> | A.2 civic line in turn attestation | Not started |
+> | A.2 civic line in turn attestation | **SHIPPED** |
 > | B.1 injected recall at wake | **SHIPPED** |
-> | B.2 lessons crystallize into revisions | Not started |
+> | B.2 lessons crystallize into revisions | Implemented via memory-curator `promote_to_skill` / `flag_for_evolution` verdicts |
 > | C.1 `anomaly_flag` tool + adjudication RPC | **SHIPPED** (code); constitutional enactment pending signing |
-> | C.2 `anomalies` schema field | **SHIPPED** |
+> | C.2 `anomalies` schema field | **SHIPPED** (advisory) |
 > | C.3 precision-scored civic record | Deferred — needs adjudication volume first |
-> | D, E, F | Not started |
+> | D.1 O-6/O-7 adjudication SLA | **SHIPPED** (code); constitutional enactment pending signing |
+> | D.2 mechanical amendment invitations from denial telemetry | **SHIPPED** |
+> | D.3 DISCRETION LEAK register | **SHIPPED** |
+> | E.1 civic eval suites | Not started |
+> | E.2 `trace civic-health` | **SHIPPED** |
+> | E.3 promotion gating on civic scores | Not started |
+> | F. institutional offices (ombudsman / steward / curator) | Not started |
 
 ---
 
