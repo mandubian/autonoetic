@@ -447,6 +447,8 @@ Response:
 
 `anomaly_flag` is **Core tier**, `is_available` unconditionally `true` — like `self_describe`, always available including to child sessions. The flag is durably recorded (a failed insert fails the tool call — it is never silently dropped) and emits a causal event (`category: "anomaly_flag"`, `action: "filed"`) attributed to the reporting agent. **Filing a flag is never itself grounds for sanction.**
 
+Intake is bounded as a spam triage measure: if you already have `max_pending_anomaly_flags_per_reporter` (default 50) un-adjudicated flags, new filings fail loudly with an `anomaly_flag_flood` error until the review authority adjudicates some of the existing ones. If you hit it, stop re-filing and consolidate your evidence into the flags already pending.
+
 An anomaly review authority (today: the operator) adjudicates pending flags via JSON-RPC:
 
 | Method | Params | Description |

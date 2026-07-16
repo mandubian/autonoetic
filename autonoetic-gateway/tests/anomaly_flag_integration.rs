@@ -8,6 +8,9 @@
 //!   - a causal event `anomaly_flag.filed` with `enforced_rules: ["Ri-0.18"]`
 //!     exists
 //!   - the tool response carries `ok: true` and `flag_id`
+//!   - the per-reporter spam triage bound (#770): filings beyond
+//!     `max_pending_anomaly_flags_per_reporter` are rejected loudly with
+//!     `anomaly_flag_flood`
 
 mod support;
 
@@ -222,4 +225,51 @@ fn default_severity_is_medium() {
     );
     assert_eq!(resp["ok"], true);
     assert_eq!(resp["severity"], "medium");
+}
+
+#[test]
+fn flood_cap_rejects_filing_loudly() {
+    let h = make_harness();
+    h.store.set_anomaly_flag_flood_cap(2);
+    let manifest = zero_capability_manifest();
+
+    // Up to the cap, filings succeed through the real tool path.
+    for i in 0..2 {
+        let resp = invoke(
+            &h,
+            &manifest,
+            &format!(r#"{{"subject_ref": "sess-x-{i}", "observation": "odd"}}"#),
+        );
+        assert_eq!(resp["ok"], true);
+    }
+
+    // The cap+1th filing errors loudly — the tool call fails, no flag row is
+    // recorded, and the reporter is told why (never a silent drop).
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let gateway_config = autonoetic_types::config::GatewayConfig::default();
+    let err = registry
+        .execute(
+            "anomaly_flag",
+            &manifest,
+            &policy,
+            &h.agent_dir,
+            None,
+            r#"{"subject_ref": "sess-x-2", "observation": "odd"}"#,
+            Some("test-session"),
+            Some("turn-000003"),
+            Some(&gateway_config),
+            Some(h.store.clone()),
+            None,
+        )
+        .expect_err("filing beyond the flood cap must error");
+    let msg = err.to_string();
+    assert!(msg.contains("anomaly_flag_flood"), "got: {msg}");
+    assert!(msg.contains("cap 2"), "got: {msg}");
+
+    let pending = h
+        .store
+        .list_pending_anomaly_flags(Some("witness.default"), 100)
+        .expect("query");
+    assert_eq!(pending.len(), 2, "rejected filings leave no rows behind");
 }

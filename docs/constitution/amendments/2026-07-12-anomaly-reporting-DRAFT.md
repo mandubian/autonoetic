@@ -55,6 +55,18 @@ anomaly review authority is the operator seat. The clause names the
 configuration, not re-amendment — the same office-before-occupant move as
 `GateDecider` (P-2.20).
 
+Triage-bound note: Ri-0.18's "cannot be silently dropped" is compatible with
+a bounded intake queue, and the bound is **config, not clause** (O-1 lineage
+— same answer as O-7's SLA window and P-7.17's approval flood cap;
+citizenship RFC open question 2). `max_pending_anomaly_flags_per_reporter`
+(default 50, 0 disables) caps un-adjudicated flags per reporter: a filing
+beyond the cap is *rejected loudly* (`anomaly_flag_flood` error to the
+reporter plus a once-per-window operator notification), which is the
+opposite of a silent drop — the reporter is told, and terminal
+adjudications free capacity, so the bound pressures the *decider* to keep
+up, never deletes a report. Constitutional text stays silent on the number
+for the same reason it stays silent on the SLA seconds.
+
 ## Enforcement-register additions (at enactment, same commit as the new version)
 
 In `autonoetic-gateway/src/enforcement_register.rs`:
@@ -84,6 +96,14 @@ EnforcementEntry {
     code: "runtime/tools/anomaly_flag.rs::AnomalyFlagTool (is_available == true, Core tier) + gateway_store/anomaly_flags.rs durable row + causal event anomaly_flag.filed",
     test: "anomaly_flag_integration.rs::zero_capability_manifest_can_file_flag",
     config: None,
+},
+EnforcementEntry {
+    clause_id: "Ri-0.18",
+    rule_id: "Ri-0.18",
+    check_id: "anomaly_flag_intake_triage_bound",
+    code: "gateway_store/anomaly_flags.rs::insert_anomaly_flag per-reporter flood cap (loud anomaly_flag_flood rejection + emit_anomaly_flag_flood_alert operator notification, once per flood window)",
+    test: "anomaly_flags.rs::tests::flood_cap_rejects_at_limit_and_keeps_existing + anomaly_flag_integration.rs::flood_cap_rejects_filing_loudly",
+    config: Some("max_pending_anomaly_flags_per_reporter"),
 },
 EnforcementEntry {
     clause_id: "O-7",

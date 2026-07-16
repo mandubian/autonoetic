@@ -1090,6 +1090,17 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_escalations_per_root")]
     pub max_pending_escalations_per_root: usize,
 
+    /// Maximum number of concurrent un-adjudicated anomaly flags
+    /// (`pending`/`under_review`) per reporter agent — the Ri-0.18 spam
+    /// triage bound (#770). `anomaly_flag` intake is capability-free, so a
+    /// prompt-injected reporter could otherwise flood the review queue. A
+    /// filing that would push the count above this cap is rejected loudly
+    /// with `anomaly_flag_flood` (never silently dropped); terminal
+    /// adjudications (confirmed/dismissed/deferred) free capacity.
+    /// Set to 0 to disable (not recommended). Default: 50.
+    #[serde(default = "default_max_pending_anomaly_flags_per_reporter")]
+    pub max_pending_anomaly_flags_per_reporter: usize,
+
     /// Default TTL in seconds for auto-generated session approval grants.
     /// When an approval is resolved and a grant is auto-inserted without an
     /// explicit `--ttl`/`--until` override, `expires_at` is set to
@@ -2539,6 +2550,10 @@ fn default_max_pending_escalations_per_root() -> usize {
     50
 }
 
+fn default_max_pending_anomaly_flags_per_reporter() -> usize {
+    50
+}
+
 fn default_grant_ttl_secs() -> u64 {
     86400
 }
@@ -3176,6 +3191,7 @@ impl Default for GatewayConfig {
             plan_frame_timeout_secs: default_plan_frame_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             max_pending_escalations_per_root: default_max_pending_escalations_per_root(),
+            max_pending_anomaly_flags_per_reporter: default_max_pending_anomaly_flags_per_reporter(),
             default_grant_ttl_secs: default_grant_ttl_secs(),
             escape_attempt_degrade_threshold: default_escape_attempt_degrade_threshold(),
             escape_attempt_emergency_threshold: default_escape_attempt_emergency_threshold(),
