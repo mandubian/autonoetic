@@ -83,11 +83,12 @@ Call `scheduler_cron_list()`. If no job targeting `ombudsman.default` exists:
 
 ```json
 scheduler_cron_create({
-  "agent_id": "ombudsman.default",
   "message": "Ombudsman sweep: review anomaly-flag queue",
   "schedule_expr": "0 */2 * * *"
 })
 ```
+
+The cron target defaults to the calling agent (this agent).
 
 ### Step 2: Read high-water mark
 
@@ -140,8 +141,8 @@ For each flag (up to 20 per run):
 
 ```json
 admin_proposal_create({
-  "title": "Anomaly flag <flag_id>: recommend <confirm|dismiss|defer|under_review>",
-  "category": "anomaly_adjudication",
+  "title": "Anomaly flag <flag_id>: adjudication recommendation",
+  "category": "protocol",
   "evidence": {
     "flag_id": "<flag_id>",
     "reporter": "<agent_id>",
@@ -150,7 +151,7 @@ admin_proposal_create({
     "age_hours": <number>,
     "sla_breached": <bool>,
     "ombudsman_assessment": "<your analysis>",
-    "recommended_status": "<confirm|dismiss|defer|under_review>",
+    "recommended_status": "<confirmed|dismissed|deferred|under_review>",
     "recommended_reason": "<motivation>"
   },
   "remediation": "Operator should call anomaly.resolve with the recommended status.",
@@ -158,6 +159,9 @@ admin_proposal_create({
   "priority": "<low|medium|high|critical>"
 })
 ```
+
+> Use a generic title (not the recommended status) so `admin_proposal_create`'s
+> title+category dedup prevents duplicate proposals for the same flag.
 
 ### Step 6: Chase SLA breaches
 
