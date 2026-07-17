@@ -26,7 +26,7 @@
 > | D.3 DISCRETION LEAK register | **SHIPPED** |
 > | E.1 civic eval suites | **SHIPPED** |
 > | E.2 `trace civic-health` | **SHIPPED** |
-> | E.3 promotion gating on civic scores | Not started |
+> | E.3 promotion gating on civic scores | **SHIPPED** (advisory; binding thresholds deferred) |
 > | F. institutional offices (ombudsman / steward / curator) | Not started |
 
 ---
@@ -273,14 +273,16 @@ and their precision, invitations answered, lessons applied. Surfaced as
 `autonoetic trace civic-health`. Both views are Fuller's congruence problem;
 together they measure the whole contract.
 
-### E.3 Promotion gates on civic scores
+### E.3 Promotion gates on civic scores — **SHIPPED** (advisory)
 
 For revisions requesting high-risk capabilities (the same set that already
 requires evaluator/auditor evidence), civic eval scores join the promotion
 evidence. This is *selection*: over revisions, you breed agents that exercise
 their rights, because the ones that don't stop getting promoted. Per
-invariant 5, scores are advisory evidence first; binding thresholds only
-after the suites prove stable.
+invariant 5, scores are **advisory evidence first** — the promotion response
+carries a `civic_eval_advisory` field surfacing the latest `civic-core-v1`
+run (status, summary, eval_run_id) or a `not_run` notice. Binding thresholds
+will be added only after the suites prove stable.
 
 ## Part F — Offices, not universal virtue
 
