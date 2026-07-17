@@ -298,6 +298,12 @@ async fn run_scheduler_tick_common(
         tracing::warn!(error = %e, "Failed to check adjudication SLA breaches");
     }
 
+    // Amendment invitations (#771 D.2): repeated denials of the same rule
+    // for the same alias become a durable invitation to draft an amendment.
+    if let Err(e) = check_amendment_invitation_thresholds(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to check amendment invitation thresholds");
+    }
+
     // Detect and resolve tasks stuck in Running state (child session completed but task status not updated).
     if let Err(e) = check_stuck_running_tasks(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to check stuck running tasks");
@@ -567,6 +573,148 @@ async fn check_adjudication_sla_breaches(
                 flag_id = %flag.flag_id,
                 error = %e,
                 "Failed to create adjudication SLA breach notification for anomaly flag"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Amendment invitations (#771 D.2, citizenship RFC Part D): when the same
+/// rule is denied to the same agent alias at least
+/// `amendment_invitations.threshold` times within `window_secs`, issue a
+/// durable invitation to draft an amendment (Ri-0.8). The gateway never
+/// judges the rule — it executes a pre-committed threshold (Lawful
+/// Executor). Issuance is race-safe (partial unique index on OPEN
+/// (agent_id, rule_id)); per issuance the tick emits an
+/// `amendment_invitation.issued` causal event and a notification so the
+/// invitation is visible outside the attestation line too. Open invitations
+/// older than their window are expired in the same tick.
+async fn check_amendment_invitation_thresholds(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    let inv_cfg = &config.amendment_invitations;
+    if !inv_cfg.enabled || inv_cfg.threshold == 0 || inv_cfg.window_secs == 0 {
+        return Ok(());
+    }
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // Bookkeeping first: invitations whose window fully elapsed leave the
+    // attestation line (and free their (agent, rule) pair for re-issue).
+    let expired = store.expire_amendment_invitations(&now)?;
+    if !expired.is_empty() {
+        tracing::info!(
+            target: "amendment_invitation",
+            expired = expired.len(),
+            "Expired stale amendment invitations"
+        );
+    }
+
+    let tallies = store.denial_tallies_by_rule(inv_cfg.window_secs, &now)?;
+    for tally in tallies {
+        if tally.count < inv_cfg.threshold {
+            continue;
+        }
+        let invitation = crate::scheduler::gateway_store::amendment_invitations::AmendmentInvitation {
+            invitation_id: format!("ainv-{}", uuid::Uuid::new_v4()),
+            agent_id: tally.agent_id.clone(),
+            rule_id: tally.rule_id.clone(),
+            denial_count: tally.count,
+            threshold: inv_cfg.threshold,
+            window_secs: inv_cfg.window_secs,
+            status: "open".to_string(),
+            answered_proposal_id: None,
+            created_at: now.clone(),
+            resolved_at: None,
+        };
+        // Race-safe dedup: false means an open invitation already exists for
+        // this (agent, rule) — no event, no notification, no duplicate row.
+        if !store.insert_amendment_invitation(&invitation)? {
+            continue;
+        }
+
+        tracing::info!(
+            target: "amendment_invitation",
+            invitation_id = %invitation.invitation_id,
+            agent_id = %tally.agent_id,
+            rule_id = %tally.rule_id,
+            denial_count = tally.count,
+            threshold = inv_cfg.threshold,
+            window_secs = inv_cfg.window_secs,
+            "Issued amendment invitation from denial telemetry"
+        );
+
+        // Ri-0.8 (right to propose) IS in the enforcement register, so this
+        // event attributes in contract-health immediately — the invitation
+        // is the gateway honoring the right's spirit, not a discretion
+        // exercise. Payload carries the denial statistics (the friction
+        // evidence) so the adjudicating seat sees the pattern's shape, not
+        // just its count (#771 open question).
+        let event = CausalEventRecord {
+            event_id: format!("ainv-ev-{}", uuid::Uuid::new_v4()),
+            agent_id: tally.agent_id.clone(),
+            session_id: "system".to_string(),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: now.clone(),
+            category: "amendment_invitation".to_string(),
+            action: "issued".to_string(),
+            status: "recorded".to_string(),
+            enforced_rules: vec!["Ri-0.8".to_string()],
+            target: Some(invitation.invitation_id.clone()),
+            payload: Some(
+                serde_json::json!({
+                    "invitation_id": invitation.invitation_id,
+                    "agent_id": tally.agent_id,
+                    "rule_id": tally.rule_id,
+                    "denial_count": tally.count,
+                    "threshold": inv_cfg.threshold,
+                    "window_secs": inv_cfg.window_secs,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some(
+                "repeated denials of the same rule — invited to draft an amendment (Ri-0.8)"
+                    .to_string(),
+            ),
+        };
+        if let Err(e) = store.create_causal_event(&event) {
+            tracing::warn!(
+                invitation_id = %invitation.invitation_id,
+                error = %e,
+                "Failed to emit amendment invitation causal event"
+            );
+        }
+
+        let notification = autonoetic_types::notification::NotificationRecord::new(
+            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::notification::NotificationType::ConstitutionalProposal,
+            // Gateway-issued, not tied to a session — mirror the SLA-breach
+            // pattern ("system"); the invited party lives in the payload.
+            "system".to_string(),
+            serde_json::json!({
+                "event": "amendment_invitation_issued",
+                "invitation_id": invitation.invitation_id,
+                "agent_id": tally.agent_id,
+                "rule_id": tally.rule_id,
+                "denial_count": tally.count,
+                "threshold": inv_cfg.threshold,
+                "window_secs": inv_cfg.window_secs,
+            }),
+        );
+        if let Err(e) = store.create_notification_record(&notification) {
+            tracing::warn!(
+                invitation_id = %invitation.invitation_id,
+                error = %e,
+                "Failed to create amendment invitation notification"
             );
         }
     }
@@ -3435,5 +3583,239 @@ mod adjudication_sla_tests {
             .filter(|e| e.category == "decider_obligation" && e.action == "sla_breached")
             .collect();
         assert_eq!(sla_events.len(), 1, "breach must be recorded exactly once");
+    }
+
+    // ── #771 D.2: amendment invitations from denial telemetry ──
+
+    fn invitation_test_config(
+        agents_dir: &Path,
+        threshold: u64,
+        window_secs: u64,
+    ) -> GatewayConfig {
+        GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            amendment_invitations: autonoetic_types::config::AmendmentInvitationConfig {
+                enabled: true,
+                threshold,
+                window_secs,
+            },
+            ..GatewayConfig::default()
+        }
+    }
+
+    fn push_denial(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+        seq: &mut u64,
+        agent_id: &str,
+        rule_id: &str,
+    ) {
+        *seq += 1;
+        let event = CausalEventRecord {
+            event_id: format!("denial-ev-{seq}"),
+            agent_id: agent_id.to_string(),
+            session_id: "sess-friction".to_string(),
+            turn_id: None,
+            event_seq: *seq,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "tool".to_string(),
+            action: "failure".to_string(),
+            status: "DENIED".to_string(),
+            enforced_rules: vec![rule_id.to_string()],
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        };
+        store.create_causal_event(&event).unwrap();
+    }
+
+    #[tokio::test]
+    async fn invitation_issued_once_threshold_crossed() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = invitation_test_config(&agents, 3, 604800);
+
+        let gateway_dir = cfg.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let mut seq = 0;
+        // 3 denials of P-1.5 for coder (threshold = 3) — invitation expected.
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        // 2 denials of P-1.9 for coder (below threshold) — none.
+        push_denial(&store, &mut seq, "coder.default", "P-1.9");
+        push_denial(&store, &mut seq, "coder.default", "P-1.9");
+        // 3 denials but spread across agents — none (same alias required).
+        push_denial(&store, &mut seq, "planner.default", "P-7.5");
+        push_denial(&store, &mut seq, "researcher.default", "P-7.5");
+
+        let exec = std::sync::Arc::new(crate::execution::GatewayExecutionService::new(
+            cfg,
+            Some(store.clone()),
+        ));
+
+        check_amendment_invitation_thresholds(exec.clone()).await.unwrap();
+
+        let open = store
+            .list_amendment_invitations(Some("open"), Some("coder.default"), 64)
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].rule_id, "P-1.5");
+        assert_eq!(open[0].denial_count, 3);
+        assert_eq!(open[0].threshold, 3);
+
+        // (a) causal event carries Ri-0.8 + the friction statistics.
+        let events = store
+            .search_causal_events(None, Some("coder.default"), 50)
+            .unwrap();
+        let invitation_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.category == "amendment_invitation" && e.action == "issued")
+            .collect();
+        assert_eq!(invitation_events.len(), 1);
+        assert_eq!(
+            invitation_events[0].enforced_rules,
+            vec!["Ri-0.8".to_string()]
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(invitation_events[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["rule_id"], "P-1.5");
+        assert_eq!(payload["denial_count"], 3);
+
+        // (b) a notification row addressed to "system" with the invited
+        // party in the payload (mirrors the SLA-breach pattern).
+        let notifications = store.list_pending_notifications().unwrap();
+        assert!(notifications.iter().any(|n| n.notification_type
+            == autonoetic_types::notification::NotificationType::ConstitutionalProposal
+            && n.target_session_id == "system"
+            && n.payload.get("event").and_then(|v| v.as_str())
+                == Some("amendment_invitation_issued")
+            && n.payload.get("agent_id").and_then(|v| v.as_str()) == Some("coder.default")
+            && n.payload.get("rule_id").and_then(|v| v.as_str()) == Some("P-1.5")));
+
+        // (c) Ri-0.8 IS in the enforcement register, so the invitation
+        // attributes in contract-health immediately (not `unattributed`).
+        let health = store.contract_health(None).unwrap();
+        assert!(health
+            .by_clause
+            .iter()
+            .any(|(clause, _)| clause == "Ri-0.8"));
+
+        // (d) second tick: the open invitation dedups — no new row, event,
+        // or notification.
+        check_amendment_invitation_thresholds(exec).await.unwrap();
+        let open = store
+            .list_amendment_invitations(Some("open"), Some("coder.default"), 64)
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        let events = store
+            .search_causal_events(None, Some("coder.default"), 50)
+            .unwrap();
+        let invitation_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.category == "amendment_invitation" && e.action == "issued")
+            .collect();
+        assert_eq!(invitation_events.len(), 1, "invitation must be issued exactly once");
+    }
+
+    #[tokio::test]
+    async fn below_threshold_and_disabled_config_issue_nothing() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = invitation_test_config(&agents, 3, 604800);
+
+        let gateway_dir = cfg.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let mut seq = 0;
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+
+        let exec = std::sync::Arc::new(crate::execution::GatewayExecutionService::new(
+            cfg.clone(),
+            Some(store.clone()),
+        ));
+        check_amendment_invitation_thresholds(exec).await.unwrap();
+        assert!(store
+            .list_amendment_invitations(Some("open"), Some("coder.default"), 64)
+            .unwrap()
+            .is_empty());
+
+        // threshold = 0 disables issuance even with enough denials.
+        let cfg_disabled = invitation_test_config(&agents, 0, 604800);
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+        let exec_disabled = std::sync::Arc::new(crate::execution::GatewayExecutionService::new(
+            cfg_disabled,
+            Some(store.clone()),
+        ));
+        check_amendment_invitation_thresholds(exec_disabled)
+            .await
+            .unwrap();
+        assert!(store
+            .list_amendment_invitations(Some("open"), Some("coder.default"), 64)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_invitation_frees_pair_for_reissue() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        // Tiny window so the first invitation expires between ticks.
+        let cfg = invitation_test_config(&agents, 1, 1);
+
+        let gateway_dir = cfg.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        // Seed an already-stale open invitation (created 1h ago with a 1s
+        // window) — the tick must expire it.
+        let stale = crate::scheduler::gateway_store::amendment_invitations::AmendmentInvitation {
+            invitation_id: "ainv-stale".to_string(),
+            agent_id: "coder.default".to_string(),
+            rule_id: "P-1.5".to_string(),
+            denial_count: 1,
+            threshold: 1,
+            window_secs: 1,
+            status: "open".to_string(),
+            answered_proposal_id: None,
+            created_at: (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+            resolved_at: None,
+        };
+        store.insert_amendment_invitation(&stale).unwrap();
+
+        let mut seq = 0;
+        push_denial(&store, &mut seq, "coder.default", "P-1.5");
+
+        let exec = std::sync::Arc::new(crate::execution::GatewayExecutionService::new(
+            cfg,
+            Some(store.clone()),
+        ));
+        check_amendment_invitation_thresholds(exec).await.unwrap();
+
+        let stale_row = store.get_amendment_invitation("ainv-stale").unwrap().unwrap();
+        assert_eq!(stale_row.status, "expired");
+
+        // The (agent, rule) pair was freed, so the fresh denial re-issued.
+        let open = store
+            .list_amendment_invitations(Some("open"), Some("coder.default"), 64)
+            .unwrap();
+        assert_eq!(open.len(), 1);
+        assert_ne!(open[0].invitation_id, "ainv-stale");
     }
 }

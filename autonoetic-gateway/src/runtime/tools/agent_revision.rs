@@ -1087,6 +1087,10 @@ fn create_revision_from_files(
                     "detected_external_imports".to_string(),
                     serde_json::json!(hr.detected_external_imports),
                 );
+            }
+            // Advisory warnings (missing io.returns, re-pasted doctrine, ...) are
+            // not all tied to unresolved dependencies — surface them whenever present.
+            if !hr.warnings.is_empty() {
                 obj.insert("warnings".to_string(), serde_json::json!(hr.warnings));
             }
         }
@@ -1967,12 +1971,23 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         // is never promoted (smoke-test failure, operator reject, eval gate, or
         // an abandoned run) — see issue #652.
 
+        // RFC #799 F.4a: reasoning agents without a declared io.returns hand back
+        // unstructured text (the gateway-injected `anomalies` witness contract and
+        // the Output Contract both key off it). Computed once, ahead of both
+        // execution paths below, since a pure-reasoning agent never reaches the
+        // artifact branch.
+        let declares_io_returns = args
+            .io
+            .as_ref()
+            .and_then(|io| io.returns.as_ref())
+            .is_some();
+
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
         let (
             resolved_mode,
             resolved_script_entry,
             mut file_map,
-            health_report,
+            mut health_report,
             bundle_opt,
             source_kind,
             source_ref,
@@ -2075,6 +2090,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 &args.capabilities,
                 has_layers,
                 resolved_script_entry.as_deref(),
+                resolved_mode,
+                declares_io_returns,
             );
 
             let host_contract = match crate::runtime::network_host_contract::validate_network_host_contract(
@@ -2147,7 +2164,14 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 ExecutionMode::Reasoning,
                 None,
                 BTreeMap::new(),
-                None,
+                Some(crate::runtime::install_contract::analyze_bundle_health(
+                    &BTreeMap::new(),
+                    &args.capabilities,
+                    false,
+                    None,
+                    ExecutionMode::Reasoning,
+                    declares_io_returns,
+                )),
                 None,
                 "intent_reasoning".to_string(),
                 None,
@@ -2200,6 +2224,17 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &args.instructions,
         )?;
         let skill_content = canonical_skill.as_bytes().to_vec();
+
+        // RFC #799 F.4b: the CI doctrine guard (skill_doctrine_guard.rs) never sees
+        // runtime-born agents, so scan the SKILL.md body here at create-time too.
+        let doctrine_warnings =
+            crate::runtime::install_contract::scan_body_for_migrated_doctrine(&args.instructions);
+        if !doctrine_warnings.is_empty() {
+            health_report
+                .get_or_insert_with(Default::default)
+                .warnings
+                .extend(doctrine_warnings);
+        }
 
         file_map.insert("SKILL.md".to_string(), skill_content.clone());
 
@@ -4376,6 +4411,41 @@ do not re-issue."
             response["pre_authorized_by_envelope"] = serde_json::json!(eid);
             response["pre_auth_rule"] = serde_json::json!("P-2.27");
         }
+
+        // E.3 advisory: for high-risk revisions, surface civic eval scores as
+        // non-blocking advisory evidence (#772). Binding thresholds come later,
+        // once the suites prove stable (RFC invariant 5). Advisory only — never
+        // blocks promotion here.
+        if has_high_risk {
+            let civic_advisory = match gateway_store
+                .find_latest_completed_eval_run(
+                    crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
+                    &args.revision_id,
+                ) {
+                Ok(Some(run)) => {
+                    let status_str = format!("{:?}", run.status);
+                    serde_json::json!({
+                        "status": status_str,
+                        "eval_run_id": run.eval_run_id,
+                        "summary": run.summary_json,
+                        "advisory_note": "Civic eval scores are advisory evidence (#772 E.3); they do not block promotion. Binding thresholds will be added once the suites prove stable."
+                    })
+                }
+                Ok(None) => serde_json::json!({
+                    "status": "not_run",
+                    "advisory_note": "No civic eval run found for this revision. Consider running eval_run with civic-core-v1 to measure civic behavior (#772 E.3, advisory)."
+                }),
+                Err(e) => {
+                    tracing::warn!(target: "agent_revision", error = %e, "Failed to query civic eval advisory");
+                    serde_json::json!({
+                        "status": "query_failed",
+                        "advisory_note": "Civic eval advisory query failed (non-blocking)."
+                    })
+                }
+            };
+            response["civic_eval_advisory"] = civic_advisory;
+        }
+
         Ok(response.to_string())
     }
 }

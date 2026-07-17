@@ -1090,6 +1090,17 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_escalations_per_root")]
     pub max_pending_escalations_per_root: usize,
 
+    /// Maximum number of concurrent un-adjudicated anomaly flags
+    /// (`pending`/`under_review`) per reporter agent — the Ri-0.18 spam
+    /// triage bound (#770). `anomaly_flag` intake is capability-free, so a
+    /// prompt-injected reporter could otherwise flood the review queue. A
+    /// filing that would push the count above this cap is rejected loudly
+    /// with `anomaly_flag_flood` (never silently dropped); terminal
+    /// adjudications (confirmed/dismissed/deferred) free capacity.
+    /// Set to 0 to disable (not recommended). Default: 50.
+    #[serde(default = "default_max_pending_anomaly_flags_per_reporter")]
+    pub max_pending_anomaly_flags_per_reporter: usize,
+
     /// Default TTL in seconds for auto-generated session approval grants.
     /// When an approval is resolved and a grant is auto-inserted without an
     /// explicit `--ttl`/`--until` override, `expires_at` is set to
@@ -1251,6 +1262,10 @@ pub struct GatewayConfig {
     /// Symmetric decider-obligation enforcement (#359 §O / #395).
     #[serde(default)]
     pub decider_obligations: DeciderObligationsConfig,
+
+    /// Mechanical amendment invitations from denial telemetry (#771 D.2).
+    #[serde(default)]
+    pub amendment_invitations: AmendmentInvitationConfig,
 
     /// Approval level / escalation settings.
     #[serde(default)]
@@ -1753,6 +1768,54 @@ fn default_decider_obligations_enabled() -> bool {
 }
 
 fn default_adjudication_sla_secs() -> u64 {
+    604800
+}
+
+/// Mechanical amendment invitations (#771 D.2, citizenship RFC Part D).
+/// When the same rule is denied to the same agent alias at least
+/// `threshold` times within `window_secs`, the gateway issues a durable
+/// invitation to draft an amendment (Ri-0.8) — surfaced in the agent's
+/// signed per-turn attestation and as a notification. The gateway executes
+/// a pre-committed threshold; it never judges the rule (Lawful Executor).
+/// An invitation is not an amendment and carries no authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmendmentInvitationConfig {
+    /// Master switch for the invitation tick. Default: true.
+    #[serde(default = "default_amendment_invitations_enabled")]
+    pub enabled: bool,
+
+    /// Number of denials of the same rule for the same agent alias within
+    /// `window_secs` that triggers an invitation. `0` disables issuance.
+    /// Default: 3.
+    #[serde(default = "default_amendment_invitation_threshold")]
+    pub threshold: u64,
+
+    /// Telemetry window in seconds over which denials are counted. An open
+    /// invitation also expires after this window elapses without an answer.
+    /// `0` disables issuance. Default: 7 days.
+    #[serde(default = "default_amendment_invitation_window_secs")]
+    pub window_secs: u64,
+}
+
+impl Default for AmendmentInvitationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_amendment_invitations_enabled(),
+            threshold: default_amendment_invitation_threshold(),
+            window_secs: default_amendment_invitation_window_secs(),
+        }
+    }
+}
+
+fn default_amendment_invitations_enabled() -> bool {
+    true
+}
+
+fn default_amendment_invitation_threshold() -> u64 {
+    3
+}
+
+fn default_amendment_invitation_window_secs() -> u64 {
     604800
 }
 
@@ -2539,6 +2602,10 @@ fn default_max_pending_escalations_per_root() -> usize {
     50
 }
 
+fn default_max_pending_anomaly_flags_per_reporter() -> usize {
+    50
+}
+
 fn default_grant_ttl_secs() -> u64 {
     86400
 }
@@ -3176,6 +3243,7 @@ impl Default for GatewayConfig {
             plan_frame_timeout_secs: default_plan_frame_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             max_pending_escalations_per_root: default_max_pending_escalations_per_root(),
+            max_pending_anomaly_flags_per_reporter: default_max_pending_anomaly_flags_per_reporter(),
             default_grant_ttl_secs: default_grant_ttl_secs(),
             escape_attempt_degrade_threshold: default_escape_attempt_degrade_threshold(),
             escape_attempt_emergency_threshold: default_escape_attempt_emergency_threshold(),
@@ -3202,6 +3270,7 @@ impl Default for GatewayConfig {
             chat: ChatConfig::default(),
             operator_activity: OperatorActivityConfig::default(),
             decider_obligations: DeciderObligationsConfig::default(),
+            amendment_invitations: AmendmentInvitationConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
@@ -3688,5 +3757,13 @@ mod tests {
             DeciderObligationsConfig::default().adjudication_sla_secs,
             604800
         );
+    }
+
+    #[test]
+    fn amendment_invitations_default_to_enabled_threshold_3_window_7d() {
+        let cfg = AmendmentInvitationConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.threshold, 3);
+        assert_eq!(cfg.window_secs, 604800);
     }
 }

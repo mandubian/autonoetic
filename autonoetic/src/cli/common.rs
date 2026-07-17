@@ -1376,6 +1376,16 @@ pub enum TraceCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Show a session's fork lineage: the ancestor chain it was forked from
+    /// (if any) and the tree of sessions forked FROM it (#814)
+    ForkTree {
+        /// Session identifier (root or nested)
+        session_id: String,
+        /// Emit machine-readable JSON. `ancestors` is ordered nearest-first
+        /// (immediate parent first, root of the fork chain last).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -73,6 +73,7 @@ fn default_inputs<'a>(manifest: &'a AgentManifest) -> AttestationInputs<'a> {
         pending_escalation_ids: vec![],
         pending_proposal_ids: vec![],
         pending_flag_ids: vec![],
+        pending_invitations: vec![],
         budget_meters: vec![BudgetMeter {
             name: "llm_rounds".to_string(),
             used: 5.0,

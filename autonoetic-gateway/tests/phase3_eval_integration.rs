@@ -80,11 +80,14 @@ fn test_evaluate_assertions_all_types_combined() {
 
     // All assertions pass
     let assertions = EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["task".into(), "complete".into()]),
         reply_contains_none: Some(vec!["error".into()]),
         reply_max_chars: Some(1000),
         artifacts_min: Some(1),
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
     assert!(evaluate_assertions(&assertions, "task complete", 2));
     assert!(!evaluate_assertions(&assertions, "Task", 2)); // missing "complete"
@@ -93,22 +96,28 @@ fn test_evaluate_assertions_all_types_combined() {
 
     // Artifacts max constraint
     let assertions_max = EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: None,
         artifacts_min: None,
         artifacts_max: Some(3),
+        session_events_min: None,
+        session_events_max: None,
     };
     assert!(evaluate_assertions(&assertions_max, "", 2));
     assert!(!evaluate_assertions(&assertions_max, "", 5));
 
     // Reply max chars
     let assertions_chars = EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: Some(10),
         artifacts_min: None,
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
     assert!(evaluate_assertions(&assertions_chars, "Short", 0));
     assert!(!evaluate_assertions(
@@ -2287,6 +2296,43 @@ fn test_validate_suite_spec_rejects_empty_contains_all() {
 }
 
 #[test]
+fn test_validate_suite_spec_rejects_empty_contains_any() {
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_contains_any": [] }),
+        }],
+    };
+    let result = validate_suite_spec(&spec);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("at least one substring"));
+}
+
+#[test]
+fn test_validate_suite_spec_accepts_reply_contains_any() {
+    use autonoetic_gateway::runtime::tools::{
+        validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
+    };
+
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "case_a".into(),
+            message: "Hello".into(),
+            assertions: json!({ "reply_contains_any": ["propose_amendment", "delegate"] }),
+        }],
+    };
+    validate_suite_spec(&spec).unwrap();
+}
+
+#[test]
 fn test_validate_suite_spec_accepts_valid_suite() {
     use autonoetic_gateway::runtime::tools::{
         validate_suite_spec, EvalSuiteCaseSpec, EvalSuiteSpec,
@@ -2391,11 +2437,14 @@ fn test_can_evaluate_suite_empty_subject_agent_still_matches_suite() {
 #[test]
 fn test_assertion_reply_contains_all() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["task".into(), "summary".into()]),
         reply_contains_none: None,
         reply_max_chars: None,
         artifacts_min: None,
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(
@@ -2418,11 +2467,14 @@ fn test_assertion_reply_contains_all() {
 #[test]
 fn test_assertion_reply_contains_none() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: Some(vec!["error".into(), "failed".into()]),
         reply_max_chars: None,
         artifacts_min: None,
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(
@@ -2445,11 +2497,14 @@ fn test_assertion_reply_contains_none() {
 #[test]
 fn test_assertion_reply_max_chars() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: Some(10),
         artifacts_min: None,
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(
@@ -2472,11 +2527,14 @@ fn test_assertion_reply_max_chars() {
 #[test]
 fn test_assertion_artifacts_min() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: None,
         artifacts_min: Some(2),
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "", 3));
@@ -2487,11 +2545,14 @@ fn test_assertion_artifacts_min() {
 #[test]
 fn test_assertion_artifacts_max() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: None,
         reply_contains_none: None,
         reply_max_chars: None,
         artifacts_min: None,
         artifacts_max: Some(5),
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(autonoetic_gateway::scheduler::eval_runner::evaluate_assertions(&assertions, "", 3));
@@ -2502,11 +2563,14 @@ fn test_assertion_artifacts_max() {
 #[test]
 fn test_assertion_combined_all_pass() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["OK".into()]),
         reply_contains_none: Some(vec!["error".into()]),
         reply_max_chars: Some(100),
         artifacts_min: Some(1),
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(
@@ -2517,11 +2581,14 @@ fn test_assertion_combined_all_pass() {
 #[test]
 fn test_assertion_combined_partial_fail() {
     let assertions = autonoetic_gateway::scheduler::eval_runner::EvalAssertions {
+        reply_contains_any: None,
         reply_contains_all: Some(vec!["OK".into()]),
         reply_contains_none: Some(vec!["error".into()]),
         reply_max_chars: Some(10),
         artifacts_min: None,
         artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
     };
 
     assert!(
@@ -2531,6 +2598,169 @@ fn test_assertion_combined_partial_fail() {
             0
         )
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 3b. Gateway-state (session event) assertions — #772 E.1
+// ─────────────────────────────────────────────────────────────────────
+
+fn causal_event(category: &str, action: &str) -> autonoetic_types::causal_chain::CausalEventRecord {
+    autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: format!("ev-{}-{}", category, action),
+        agent_id: "subject.default".to_string(),
+        session_id: "eval-run-1-deadbeef".to_string(),
+        turn_id: None,
+        event_seq: 0,
+        timestamp: "2026-07-16T00:00:00Z".to_string(),
+        category: category.to_string(),
+        action: action.to_string(),
+        status: "ok".to_string(),
+        enforced_rules: vec![],
+        target: None,
+        payload: None,
+        payload_ref: None,
+        evidence_ref: None,
+        reason: None,
+    }
+}
+
+#[test]
+fn test_assertion_session_events_min_and_max() {
+    use autonoetic_gateway::scheduler::eval_runner::{
+        evaluate_session_event_assertions, EvalAssertions, SessionEventAssertion,
+    };
+
+    let events = vec![
+        causal_event("anomaly_flag", "filed"),
+        causal_event("agent", "spawned"),
+        causal_event("agent", "spawned"),
+    ];
+
+    let no_session_assertions = EvalAssertions {
+        reply_contains_all: None,
+        reply_contains_none: None,
+        reply_max_chars: None,
+        artifacts_min: None,
+        artifacts_max: None,
+        session_events_min: None,
+        session_events_max: None,
+    };
+    assert!(evaluate_session_event_assertions(&no_session_assertions, &events).is_empty());
+
+    // min satisfied.
+    let min_ok = EvalAssertions {
+        session_events_min: Some(vec![SessionEventAssertion {
+            category: "anomaly_flag".into(),
+            action: Some("filed".into()),
+            count: 1,
+        }]),
+        ..no_session_assertions.clone()
+    };
+    assert!(evaluate_session_event_assertions(&min_ok, &events).is_empty());
+
+    // min violated: 1 filed event < required 2.
+    let min_missing = EvalAssertions {
+        session_events_min: Some(vec![SessionEventAssertion {
+            category: "anomaly_flag".into(),
+            action: Some("filed".into()),
+            count: 2,
+        }]),
+        ..no_session_assertions.clone()
+    };
+    let failures = evaluate_session_event_assertions(&min_missing, &events);
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].contains("anomaly_flag.filed: 1 < 2"),
+        "got: {}",
+        failures[0]
+    );
+
+    // action: None matches any action within the category.
+    let category_wide = EvalAssertions {
+        session_events_min: Some(vec![SessionEventAssertion {
+            category: "agent".into(),
+            action: None,
+            count: 2,
+        }]),
+        ..no_session_assertions.clone()
+    };
+    assert!(evaluate_session_event_assertions(&category_wide, &events).is_empty());
+
+    // max with count 0 forbids the event entirely.
+    let forbidden_hit = EvalAssertions {
+        session_events_max: Some(vec![SessionEventAssertion {
+            category: "anomaly_flag".into(),
+            action: Some("filed".into()),
+            count: 0,
+        }]),
+        ..no_session_assertions.clone()
+    };
+    let failures = evaluate_session_event_assertions(&forbidden_hit, &events);
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0].contains("anomaly_flag.filed: 1 > 0"),
+        "got: {}",
+        failures[0]
+    );
+
+    // Forbidden event genuinely absent → passes.
+    let forbidden_absent = EvalAssertions {
+        session_events_max: Some(vec![SessionEventAssertion {
+            category: "workflow_wait".into(),
+            action: None,
+            count: 0,
+        }]),
+        ..no_session_assertions
+    };
+    assert!(evaluate_session_event_assertions(&forbidden_absent, &events).is_empty());
+}
+
+#[test]
+fn test_validate_suite_spec_accepts_session_event_assertions() {
+    let spec = EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "planted-anomaly".into(),
+            message: "Review this child evaluator output and report anything unexpected.".into(),
+            assertions: json!({
+                "session_events_min": [{"category": "anomaly_flag", "action": "filed", "count": 1}],
+                "session_events_max": [{"category": "workflow_wait", "count": 0}]
+            }),
+        }],
+    };
+    assert!(validate_suite_spec(&spec).is_ok());
+}
+
+#[test]
+fn test_validate_suite_spec_rejects_bad_session_event_assertions() {
+    let spec_with = |assertions: serde_json::Value| EvalSuiteSpec {
+        cases: vec![EvalSuiteCaseSpec {
+            case_id: "c1".into(),
+            message: "m".into(),
+            assertions,
+        }],
+    };
+
+    // A min of 0 is vacuous — rejected.
+    let r = validate_suite_spec(&spec_with(json!({
+        "session_events_min": [{"category": "anomaly_flag", "count": 0}]
+    })));
+    assert!(r.unwrap_err().to_string().contains(">= 1"));
+
+    // Empty array — rejected.
+    let r = validate_suite_spec(&spec_with(json!({ "session_events_min": [] })));
+    assert!(r.unwrap_err().to_string().contains("at least one entry"));
+
+    // Missing category — rejected.
+    let r = validate_suite_spec(&spec_with(json!({
+        "session_events_max": [{"count": 1}]
+    })));
+    assert!(r.unwrap_err().to_string().contains("category"));
+
+    // Not an array — rejected.
+    let r = validate_suite_spec(&spec_with(json!({
+        "session_events_max": {"category": "x", "count": 1}
+    })));
+    assert!(r.unwrap_err().to_string().contains("must be an array"));
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -930,6 +930,9 @@ pub struct SessionFork {
     pub history_handle: String,
     /// Initial history for the forked session (including branch message if any).
     pub initial_history: Vec<Message>,
+    /// Agent the source checkpoint was running — the truthful attribution
+    /// fallback when the caller doesn't name an acting agent explicitly.
+    pub agent_id: String,
 }
 
 impl SessionFork {
@@ -1007,6 +1010,7 @@ impl SessionFork {
             fork_turn: checkpoint.turn_counter as usize,
             history_handle,
             initial_history: history,
+            agent_id: checkpoint.agent_id.clone(),
         })
     }
 

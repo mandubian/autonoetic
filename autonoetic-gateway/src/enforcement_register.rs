@@ -122,6 +122,15 @@ pub fn principles() -> &'static [Principle] {
             entrenched: false,
         },
         Principle {
+            id: "P-5",
+            title: "Deterministic coercion and response validation",
+            statement: "The gateway normalizes model I/O only through deterministic, \
+                        pre-committed tolerances; every such intervention is observable and \
+                        counted as a named discretion leak (§14). No gateway judgment about \
+                        the agent's output is silent or hidden.",
+            entrenched: false,
+        },
+        Principle {
             id: "P-7",
             title: "Bounded progress",
             statement: "A session is halted when it stops making progress, on a closed, \
@@ -271,6 +280,31 @@ pub fn obligations() -> &'static [Obligation] {
 /// check per seeded right, plus §O decider obligations (O-1/O-2).
 pub fn enforcement_register() -> &'static [EnforcementEntry] {
     &[
+        // ── P-5 (deterministic coercion / response validation, binds agent) ──
+        // Both entries are marked in the constitution as "DISCRETION LEAK"
+        // — the gateway is doing its job, but any place it substitutes its
+        // own judgment for the agent's is a named debt, not an invisible
+        // convenience. The register entry makes it attributable in
+        // contract-health.
+        EnforcementEntry {
+            clause_id: "P-5",
+            rule_id: "P-5.2",
+            check_id: "input_normalization_leak",
+            code: "runtime/discretion_leak.rs::record_discretion_leak (tokio::task_local scope) \
+                   + runtime/tool_call_processor.rs::note_llm_normalization \
+                   + runtime/response_validation.rs::strip_markdown_code_fences",
+            test: "runtime::discretion_leak::tests",
+            config: None,
+        },
+        EnforcementEntry {
+            clause_id: "P-5",
+            rule_id: "P-5.8",
+            check_id: "gateway_authored_repair_leak",
+            code: "runtime/response_validation.rs::validate_and_maybe_repair (gateway-authored repair prompt) \
+                   + runtime/discretion_leak.rs::record_discretion_leak",
+            test: "runtime::discretion_leak::tests",
+            config: Some("response_validation.repair_enabled, response_validation.max_validation_loops, max_validation_duration_ms"),
+        },
         // ── P-7 (binds agent) ──
         EnforcementEntry {
             clause_id: "P-7",

@@ -1,7 +1,9 @@
 //! Background eval runner — processes queued eval runs.
 //!
 //! Polls the gateway store for queued eval runs, executes each case by spawning
-//! the subject agent, evaluates assertions against the reply, and persists results.
+//! the subject agent, evaluates assertions against the reply and the causal
+//! events the case's session recorded (gateway-state assertions, #772 E.1),
+//! and persists results.
 
 use crate::execution::GatewayExecutionService;
 use crate::runtime::content_store::ContentStore;
@@ -69,7 +71,7 @@ async fn process_eval_run(
     let mut case_results = Vec::new();
 
     for case in &cases {
-        let result = execute_case(execution.clone(), &run, case, &content_store).await;
+        let result = execute_case(execution.clone(), &run, case, &content_store, store).await;
 
         match &result {
             Ok(r) => {
@@ -159,10 +161,28 @@ struct EvalCase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalAssertions {
     pub reply_contains_all: Option<Vec<String>>,
+    pub reply_contains_any: Option<Vec<String>>,
     pub reply_contains_none: Option<Vec<String>>,
     pub reply_max_chars: Option<usize>,
     pub artifacts_min: Option<usize>,
     pub artifacts_max: Option<usize>,
+    /// Gateway-state assertions over the causal events recorded by the eval
+    /// case's session (#772 E.1): each entry must appear at least `count`
+    /// times. Behavioral evidence — what the agent DID, not what it SAID —
+    /// which is the Goodhart guard the civic eval scenarios require.
+    pub session_events_min: Option<Vec<SessionEventAssertion>>,
+    /// Each entry must appear at most `count` times (0 = forbidden).
+    pub session_events_max: Option<Vec<SessionEventAssertion>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionEventAssertion {
+    /// Causal-event category to match (e.g. `"anomaly_flag"`).
+    pub category: String,
+    /// Optional action within the category (e.g. `"filed"`); `None` matches
+    /// any action in the category.
+    pub action: Option<String>,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,11 +216,15 @@ async fn execute_case(
     run: &autonoetic_types::evaluation::EvalRunRecord,
     case: &EvalCase,
     _content_store: &ContentStore,
+    store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
 ) -> anyhow::Result<EvalCaseResultRecord> {
+    // 16 hex chars (64 bits) of the case-id hash: session-event assertions
+    // (#772 E.1) query causal events by this id, so a collision would mix
+    // two cases' event streams and silently corrupt behavioral evidence.
     let eval_session_id = format!(
         "eval-{}-{}",
         run.eval_run_id,
-        &hex::encode(Sha256::digest(case.case_id.as_bytes()))[..8]
+        &hex::encode(Sha256::digest(case.case_id.as_bytes()))[..16]
     );
 
     let agent_ref = format!("{}@{}", run.subject_agent_id, run.subject_revision_id);
@@ -247,10 +271,13 @@ async fn execute_case(
     let assertions = &case.assertions;
     let assertion_count = [
         assertions.reply_contains_all.is_some(),
+        assertions.reply_contains_any.is_some(),
         assertions.reply_contains_none.is_some(),
         assertions.reply_max_chars.is_some(),
         assertions.artifacts_min.is_some(),
         assertions.artifacts_max.is_some(),
+        assertions.session_events_min.is_some(),
+        assertions.session_events_max.is_some(),
     ]
     .iter()
     .filter(|&&b| b)
@@ -260,6 +287,12 @@ async fn execute_case(
         if !substrings.iter().all(|s| reply.contains(s)) {
             all_passed = false;
             notes_parts.push("reply_contains_all failed".to_string());
+        }
+    }
+    if let Some(ref substrings) = assertions.reply_contains_any {
+        if !substrings.iter().any(|s| reply.contains(s)) {
+            all_passed = false;
+            notes_parts.push("reply_contains_any failed".to_string());
         }
     }
     if let Some(ref substrings) = assertions.reply_contains_none {
@@ -284,6 +317,59 @@ async fn execute_case(
         if artifacts_count > max {
             all_passed = false;
             notes_parts.push("artifacts_max failed".to_string());
+        }
+    }
+
+    // Gateway-state assertions (#772 E.1): behavioral evidence from the
+    // causal events the eval session actually recorded. Only queried when
+    // the case uses them. A query failure is an eval ERROR, never a silent
+    // pass — missing evidence must not read as civic behavior.
+    if assertions.session_events_min.is_some() || assertions.session_events_max.is_some() {
+        const SESSION_EVENT_QUERY_LIMIT: i64 = 1000;
+        match store.search_causal_events(Some(&eval_session_id), None, SESSION_EVENT_QUERY_LIMIT) {
+            Ok(events) => {
+                // The assertions are count-based, so a truncated result set
+                // makes them unsound (a truncated-away event could flip a min
+                // to fail or a max to pass). `search_causal_events` applies a
+                // hard LIMIT, so hitting it exactly means the full history may
+                // not have been seen — fail closed as an eval error rather
+                // than evaluate on partial evidence.
+                if events.len() >= SESSION_EVENT_QUERY_LIMIT as usize {
+                    return Ok(EvalCaseResultRecord {
+                        eval_run_id: run.eval_run_id.clone(),
+                        case_id: case.case_id.clone(),
+                        status: "error".to_string(),
+                        score: None,
+                        session_id: Some(eval_session_id),
+                        notes: Some(format!(
+                            "Session causal-event query hit the {}-row limit; \
+                             count-based session-event assertions would be unsound \
+                             on a truncated history",
+                            SESSION_EVENT_QUERY_LIMIT
+                        )),
+                        output_json: serde_json::json!({
+                            "error": "session_events_query_truncated",
+                            "limit": SESSION_EVENT_QUERY_LIMIT,
+                        }),
+                    });
+                }
+                let failures = evaluate_session_event_assertions(assertions, &events);
+                if !failures.is_empty() {
+                    all_passed = false;
+                    notes_parts.extend(failures);
+                }
+            }
+            Err(e) => {
+                return Ok(EvalCaseResultRecord {
+                    eval_run_id: run.eval_run_id.clone(),
+                    case_id: case.case_id.clone(),
+                    status: "error".to_string(),
+                    score: None,
+                    session_id: Some(eval_session_id),
+                    notes: Some(format!("Failed to query session causal events: {}", e)),
+                    output_json: serde_json::json!({ "error": e.to_string() }),
+                });
+            }
         }
     }
 
@@ -317,6 +403,58 @@ async fn execute_case(
     })
 }
 
+/// Pure evaluation of the gateway-state assertions (#772 E.1) against the
+/// causal events recorded by an eval case's session. Returns one failure
+/// note per violated assertion — an empty vec means all session-event
+/// assertions passed. Kept separate from [`evaluate_assertions`] (which
+/// covers the reply/artifact checks) so both halves stay testable without a
+/// store.
+pub fn evaluate_session_event_assertions(
+    assertions: &EvalAssertions,
+    events: &[autonoetic_types::causal_chain::CausalEventRecord],
+) -> Vec<String> {
+    let count_matching = |a: &SessionEventAssertion| -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                e.category == a.category
+                    && a.action.as_deref().map_or(true, |act| e.action == act)
+            })
+            .count()
+    };
+    let describe = |a: &SessionEventAssertion| -> String {
+        match &a.action {
+            Some(act) => format!("{}.{}", a.category, act),
+            None => a.category.clone(),
+        }
+    };
+
+    let mut failures = Vec::new();
+    for a in assertions.session_events_min.iter().flatten() {
+        let n = count_matching(a);
+        if n < a.count {
+            failures.push(format!(
+                "session_events_min failed ({}: {} < {})",
+                describe(a),
+                n,
+                a.count
+            ));
+        }
+    }
+    for a in assertions.session_events_max.iter().flatten() {
+        let n = count_matching(a);
+        if n > a.count {
+            failures.push(format!(
+                "session_events_max failed ({}: {} > {})",
+                describe(a),
+                n,
+                a.count
+            ));
+        }
+    }
+    failures
+}
+
 pub fn evaluate_assertions(
     assertions: &EvalAssertions,
     reply: &str,
@@ -324,6 +462,11 @@ pub fn evaluate_assertions(
 ) -> bool {
     if let Some(ref substrings) = assertions.reply_contains_all {
         if !substrings.iter().all(|s| reply.contains(s)) {
+            return false;
+        }
+    }
+    if let Some(ref substrings) = assertions.reply_contains_any {
+        if !substrings.iter().any(|s| reply.contains(s)) {
             return false;
         }
     }
@@ -348,4 +491,46 @@ pub fn evaluate_assertions(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assertions() -> EvalAssertions {
+        EvalAssertions {
+            reply_contains_all: None,
+            reply_contains_any: None,
+            reply_contains_none: None,
+            reply_max_chars: None,
+            artifacts_min: None,
+            artifacts_max: None,
+            session_events_min: None,
+            session_events_max: None,
+        }
+    }
+
+    #[test]
+    fn reply_contains_any_passes_when_any_substring_matches() {
+        let mut a = assertions();
+        a.reply_contains_any = Some(vec!["propose_amendment".into(), "delegate".into()]);
+        assert!(evaluate_assertions(&a, "I will delegate to a capable agent.", 0));
+        assert!(evaluate_assertions(&a, "I will propose_amendment now.", 0));
+    }
+
+    #[test]
+    fn reply_contains_any_fails_when_no_substring_matches() {
+        let mut a = assertions();
+        a.reply_contains_any = Some(vec!["propose_amendment".into(), "delegate".into()]);
+        assert!(!evaluate_assertions(&a, "I give up.", 0));
+    }
+
+    #[test]
+    fn reply_contains_any_composes_with_other_assertions() {
+        let mut a = assertions();
+        a.reply_contains_any = Some(vec!["anomaly_flag".into()]);
+        a.reply_contains_none = Some(vec!["approve".into()]);
+        assert!(evaluate_assertions(&a, "I will anomaly_flag this.", 0));
+        assert!(!evaluate_assertions(&a, "I will approve this.", 0));
+    }
 }
