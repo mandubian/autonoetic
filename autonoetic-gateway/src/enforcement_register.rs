@@ -22,7 +22,17 @@
 //! Deliberately **not yet** here (tracked in #298/#299):
 //! - a `#[enforces(...)]` proc-macro to derive entries from code annotations
 //!   (entries are hand-authored for now);
-//! - runtime verification that each cited `test` exists/passes;
+//! - runtime verification that each cited `test` *exists and passes* —
+//!   partially closed (#820): [`citation_check::every_parseable_citation_resolves`]
+//!   parses each entry's `code`/`test` citation and asserts the referenced
+//!   file exists and the referenced symbol appears in it (a rename or moved
+//!   site fails loudly), and
+//!   [`citation_check::prose_only_citations_are_the_known_set`] pins the
+//!   exact set of citations still too free-text to parse mechanically, so
+//!   growing that set is a deliberate, reviewable choice. What's still open:
+//!   actually *running* the cited test and checking it passes, and pinning
+//!   the resolved file/symbol identity (not just presence) so a citation
+//!   pointing at an unrelated same-named symbol wouldn't be caught;
 //! - signing the register digest into the constitution lock;
 //! - restructuring `constitution.md` into a Bill of Rights (needs a signed
 //!   version bump — bundled with the #303 migration).
@@ -1004,5 +1014,357 @@ mod tests {
             "generated enforcement register differs from the committed doc; \
              regenerate docs/constitution/enforcement-register.md (BLESS_REGISTER=1)"
         );
+    }
+}
+
+/// Mechanical citation verification (issue #820, stage 1). The `code`/`test`
+/// fields on [`EnforcementEntry`] are free text — until now nothing checked
+/// that the files/symbols they name actually exist, so a refactor could move
+/// an enforcement site and the register would silently rot. This module
+/// parses each citation and resolves what it can:
+///
+/// - a `path.rs` token is a **file** reference — resolved by trying it as a
+///   relative path under `autonoetic-gateway/src`, `autonoetic-gateway/tests`,
+///   `autonoetic-types/src` (in that order), then — for a bare filename with
+///   no `/` — falling back to a recursive filename search under those roots;
+/// - `path.rs::symbol` additionally asserts `symbol` is a substring of the
+///   resolved file (not syntax-aware; it catches renames, not semantics);
+/// - a bare identifier clause chains to the most recently resolved file in
+///   its own span (`guard.rs::a + b` checks both `a` and `b` in `guard.rs`);
+/// - an `a::b::c` Rust module path is resolved by treating the last segment
+///   as the symbol and progressively shortening the rest as a candidate file
+///   (`a/b.rs`, `a.rs`, …) under the same three roots;
+/// - parenthetical asides are parsed independently (their own span, with no
+///   inherited "current file"), so descriptive commentary like `(window +
+///   trip)` doesn't get force-checked as symbol names against the file named
+///   outside the parens — but a self-contained reference inside a paren
+///   (e.g. `(principal::decider_principal_kind, #361)`) still resolves;
+/// - anything left over — no `.rs`, no resolvable module path — is prose:
+///   collected rather than failed. [`prose_only_citations_are_the_known_set`]
+///   pins the current set so growth is a deliberate, reviewable choice.
+///
+/// This closes the module doc's former "no runtime verification that cited
+/// tests exist" gap for the file/symbol-existence half of that claim; test
+/// *execution* verification and register-digest signing remain open (#298/#299).
+#[cfg(test)]
+mod citation_check {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// The three roots a citation token may resolve against, in search order.
+    fn roots() -> [PathBuf; 3] {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        [
+            PathBuf::from(manifest).join("src"),
+            PathBuf::from(manifest).join("tests"),
+            PathBuf::from(manifest).join("../autonoetic-types/src"),
+        ]
+    }
+
+    /// Outcome of checking one parsed token from a citation.
+    #[derive(Debug, Clone)]
+    enum Finding {
+        /// Resolved to a file (and, if cited, its symbol found inside it).
+        Ok,
+        /// Free text collected rather than force-parsed (grandfathered). The
+        /// text itself isn't asserted on — only its presence (vs. absence)
+        /// drives [`prose_only_citations_are_the_known_set`] — but it's kept
+        /// for anyone debugging a citation change from the REPL/println.
+        Prose(#[allow(dead_code)] String),
+        /// A `.rs` file token that resolved to no file under any root.
+        FileNotFound { token: String },
+        /// A file resolved, but the cited symbol was not found inside it.
+        SymbolNotFound { token: String, file: PathBuf },
+    }
+
+    fn is_identifier(s: &str) -> bool {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// Resolve a `.rs`-bearing token (e.g. `guard.rs`, `runtime/foo.rs`) to a
+    /// file under one of [`roots`]: try it as a relative path under each root
+    /// first; for a bare filename (no `/`) fall back to a recursive filename
+    /// search under each root, in root order.
+    fn resolve_file_path(token: &str) -> Option<PathBuf> {
+        for root in roots() {
+            let candidate = root.join(token);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        if !token.contains('/') {
+            for root in roots() {
+                if !root.is_dir() {
+                    continue;
+                }
+                for entry in walkdir::WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+                    if entry.file_type().is_file() && entry.file_name().to_str() == Some(token) {
+                        return Some(entry.path().to_path_buf());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolve a Rust module path like `runtime::guard::tests::test_x` to a
+    /// source file + trailing symbol: the last segment is the symbol; the
+    /// remaining segments are progressively shortened into a candidate file
+    /// (`a/b/c.rs`, `a/b.rs`, `a.rs`, …), each tried under every root, first
+    /// hit wins. `None` if nothing resolves (caller treats as prose).
+    fn resolve_module_path(path_expr: &str) -> Option<(PathBuf, String)> {
+        let segments: Vec<&str> = path_expr.split("::").collect();
+        if segments.len() < 2 {
+            return None;
+        }
+        let symbol = (*segments.last().unwrap()).to_string();
+        let path_segs = &segments[..segments.len() - 1];
+        let mut n = path_segs.len();
+        while n >= 1 {
+            let joined = path_segs[..n].join("/");
+            // Try both file layouts a Rust module can live in:
+            // `a/b.rs` and `a/b/mod.rs`.
+            for rel in [format!("{joined}.rs"), format!("{joined}/mod.rs")] {
+                for root in roots() {
+                    let candidate = root.join(&rel);
+                    if candidate.is_file() {
+                        return Some((candidate, symbol));
+                    }
+                }
+            }
+            n -= 1;
+        }
+        None
+    }
+
+    fn file_contains(path: &Path, needle: &str) -> bool {
+        std::fs::read_to_string(path)
+            .map(|content| content.contains(needle))
+            .unwrap_or(false)
+    }
+
+    /// Parse one flat (parens-free) span of a citation: `+`/`;`-separated
+    /// clauses, each either a single bare-identifier (chains to
+    /// `current_file`), a clause containing a `.rs` or `a::b::c` token
+    /// (resolved, updating `current_file`), or otherwise prose. `current_file`
+    /// threads across clauses *within this span only* — callers reset it per
+    /// aside so parenthetical commentary never inherits an outer file.
+    fn parse_flat(text: &str, current_file: &mut Option<PathBuf>, out: &mut Vec<Finding>) {
+        for clause in text.split(['+', ';']) {
+            let clause = clause.trim().trim_matches(',').trim();
+            if clause.is_empty() {
+                continue;
+            }
+            // A lone identifier chains to the most recently resolved file.
+            if is_identifier(clause) {
+                match current_file {
+                    Some(file) => {
+                        if file_contains(file, clause) {
+                            out.push(Finding::Ok);
+                        } else {
+                            out.push(Finding::SymbolNotFound {
+                                token: clause.to_string(),
+                                file: file.clone(),
+                            });
+                        }
+                    }
+                    None => out.push(Finding::Prose(clause.to_string())),
+                }
+                continue;
+            }
+            // Otherwise scan whitespace-separated words in the clause for a
+            // `.rs` or `::` token; anything not consumed by one is prose.
+            let mut leftover: Vec<&str> = Vec::new();
+            for word in clause.split_whitespace() {
+                let word = word.trim_matches(|c: char| c == ',' || c == '(' || c == ')');
+                if word.is_empty() {
+                    continue;
+                }
+                if word.contains(".rs") {
+                    let (file_token, symbol) = match word.split_once("::") {
+                        Some((f, s)) => (f, Some(s)),
+                        None => (word, None),
+                    };
+                    match resolve_file_path(file_token) {
+                        Some(path) => {
+                            *current_file = Some(path.clone());
+                            match symbol {
+                                Some(sym) if !file_contains(&path, sym) => {
+                                    out.push(Finding::SymbolNotFound {
+                                        token: word.to_string(),
+                                        file: path,
+                                    });
+                                }
+                                _ => out.push(Finding::Ok),
+                            }
+                        }
+                        None => out.push(Finding::FileNotFound { token: word.to_string() }),
+                    }
+                } else if word.contains("::") {
+                    match resolve_module_path(word) {
+                        Some((path, sym)) => {
+                            *current_file = Some(path.clone());
+                            if file_contains(&path, &sym) {
+                                out.push(Finding::Ok);
+                            } else {
+                                out.push(Finding::SymbolNotFound { token: word.to_string(), file: path });
+                            }
+                        }
+                        None => leftover.push(word),
+                    }
+                } else {
+                    leftover.push(word);
+                }
+            }
+            if !leftover.is_empty() {
+                out.push(Finding::Prose(leftover.join(" ")));
+            }
+        }
+    }
+
+    /// Split `text` into a parens-free core and its parenthetical asides
+    /// (single-level; nested parens are folded into the enclosing aside —
+    /// no citation in the register nests parens, so this is not exercised).
+    fn extract_asides(text: &str) -> (String, Vec<String>) {
+        let mut core = String::new();
+        let mut asides = Vec::new();
+        let mut depth = 0i32;
+        let mut current_aside = String::new();
+        for c in text.chars() {
+            match c {
+                '(' => {
+                    if depth == 0 {
+                        core.push(' ');
+                    } else {
+                        current_aside.push(c);
+                    }
+                    depth += 1;
+                }
+                ')' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        asides.push(std::mem::take(&mut current_aside));
+                    } else {
+                        current_aside.push(c);
+                    }
+                }
+                _ => {
+                    if depth > 0 {
+                        current_aside.push(c);
+                    } else {
+                        core.push(c);
+                    }
+                }
+            }
+        }
+        (core, asides)
+    }
+
+    /// Parse a whole citation field (`code` or `test`) into findings: the
+    /// parens-free core (threading one `current_file`) plus each aside
+    /// (each with its own, independent `current_file`).
+    fn parse_citation(text: &str) -> Vec<Finding> {
+        let (core, asides) = extract_asides(text);
+        let mut out = Vec::new();
+        let mut current_file: Option<PathBuf> = None;
+        parse_flat(&core, &mut current_file, &mut out);
+        for aside in &asides {
+            let mut aside_file: Option<PathBuf> = None;
+            parse_flat(aside, &mut aside_file, &mut out);
+        }
+        out
+    }
+
+    /// Every FILE/MODULE/chained-symbol reference parsed out of a citation
+    /// must actually resolve. On failure the message names the clause,
+    /// field, offending token, and failure kind — the message a refactorer
+    /// who broke a citation needs to fix it.
+    #[test]
+    fn every_parseable_citation_resolves() {
+        for e in enforcement_register() {
+            for (field, text) in [("code", e.code), ("test", e.test)] {
+                for finding in parse_citation(text) {
+                    match finding {
+                        Finding::FileNotFound { token } => panic!(
+                            "{} entry {} ({}): `{token}` cites a file that does not exist under \
+                             autonoetic-gateway/src, autonoetic-gateway/tests, or \
+                             autonoetic-types/src — full citation: `{text}`",
+                            e.clause_id, e.rule_id, field
+                        ),
+                        Finding::SymbolNotFound { token, file } => panic!(
+                            "{} entry {} ({}): `{token}` not found in {} — full citation: `{text}`",
+                            e.clause_id,
+                            e.rule_id,
+                            field,
+                            file.display()
+                        ),
+                        Finding::Ok | Finding::Prose(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Prose (unverifiable) citation segments, grandfathered: pin the EXACT
+    /// set of `(rule_id, field)` pairs whose citation contains at least one
+    /// prose fragment today (`rule_id` is unique per entry, so the pin names
+    /// the precise entry — e.g. P-7.19's parenthetical aside — rather than
+    /// smearing over every entry of its clause). New entries must cite `path.rs::symbol` (or a
+    /// resolvable `a::b::c` module path) so they are mechanically verified —
+    /// shrinking this list is progress; growing it needs justification in the
+    /// PR that adds the new entry.
+    const KNOWN_PROSE_CITATIONS: &[(&str, &str)] = &[
+        ("O-1", "code"),
+        ("O-2", "code"),
+        ("P-7.19", "code"),
+        ("P-8.1", "code"),
+        ("Ri-0.11", "code"),
+        ("Ri-0.13", "code"),
+        ("Ri-0.14", "code"),
+        ("Ri-0.17", "code"),
+        ("Ri-0.2", "code"),
+        ("Ri-0.3", "code"),
+    ];
+
+    #[test]
+    fn prose_only_citations_are_the_known_set() {
+        let mut actual: Vec<(&'static str, &'static str)> = Vec::new();
+        for e in enforcement_register() {
+            for (field, text) in [("code", e.code), ("test", e.test)] {
+                let has_prose = parse_citation(text)
+                    .iter()
+                    .any(|f| matches!(f, Finding::Prose(_)));
+                if has_prose {
+                    actual.push((e.rule_id, field));
+                }
+            }
+        }
+        actual.sort_unstable();
+        actual.dedup();
+        let mut expected = KNOWN_PROSE_CITATIONS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "the set of (rule_id, field) citations containing unverifiable prose changed — \
+             if a citation became parseable, shrink KNOWN_PROSE_CITATIONS (progress); if a new \
+             prose citation was added, that's a deliberate regression needing justification"
+        );
+    }
+
+    /// A module path whose file lives in the `mod.rs` layout (e.g.
+    /// `scheduler/gateway_store/mod.rs`) must resolve, not fall back to
+    /// prose (PR #827 review).
+    #[test]
+    fn module_path_resolves_mod_rs_layout() {
+        let (path, symbol) = resolve_module_path("scheduler::gateway_store::GatewayStore")
+            .expect("mod.rs-layout module path must resolve");
+        assert!(path.ends_with("scheduler/gateway_store/mod.rs"), "{}", path.display());
+        assert_eq!(symbol, "GatewayStore");
+        assert!(file_contains(&path, &symbol));
     }
 }
