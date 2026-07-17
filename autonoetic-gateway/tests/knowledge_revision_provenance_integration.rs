@@ -294,6 +294,8 @@ fn test_session_binding_tags_knowledge_store_write() {
             agent_id: agent_id.to_string(),
             revision_id: revision_id.to_string(),
             runtime_lock_hash: "sha256:test".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
             home_node_id: "gateway".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             requested_target: agent_id.to_string(),

@@ -617,6 +617,8 @@ async fn test_existing_binding_does_not_contaminate_other_agent_lock() -> anyhow
         agent_id: agent_a.to_string(),
         revision_id: agent_a_rev,
         runtime_lock_hash: "sha256:seed-lock".to_string(),
+        constitution_version: None,
+        constitution_digest: None,
         home_node_id: "test-node".to_string(),
         created_at: chrono::Utc::now().to_rfc3339(),
         requested_target: agent_a.to_string(),

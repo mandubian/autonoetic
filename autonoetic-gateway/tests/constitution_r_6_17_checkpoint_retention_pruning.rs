@@ -34,6 +34,8 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: None,
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason: YieldReason::Hibernation,

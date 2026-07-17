@@ -588,6 +588,8 @@ Universal execution snapshots saved at every yield point for crash recovery and 
   "agent_id": "coder.default",
   "workflow_id": "wf-abc",
   "runtime_lock_hash": "sha256:...",
+  "constitution_version": "2026.06.05",
+  "constitution_digest": "sha256:...",
   "llm_config_snapshot": {...},
   "tool_registry_version": "...",
   "content_store_refs": [...],

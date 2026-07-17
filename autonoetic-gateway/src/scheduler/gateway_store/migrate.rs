@@ -4,7 +4,10 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 68;
+// #821 uses version 70 (not 69, reserved by a parallel PR #826) — each
+// `apply_*_vNN` guards on its own version independently (see
+// `apply_session_constitution_pin_v70`), so the gap is safe.
+const SCHEMA_VERSION_LATEST: i64 = 70;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -553,6 +556,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_anomaly_flags_v66(conn)?;
     apply_adjudication_sla_v67(conn)?;
     apply_revision_requested_by_v68(conn)?;
+    apply_session_constitution_pin_v70(conn)?;
 
     Ok(())
 }
@@ -3152,6 +3156,54 @@ fn apply_revision_requested_by_v68(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
+/// #821 — pins the constitution (version + digest) that admitted a session
+/// on `session_agent_bindings`, mirroring the `runtime_lock_hash` pin
+/// already stored there. Nullable: sessions bound before this migration (or
+/// started when the constitution runtime was never initialized) have no
+/// recorded pin.
+///
+/// Uses version 70, not 69 — 69 is reserved by a parallel PR (#826). Each
+/// `apply_*_vNN` guards on its own version independently, so the gap is
+/// harmless: this function only runs once `current < 70`, regardless of
+/// whether a v69 migration has landed yet.
+fn apply_session_constitution_pin_v70(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 70 {
+        return Ok(());
+    }
+
+    // Guard each ADD COLUMN independently (mirrors the v68 pragma_table_info
+    // idiom above) so a partial application (crash between the two ALTERs,
+    // before the schema_migrations insert) is recovered on restart instead
+    // of failing with a duplicate-column error.
+    for col in ["constitution_version", "constitution_digest"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_agent_bindings') WHERE name = ?1",
+            params![col],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE session_agent_bindings ADD COLUMN {col} TEXT;"
+            ))?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            70_i64,
+            "session_constitution_pin",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3173,6 +3225,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cols, 2);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// #821 — v70 adds constitution_version/constitution_digest columns to
+    /// session_agent_bindings and is recorded in schema_migrations. Running
+    /// migrate twice must be a no-op (idempotent), and a legacy row (as if
+    /// inserted before the columns existed) reads back `NULL`/`None`.
+    #[test]
+    fn v70_adds_session_agent_bindings_constitution_pin_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_agent_bindings')
+                 WHERE name IN ('constitution_version', 'constitution_digest')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 2);
+
+        conn.execute(
+            "INSERT INTO session_agent_bindings (
+                session_id, root_session_id, alias_id, agent_id, revision_id,
+                runtime_lock_hash, home_node_id, created_at, requested_target
+            ) VALUES ('sess-legacy', 'sess-legacy', NULL, 'agent.default', 'rev-1',
+                      'sha256:lock', 'gateway-1', '2024-01-01T00:00:00Z', 'agent.default')",
+            [],
+        )
+        .unwrap();
+
+        let (version, digest): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT constitution_version, constitution_digest
+                 FROM session_agent_bindings WHERE session_id = 'sess-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, None);
+        assert_eq!(digest, None);
 
         let version: i64 = conn
             .query_row(

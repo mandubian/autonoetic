@@ -64,6 +64,8 @@ fn seed_binding(store: &GatewayStore, session_id: &str) {
             agent_id: "planner.default".to_string(),
             revision_id: "rev_seed".to_string(),
             runtime_lock_hash: "sha256:seed".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
             home_node_id: "gateway".to_string(),
             created_at: "2026-06-15T00:00:00Z".to_string(),
             requested_target: "planner.default".to_string(),

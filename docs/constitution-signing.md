@@ -112,3 +112,18 @@ When the gateway bootstraps constitution artifacts to `.gateway`:
 
 This guarantees the runtime-local lock is signed by the exact gateway identity
 running that node.
+
+## Session-Level Pinning (#821)
+
+The lock above is process-global: it pins the constitution one gateway runs.
+Individual sessions did not record which constitution *admitted* them, so a
+session resumed across an amendment could silently run under new law without
+anyone noticing. Each session now pins `(constitution_version,
+constitution_digest)` at session start — mirroring how `runtime_lock_hash` is
+pinned per session — stored on its `SessionCheckpoint` and
+`SessionAgentBinding`. At resume, the gateway compares the session's pin
+against the running gateway's active constitution; on a mismatch it emits a
+`constitution_drift` causal event and injects a one-paragraph notice into the
+agent's next system prompt (Ri-0.5), then adopts the new pin. Unlike
+`runtime_lock` drift, constitution drift never blocks the session — see
+`autonoetic-gateway/src/runtime/lifecycle.rs::detect_constitution_drift`.

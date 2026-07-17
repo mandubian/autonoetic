@@ -275,6 +275,12 @@ pub struct SessionAgentBinding {
     pub revision_id: String,
     /// Pinned runtime closure hash.
     pub runtime_lock_hash: String,
+    /// Constitution version that admitted this session (#821), captured at
+    /// session start from the gateway's active constitution. `None` when
+    /// the constitution runtime was never initialized (e.g. some tests).
+    pub constitution_version: Option<String>,
+    /// Constitution digest paired with `constitution_version` above.
+    pub constitution_digest: Option<String>,
     /// Home node for future distributed placement.
     pub home_node_id: String,
     /// RFC3339 creation timestamp.
@@ -596,6 +602,8 @@ mod tests {
             agent_id: "planner.default".to_string(),
             revision_id: "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
             runtime_lock_hash: "sha256:lock123".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
             home_node_id: "gateway-1".to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             requested_target: "planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
