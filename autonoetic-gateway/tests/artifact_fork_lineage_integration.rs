@@ -47,7 +47,7 @@ fn forked_session_resolves_parent_session_scoped_ref() -> anyhow::Result<()> {
     assert!(unresolved.is_none(), "ref should not resolve before lineage is recorded");
 
     // Record fork lineage.
-    store.record_fork_lineage(fork_session, parent_session)?;
+    store.record_fork_lineage(fork_session, parent_session, 0, None, "test-agent")?;
 
     // Now the fork resolves the parent's ref.
     let resolved = store
@@ -78,7 +78,7 @@ fn forked_session_resolves_parent_ref_via_root() -> anyhow::Result<()> {
     let fork_root = "fork-xyz";
     let child = "fork-xyz/T5";
 
-    store.record_fork_lineage(fork_root, parent_root)?;
+    store.record_fork_lineage(fork_root, parent_root, 0, None, "test-agent")?;
 
     // The child resolves through its own root (fork-xyz) which has no ref,
     // then walks the fork lineage to sess-root.
@@ -105,11 +105,11 @@ fn fork_of_fork_resolves_grandparent_ref() -> anyhow::Result<()> {
 
     // fork1 → grandparent
     let fork1 = "fork-level1";
-    store.record_fork_lineage(fork1, grandparent)?;
+    store.record_fork_lineage(fork1, grandparent, 0, None, "test-agent")?;
 
     // fork2 → fork1 (fork of a fork)
     let fork2 = "fork-level2";
-    store.record_fork_lineage(fork2, fork1)?;
+    store.record_fork_lineage(fork2, fork1, 0, None, "test-agent")?;
 
     // fork2 walks fork1 → grandparent to find the ref.
     let resolved = store
@@ -135,7 +135,7 @@ fn fork_does_not_resolve_unrelated_session_ref() -> anyhow::Result<()> {
     ))?;
 
     let fork = "fork-orphan";
-    store.record_fork_lineage(fork, parent)?;
+    store.record_fork_lineage(fork, parent, 0, None, "test-agent")?;
 
     // The fork's lineage is parent (sess-real-parent), not stranger.
     let unresolved = store.resolve_artifact_ref_any_scope("ar.stranger", fork)?;
@@ -158,7 +158,7 @@ fn find_active_ref_for_artifact_walks_fork_lineage() -> anyhow::Result<()> {
     ))?;
 
     let fork = "fork-find";
-    store.record_fork_lineage(fork, parent)?;
+    store.record_fork_lineage(fork, parent, 0, None, "test-agent")?;
 
     // find_active_ref_for_artifact should find ar.find1 via fork lineage.
     let found = store
@@ -185,7 +185,7 @@ fn expired_parent_ref_not_resolved_from_fork() -> anyhow::Result<()> {
     store.create_artifact_ref(&record)?;
 
     let fork = "fork-exp";
-    store.record_fork_lineage(fork, parent)?;
+    store.record_fork_lineage(fork, parent, 0, None, "test-agent")?;
 
     let unresolved = store.resolve_artifact_ref_any_scope("ar.expired1", fork)?;
     assert!(unresolved.is_none(), "expired parent ref must not resolve from fork");
@@ -295,7 +295,7 @@ fn forked_session_resolves_parent_workflow_scoped_ref() -> anyhow::Result<()> {
 
     // Fork from the parent.
     let fork = "fork-wf-test";
-    store.record_fork_lineage(fork, parent)?;
+    store.record_fork_lineage(fork, parent, 0, None, "test-agent")?;
 
     // The fork resolves the parent's workflow-scoped ref via lineage.
     let resolved = store
@@ -326,7 +326,7 @@ fn find_active_ref_walks_fork_lineage_for_workflow_scope() -> anyhow::Result<()>
     ))?;
 
     let fork = "fork-find-wf";
-    store.record_fork_lineage(fork, parent)?;
+    store.record_fork_lineage(fork, parent, 0, None, "test-agent")?;
 
     let found = store
         .find_active_ref_for_artifact("art_findwf", fork)?

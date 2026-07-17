@@ -505,6 +505,8 @@ mod tests {
             reply_max_chars: None,
             artifacts_min: None,
             artifacts_max: None,
+            session_events_min: None,
+            session_events_max: None,
         }
     }
 

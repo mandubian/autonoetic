@@ -10,6 +10,8 @@ pub mod constitutional_proposals;
 mod credentials;
 mod escalations;
 mod evaluations;
+mod fork_lineage;
+pub use fork_lineage::ForkLineageRecord;
 mod gate_messages;
 mod hook_deliveries;
 mod improvement_cycles;

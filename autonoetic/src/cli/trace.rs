@@ -1695,16 +1695,18 @@ pub async fn handle_trace_fork(
         )?
     };
 
-    // Mirror the source timeline into the fork (best effort) so the Session Room
-    // shows the inherited history immediately rather than an empty timeline.
+    // Record every fork side effect (timeline mirror, lineage row, both
+    // causal events) through the same choke point `session.fork` (RPC) uses,
+    // so a CLI fork is indistinguishable from an RPC fork: its parent
+    // artifact refs resolve and it shows up in `trace fork-tree` (#814). Best
+    // effort — the fork itself already succeeded (checkpoint written).
     let gateway_dir = config.agents_dir.join(".gateway");
     if let Ok(store) = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir) {
-        if let Err(e) = store.clone_timeline_for_fork(
-            &fork.source_session_id,
-            &fork.new_session_id,
-            fork.fork_turn as u64,
-        ) {
-            eprintln!("warning: could not mirror source timeline into fork: {e}");
+        // Attribution fallback: the agent the source checkpoint was running
+        // (a session id is not an agent, so never fall back to that).
+        let fork_agent_id = agent_id.unwrap_or(&fork.agent_id);
+        if let Err(e) = store.record_session_fork(&fork, branch_message, fork_agent_id) {
+            eprintln!("warning: could not record session fork lineage: {e}");
         }
     }
 
@@ -1767,6 +1769,171 @@ pub async fn handle_trace_fork(
                 "at_turn": at_turn,
             }))?
         );
+    }
+
+    Ok(())
+}
+
+/// A descendant fork, together with the sessions forked FROM it, recursively.
+struct ForkTreeNode {
+    record: autonoetic_gateway::scheduler::gateway_store::ForkLineageRecord,
+    children: Vec<ForkTreeNode>,
+}
+
+/// Recursively collect the sessions forked FROM `session_id`. Mirrors the
+/// guards `fork_ancestor_roots` uses internally for the ancestor walk: a
+/// max depth of 16 and a visited set, so a cyclical or malformed lineage
+/// table can't hang the CLI.
+fn collect_fork_descendants(
+    store: &autonoetic_gateway::scheduler::GatewayStore,
+    session_id: &str,
+    depth: usize,
+    visited: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<ForkTreeNode>> {
+    if depth >= 16 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for record in store.list_fork_children(session_id)? {
+        if !visited.insert(record.forked_session_id.clone()) {
+            continue; // cycle guard
+        }
+        let children = collect_fork_descendants(store, &record.forked_session_id, depth + 1, visited)?;
+        out.push(ForkTreeNode { record, children });
+    }
+    Ok(out)
+}
+
+fn fork_lineage_record_json(
+    r: &autonoetic_gateway::scheduler::gateway_store::ForkLineageRecord,
+) -> serde_json::Value {
+    serde_json::json!({
+        "forked_session_id": r.forked_session_id,
+        "source_session_id": r.source_session_id,
+        "fork_turn": r.fork_turn,
+        "branch_message_sha256": r.branch_message_sha256,
+        "agent_id": r.agent_id,
+        "created_at": r.created_at,
+    })
+}
+
+fn fork_tree_node_json(n: &ForkTreeNode) -> serde_json::Value {
+    let mut v = fork_lineage_record_json(&n.record);
+    v["children"] = serde_json::Value::Array(n.children.iter().map(fork_tree_node_json).collect());
+    v
+}
+
+fn print_fork_tree(nodes: &[ForkTreeNode], depth: usize) {
+    for n in nodes {
+        let turn = n
+            .record
+            .fork_turn
+            .map(|t| format!(" @turn {t}"))
+            .unwrap_or_default();
+        println!(
+            "  {}{}{}{}{}  (created {})",
+            "  ".repeat(depth),
+            color::DIM,
+            n.record.forked_session_id,
+            color::RESET,
+            turn,
+            n.record.created_at
+        );
+        print_fork_tree(&n.children, depth + 1);
+    }
+}
+
+/// Handle `autonoetic trace fork-tree` command: show a session's ancestor
+/// chain (if it was itself a fork) and the tree of sessions forked FROM it.
+pub fn handle_trace_fork_tree(
+    config_path: &Path,
+    session_id: &str,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+
+    let root_id =
+        autonoetic_gateway::runtime::content_store::root_session_id(session_id).to_string();
+
+    // Ancestor walk, nearest-first: immediate parent, grandparent, ... capped
+    // at depth 16 with a visited set (same guards as `fork_ancestor_roots`).
+    let mut ancestors = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut cursor = root_id.clone();
+    for _ in 0..16 {
+        let Some(record) = store.get_fork_lineage(&cursor)? else {
+            break;
+        };
+        if !visited.insert(record.forked_session_id.clone()) {
+            break; // cycle guard
+        }
+        // Advance by the source's ROOT: the lineage table is keyed by root
+        // ids, and legacy rows may have recorded a nested source id.
+        let next = autonoetic_gateway::runtime::content_store::root_session_id(
+            &record.source_session_id,
+        )
+        .to_string();
+        ancestors.push(record);
+        cursor = next;
+    }
+
+    let mut descendant_visited = std::collections::HashSet::new();
+    descendant_visited.insert(root_id.clone());
+    let descendants = collect_fork_descendants(&store, &root_id, 0, &mut descendant_visited)?;
+
+    if json_output {
+        let body = serde_json::json!({
+            "session_id": root_id,
+            "ancestors": ancestors.iter().map(fork_lineage_record_json).collect::<Vec<_>>(),
+            "descendants": descendants.iter().map(fork_tree_node_json).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    println!(
+        "{}Fork lineage{} for {}",
+        color::BOLD,
+        color::RESET,
+        color::agent(&root_id)
+    );
+    println!();
+
+    if ancestors.is_empty() {
+        println!("  (root session — not itself a fork)");
+    } else {
+        // Print oldest-first: the topmost ancestor, then each descendant of
+        // it down to `root_id` (the target, which is `ancestors[0]`'s
+        // forked_session_id).
+        let apex = &ancestors.last().unwrap().source_session_id;
+        println!("  {}", apex);
+        for a in ancestors.iter().rev() {
+            let turn = a
+                .fork_turn
+                .map(|t| format!(" @turn {t}"))
+                .unwrap_or_default();
+            println!(
+                "    -> {}{}{}  (created {})",
+                color::agent(&a.forked_session_id),
+                turn,
+                if a.branch_message_sha256.is_some() {
+                    " (branch message)"
+                } else {
+                    ""
+                },
+                a.created_at
+            );
+        }
+    }
+
+    println!();
+    if descendants.is_empty() {
+        println!("  No sessions have been forked from this one.");
+    } else {
+        println!("  Descendants:");
+        print_fork_tree(&descendants, 0);
     }
 
     Ok(())
