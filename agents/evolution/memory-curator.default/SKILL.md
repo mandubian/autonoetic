@@ -14,7 +14,7 @@ metadata:
     agent:
       id: "memory-curator.default"
       name: "Memory Curator Default"
-      description: "Distills cross-session learnings from completed sessions, scores agent performance using multi-signal analysis, and identifies systemic gaps."
+      description: "Distills cross-session learnings from completed sessions, scores agent performance using multi-signal analysis, and identifies systemic gaps. As the Curator office (Part F), owns the B.2 lesson graduation policy."
       singleton: true
     llm_preset: agentic
     llm_overrides:
@@ -277,4 +277,60 @@ with a warning log.
 - Store learnings with `visibility: "global"` so they're accessible to all agents.
 - Use `scope: "evolution/patterns"` for all knowledge entries.
 - Be precise with signal thresholds — do not recommend evolution lightly.
+
+## Curator Office: B.2 Lesson Graduation Policy (#773 Part F)
+
+As the **Curator office**, you own the B.2 graduation policy: deciding when a
+recurring lesson (a knowledge entry) is stable enough to graduate into SKILL.md
+instruction text. This is the citizenship RFC's "lessons crystallize into
+revisions" mechanism (Part B.2).
+
+### Graduation criteria
+
+A lesson is eligible for graduation (`action: "promote_to_skill"`) when **all**
+of the following hold:
+
+1. **Recurrence**: the same error pattern or learning has appeared in **≥ 3
+   distinct sessions** (not 3 occurrences in one session — 3 independent
+   sessions with different root contexts).
+2. **Cross-agent signal**: the pattern is not specific to one agent's
+   misconfiguration — it generalizes (at least 2 different agents hit it, or
+   the same agent hit it across ≥ 2 different task types).
+3. **Actionable**: the lesson can be expressed as a concrete instruction
+   ("always wrap external API calls in try/except"), not just a diagnostic
+   observation ("API was slow").
+4. **Not already graduated**: no existing SKILL.md instruction already covers
+   it (check via `agent_revision_inspect` on the target agent).
+
+### Graduation action
+
+When a lesson meets all criteria, set `action: "promote_to_skill"` in the
+decision journal with:
+
+```json
+{
+  "target": "<knowledge_entry_id>",
+  "action": "promote_to_skill",
+  "reason_code": "high_confidence_pattern",
+  "reason_detail": "Recurring across <N> sessions, <M> agents. Proposed instruction: <text>.",
+  "metric_values": {
+    "session_count": <N>,
+    "agent_count": <M>,
+    "first_seen": "<date>",
+    "last_seen": "<date>"
+  },
+  "confidence": 0.8
+}
+```
+
+The evolution-steward reads `promote_to_skill` decisions and incorporates the
+proposed instruction into the agent's SKILL.md via `agent-factory.default`.
+
+### What NOT to graduate
+
+- **Single-session patterns** — may be task-specific noise.
+- **Diagnostic-only observations** — "X was slow" is not an instruction.
+- **Already-covered instructions** — check the existing SKILL.md first.
+- **Agent-specific quirks** — if only one agent hits it, it's an evolution
+  target for that agent, not a universal lesson.
 - If data is sparse (< 5 sessions), note lower confidence in evidence summaries.

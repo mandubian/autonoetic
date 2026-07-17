@@ -27,7 +27,7 @@
 > | E.1 civic eval suites | **SHIPPED** |
 > | E.2 `trace civic-health` | **SHIPPED** |
 > | E.3 promotion gating on civic scores | **SHIPPED** (advisory; binding thresholds deferred) |
-> | F. institutional offices (ombudsman / steward / curator) | Not started |
+> | F. institutional offices (ombudsman / steward / curator) | **SHIPPED** |
 
 ---
 
@@ -284,24 +284,29 @@ carries a `civic_eval_advisory` field surfacing the latest `civic-core-v1`
 run (status, summary, eval_run_id) or a `not_run` notice. Binding thresholds
 will be added only after the suites prove stable.
 
-## Part F — Offices, not universal virtue
+## Part F — Offices, not universal virtue — **SHIPPED**
 
 Most citizens are civically passive; functioning polities carry the active
 load through institutions. Same here: every agent gets only the cheap reflex
 layer (Parts A–C); the active civic labor runs in **scheduled institutional
 sessions** (the scheduler and `BackgroundReevaluation` already exist):
 
-- **Ombudsman** — works the anomaly-flag queue, chases O-6/SLA breaches,
-  notifies proposers of outcomes.
+- **Ombudsman** (`ombudsman.default`) — works the anomaly-flag queue, chases
+  O-7 SLA breaches, and files adjudication recommendations as admin proposals
+  for the operator. Scheduled every 2 hours via `system_agents`.
 - **Steward** (extends `evolution-steward.default`) — reads contract health +
-  civic health + the leak register; drafts amendments from D.2 invitations
-  and the D.3 agenda (with `code-issue-proposer.default` as the drafting
-  hand).
-- **Curator** (extends `memory-curator.default`) — owns B.2 graduation policy.
+  civic health + the DISCRETION LEAK register; drafts amendments from D.2
+  invitations and the D.3 agenda by delegating to `governance-author.default`.
+- **Curator** (extends `memory-curator.default`) — owns B.2 graduation policy:
+  decides when a recurring lesson (≥ 3 distinct sessions, ≥ 2 agents) is
+  stable enough to graduate into SKILL.md instruction text.
 
 Each office is a *seat* with duties attached — occupiable by an agent or a
 human, per RFC #359 Part A — and its actions land on the causal chain like
-anyone else's.
+anyone else's. Offices are **advisory first**: the ombudsman recommends
+(but does not enact) adjudication; the steward drafts (but does not enact)
+amendments; the curator flags (but does not enact) graduation. The operator
+remains the sovereignty backstop.
 
 ---
 
