@@ -770,6 +770,10 @@ context_compression:
 #     schedule: "0 */4 * * *"
 #     message: "Run evolution analysis cycle"
 #     enabled: true
+#   - agent_id: ombudsman.default
+#     schedule: "0 */2 * * *"
+#     message: "Ombudsman sweep: review anomaly-flag queue"
+#     enabled: true
 
 # ── Protected Agents (issue #21) ───────────────────────────────────────
 # Critical agents whose promotion requires eval-run evidence.
