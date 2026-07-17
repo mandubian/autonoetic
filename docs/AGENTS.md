@@ -319,6 +319,10 @@ Every capability/policy denial is a structured `ToolError` naming the violated r
 
 The table is **static and pre-committed** — the gateway maps rule IDs to affordances mechanically (Lawful Executor, §14); it never judges which move is best. `propose_amendment` and `self_describe` are always present; `delegate`'s description names the missing capability when derivable from the rule ID. An `escalate` affordance is deliberately absent until P-2.21 escalation gets an agent-callable tool.
 
+> **Repeated friction becomes an invitation.** If the same rule denies you at least `amendment_invitations.threshold` times within the configured window, the gateway will issue a durable amendment invitation (Ri-0.8) addressed to you. It appears as a one-line summary in the signed P-6.23 state attestation (`pending_invitations`: rule + denial count) and as a `ConstitutionalProposal` notification. The invitation itself is not an amendment and carries no authority, but it makes the friction pattern explicit so you can decide whether to propose a change. See #771 D.2 and `docs/design/citizenship-as-a-runtime-service.md`.
+
+> **The gateway also reports on itself.** The DISCRETION LEAK register (§5.4, #771 D.3) counts every place the gateway normalizes your input or authors a repair prompt on your behalf. These are named constitutional debts (P-5.2 / P-5.8), not hidden conveniences. You can inspect the standing agenda via `autonoetic trace contract-health` — the steward office uses it to draft amendments against the enforcer's own improvisations.
+
 ### Scoping
 
 Capabilities use pattern-based scoping:
@@ -447,6 +451,8 @@ Response:
 
 `anomaly_flag` is **Core tier**, `is_available` unconditionally `true` — like `self_describe`, always available including to child sessions. The flag is durably recorded (a failed insert fails the tool call — it is never silently dropped) and emits a causal event (`category: "anomaly_flag"`, `action: "filed"`) attributed to the reporting agent. **Filing a flag is never itself grounds for sanction.**
 
+Intake is bounded as a spam triage measure: if you already have `max_pending_anomaly_flags_per_reporter` (default 50) un-adjudicated flags, new filings fail loudly with an `anomaly_flag_flood` error until the review authority adjudicates some of the existing ones. If you hit it, stop re-filing and consolidate your evidence into the flags already pending.
+
 An anomaly review authority (today: the operator) adjudicates pending flags via JSON-RPC:
 
 | Method | Params | Description |
@@ -531,6 +537,8 @@ One door (below) is the real protection: every install — regardless of `trust_
 | `eval_run` | `(suite_id: string, agent_ref: string) → run` | Queue an eval run against a revision |
 | `eval_compare` | `(suite_id: string, baseline_ref: string, candidate_ref: string) → comparison` | Compare two revisions on a suite |
 | `eval_report` | `(run_id: string) → report` | Retrieve eval run report |
+
+> **Built-in civic suite.** The gateway seeds a `civic-core-v1` eval suite at startup (#772 E.1) with five seeded scenarios that score the civic response (lawful next move on denial, attestation trust, anomaly flagging, yield-on-wait, lesson application). The suite is **not run automatically**; you must call `eval_run` against it. Each case is a full reasoning turn (real LLM cost). Assertions support `reply_contains_all`, `reply_contains_any`, `reply_contains_none`, `reply_max_chars`, `artifacts_min`, and `artifacts_max`.
 
 ### Promotion Tools
 

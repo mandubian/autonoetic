@@ -501,6 +501,7 @@ pub fn handle_trace_contract_health(
     let registered_count = autonoetic_gateway::enforcement_register::principles().len()
         + autonoetic_gateway::enforcement_register::rights().len()
         + autonoetic_gateway::enforcement_register::obligations().len();
+    let leak_summary = store.discretion_leak_summary(since)?;
 
     if json_output {
         let body = serde_json::json!({
@@ -517,6 +518,13 @@ pub fn handle_trace_contract_health(
             "unattributed": health.unattributed,
             "dead_clauses": dead,
             "registered_clause_count": registered_count,
+            "discretion_leaks": leak_summary.iter().map(|t| {
+                serde_json::json!({
+                    "rule_id": t.rule_id,
+                    "kind": t.kind,
+                    "count": t.count,
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
@@ -608,6 +616,49 @@ pub fn handle_trace_contract_health(
             color::RESET
         );
     }
+
+    // #771 D.3: "Top leaks this window" — the standing agenda the steward
+    // office drafts amendments against.
+    println!();
+    if leak_summary.is_empty() {
+        println!(
+            "{}No discretion leaks recorded (the gateway did not exercise judgment reserved to the agent).{}",
+            color::DIM,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}Top discretion leaks{} {} — gateway judgment reserved to the agent or pre-committed law:",
+            color::BOLD,
+            color::RESET,
+            match since {
+                Some(ts) => color::dim(&format!("(since {ts})")),
+                None => color::dim("(all retained events)"),
+            }
+        );
+        println!(
+            "{}{:<10} {:<30} {:<8}{}{}",
+            color::DIM,
+            color::BOLD,
+            "RULE",
+            "KIND",
+            "COUNT",
+            color::RESET,
+        );
+        println!("{}", color::separator(72));
+        for t in &leak_summary {
+            println!(
+                "{}{:<10}{} {:<30} {}{:<8}{}",
+                color::BRIGHT_YELLOW,
+                t.rule_id,
+                color::RESET,
+                t.kind,
+                color::BRIGHT_YELLOW,
+                t.count,
+                color::RESET,
+            );
+        }
+    }
     Ok(())
 }
 
@@ -637,6 +688,9 @@ pub fn handle_trace_civic_health(
                     "proposals_pending": e.proposals_pending,
                     "flags_filed": e.flags_filed,
                     "flags_pending": e.flags_pending,
+                    "invitations_issued": e.invitations_issued,
+                    "invitations_open": e.invitations_open,
+                    "invitations_answered": e.invitations_answered,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -663,18 +717,19 @@ pub fn handle_trace_civic_health(
         );
     } else {
         println!(
-            "{}{}{:<28} {:<20} {}{}",
+            "{}{}{:<28} {:<20} {:<20} {}{}",
             color::DIM,
             color::BOLD,
             "AGENT",
             "PROPOSALS(pending)",
             "FLAGS(pending)",
+            "INVITATIONS(open/answered)",
             color::RESET
         );
         println!("{}", color::separator(72));
         for e in &health.by_agent {
             println!(
-                "{}{:<28}{} {} ({} pending)   {} ({} pending)",
+                "{}{:<28}{} {} ({} pending)   {} ({} pending)   {} ({} / {} answered)",
                 color::BRIGHT_CYAN,
                 e.agent_id,
                 color::RESET,
@@ -682,13 +737,16 @@ pub fn handle_trace_civic_health(
                 e.proposals_pending,
                 e.flags_filed,
                 e.flags_pending,
+                e.invitations_issued,
+                e.invitations_open,
+                e.invitations_answered,
             );
         }
     }
 
     println!();
     println!(
-        "{}Precision-of-adjudication and invitation-response metrics are not yet tracked here (RFC E.1/E.3, D.2).{}",
+        "{}Precision-of-adjudication metrics are not yet tracked here (RFC E.1/E.3).{}",
         color::DIM,
         color::RESET
     );

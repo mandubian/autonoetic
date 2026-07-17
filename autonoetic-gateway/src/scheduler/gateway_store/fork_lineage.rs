@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 /// A row of `session_fork_lineage`. The enrichment columns (`fork_turn`,
 /// `branch_message_sha256`, `agent_id`) are `None` for rows written before
-/// #814 (migration v69) or via the causal-event backfill, which doesn't have
+/// #814 (migration v70) or via the causal-event backfill, which doesn't have
 /// this information available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkLineageRecord {
@@ -127,7 +127,7 @@ impl GatewayStore {
     /// lineage table existed. Returns the number of rows inserted.
     ///
     /// The enrichment columns (`fork_turn`, `branch_message_sha256`,
-    /// `agent_id`) added by v69 are left `NULL`: that information isn't
+    /// `agent_id`) added by v70 are left `NULL`: that information isn't
     /// reliably recoverable from the causal event alone (payload shape
     /// varies across gateway versions).
     pub fn backfill_fork_lineage_from_causal_events(&self) -> Result<usize> {
@@ -552,7 +552,7 @@ mod tests {
         Ok(())
     }
 
-    /// #814 (c): a legacy-shape row (written before v69, enrichment columns
+    /// #814 (c): a legacy-shape row (written before v70, enrichment columns
     /// NULL) is read back correctly as `None`s.
     #[test]
     fn get_fork_lineage_reads_legacy_row_as_none() -> Result<()> {

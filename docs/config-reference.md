@@ -33,6 +33,7 @@ Fields marked **required** must be present or the gateway will fail to start.
 | `max_pending_spawns_per_agent` | usize | `4` | Maximum pending executions admitted per target agent (includes the currently running execution). |
 | `max_spawn_depth` | u32 | `8` | System-wide ceiling for spawn-chain depth (P-7.15). Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins. |
 | `max_pending_approvals_per_root` | usize | `50` | Maximum concurrent pending approvals per root session. When a new request would push the count above this cap, the request is rejected with `approval_flood`. Set to `0` to disable (not recommended). Controls the P-7.17 approval flood cap. |
+| `max_pending_anomaly_flags_per_reporter` | usize | `50` | Maximum concurrent un-adjudicated anomaly flags (`pending`/`under_review`) per reporter agent — the Ri-0.18 spam triage bound (#770). A filing beyond the cap is rejected loudly with `anomaly_flag_flood` (never silently dropped) and an operator notification is emitted once per flood window. Terminal adjudications (confirmed/dismissed/deferred) free capacity. Set to `0` to disable (not recommended). |
 | `continuation_key` | string | `null` | HMAC-SHA256 key for signing turn continuation files. When unset, the gateway derives a deterministic key from `node_id` (development convenience only). Production deployments should set this to a high-entropy secret. Rotate by changing the value — existing continuations will fail integrity verification and be rejected. |
 | `approval_timeout_secs` | u64 | `600` | Maximum seconds a workflow task can remain in `AwaitingApproval` before auto-failing. `0` disables (not recommended for production). |
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
@@ -843,12 +844,23 @@ A decision is BLOCKING when made by a *principal* (operator / agent — mechanic
 | `decider_obligations.enabled` | bool | `true` | Require a motivation for BLOCKING-tier decisions. `false` disables enforcement (decisions may be recorded without a reason). |
 | `decider_obligations.adjudication_sla_secs` | u64 | `604800` | Adjudication SLA (#771 D.1): a constitutional proposal (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is stamped `sla_breached_at` and a causal event + notification are emitted. The item's status is unchanged — the decision is still owed. `0` disables the check. |
 
+### Amendment Invitations
+
+Mechanical civic invitation from repeated friction (#771 D.2). When the same rule is denied to the same agent alias at least `threshold` times within `window_secs`, the gateway issues a durable invitation to draft an amendment (Ri-0.8). The gateway executes a pre-committed threshold and never judges the rule (Lawful Executor). An invitation is not an amendment and carries no authority; it is surfaced in the agent's signed turn attestation as a one-line summary (rule + denial count) and as a `ConstitutionalProposal` notification. Open invitations expire after `window_secs` elapses.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `amendment_invitations.enabled` | bool | `true` | Master switch for the invitation tick. `false` disables issuance entirely. |
+| `amendment_invitations.threshold` | u64 | `3` | Number of denials of the same rule for the same agent alias within `window_secs` that triggers an invitation. `0` disables issuance. |
+| `amendment_invitations.window_secs` | u64 | `604800` | Telemetry window in seconds. An open invitation also expires after this window elapses without an answer. `0` disables issuance. |
+
 Example:
 
 ```yaml
-decider_obligations:
+amendment_invitations:
   enabled: true
-  adjudication_sla_secs: 604800
+  threshold: 3
+  window_secs: 604800
 ```
 
 ---
@@ -1180,6 +1192,7 @@ max_pending_spawns_per_agent: 4
 max_spawn_depth: 8
 approval_timeout_secs: 600
 max_pending_approvals_per_root: 50
+max_pending_anomaly_flags_per_reporter: 50
 # continuation_key: "set-me-in-production-from-a-secret-source"
 workflow_task_heartbeat_secs: 2
 stuck_task_timeout_secs: 600

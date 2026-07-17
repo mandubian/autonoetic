@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 69;
+const SCHEMA_VERSION_LATEST: i64 = 70;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -553,7 +553,8 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_anomaly_flags_v66(conn)?;
     apply_adjudication_sla_v67(conn)?;
     apply_revision_requested_by_v68(conn)?;
-    apply_fork_lineage_enrichment_v69(conn)?;
+    apply_amendment_invitations_v69(conn)?;
+    apply_fork_lineage_enrichment_v70(conn)?;
 
     Ok(())
 }
@@ -3153,18 +3154,70 @@ fn apply_revision_requested_by_v68(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// #814 — enrich `session_fork_lineage` (added by v54) with the turn a fork
-/// branched from, the branch message's digest, and the acting agent, so a
-/// `session.fork` (RPC) and `trace fork` (CLI) side effect can be unified into
-/// one choke point (`GatewayStore::record_session_fork`) that writes the same
-/// enriched row regardless of caller.
-fn apply_fork_lineage_enrichment_v69(conn: &mut Connection) -> Result<()> {
+/// #771 D.2 — mechanical amendment invitations from denial telemetry. When
+/// the same rule is denied to the same agent alias at least
+/// `amendment_invitations.threshold` times within `window_secs`, the gateway
+/// issues a durable invitation to draft an amendment (Ri-0.8). The gateway
+/// never judges the rule — it executes a pre-committed threshold (Lawful
+/// Executor). The partial unique index makes issuance race-safe: at most one
+/// OPEN invitation per (agent_id, rule_id) even under concurrent scheduler
+/// ticks, mirroring the stamp-once idiom of `flag_*_sla_breaches` (v67).
+fn apply_amendment_invitations_v69(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
         [],
         |row| row.get(0),
     )?;
     if current >= 69 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS amendment_invitations (
+            invitation_id        TEXT PRIMARY KEY,
+            agent_id             TEXT NOT NULL,
+            rule_id              TEXT NOT NULL,
+            denial_count         INTEGER NOT NULL,
+            threshold            INTEGER NOT NULL,
+            window_secs          INTEGER NOT NULL,
+            status               TEXT NOT NULL DEFAULT 'open',
+            answered_proposal_id TEXT,
+            created_at           TEXT NOT NULL,
+            resolved_at          TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_amendment_invitations_open
+          ON amendment_invitations(agent_id, rule_id) WHERE status = 'open';
+        CREATE INDEX IF NOT EXISTS idx_amendment_invitations_agent
+          ON amendment_invitations(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_amendment_invitations_status
+          ON amendment_invitations(status);
+        CREATE INDEX IF NOT EXISTS idx_amendment_invitations_created_at
+          ON amendment_invitations(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            69_i64,
+            "amendment_invitations",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// #814 — enrich `session_fork_lineage` (added by v54) with the turn a fork
+/// branched from, the branch message's digest, and the acting agent, so a
+/// `session.fork` (RPC) and `trace fork` (CLI) side effect can be unified into
+/// one choke point (`GatewayStore::record_session_fork`) that writes the same
+/// enriched row regardless of caller.
+fn apply_fork_lineage_enrichment_v70(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 70 {
         return Ok(());
     }
 
@@ -3191,7 +3244,7 @@ fn apply_fork_lineage_enrichment_v69(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![
-            69_i64,
+            70_i64,
             "fork_lineage_enrichment",
             chrono::Utc::now().to_rfc3339()
         ],
@@ -3231,11 +3284,48 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION_LATEST);
     }
 
-    /// #814 — v69 adds fork_turn/branch_message_sha256/agent_id to
+    /// #771 D.2 — v69 creates amendment_invitations with the race-safe
+    /// partial unique index on OPEN (agent_id, rule_id). Migrate twice = no-op.
+    #[test]
+    fn v69_creates_amendment_invitations_with_open_dedup_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'amendment_invitations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1);
+
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_amendment_invitations_open'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// #814 — v70 adds fork_turn/branch_message_sha256/agent_id to
     /// session_fork_lineage (nullable) and is recorded in schema_migrations.
     /// Running migrate twice must be a no-op.
     #[test]
-    fn v69_adds_fork_lineage_enrichment_columns() {
+    fn v70_adds_fork_lineage_enrichment_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
