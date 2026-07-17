@@ -1092,11 +1092,15 @@ mod citation_check {
         let path_segs = &segments[..segments.len() - 1];
         let mut n = path_segs.len();
         while n >= 1 {
-            let rel = format!("{}.rs", path_segs[..n].join("/"));
-            for root in roots() {
-                let candidate = root.join(&rel);
-                if candidate.is_file() {
-                    return Some((candidate, symbol));
+            let joined = path_segs[..n].join("/");
+            // Try both file layouts a Rust module can live in:
+            // `a/b.rs` and `a/b/mod.rs`.
+            for rel in [format!("{joined}.rs"), format!("{joined}/mod.rs")] {
+                for root in roots() {
+                    let candidate = root.join(&rel);
+                    if candidate.is_file() {
+                        return Some((candidate, symbol));
+                    }
                 }
             }
             n -= 1;
@@ -1316,5 +1320,17 @@ mod citation_check {
              if a citation became parseable, shrink KNOWN_PROSE_CITATIONS (progress); if a new \
              prose citation was added, that's a deliberate regression needing justification"
         );
+    }
+
+    /// A module path whose file lives in the `mod.rs` layout (e.g.
+    /// `scheduler/gateway_store/mod.rs`) must resolve, not fall back to
+    /// prose (PR #827 review).
+    #[test]
+    fn module_path_resolves_mod_rs_layout() {
+        let (path, symbol) = resolve_module_path("scheduler::gateway_store::GatewayStore")
+            .expect("mod.rs-layout module path must resolve");
+        assert!(path.ends_with("scheduler/gateway_store/mod.rs"), "{}", path.display());
+        assert_eq!(symbol, "GatewayStore");
+        assert!(file_contains(&path, &symbol));
     }
 }
