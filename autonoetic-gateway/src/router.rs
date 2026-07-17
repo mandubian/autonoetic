@@ -2965,10 +2965,13 @@ impl JsonRpcRouter {
                     }
                 };
 
-                // Determine target agent
+                // Determine the acting agent for lineage/causal attribution:
+                // an explicit target_agent_id, else the agent the source
+                // checkpoint was running (NOT the source session id — a
+                // session id is not an agent).
                 let target_agent_id = params
                     .target_agent_id
-                    .unwrap_or_else(|| params.source_session_id.clone());
+                    .unwrap_or_else(|| fork.agent_id.clone());
 
                 // Single choke point for every fork side effect (timeline
                 // mirror, lineage row, both causal events) — shared with

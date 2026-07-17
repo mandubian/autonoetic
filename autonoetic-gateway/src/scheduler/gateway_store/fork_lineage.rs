@@ -173,8 +173,11 @@ impl GatewayStore {
             if !visited.insert(source_root.clone()) {
                 break; // cycle guard
             }
-            ancestors.push(source_root);
-            cursor = source;
+            ancestors.push(source_root.clone());
+            // Advance by the ROOT, not the raw source: the table is keyed by
+            // root ids, so a legacy row whose source was recorded as a nested
+            // id ("root/T5") would otherwise dead-end the walk one hop early.
+            cursor = source_root;
         }
         ancestors
     }
@@ -209,6 +212,16 @@ impl GatewayStore {
         branch_message: Option<&str>,
         agent_id: &str,
     ) -> Result<usize> {
+        // Lineage rows, causal events, and children queries are all keyed by
+        // ROOT session ids (that's what `fork_ancestor_roots` and
+        // `list_fork_children` walk), so normalize a nested source
+        // ("root/T5") to its root here. The exact source id is preserved in
+        // the causal payloads as `source_session_id_exact` when it differs.
+        let source_root =
+            crate::runtime::content_store::root_session_id(&fork.source_session_id).to_string();
+        let source_exact = (fork.source_session_id != source_root)
+            .then_some(fork.source_session_id.as_str());
+
         let mirrored_events = match self.clone_timeline_for_fork(
             &fork.source_session_id,
             &fork.new_session_id,
@@ -238,14 +251,15 @@ impl GatewayStore {
         // this table, so a failure here must not be silently swallowed.
         self.record_fork_lineage(
             &fork.new_session_id,
-            &fork.source_session_id,
+            &source_root,
             fork.fork_turn as u64,
             branch_message_sha256.as_deref(),
             agent_id,
         )?;
 
         let forked_payload = serde_json::json!({
-            "source_session_id": fork.source_session_id,
+            "source_session_id": source_root,
+            "source_session_id_exact": source_exact,
             "fork_turn": fork.fork_turn,
             "history_handle": fork.history_handle,
             "branch_message_sha256": branch_message_sha256,
@@ -277,13 +291,17 @@ impl GatewayStore {
 
         let fork_created_payload = serde_json::json!({
             "forked_session_id": fork.new_session_id,
+            "source_session_id_exact": source_exact,
             "fork_turn": fork.fork_turn,
             "branch_message_sha256": branch_message_sha256,
         });
+        // Written under the source's ROOT so the event is visible when
+        // querying the root session's chain, even for forks taken from a
+        // nested child session.
         let fork_created_event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: uuid::Uuid::new_v4().to_string(),
             agent_id: agent_id.to_string(),
-            session_id: fork.source_session_id.clone(),
+            session_id: source_root.clone(),
             turn_id: None,
             event_seq: 0,
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -488,6 +506,48 @@ mod tests {
         let children_of_b = store.list_fork_children("session-b")?;
         assert_eq!(children_of_b.len(), 1);
         assert_eq!(children_of_b[0].forked_session_id, "session-c");
+
+        Ok(())
+    }
+
+    /// #814 review (PR #826): a fork taken from a NESTED source session id is
+    /// normalized to the root for the lineage row and the source-side causal
+    /// event — keeping `list_fork_children`, `fork_ancestor_roots`, and
+    /// `trace fork-tree` root-keyed — while the exact source id is preserved
+    /// in the payload. The attribution fallback is the checkpoint's agent.
+    #[test]
+    fn record_session_fork_normalizes_nested_source_to_root() -> Result<()> {
+        let temp = tempdir()?;
+        let config = test_config(&temp);
+        let store = GatewayStore::open(&temp.path().join(".gateway"))?;
+
+        let cp = test_checkpoint("root-x/child-y", "turn-0003", vec![Message::user("hi")], 3);
+        save_checkpoint(&config, &cp)?;
+        let fork = SessionFork::fork(&config, "root-x/child-y", Some("fork-nested"), None)?;
+        assert_eq!(fork.agent_id, "test-agent", "fork carries the checkpoint's agent");
+        store.record_session_fork(&fork, None, "coder.default")?;
+
+        // Lineage row keyed by the ROOT source.
+        let lineage = store.get_fork_lineage("fork-nested")?.expect("lineage row");
+        assert_eq!(lineage.source_session_id, "root-x");
+        let children = store.list_fork_children("root-x")?;
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].forked_session_id, "fork-nested");
+
+        // fork_created lands on the ROOT chain; exact source kept in payload.
+        let root_events = store.search_causal_events(Some("root-x"), None, 10)?;
+        assert_eq!(root_events.len(), 1);
+        assert_eq!(root_events[0].action, "session.fork_created");
+        let payload: serde_json::Value =
+            serde_json::from_str(root_events[0].payload.as_ref().unwrap())?;
+        assert_eq!(payload["source_session_id_exact"], "root-x/child-y");
+
+        // Child event's source_session_id is the root too (v54-backfill shape).
+        let child_events = store.search_causal_events(Some("fork-nested"), None, 10)?;
+        let payload: serde_json::Value =
+            serde_json::from_str(child_events[0].payload.as_ref().unwrap())?;
+        assert_eq!(payload["source_session_id"], "root-x");
+        assert_eq!(payload["source_session_id_exact"], "root-x/child-y");
 
         Ok(())
     }

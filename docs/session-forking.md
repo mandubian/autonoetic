@@ -118,6 +118,14 @@ fork, keyed by `forked_session_id`, storing `source_session_id`, `fork_turn`,
 `branch_message_sha256` (a digest, not the raw text), `agent_id` (who
 performed the fork), and `created_at`.
 
+Two normalizations happen at write time: `source_session_id` is always the
+source's **root** session id (the table, the children/ancestor walks, and the
+fork-tree surface are all root-keyed; a fork taken from a nested child session
+keeps its exact source in the causal payloads as `source_session_id_exact`),
+and the acting `agent_id` falls back to the agent the source checkpoint was
+running when the caller doesn't name one explicitly — a session id is never
+used as an agent id.
+
 Every fork writes this row plus two causal events, all through a single choke
 point, `GatewayStore::record_session_fork`, used identically by the
 `session.fork` RPC handler and the `trace fork` CLI command (before #814, the

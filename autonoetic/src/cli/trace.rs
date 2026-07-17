@@ -1644,7 +1644,9 @@ pub async fn handle_trace_fork(
     // effort — the fork itself already succeeded (checkpoint written).
     let gateway_dir = config.agents_dir.join(".gateway");
     if let Ok(store) = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir) {
-        let fork_agent_id = agent_id.unwrap_or(source_session_id);
+        // Attribution fallback: the agent the source checkpoint was running
+        // (a session id is not an agent, so never fall back to that).
+        let fork_agent_id = agent_id.unwrap_or(&fork.agent_id);
         if let Err(e) = store.record_session_fork(&fork, branch_message, fork_agent_id) {
             eprintln!("warning: could not record session fork lineage: {e}");
         }
@@ -1809,7 +1811,12 @@ pub fn handle_trace_fork_tree(
         if !visited.insert(record.forked_session_id.clone()) {
             break; // cycle guard
         }
-        let next = record.source_session_id.clone();
+        // Advance by the source's ROOT: the lineage table is keyed by root
+        // ids, and legacy rows may have recorded a nested source id.
+        let next = autonoetic_gateway::runtime::content_store::root_session_id(
+            &record.source_session_id,
+        )
+        .to_string();
         ancestors.push(record);
         cursor = next;
     }
