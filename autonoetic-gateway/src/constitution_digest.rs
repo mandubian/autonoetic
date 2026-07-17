@@ -204,6 +204,21 @@ pub fn constitution_digest() -> Arc<str> {
     runtime_arc().digest.clone()
 }
 
+/// Best-effort `(version, digest)` pair for session-level pinning (#821).
+///
+/// Unlike the strict getters above, this never panics: it returns `None`
+/// when the constitution runtime has not been initialized (common in unit
+/// tests that construct a router/executor without calling
+/// `initialize_constitution`) or if the lock has been poisoned. Callers that
+/// capture a per-session constitution pin should use this instead of the
+/// panicking getters, since a session must be able to start even when no
+/// constitution config is wired up.
+pub fn try_constitution_pin() -> Option<(String, String)> {
+    let guard = RUNTIME.read().ok()?;
+    let rt = guard.as_ref()?;
+    Some((rt.lock.constitution_version.clone(), rt.digest.to_string()))
+}
+
 pub fn canonical_right_enforcement_table() -> BTreeMap<String, String> {
     runtime_arc().rights_enforcement.clone()
 }

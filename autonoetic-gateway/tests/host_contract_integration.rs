@@ -350,6 +350,8 @@ fn grant_drift_emits_causal_event_for_host_outside_contract() {
             agent_id: agent_id.to_string(),
             revision_id: revision_id.clone(),
             runtime_lock_hash: "sha256:lock".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
             home_node_id: "gateway".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             requested_target: agent_id.to_string(),

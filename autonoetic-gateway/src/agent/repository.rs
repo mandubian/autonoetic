@@ -503,6 +503,15 @@ impl AgentRepository {
             Some(ParsedAgentTarget::ExplicitRef { .. }) | None => None,
         };
 
+        // #821: pin the constitution (version + digest) that admitted this
+        // session, mirroring runtime_lock_hash above. `None` when the
+        // constitution runtime was never initialized (e.g. some tests).
+        let (constitution_version, constitution_digest) =
+            match crate::constitution_digest::try_constitution_pin() {
+                Some((version, digest)) => (Some(version), Some(digest)),
+                None => (None, None),
+            };
+
         let binding = SessionAgentBinding {
             session_id: session_id.to_string(),
             root_session_id: root_session_id.to_string(),
@@ -510,6 +519,8 @@ impl AgentRepository {
             agent_id: agent_ref.agent_id.clone(),
             revision_id: agent_ref.revision_id.clone(),
             runtime_lock_hash: rev.runtime_lock_hash.clone(),
+            constitution_version,
+            constitution_digest,
             home_node_id: home_node_id.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             requested_target: target.to_string(),

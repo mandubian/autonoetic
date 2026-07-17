@@ -156,6 +156,17 @@ pub struct SessionCheckpoint {
     /// SHA-256 of runtime.lock content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_lock_hash: Option<String>,
+    /// Constitution version that admitted this session (#821), pinned at
+    /// session start and updated only when the resume-time drift check
+    /// notices the process constitution has changed. `None` when the
+    /// constitution runtime was never initialized (e.g. many unit tests).
+    /// `#[serde(default)]` so checkpoints predating this field deserialize
+    /// with `None` (backward compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constitution_version: Option<String>,
+    /// Constitution digest paired with `constitution_version` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constitution_digest: Option<String>,
     /// LLM configuration at session start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_config_snapshot: Option<LlmConfigSnapshot>,
@@ -245,6 +256,8 @@ impl SessionCheckpoint {
         runtime.turn_counter = self.turn_counter;
         runtime.blocked_state_event_emitted = self.blocked_state_event_emitted;
         runtime.runtime_lock_hash = self.runtime_lock_hash.clone();
+        runtime.constitution_version = self.constitution_version.clone();
+        runtime.constitution_digest = self.constitution_digest.clone();
         if let Some(ref cm) = self.compression_metadata {
             runtime.compression_metadata = cm.clone();
         }
@@ -1048,6 +1061,8 @@ mod tests {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -1121,6 +1136,8 @@ mod tests {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -1187,6 +1204,8 @@ mod tests {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -1257,6 +1276,8 @@ mod tests {
                 workflow_id: None,
                 task_id: None,
                 runtime_lock_hash: None,
+                constitution_version: None,
+                constitution_digest: None,
                 llm_config_snapshot: None,
                 tool_registry_version: None,
                 yield_reason: YieldReason::Hibernation,
@@ -1347,6 +1368,8 @@ mod tests {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -1427,6 +1450,8 @@ mod tests {
                 workflow_id: None,
                 task_id: None,
                 runtime_lock_hash: None,
+                constitution_version: None,
+                constitution_digest: None,
                 llm_config_snapshot: None,
                 tool_registry_version: None,
                 yield_reason: YieldReason::Hibernation,
@@ -1486,6 +1511,8 @@ mod tests {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -1557,6 +1584,8 @@ mod tests {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -1594,5 +1623,61 @@ mod tests {
             .expect("checkpoint should exist");
         assert!(!latest.loop_guard_state.repair_mode);
         assert_eq!(latest.loop_guard_state.current_loops, 0, "outer loops cleared on success");
+    }
+
+    /// #821 backward compat: a checkpoint JSON blob written before
+    /// `constitution_version`/`constitution_digest` existed (simulated here
+    /// by stripping the keys post-serialization) must still deserialize,
+    /// with the new fields defaulting to `None` instead of failing.
+    #[test]
+    fn checkpoint_without_constitution_pin_fields_deserializes_as_none() {
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: "session-legacy".to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: Some("2026.06.05".to_string()),
+            constitution_digest: Some("deadbeef".to_string()),
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+
+        let mut json = serde_json::to_value(&checkpoint).expect("serialize");
+        // Simulate a pre-#821 checkpoint on disk: strip the new fields entirely.
+        let obj = json.as_object_mut().expect("checkpoint serializes to an object");
+        obj.remove("constitution_version");
+        obj.remove("constitution_digest");
+
+        let restored: SessionCheckpoint = serde_json::from_value(json)
+            .expect("legacy checkpoint JSON (missing constitution pin fields) should still deserialize");
+        assert_eq!(restored.constitution_version, None);
+        assert_eq!(restored.constitution_digest, None);
+        // Sanity: everything else round-tripped normally.
+        assert_eq!(restored.session_id, "session-legacy");
     }
 }

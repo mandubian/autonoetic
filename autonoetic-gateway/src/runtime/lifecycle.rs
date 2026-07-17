@@ -159,6 +159,17 @@ pub struct AgentExecutor {
     pub task_id: Option<String>,
     /// SHA-256 of runtime.lock content, captured at session start for reproducibility.
     pub runtime_lock_hash: Option<String>,
+    /// Constitution version that admitted this session (#821), captured
+    /// once at session start (or restored from a checkpoint on resume).
+    /// `None` when the constitution runtime was never initialized.
+    pub constitution_version: Option<String>,
+    /// Constitution digest paired with `constitution_version` above.
+    pub constitution_digest: Option<String>,
+    /// One-paragraph notice built by the drift check below when the running
+    /// gateway's constitution has changed since this session's pin. Injected
+    /// into the system prompt exactly once (consumed via `.take()`), then
+    /// cleared — never serialized into a checkpoint.
+    pub(crate) constitution_drift_notice: Option<String>,
     /// Whether runtime-lock drift has already been checked this session.
     pub drift_checked: bool,
     /// Emergency-stop hooks (sandbox PIDs, etc.); same registry as [`crate::execution::GatewayExecutionService`].
@@ -297,6 +308,62 @@ fn normalize_error_signature(message: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Decision + payload for a constitution drift notice (#821). Pure so it can
+/// be unit-tested without a tracer/gateway_store: compares the session's
+/// pinned constitution (captured at session start, or restored from its
+/// checkpoint on resume) against the currently running gateway's
+/// constitution. Returns `None` when there is nothing to notice — no prior
+/// pin (fresh session, or a session that predates this feature), or the
+/// pins already match.
+///
+/// Constitution drift is always a **notice**, never a block (Ri-0.5
+/// notice-before-degradation; non-retroactivity is about knowing, not
+/// freezing) — unlike `runtime_lock` drift, which can bail the session.
+pub(crate) struct ConstitutionDriftNotice {
+    /// Causal-event payload: pinned/current version+digest, tagged
+    /// `enforced_rules: ["Ri-0.5"]` so `session_tracer::log_event` attributes
+    /// the event to Ri-0.5 for contract-health tallying.
+    pub payload: serde_json::Value,
+    /// One-paragraph text injected into the system prompt for the next turn.
+    pub notice_text: String,
+}
+
+pub(crate) fn detect_constitution_drift(
+    pinned_version: Option<&str>,
+    pinned_digest: Option<&str>,
+    current_version: &str,
+    current_digest: &str,
+) -> Option<ConstitutionDriftNotice> {
+    let (pinned_version, pinned_digest) = match (pinned_version, pinned_digest) {
+        (Some(v), Some(d)) => (v, d),
+        _ => return None,
+    };
+    if pinned_digest == current_digest {
+        return None;
+    }
+    let payload = serde_json::json!({
+        "pinned_version": pinned_version,
+        "pinned_digest": pinned_digest,
+        "current_version": current_version,
+        "current_digest": current_digest,
+        "enforced_rules": ["Ri-0.5"],
+    });
+    fn short(d: &str) -> &str {
+        &d[..d.len().min(12)]
+    }
+    let notice_text = format!(
+        "---\n\nConstitution Drift Notice (Ri-0.5)\n\n\
+         The law changed while this session was suspended: from version {} ({}) \
+         to version {} ({}). The current attestation block in this system prompt \
+         is authoritative going forward.\n",
+        pinned_version,
+        short(pinned_digest),
+        current_version,
+        short(current_digest),
+    );
+    Some(ConstitutionDriftNotice { payload, notice_text })
+}
+
 impl AgentExecutor {
     pub fn new(
         manifest: AgentManifest,
@@ -334,6 +401,9 @@ impl AgentExecutor {
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            constitution_drift_notice: None,
             drift_checked: false,
             active_executions: None,
             live_digest: None,
@@ -840,6 +910,8 @@ impl AgentExecutor {
             workflow_id: self.workflow_id.clone(),
             task_id: self.task_id.clone(),
             runtime_lock_hash: self.runtime_lock_hash.clone(),
+            constitution_version: self.constitution_version.clone(),
+            constitution_digest: self.constitution_digest.clone(),
             llm_config_snapshot,
             tool_registry_version: None,
             yield_reason,
@@ -1402,6 +1474,35 @@ impl AgentExecutor {
                     );
                 }
             }
+
+            // Constitution drift notice (#821): mirrors the runtime_lock
+            // drift check above in shape (same `drift_checked` gate, same
+            // causal-event style) but NEVER bails — Ri-0.5
+            // notice-before-degradation and non-retroactivity are about the
+            // agent *knowing* the law changed, not about freezing it.
+            if let Some((current_version, current_digest)) =
+                crate::constitution_digest::try_constitution_pin()
+            {
+                if let Some(notice) = detect_constitution_drift(
+                    self.constitution_version.as_deref(),
+                    self.constitution_digest.as_deref(),
+                    &current_version,
+                    &current_digest,
+                ) {
+                    let _ = tracer.log_event(
+                        "constitution_drift",
+                        "notice",
+                        autonoetic_types::causal_chain::EntryStatus::Success,
+                        Some(notice.payload),
+                    );
+                    self.constitution_drift_notice = Some(notice.notice_text);
+                    // Adopt the new pin now that the session knowingly runs
+                    // under the new law — notice once per change, not every
+                    // turn: the next resume's pin already matches current.
+                    self.constitution_version = Some(current_version);
+                    self.constitution_digest = Some(current_digest);
+                }
+            }
             self.drift_checked = true;
         }
 
@@ -1421,6 +1522,22 @@ impl AgentExecutor {
             if self.runtime_lock_hash.is_none() {
                 self.runtime_lock_hash =
                     crate::runtime::checkpoint::compute_runtime_lock_hash(&self.agent_dir);
+            }
+
+            // Capture the constitution pin (version + digest) at session
+            // start (#821), mirroring runtime_lock_hash: records which law
+            // admitted this session. Only fires for a genuinely fresh
+            // session — a resumed session already has its pin restored by
+            // `SessionCheckpoint::restore_into`, and the drift check above
+            // runs before this block, so it has already adopted any new pin
+            // by the time we get here. `None` when the constitution runtime
+            // was never initialized (common in unit tests).
+            if self.constitution_version.is_none() {
+                if let Some((version, digest)) = crate::constitution_digest::try_constitution_pin()
+                {
+                    self.constitution_version = Some(version);
+                    self.constitution_digest = Some(digest);
+                }
             }
         }
         // --- Auto-inject Agent Messages ---
@@ -1667,6 +1784,16 @@ impl AgentExecutor {
                 system_instructions.push_str(snippet);
             }
             if let Some(notice) = self.build_degradation_notice_tail(&session_id)? {
+                system_instructions.push_str("\n\n");
+                system_instructions.push_str(&notice);
+            }
+            // Constitution drift notice (#821): a one-shot system-instruction
+            // tail, injected the wake it is detected and then `.take()`n so
+            // it does not repeat on every subsequent turn (unlike the
+            // degradation notice above, which re-queries persisted state
+            // every turn because degraded-mode is an ongoing condition —
+            // drift is a single fact to acknowledge, not a standing state).
+            if let Some(notice) = self.constitution_drift_notice.take() {
                 system_instructions.push_str("\n\n");
                 system_instructions.push_str(&notice);
             }
@@ -4023,6 +4150,63 @@ mod tests {
             AgentExecutor::detect_terminal_workflow_error("content_read", result),
             None
         );
+    }
+
+    // -- detect_constitution_drift (#821) ---------------------------------------
+
+    #[test]
+    fn constitution_drift_no_prior_pin_is_not_a_drift() {
+        // Fresh session (or one that predates #821): nothing pinned yet, so
+        // there is nothing to compare against — must not fabricate a notice.
+        assert!(detect_constitution_drift(None, None, "2026.06.05", "digest-a").is_none());
+    }
+
+    #[test]
+    fn constitution_drift_matching_pin_is_not_a_drift() {
+        assert!(detect_constitution_drift(
+            Some("2026.06.05"),
+            Some("digest-a"),
+            "2026.06.05",
+            "digest-a",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn constitution_drift_changed_digest_produces_notice_and_payload() {
+        let notice = detect_constitution_drift(
+            Some("2026.06.05"),
+            Some("digest-old-0123456789"),
+            "2026.07.01",
+            "digest-new-9876543210",
+        )
+        .expect("changed digest must be detected as drift");
+
+        assert_eq!(notice.payload["pinned_version"], "2026.06.05");
+        assert_eq!(notice.payload["pinned_digest"], "digest-old-0123456789");
+        assert_eq!(notice.payload["current_version"], "2026.07.01");
+        assert_eq!(notice.payload["current_digest"], "digest-new-9876543210");
+        assert_eq!(notice.payload["enforced_rules"], serde_json::json!(["Ri-0.5"]));
+
+        // Never blocking: the notice is text for the agent, not an error —
+        // and it must state old version, new version, and be legible.
+        assert!(notice.notice_text.contains("Ri-0.5"));
+        assert!(notice.notice_text.contains("2026.06.05"));
+        assert!(notice.notice_text.contains("2026.07.01"));
+        assert!(notice.notice_text.contains("law changed"));
+    }
+
+    #[test]
+    fn constitution_drift_same_version_different_digest_still_drifts() {
+        // Digest is the source of truth (a version string could be reused by
+        // mistake); compare on digest, not version label.
+        let notice = detect_constitution_drift(
+            Some("2026.06.05"),
+            Some("digest-a"),
+            "2026.06.05",
+            "digest-b",
+        );
+        assert!(notice.is_some());
     }
 
     #[test]

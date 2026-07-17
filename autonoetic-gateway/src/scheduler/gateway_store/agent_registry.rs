@@ -313,8 +313,9 @@ impl GatewayStore {
         conn.execute(
             "INSERT OR REPLACE INTO session_agent_bindings (
                 session_id, root_session_id, alias_id, agent_id, revision_id,
-                runtime_lock_hash, home_node_id, created_at, requested_target
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                runtime_lock_hash, home_node_id, created_at, requested_target,
+                constitution_version, constitution_digest
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 &binding.session_id,
                 &binding.root_session_id,
@@ -325,6 +326,8 @@ impl GatewayStore {
                 &binding.home_node_id,
                 &binding.created_at,
                 &binding.requested_target,
+                &binding.constitution_version,
+                &binding.constitution_digest,
             ],
         )?;
         Ok(())
@@ -337,7 +340,8 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT session_id, root_session_id, alias_id, agent_id, revision_id,
-                    runtime_lock_hash, home_node_id, created_at, requested_target
+                    runtime_lock_hash, home_node_id, created_at, requested_target,
+                    constitution_version, constitution_digest
              FROM session_agent_bindings WHERE session_id = ?1",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
@@ -351,6 +355,8 @@ impl GatewayStore {
                 home_node_id: row.get(6)?,
                 created_at: row.get(7)?,
                 requested_target: row.get(8)?,
+                constitution_version: row.get(9)?,
+                constitution_digest: row.get(10)?,
             })
         })?;
         let mut results = Vec::new();
@@ -1103,5 +1109,51 @@ mod tests {
             .expect("revision should exist");
         assert!(read.requested_by_type.is_none());
         assert!(read.requested_by_id.is_none());
+    }
+
+    fn session_agent_binding(session_id: &str) -> SessionAgentBinding {
+        SessionAgentBinding {
+            session_id: session_id.to_string(),
+            root_session_id: session_id.to_string(),
+            alias_id: None,
+            agent_id: "coder.default".to_string(),
+            revision_id: "rev-1".to_string(),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
+            home_node_id: "gateway-1".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            requested_target: "coder.default".to_string(),
+        }
+    }
+
+    /// #821 — the constitution pin (version + digest) survives an
+    /// upsert/get round-trip, both when set (Some) and when absent (None,
+    /// e.g. the constitution runtime was never initialized).
+    #[test]
+    fn session_agent_binding_constitution_pin_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        let mut with_pin = session_agent_binding("sess-with-pin");
+        with_pin.constitution_version = Some("2026.06.05".to_string());
+        with_pin.constitution_digest = Some("deadbeef".to_string());
+        store.upsert_session_agent_binding(&with_pin).unwrap();
+
+        let read = store
+            .get_session_agent_binding("sess-with-pin")
+            .unwrap()
+            .expect("binding should exist");
+        assert_eq!(read.constitution_version.as_deref(), Some("2026.06.05"));
+        assert_eq!(read.constitution_digest.as_deref(), Some("deadbeef"));
+
+        let without_pin = session_agent_binding("sess-without-pin");
+        store.upsert_session_agent_binding(&without_pin).unwrap();
+        let read = store
+            .get_session_agent_binding("sess-without-pin")
+            .unwrap()
+            .expect("binding should exist");
+        assert!(read.constitution_version.is_none());
+        assert!(read.constitution_digest.is_none());
     }
 }
