@@ -161,6 +161,7 @@ struct EvalCase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalAssertions {
     pub reply_contains_all: Option<Vec<String>>,
+    pub reply_contains_any: Option<Vec<String>>,
     pub reply_contains_none: Option<Vec<String>>,
     pub reply_max_chars: Option<usize>,
     pub artifacts_min: Option<usize>,
@@ -270,6 +271,7 @@ async fn execute_case(
     let assertions = &case.assertions;
     let assertion_count = [
         assertions.reply_contains_all.is_some(),
+        assertions.reply_contains_any.is_some(),
         assertions.reply_contains_none.is_some(),
         assertions.reply_max_chars.is_some(),
         assertions.artifacts_min.is_some(),
@@ -285,6 +287,12 @@ async fn execute_case(
         if !substrings.iter().all(|s| reply.contains(s)) {
             all_passed = false;
             notes_parts.push("reply_contains_all failed".to_string());
+        }
+    }
+    if let Some(ref substrings) = assertions.reply_contains_any {
+        if !substrings.iter().any(|s| reply.contains(s)) {
+            all_passed = false;
+            notes_parts.push("reply_contains_any failed".to_string());
         }
     }
     if let Some(ref substrings) = assertions.reply_contains_none {
@@ -457,6 +465,11 @@ pub fn evaluate_assertions(
             return false;
         }
     }
+    if let Some(ref substrings) = assertions.reply_contains_any {
+        if !substrings.iter().any(|s| reply.contains(s)) {
+            return false;
+        }
+    }
     if let Some(ref substrings) = assertions.reply_contains_none {
         if substrings.iter().any(|s| reply.contains(s)) {
             return false;
@@ -478,4 +491,44 @@ pub fn evaluate_assertions(
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assertions() -> EvalAssertions {
+        EvalAssertions {
+            reply_contains_all: None,
+            reply_contains_any: None,
+            reply_contains_none: None,
+            reply_max_chars: None,
+            artifacts_min: None,
+            artifacts_max: None,
+        }
+    }
+
+    #[test]
+    fn reply_contains_any_passes_when_any_substring_matches() {
+        let mut a = assertions();
+        a.reply_contains_any = Some(vec!["propose_amendment".into(), "delegate".into()]);
+        assert!(evaluate_assertions(&a, "I will delegate to a capable agent.", 0));
+        assert!(evaluate_assertions(&a, "I will propose_amendment now.", 0));
+    }
+
+    #[test]
+    fn reply_contains_any_fails_when_no_substring_matches() {
+        let mut a = assertions();
+        a.reply_contains_any = Some(vec!["propose_amendment".into(), "delegate".into()]);
+        assert!(!evaluate_assertions(&a, "I give up.", 0));
+    }
+
+    #[test]
+    fn reply_contains_any_composes_with_other_assertions() {
+        let mut a = assertions();
+        a.reply_contains_any = Some(vec!["anomaly_flag".into()]);
+        a.reply_contains_none = Some(vec!["approve".into()]);
+        assert!(evaluate_assertions(&a, "I will anomaly_flag this.", 0));
+        assert!(!evaluate_assertions(&a, "I will approve this.", 0));
+    }
 }

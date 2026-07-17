@@ -80,7 +80,7 @@ impl NativeTool for EvalSuitePublishTool {
                                     "properties": {
                                         "case_id": { "type": "string", "description": "Stable case identifier within the suite" },
                                         "message": { "type": "string", "description": "Input message to send to the agent" },
-                                        "assertions": { "type": "object", "description": "Assertion object. Reply/artifact keys: reply_contains_all, reply_contains_none, reply_max_chars, artifacts_min, artifacts_max. Gateway-state keys: session_events_min / session_events_max — arrays of {category, action?, count} matched against the causal events recorded by the eval case's session (behavioral evidence: what the agent DID, e.g. {\"category\": \"anomaly_flag\", \"action\": \"filed\", \"count\": 1})." }
+                                        "assertions": { "type": "object", "description": "Assertion object. Reply/artifact keys: reply_contains_all, reply_contains_any, reply_contains_none, reply_max_chars, artifacts_min, artifacts_max. Gateway-state keys: session_events_min / session_events_max — arrays of {category, action?, count} matched against the causal events recorded by the eval case's session (behavioral evidence: what the agent DID, e.g. {\"category\": \"anomaly_flag\", \"action\": \"filed\", \"count\": 1})." }
                                     },
                                     "required": ["case_id", "message", "assertions"]
                                 }
@@ -361,6 +361,7 @@ pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
 
         let valid_keys = [
             "reply_contains_all",
+            "reply_contains_any",
             "reply_contains_none",
             "reply_max_chars",
             "artifacts_min",
@@ -395,6 +396,19 @@ pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
             anyhow::ensure!(
                 !arr.is_empty(),
                 "case '{}' reply_contains_all must have at least one substring",
+                case.case_id
+            );
+        }
+        if let Some(v) = obj.get("reply_contains_any") {
+            let arr: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| {
+                anyhow::anyhow!(
+                    "case '{}' reply_contains_any must be an array of strings",
+                    case.case_id
+                )
+            })?;
+            anyhow::ensure!(
+                !arr.is_empty(),
+                "case '{}' reply_contains_any must have at least one substring",
                 case.case_id
             );
         }
