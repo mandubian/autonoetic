@@ -124,6 +124,14 @@ pub fn find_and_replace(
         match windows.len() {
             0 => continue,
             1 => {
+                // Observable tolerance (M1 doctrine, #619): the literal substring
+                // match failed and we matched via a non-exact (whitespace/line-trim)
+                // fallback. Surface it through the shared chokepoint so the
+                // gateway "guessing" the patch site is visible in traces.
+                crate::runtime::tool_call_processor::note_llm_normalization(
+                    "fuzzy_patch_match",
+                    "content_patch matched via non-exact (whitespace/line-trim) fallback",
+                );
                 let content = apply_line_replacement(source, &src_lines, &pat_lines, windows[0], new);
                 return Ok(ReplaceOutcome {
                     content,

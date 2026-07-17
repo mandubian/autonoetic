@@ -15,6 +15,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod openai;
 pub mod provider;
+pub mod xml_tool_calls;
 
 /// Build a `reqwest::Client` tuned for LLM API calls.
 ///
@@ -27,7 +28,10 @@ pub mod provider;
 /// - `tcp_keepalive`: 30 s — detect dead TCP connections proactively.
 /// - **No global request timeout** — LLM streams can run for minutes; a blanket
 ///   `timeout()` would kill legitimate long-running responses. Instead, each
-///   non-streaming `complete()` call applies a per-request timeout (5 min).
+///   non-streaming `complete()` call applies a per-request timeout
+///   ([`request_timeout`], default 120s, env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`)
+///   with a fail-fast, wall-clock-bounded retry policy
+///   ([`next_connection_retry_wait`]).
 pub fn build_llm_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -61,8 +65,236 @@ pub fn is_transient_connection_error(err: &reqwest::Error) -> bool {
 
 pub const MAX_CONNECTION_RETRIES: u32 = 3;
 
+/// A *timeout* already consumed a full per-request budget; retrying it with
+/// another full-length attempt is how a degraded endpoint compounds into many
+/// minutes of wasted wall-clock. So timeouts retry at most once (fast-failing
+/// connection errors like refused/reset keep [`MAX_CONNECTION_RETRIES`]).
+pub const MAX_TIMEOUT_RETRIES: u32 = 1;
+
+/// Cap for transient server-error (HTTP 5xx with a response body) retries.
+/// These are rarer than connection blips but can happen when an upstream
+/// provider returns a malformed-structured-output 500 or an overloaded 503.
+/// We keep this lower than connection retries to avoid amplifying a genuinely
+/// broken upstream endpoint.
+pub const MAX_5XX_RETRIES: u32 = 2;
+
+/// Default per-request timeout for a non-streaming `complete()` call.
+/// Lowered from a previous 300s: 5 minutes per attempt let a slow/overloaded
+/// endpoint burn ~20 min/turn (timeout × retries) before failing. Override with
+/// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+/// The per-request completion timeout, from `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`
+/// (clamped to a sane floor) or [`DEFAULT_REQUEST_TIMEOUT_SECS`].
+pub fn request_timeout() -> std::time::Duration {
+    let secs = std::env::var("AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s >= 5)
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
     (attempt as u64) * 1000
+}
+
+/// Backoff for transient server-error (HTTP 5xx) retries.
+/// Slightly longer than connection blips: upstream is usually under load.
+pub fn server_error_retry_backoff_ms(attempt: u32) -> u64 {
+    (attempt as u64 + 1) * 1500
+}
+
+/// Retry decision for a transient connection error on an LLM call.
+///
+/// Returns `Some(wait_ms)` to retry after a backoff, or `None` to stop. It
+/// fail-fasts on two axes the old "retry up to N times" logic ignored:
+/// - **wall-clock deadline**: once `elapsed >= deadline` (typically 2× the
+///   per-request timeout), stop — a persistently slow endpoint must not
+///   multiply the timeout across retries.
+/// - **timeout vs blip**: a request timeout (`is_timeout`) retries at most
+///   [`MAX_TIMEOUT_RETRIES`]; fast-failing connection errors retry up to
+///   [`MAX_CONNECTION_RETRIES`].
+pub fn next_connection_retry_wait(
+    err: &reqwest::Error,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    let is_timeout = err.is_timeout() || err.to_string().to_lowercase().contains("timed out");
+    retry_wait_decision(
+        is_transient_connection_error(err),
+        is_timeout,
+        attempt,
+        elapsed,
+        deadline,
+    )
+}
+
+/// Pure decision core of [`next_connection_retry_wait`], split out so it can be
+/// unit-tested without fabricating a `reqwest::Error`.
+pub(crate) fn retry_wait_decision(
+    is_transient: bool,
+    is_timeout: bool,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    if !is_transient {
+        return None;
+    }
+    if elapsed >= deadline {
+        return None;
+    }
+    let cap = if is_timeout {
+        MAX_TIMEOUT_RETRIES
+    } else {
+        MAX_CONNECTION_RETRIES
+    };
+    if attempt >= cap {
+        return None;
+    }
+    let wait_ms = connection_retry_backoff_ms(attempt);
+    // Don't sleep past the deadline: if the backoff itself would push us to/over
+    // the cap, stop now rather than sleep and then start an attempt that's
+    // already late. (Keeps the cumulative wall-clock honest.)
+    if elapsed.saturating_add(std::time::Duration::from_millis(wait_ms)) >= deadline {
+        return None;
+    }
+    Some(wait_ms)
+}
+
+/// Whether a non-success HTTP status/body indicates a transient server error
+/// worth retrying.  Context-overflow errors are handled separately and must NOT
+/// be routed here.
+pub fn is_transient_server_error(status: u16, body: &str) -> bool {
+    if !matches!(status, 500 | 502 | 503 | 504) {
+        return false;
+    }
+    // Trim first: some providers return whitespace/newline-only bodies on 5xx,
+    // which should be treated the same as an empty (transient) body.
+    let lc = body.trim().to_lowercase();
+    if lc.is_empty() {
+        return true;
+    }
+    const TRANSIENT_PHRASES: &[&str] = &[
+        "overloaded",
+        "temporarily unavailable",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "peg-native",
+        "server_error",
+        "try again",
+        "try again later",
+    ];
+    TRANSIENT_PHRASES.iter().any(|phrase| lc.contains(phrase))
+}
+
+/// RFC #779 Part E.2 — classify whether an error that escaped within-provider
+/// retry is eligible for **cross-provider failover**.
+///
+/// Only genuinely transient errors justify trying a different provider/model:
+/// a 400 (bad request), 401 (auth), or 403 (forbidden) is deterministic —
+/// the same request to a different provider will likely fail differently, not
+/// succeed. The within-provider retry already handled connection blips and
+/// transient 5xx; if the error reaches here, the provider is genuinely down
+/// or rate-limiting hard.
+///
+/// Eligible conditions:
+/// - HTTP 429 (rate limit / too many requests)
+/// - HTTP 5xx (server error) — already retried within provider, now try elsewhere
+/// - Connection-level failures (refused, reset, timeout)
+/// - Provider-specific "overloaded" signals (529, overloaded)
+///
+/// NOT eligible (deterministic errors):
+/// - 400/401/403 — bad request, auth failure, forbidden
+/// - Context overflow (handled separately by the context governor)
+/// - Validation / schema errors
+pub fn is_failover_eligible_error(err: &anyhow::Error) -> bool {
+    let msg = err.to_string().to_lowercase();
+
+    // Context overflow is handled separately by the context governor (P-6.9),
+    // not by provider failover — even if it arrives with a 5xx status.
+    if msg.contains("context_overflow")
+        || msg.contains("context window")
+        || msg.contains("context_length_exceeded")
+        || msg.contains("max_context_window_reached")
+        || msg.contains("resource_exhausted")
+    {
+        return false;
+    }
+
+    // Rate limiting
+    if msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("rate_limit")
+        || msg.contains("too many requests")
+    {
+        return true;
+    }
+
+    // Transient server errors (5xx) — already retried within provider
+    if msg.contains("500")
+        || msg.contains("502")
+        || msg.contains("503")
+        || msg.contains("504")
+        || msg.contains("529") // Anthropic overloaded
+        || msg.contains("overloaded")
+        || msg.contains("internal server error")
+        || msg.contains("bad gateway")
+        || msg.contains("service unavailable")
+        || msg.contains("gateway timeout")
+        || msg.contains("server_error")
+        || msg.contains("temporarily unavailable")
+    {
+        return true;
+    }
+
+    // Connection-level failures
+    if msg.contains("connection refused")
+        || msg.contains("connection reset")
+        || msg.contains("connection aborted")
+        || msg.contains("broken pipe")
+        || msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("error sending request")
+        || msg.contains("dns error")
+        || msg.contains("name resolution")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Retry decision for a transient server-error (HTTP 5xx) response.
+///
+/// Returns `Some(wait_ms)` to retry after a backoff, or `None` to stop. Uses the
+/// same wall-clock deadline discipline as [`next_connection_retry_wait`] but with
+/// a separate retry cap ([`MAX_5XX_RETRIES`]) and a longer backoff.
+pub fn next_server_error_retry_wait(
+    status: u16,
+    body: &str,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    if !is_transient_server_error(status, body) {
+        return None;
+    }
+    if elapsed >= deadline {
+        return None;
+    }
+    if attempt >= MAX_5XX_RETRIES {
+        return None;
+    }
+    let wait_ms = server_error_retry_backoff_ms(attempt);
+    if elapsed.saturating_add(std::time::Duration::from_millis(wait_ms)) >= deadline {
+        return None;
+    }
+    Some(wait_ms)
 }
 
 /// Check whether a non-success status / body indicates a context-overflow error
@@ -105,12 +337,28 @@ pub fn is_context_overflow_error(status: u16, body: &str) -> bool {
             //    OpenAI-compatible server that doesn't use a standard code/type.
             if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
                 let lc = msg.to_lowercase();
+                let has_overflow_verb = lc.contains("exceed")
+                    || lc.contains("too long")
+                    || lc.contains("too many tokens");
+                // A size/length/window/token hint distinguishes a *context size*
+                // overflow from unrelated "context" errors that merely share the
+                // word — most importantly "context deadline exceeded" (a timeout,
+                // NOT an overflow), which must not be routed into overflow recovery.
+                let has_size_hint = lc.contains("size")
+                    || lc.contains("length")
+                    || lc.contains("window")
+                    || lc.contains("token");
                 if lc.contains("exceeds the available context")
                     || lc.contains("exceeds the context")
                     || lc.contains("context length exceeded")
                     || lc.contains("maximum context length")
-                    || lc.contains("context window")
-                        && (lc.contains("exceed") || lc.contains("too long"))
+                    || (lc.contains("context window") && has_overflow_verb)
+                    // General catch for OpenAI-compatible servers that phrase it
+                    // differently (e.g. llama.cpp / vLLM "Context size has been
+                    // exceeded."). Requires "context" + an overflow verb + a
+                    // size/length/window/token hint, so timeouts like
+                    // "context deadline exceeded" are NOT misclassified.
+                    || (lc.contains("context") && has_overflow_verb && has_size_hint)
                 {
                     return true;
                 }
@@ -315,6 +563,16 @@ pub struct CompletionRequest {
     /// providers that support it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_cache_key: Option<String>,
+    /// Byte length of the leading portion of the (single) system message that
+    /// is STABLE across turns and therefore safe to mark as a provider cache
+    /// prefix. The volatile suffix (state attestation, degradation notice,
+    /// per-turn memory context) follows this boundary. `None` disables the
+    /// cache breakpoint. Cache-capable drivers (Anthropic; OpenRouter routing
+    /// Claude/Gemini) split the system content here and attach
+    /// `cache_control: {type: ephemeral}` to the prefix block; other providers
+    /// ignore it (llama.cpp/OpenAI reuse a stable prefix automatically).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_cache_prefix_bytes: Option<usize>,
 }
 
 impl CompletionRequest {
@@ -328,6 +586,7 @@ impl CompletionRequest {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         }
     }
 }

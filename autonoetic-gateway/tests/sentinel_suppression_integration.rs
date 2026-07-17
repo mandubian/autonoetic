@@ -14,13 +14,14 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::active_execution_registry::{
     ActiveExecutionRegistry, NativeToolRunContext,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::runtime::trajectory_monitor::TrajectoryMonitor;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::config::TrajectoryConfig;
+use autonoetic_types::trajectory::FeedbackEvent;
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
@@ -37,6 +38,7 @@ fn test_manifest() -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -53,27 +55,33 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 
-fn quiet_guard_state() -> LoopGuardState {
-    LoopGuardState::default()
+fn quiet_guard_state() -> LoopGuard {
+    LoopGuard::default()
 }
 
 fn drive_to_diverging(
     mon: &mut TrajectoryMonitor,
-    state: &mut LoopGuardState,
+    state: &mut LoopGuard,
 ) -> autonoetic_gateway::runtime::trajectory_monitor::TickResult {
-    state.current_loops = 4;
-    let _ = mon.tick(4, &[], None, &state);
-    state.current_loops = 4;
-    state
-        .tool_failure_counts
-        .insert("sandbox.exec".into(), 4);
-    mon.tick(6, &[], None, &state)
+    // Under RFC D.6 only FeedbackIgnored can drive Diverging/Critical.
+    // Build the ignored signal by issuing feedback on turn 4 and repeating
+    // the same feedback event on turn 6.
+    let fb = FeedbackEvent::Validation {
+        rule: "output_schema".into(),
+        field_path: None,
+    };
+    mon.record_feedback(4, &[fb.clone()]);
+    mon.record_feedback(5, &[fb.clone()]);
+    mon.tick(5, &[], &[], None, state);
+    mon.tick(6, &[], &[fb], None, state)
 }
 
 // ── Test 1: sentinel.suppress accepts reason and emits causal event ──────────
@@ -101,6 +109,7 @@ fn sentinel_suppress_accepts_reason_and_emits_causal_event() -> anyhow::Result<(
         artifact_id: None,
         sentinel_suppress_target: Some(target.clone()),
         discovered_tools: None,
+        tool_discovery_catalog: None,
         wake_hint: None,
         wake_hints_map: None,
     };

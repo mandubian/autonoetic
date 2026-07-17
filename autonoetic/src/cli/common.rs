@@ -295,6 +295,34 @@ pub enum SessionCommands {
     Show {
         session_id: String,
     },
+    /// Export a full session into a single human-readable archive.
+    Export {
+        /// Session ID to export. May be a root session or any child/spawn
+        /// session; the export always covers the entire root session tree.
+        session_id: String,
+        /// Output path. Defaults to `<session-id>.room.md` in the current
+        /// directory.
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        /// Export format: `room` (default), `room-raw`, or `json`.
+        #[arg(short, long, default_value = "room")]
+        format: String,
+        /// Include checkpoint files (full message history) in the appendix.
+        /// Checkpoints can be large.
+        #[arg(long)]
+        with_checkpoints: bool,
+        /// Minimum timeline altitude to include. `detail` events are dropped
+        /// when set to `normal`, `attention`, or `error`.
+        #[arg(long)]
+        min_altitude: Option<String>,
+        /// Export into a structured archive directory instead of a single
+        /// file. The directory layout is:
+        ///   `<output-dir>/<constitution-version>-<lock-digest-short>/<session-id>/`
+        /// All formats are written there (room.md, json, checkpoints json,
+        /// manifest). Mutually exclusive with `--output`.
+        #[arg(long, conflicts_with = "output")]
+        output_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Arguments for the all-in-one `run` command.
@@ -340,6 +368,18 @@ pub struct GatewayArgs {
 
 #[derive(Subcommand)]
 pub enum GatewayCommands {
+    /// Reset the gateway environment to bootstrap state while preserving config.
+    /// Stops the daemon, wipes the gateway database and ephemeral state,
+    /// refreshes reference agent bundles from the repo, then re-bootstraps
+    /// gateway revisions without prompting for model selection.
+    Reset {
+        /// Skip the interactive confirmation prompt.
+        #[arg(short, long)]
+        yes: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Starts the Gateway daemon in the foreground
     Start {
         /// Run in the background
@@ -379,10 +419,28 @@ pub enum GatewayCommands {
         #[command(subcommand)]
         command: GatewayGrantCommands,
     },
+    /// Inspect or revoke cross-session approved sandbox-exec cache entries.
+    ExecCache {
+        #[command(subcommand)]
+        command: GatewayExecCacheCommands,
+    },
     /// Inspect or answer pending user interactions.
     Interactions {
         #[command(subcommand)]
         command: GatewayInteractionCommands,
+    },
+    /// Unified view of everything awaiting an operator decision for a root
+    /// session — approvals, interactions, escalations, and plans in one list,
+    /// each with the command that resolves it (#722). This is the CLI form of
+    /// the `operator.pending` RPC, so a headless operator no longer has to poll
+    /// four separate command families.
+    Pending {
+        /// Root session id to list pending decisions for.
+        #[arg(long)]
+        root_session: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
     /// Manage system agents (declared in config, auto-scheduled on startup).
     SystemAgents {
@@ -403,6 +461,16 @@ pub enum GatewayCommands {
     Wiki {
         #[command(subcommand)]
         command: GatewayWikiCommands,
+    },
+    /// Inspect or resolve pending escalations.
+    Escalations {
+        #[command(subcommand)]
+        command: GatewayEscalationCommands,
+    },
+    /// Inspect or retry durable workflow tasks.
+    Workflow {
+        #[command(subcommand)]
+        command: GatewayWorkflowCommands,
     },
 }
 
@@ -510,6 +578,74 @@ pub enum GatewayWikiCommands {
         /// Optional reason.
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayEscalationCommands {
+    /// List pending escalations.
+    List {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show details of a specific escalation.
+    Show {
+        /// Escalation ID (e.g. esc_xxxxxxxx).
+        escalation_id: String,
+    },
+    /// Resolve a pending escalation (approve or reject).
+    Resolve {
+        /// Escalation ID (e.g. esc_xxxxxxxx).
+        escalation_id: String,
+        /// Approve the escalation.
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+        /// Reject the escalation.
+        #[arg(long, conflicts_with = "approve")]
+        reject: bool,
+        /// Optional reason for the decision.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayWorkflowCommands {
+    /// Inspect or retry durable workflow tasks.
+    Task {
+        #[command(subcommand)]
+        command: GatewayTaskCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayTaskCommands {
+    /// Re-run a Failed (or Aborted) workflow task.
+    ///
+    /// Moves the task back to Runnable so the durable scheduler re-queues and
+    /// re-spawns it. This is the manual escape hatch for a task that exhausted
+    /// its automatic stage-retry budget (or never had one) — e.g. a child agent
+    /// that crashed on a transient LLM error past the driver retries. Reactivates
+    /// the parent workflow run if it is itself terminal.
+    Retry {
+        /// Task ID (e.g. task-xxxxxxxx).
+        task_id: String,
+        /// Workflow ID (wf-*). One of --workflow-id / --root-session is
+        /// required to locate the workflow. Takes precedence over --root-session.
+        #[arg(long)]
+        workflow_id: Option<String>,
+        /// Root session ID, used to resolve the workflow when --workflow-id is
+        /// omitted. One of --workflow-id / --root-session is required.
+        #[arg(long)]
+        root_session: Option<String>,
+        /// Optional note stamped on the task's result_summary (default:
+        /// "operator retry at <timestamp>").
+        #[arg(long)]
+        note: Option<String>,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -630,6 +766,28 @@ pub enum GatewayApprovalCommands {
         /// Only include approvals since this time (e.g. `1h`, `24h`, `7d`).
         #[arg(long)]
         since: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayExecCacheCommands {
+    /// List cached approved sandbox-exec fingerprints with metadata.
+    List {
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke a cached approval by fingerprint, or all of them.
+    Revoke {
+        /// The fingerprint (`sha256:…`) to revoke. Copy it from `exec-cache list`.
+        #[arg(conflicts_with = "all")]
+        fingerprint: Option<String>,
+        /// Revoke every cached exec approval.
+        #[arg(long)]
+        all: bool,
+        /// Reason for revocation (recorded in the causal audit trail).
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -988,6 +1146,29 @@ pub enum AgentAliasCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Suspend an agent: block new sessions while leaving in-flight sessions
+    /// running. Read-only resolution (evaluation/diff) stays available.
+    Suspend {
+        /// Alias ID to suspend (MVP default alias is agent_id)
+        alias_id: String,
+        /// Why the agent is being suspended (recorded on the alias)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Who is suspending (recorded on the alias)
+        #[arg(long, default_value = "operator")]
+        by: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lift a suspension so the agent can start new sessions again.
+    Unsuspend {
+        /// Alias ID to unsuspend (MVP default alias is agent_id)
+        alias_id: String,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,8 +1219,8 @@ pub struct RoomArgs {
     /// agent (e.g. `planner.default`).
     #[arg(long)]
     pub agent: Option<String>,
-    /// Altitude floor: detail | normal | attention | error. Default: normal.
-    #[arg(long, default_value = "normal")]
+    /// Altitude floor: detail | normal | attention | error. Default: detail.
+    #[arg(long, default_value = "detail")]
     pub min_altitude: String,
     /// Follow the timeline live (tail -f style) until Ctrl+C.
     #[arg(long)]
@@ -1183,6 +1364,25 @@ pub enum TraceCommands {
         #[arg(long)]
         since: Option<String>,
         /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Civic-health view: how often each agent exercises its civic affordances (proposals, anomaly flags) (#772)
+    CivicHealth {
+        /// Only count filed items at or after this RFC3339 timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a session's fork lineage: the ancestor chain it was forked from
+    /// (if any) and the tree of sessions forked FROM it (#814)
+    ForkTree {
+        /// Session identifier (root or nested)
+        session_id: String,
+        /// Emit machine-readable JSON. `ancestors` is ordered nearest-first
+        /// (immediate parent first, root of the fork chain last).
         #[arg(long)]
         json: bool,
     },

@@ -53,6 +53,7 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
             id: AGENT_ID.to_string(),
             name: AGENT_ID.to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,
@@ -69,8 +70,10 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -113,6 +116,8 @@ fn make_revision_record(revision_id: &str) -> AgentRevisionRecord {
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "artifact".to_string(),
         source_ref: None,
         origin_node_id: "local".to_string(),
@@ -120,6 +125,7 @@ fn make_revision_record(revision_id: &str) -> AgentRevisionRecord {
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::Value::Null,
         short_id: revision_id.chars().take(8).collect(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     }
@@ -153,6 +159,9 @@ fn setup_promote_harness(outgoing_caps_yaml: &str, incoming_caps_yaml: &str) -> 
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 
@@ -248,6 +257,7 @@ fn store_revision_promote_approval(
             added_capabilities: added.into_iter().map(String::from).collect(),
             broadened_capabilities: broadened.into_iter().map(String::from).collect(),
             payload: None,
+            federation_context: None,
         },
         created_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
         status: None,
@@ -257,12 +267,11 @@ fn store_revision_promote_approval(
         evidence_ref: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     };
     store.create_approval(&mut req).unwrap();
     req
@@ -589,6 +598,9 @@ fn approval_ref_bypass_is_invalidated_when_alias_moves() {
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "test".to_string(),
             reason: None,
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         })
         .unwrap();
 
@@ -749,7 +761,6 @@ fn new_agent_first_promotion_requires_operator_approval_by_default() {
         "message should name the new-agent case, got: {}",
         resp["message"]
     );
-
 }
 
 #[test]

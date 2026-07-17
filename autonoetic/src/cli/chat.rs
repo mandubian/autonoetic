@@ -29,6 +29,11 @@ use super::common::{
 use autonoetic_gateway::router::{
     JsonRpcRequest as GatewayJsonRpcRequest, JsonRpcResponse as GatewayJsonRpcResponse,
 };
+use autonoetic_gateway::runtime::workbench_return::{
+    build_return_to_agent_wakeup, prepare_return_to_agent_wakeup,
+    read_return_to_agent_input, summarize_contract_changes, ReturnToAgentInput,
+    ReturnToAgentStatus, ReturnToAgentWakeup,
+};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::LlmExchangeUsage;
 use autonoetic_types::background::{
@@ -287,12 +292,18 @@ enum SlashCommand {
     /// selected orchestrator (default: planner.default). Refuses to proceed
     /// when the workbench has unsaved edits unless `--force` is supplied.
     ReturnToAgent { force: bool, message: Option<String> },
+    /// `/waive [validation_id] [reason...]` — show validation waiver options
+    /// or ask the orchestrator to waive a specific advisory validation.
+    Waive { validation_id: Option<String>, reason: Option<String> },
     /// `/plan` lists pending plans; `/plan approve [plan_id]` approves one.
     PlanApprove(Option<String>),
     /// `/model` shows resolved inference; `/model <preset>` overrides; `/model clear` resets.
     ModelShow,
     ModelSet { preset: String, reason: Option<String> },
     ModelClear,
+    /// `/sentinel stop [reason...]` — operator-initiated emergency stop of the
+    /// current root session when the Sentinel has raised a critical advisory.
+    SentinelStop(Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -1134,6 +1145,18 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
             };
             Ok(SlashCommand::ReturnToAgent { force, message })
         }
+        "/waive" => {
+            let validation_id = parts.next().map(|s| s.to_string());
+            let reason = {
+                let rest: Vec<String> = parts.map(|s| s.to_string()).collect();
+                if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.join(" "))
+                }
+            };
+            Ok(SlashCommand::Waive { validation_id, reason })
+        }
         "/plan" => {
             let sub = parts.next().map(|s| s.to_lowercase());
             match sub.as_deref() {
@@ -1164,6 +1187,22 @@ fn parse_slash_command(input: &str) -> Result<SlashCommand, String> {
             };
             Ok(SlashCommand::ModelSet { preset, reason })
         }
+        "/sentinel" => {
+            let mut parts = trimmed[9..].trim().split_whitespace();
+            match parts.next() {
+                Some("stop") => {
+                    let reason = parts.collect::<Vec<_>>().join(" ");
+                    Ok(SlashCommand::SentinelStop(
+                        if reason.is_empty() { None } else { Some(reason) },
+                    ))
+                }
+                Some(other) => Err(format!(
+                    "Unknown /sentinel subcommand '{}'. Try: stop.",
+                    other
+                )),
+                None => Err("Usage: /sentinel stop [reason...]".to_string()),
+            }
+        }
         _ => Err(format!("Unknown command '{}'. Try /help.", trimmed)),
     }
 }
@@ -1179,6 +1218,7 @@ fn format_help_card() -> String {
         "  /plan                  List plans awaiting operator approval",
         "  /plan approve [id]     Approve a plan (default: latest pending)",
         "  /wb [status|diff|reconcile|discard]  Workbench actions",
+        "  /waive [validation_id] [reason]  Trigger validation waiver workflow (requires validation_waivers.enabled)",
         "  /return [--force] [note]   Hand the active workbench back to the orchestrator (planner.default).",
         "                            Refuses if there are unsaved edits; use --force to override (edits are dropped).",
         "  /why [request_id]      Explain why an approval was triggered (constitutional rules)",
@@ -1187,6 +1227,8 @@ fn format_help_card() -> String {
         "  /model                 Show resolved LLM preset for this session",
         "  /model <preset> [why]  Override inference preset until cleared",
         "  /model clear           Remove session inference override",
+        "  /sentinel stop [reason]  Emergency-stop the root session (Sentinel intervention)",
+        "  Ctrl+X                 Shortcut for /sentinel stop",
         "  /cancel                Leave the current picker/prompt",
         "  /quit                  Exit chat",
     ]
@@ -1456,6 +1498,7 @@ fn refresh_gate_history(
                     ApprovalStatus::Approved => "approved",
                     ApprovalStatus::Rejected => "rejected",
                     ApprovalStatus::Cancelled => "cancelled",
+                    ApprovalStatus::Stale => "stale",
                 };
                 let decision = a.decision_reason.as_deref().unwrap_or(status_label);
                 Some(format!(
@@ -2119,7 +2162,91 @@ fn handle_slash_command_submission(
             app.add_message(MessageRole::System, message);
             true
         }
+        SlashCommand::Waive { validation_id, reason } => {
+            if !config.validation_waivers.enabled {
+                app.add_message(
+                    MessageRole::System,
+                    "Validation waivers are disabled in this gateway config. \
+                     Set `validation_waivers.enabled: true` to use `/waive`."
+                        .to_string(),
+                );
+                return true;
+            }
+            let card = match validation_id {
+                Some(id) => {
+                    let reason_text = reason.unwrap_or_else(|| "operator waived via /waive".to_string());
+                    match &app.active_workbench {
+                        Some(wb) => format!(
+                            "Requesting waiver for validation `{}` on artifact `{}`.\n\
+                             Reason: {}\n\nThe orchestrator will call `validation.waive` \
+                             with artifact_id=`{}`, validation_id=`{}`, validation_class=`correctness_check`.",
+                            id, wb.base_artifact_id, reason_text, wb.base_artifact_id, id
+                        ),
+                        None => format!(
+                            "Requesting waiver for validation `{}`.\n\
+                             Reason: {}\n\nNo active workbench was detected; please confirm the artifact_id with the orchestrator.",
+                            id, reason_text
+                        ),
+                    }
+                }
+                None => format_waiver_status_card(gateway_store, app),
+            };
+            app.add_message(MessageRole::System, card);
+            // Return true so the original `/waive ...` text is sent to the orchestrator
+            // as a chat message; the orchestrator can then call `validation.waive`.
+            true
+        }
+        SlashCommand::SentinelStop(_) => {
+            // Handled directly in the async input loop so it can await the
+            // emergency-stop call. Returning true keeps the TUI alive.
+            true
+        }
     }
+}
+
+fn format_waiver_status_card(
+    gateway_store: Option<&GatewayStore>,
+    app: &App,
+) -> String {
+    let mut lines = vec![
+        "Validation waiver trigger — available validations:".to_string(),
+        String::new(),
+    ];
+
+    if let Some(wb) = &app.active_workbench {
+        lines.push(format!("Active workbench: {}", wb.workbench_id));
+        lines.push(format!("Base artifact: {}", wb.base_artifact_id));
+        if let Some(store) = gateway_store {
+            match store.list_waivers_for_artifact(&wb.base_artifact_id) {
+                Ok(waivers) if !waivers.is_empty() => {
+                    lines.push(String::new());
+                    lines.push("Existing waivers:".to_string());
+                    for w in waivers {
+                        lines.push(format!(
+                            "  - {} ({}) — {}",
+                            w.validation_id,
+                            w.validation_class.as_str(),
+                            w.reason
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        lines.push("No active workbench. Open or create a workbench first.".to_string());
+    }
+
+    lines.push(String::new());
+    lines.push("Usage:".to_string());
+    lines.push("  /waive <validation_id> [reason...]".to_string());
+    lines.push(String::new());
+    lines.push("Example:".to_string());
+    lines.push("  /waive unit_tests Small doc-only change, no executable code touched.".to_string());
+    lines.push(String::new());
+    lines.push("Only advisory validations can be waived; mechanical_safety and security_review are enforced.".to_string());
+
+    lines.join("\n")
 }
 
 fn format_why_explanation(
@@ -2286,430 +2413,6 @@ fn format_workbench_diff(
     lines.join("\n")
 }
 
-/// Inputs for `build_return_to_agent_wakeup`. Kept as a plain struct so the
-/// builder stays unit-testable without constructing a full workbench record.
-/// Owns all of its data (no borrowed references) so the caller can free
-/// scratch workbench lookups after constructing the input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReturnToAgentInput {
-    workbench_id: String,
-    base_artifact_id: String,
-    /// True when the workbench has been reconciled (i.e. the operator already
-    /// committed the edits into a new artifact revision). False when the
-    /// workbench is still active and the wake-up is being sent without a
-    /// prior reconcile (operator chose --force).
-    reconciled: bool,
-    /// Optional new artifact ref/id from the most recent reconcile.
-    new_artifact_ref: Option<String>,
-    new_artifact_id: Option<String>,
-    /// Optional operator note typed alongside `/return ...`.
-    operator_note: Option<String>,
-    /// Number of files that differ from the base artifact (modified+added+deleted).
-    /// 0 when the workbench is in sync with the base (or already reconciled).
-    unsaved_change_count: usize,
-    /// IDs of files modified by the operator since the projection. May be
-    /// empty when the workbench is reconciled or unsaved_change_count is 0.
-    operator_modified_files: Vec<String>,
-    /// IDs of files added by the operator since the projection.
-    operator_added_files: Vec<String>,
-    /// IDs of files deleted by the operator since the projection.
-    deleted_files: Vec<String>,
-    /// Issue #332: high-level semantic summary of the diff (contract
-    /// impact, validation state, file-role classifications). Loaded
-    /// from `.autonoetic/semantic_summary.json` for reconciled
-    /// workbenches; `None` when missing or for active workbenches.
-    /// Uses the typed struct so `ReturnToAgentInput` preserves `Eq`.
-    semantic_summary: Option<SemanticSummary>,
-}
-
-/// Output of `build_return_to_agent_wakeup`. The `message` is the natural
-/// language text the orchestrator will read; `metadata` is the structured
-/// `workbench_reconciled` payload attached to the event.ingest call for
-/// downstream tooling and the agent's own state updates.
-#[derive(Debug, Clone, PartialEq)]
-struct ReturnToAgentWakeup {
-    message: String,
-    metadata: serde_json::Value,
-}
-
-fn build_return_to_agent_wakeup(input: &ReturnToAgentInput) -> ReturnToAgentWakeup {
-    let mut structured = serde_json::json!({
-        "event": "workbench_reconciled",
-        "workbench_id": input.workbench_id,
-        "base_artifact_id": input.base_artifact_id,
-        "reconciled": input.reconciled,
-        "unsaved_change_count": input.unsaved_change_count,
-        "operator_modified": !input.operator_modified_files.is_empty()
-            || !input.operator_added_files.is_empty()
-            || !input.deleted_files.is_empty(),
-    });
-
-    if let Some(new_artifact_ref) = &input.new_artifact_ref {
-        structured["new_artifact_ref"] = serde_json::Value::String(new_artifact_ref.clone());
-    }
-    if let Some(new_artifact_id) = &input.new_artifact_id {
-        structured["new_artifact_id"] = serde_json::Value::String(new_artifact_id.clone());
-    }
-    if !input.operator_modified_files.is_empty() {
-        structured["operator_modified_files"] = serde_json::Value::Array(
-            input
-                .operator_modified_files
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        );
-    }
-    if !input.operator_added_files.is_empty() {
-        structured["operator_added_files"] = serde_json::Value::Array(
-            input
-                .operator_added_files
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        );
-    }
-    if !input.deleted_files.is_empty() {
-        structured["deleted_files"] = serde_json::Value::Array(
-            input
-                .deleted_files
-                .iter()
-                .map(|s| serde_json::Value::String(s.clone()))
-                .collect(),
-        );
-    }
-    if let Some(semantic_summary) = &input.semantic_summary {
-        structured["semantic_summary"] = serde_json::to_value(semantic_summary)
-            .unwrap_or(serde_json::Value::Null);
-    }
-
-    let artifact_ref_label = input
-        .new_artifact_ref
-        .as_ref()
-        .map(|r| format!("`{}`", r))
-        .unwrap_or_else(|| format!("base `{}`", input.base_artifact_id));
-
-    let mut message = String::new();
-    message.push_str(&format!(
-        "Operator returned workbench `{}` to you. Active artifact: {}.",
-        input.workbench_id, artifact_ref_label
-    ));
-    if input.reconciled {
-        message.push_str(" Status: reconciled.");
-    } else if input.unsaved_change_count > 0 {
-        message.push_str(&format!(
-            " Status: active with {} unsaved change(s) (sent with --force; edits were not committed).",
-            input.unsaved_change_count
-        ));
-    } else {
-        message.push_str(" Status: active, in sync with base artifact (no edits).");
-    }
-    if let Some(note) = &input.operator_note {
-        if !note.trim().is_empty() {
-            message.push_str(&format!(" Operator note: {}.", note.trim()));
-        }
-    }
-    if let Some(semantic_summary) = &input.semantic_summary {
-        if let Some(label) = summarize_contract_changes(semantic_summary) {
-            message.push_str(&format!(" Contract impact: {label}."));
-        }
-    }
-    message.push_str(" Please continue the workflow.");
-
-    ReturnToAgentWakeup {
-        message,
-        metadata: serde_json::json!({
-            "workbench_reconciled": structured,
-        }),
-    }
-}
-
-/// Render a one-line summary of the contract-impact changes recorded in
-/// the semantic summary. Returns `None` when there are no
-/// `contract_changes` to call out.
-///
-/// Format: a comma-separated list of `"<impact> on <path>"` items,
-/// truncated to the first three to keep the wake-up message compact.
-fn summarize_contract_changes(summary: &SemanticSummary) -> Option<String> {
-    if summary.contract_changes.is_empty() {
-        return None;
-    }
-    let mut labels: Vec<String> = Vec::new();
-    for c in summary.contract_changes.iter().take(3) {
-        labels.push(format!("{} on {}", c.impact.as_str(), c.path));
-    }
-    let suffix = if summary.contract_changes.len() > 3 {
-        format!(" (+{} more)", summary.contract_changes.len() - 3)
-    } else {
-        String::new()
-    };
-    Some(format!("{}{suffix}", labels.join(", ")))
-}
-
-/// Read the active workbench's operator-edited file lists from the gateway
-/// store. Returns `None` when the workbench is not found, the store is
-/// missing, or the workspace dir is gone.
-///
-/// For a *reconciled* workbench, the data is sourced from
-/// `.autonoetic/reconciliation.json` (written by the workbench_reconcile
-/// tool) so the wake-up carries the new artifact ref/id and the
-/// operator-vs-agent authorship classification recorded at reconcile time.
-/// For an *active* workbench, the data is computed live from
-/// `base_digests.json` and the current files on disk.
-fn read_return_to_agent_input(
-    gateway_store: Option<&GatewayStore>,
-    workbench_id: &str,
-    operator_note: Option<&str>,
-) -> Option<ReturnToAgentInput> {
-    let store = gateway_store?;
-    let wb = store.load_workbench(workbench_id).ok().flatten()?;
-
-    let reconciled = matches!(wb.status, autonoetic_types::workbench::WorkbenchStatus::Reconciled);
-
-    let source_dir = Path::new(&wb.workspace_path);
-    let meta_dir = source_dir.parent().map(|p| p.join(".autonoetic"));
-
-    if reconciled {
-        // Reconciled workbench: trust the recorded provenance. If the
-        // reconciliation.json is missing, fall back to the base artifact
-        // ref and an empty file list.
-        let provenance_path = meta_dir
-            .as_ref()
-            .map(|d| d.join("reconciliation.json"));
-        let provenance: Option<serde_json::Value> = provenance_path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|raw| serde_json::from_str(&raw).ok());
-
-        let new_artifact_ref = provenance
-            .as_ref()
-            .and_then(|v| v.get("new_artifact_ref"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let new_artifact_id = provenance
-            .as_ref()
-            .and_then(|v| v.get("new_artifact_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let modified: Vec<String> = provenance
-            .as_ref()
-            .and_then(|v| v.get("operator_modified"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let added: Vec<String> = provenance
-            .as_ref()
-            .and_then(|v| v.get("operator_added"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let deleted: Vec<String> = provenance
-            .as_ref()
-            .and_then(|v| v.get("deleted"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let unsaved_change_count = modified.len() + added.len() + deleted.len();
-        let semantic_summary = meta_dir
-            .as_ref()
-            .map(|d| d.join("semantic_summary.json"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|raw| serde_json::from_str(&raw).ok());
-        return Some(ReturnToAgentInput {
-            workbench_id: wb.workbench_id,
-            base_artifact_id: wb.base_artifact_id,
-            reconciled,
-            new_artifact_ref,
-            new_artifact_id,
-            operator_note: operator_note.map(|s| s.to_string()),
-            unsaved_change_count,
-            operator_modified_files: modified,
-            operator_added_files: added,
-            deleted_files: deleted,
-            semantic_summary,
-        });
-    }
-
-    // Active workbench: compute live from base_digests + current files.
-    if !source_dir.exists() {
-        return Some(ReturnToAgentInput {
-            workbench_id: wb.workbench_id,
-            base_artifact_id: wb.base_artifact_id,
-            reconciled,
-            new_artifact_ref: None,
-            new_artifact_id: None,
-            operator_note: operator_note.map(|s| s.to_string()),
-            unsaved_change_count: 0,
-            operator_modified_files: Vec::new(),
-            operator_added_files: Vec::new(),
-            deleted_files: Vec::new(),
-            semantic_summary: None,
-        });
-    }
-
-    let base_digests: std::collections::HashMap<String, String> = meta_dir
-        .as_ref()
-        .and_then(|d| {
-            let p = d.join("base_digests.json");
-            if p.exists() {
-                serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-
-    let mut current_names: Vec<String> = Vec::new();
-    for entry in walkdir::WalkDir::new(source_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            let rel = entry.path().strip_prefix(source_dir).unwrap();
-            let rel_str = rel.to_string_lossy().to_string();
-            if rel_str.starts_with(".autonoetic/") {
-                continue;
-            }
-            current_names.push(rel_str);
-        }
-    }
-    let current_set: std::collections::HashSet<&str> =
-        current_names.iter().map(|s| s.as_str()).collect();
-
-    let mut modified: Vec<String> = Vec::new();
-    let mut added: Vec<String> = Vec::new();
-    let mut deleted: Vec<String> = Vec::new();
-    for name in &current_names {
-        match base_digests.get(name.as_str()) {
-            Some(base_digest) => {
-                match file_sha256(&source_dir.join(name)) {
-                    Ok(current_digest) if current_digest == *base_digest => {}
-                    _ => modified.push(name.clone()),
-                }
-            }
-            None => added.push(name.clone()),
-        }
-    }
-    for name in base_digests.keys() {
-        if !current_set.contains(name.as_str()) {
-            deleted.push(name.clone());
-        }
-    }
-
-    let unsaved_change_count = modified.len() + added.len() + deleted.len();
-
-    Some(ReturnToAgentInput {
-        workbench_id: wb.workbench_id,
-        base_artifact_id: wb.base_artifact_id,
-        reconciled,
-        new_artifact_ref: None,
-        new_artifact_id: None,
-        operator_note: operator_note.map(|s| s.to_string()),
-        unsaved_change_count,
-        operator_modified_files: modified,
-        operator_added_files: added,
-        deleted_files: deleted,
-        semantic_summary: None,
-    })
-}
-
-/// Outcome of `prepare_return_to_agent_wakeup`. Drives the TUI's response
-/// to a `/return` slash command: either render an inline error and stop, or
-/// dispatch the wake-up to the orchestrator.
-#[derive(Debug)]
-enum ReturnToAgentStatus {
-    /// No active workbench — nothing to return. TUI shows a friendly message.
-    NoWorkbench,
-    /// Workbench has unsaved edits and `--force` was not supplied. TUI
-    /// shows the refusal (with the list of edited files) and stops.
-    Refused { reason: String },
-    /// Wake-up is built and ready to send. TUI dispatches via the channel.
-    Ready {
-        target_agent_id: String,
-        outbound_message: String,
-        metadata: serde_json::Value,
-    },
-}
-
-/// Prepare the wake-up that `/return` will dispatch. Pulls the active
-/// workbench from the gateway store, applies the unsaved-edits safety
-/// check, and produces the structured payload for `event.ingest`.
-fn prepare_return_to_agent_wakeup(
-    gateway_store: Option<&GatewayStore>,
-    active_workbench: Option<&WorkbenchOverview>,
-    force: bool,
-    operator_note: Option<&str>,
-) -> ReturnToAgentStatus {
-    let Some(wb_overview) = active_workbench else {
-        return ReturnToAgentStatus::NoWorkbench;
-    };
-
-    let Some(input) = read_return_to_agent_input(
-        gateway_store,
-        &wb_overview.workbench_id,
-        operator_note,
-    ) else {
-        return ReturnToAgentStatus::Refused {
-            reason: format!(
-                "Workbench {} is no longer in the gateway store. Cannot return.",
-                wb_overview.workbench_id
-            ),
-        };
-    };
-
-    if !force && !input.reconciled && input.unsaved_change_count > 0 {
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "Workbench {} has {} unsaved edit(s). Refusing to silently drop them.",
-            input.workbench_id, input.unsaved_change_count
-        ));
-        if !input.operator_modified_files.is_empty() {
-            lines.push("  Modified:".to_string());
-            for f in &input.operator_modified_files {
-                lines.push(format!("    ~ {}", f));
-            }
-        }
-        if !input.operator_added_files.is_empty() {
-            lines.push("  Added:".to_string());
-            for f in &input.operator_added_files {
-                lines.push(format!("    + {}", f));
-            }
-        }
-        if !input.deleted_files.is_empty() {
-            lines.push("  Deleted:".to_string());
-            for f in &input.deleted_files {
-                lines.push(format!("    - {}", f));
-            }
-        }
-        lines.push(
-            "Reconcile them first (autonoetic workbench reconcile <wb>) or re-run with --force to drop the edits and return the base artifact.".to_string(),
-        );
-        return ReturnToAgentStatus::Refused {
-            reason: lines.join("\n"),
-        };
-    }
-
-    let target_agent_id = "planner.default".to_string();
-    let wakeup = build_return_to_agent_wakeup(&input);
-
-    ReturnToAgentStatus::Ready {
-        target_agent_id,
-        outbound_message: wakeup.message,
-        metadata: wakeup.metadata,
-    }
-}
 
 /// Pending `user.ask` rows for this terminal session: exact session plus any under the same root
 /// (planner chat can surface child-session questions).
@@ -2769,7 +2472,8 @@ fn poll_session_snapshot(
                     autonoetic_types::workflow::TaskRunStatus::Pending => queued += 1,
                     autonoetic_types::workflow::TaskRunStatus::Runnable
                     | autonoetic_types::workflow::TaskRunStatus::Running => running += 1,
-                    autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => awaiting += 1,
+                    autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                    | autonoetic_types::workflow::TaskRunStatus::Stale => awaiting += 1,
                     autonoetic_types::workflow::TaskRunStatus::Succeeded
                     | autonoetic_types::workflow::TaskRunStatus::Failed
                     | autonoetic_types::workflow::TaskRunStatus::Cancelled
@@ -3602,6 +3306,17 @@ fn finalize_assistant_display(
 }
 
 fn format_assistant_reply(reply: &str) -> AssistantReplyDisplay {
+    // Safety net: strip <think> blocks for display, in case the reply was
+    // stored before the lifecycle-level stripping was added.
+    let reply_owned: String;
+    let reply: &str = if reply.contains("<think>") {
+        reply_owned = autonoetic_gateway::runtime::response_validation::strip_think_blocks(reply)
+            .into_owned();
+        &reply_owned
+    } else {
+        reply
+    };
+
     let (source, is_fenced) = parse_assistant_reply_json(reply);
 
     let summary = loose_field_from_reply(reply, "summary", &source);
@@ -6233,11 +5948,17 @@ async fn handle_chat_test_mode(
                  Ok(SlashCommand::ReturnToAgent { .. }) => {
                      println!("/return is not supported in test mode.");
                  }
+                 Ok(SlashCommand::Waive { .. }) => {
+                     println!("/waive is not supported in test mode.");
+                 }
                  Ok(SlashCommand::PlanApprove(_)) => {
                      println!("/plan is not supported in test mode.");
                  }
                  Ok(SlashCommand::ModelShow | SlashCommand::ModelSet { .. } | SlashCommand::ModelClear) => {
                      println!("/model is not supported in test mode.");
+                 }
+                 Ok(SlashCommand::SentinelStop(_)) => {
+                     println!("/sentinel stop is not supported in test mode.");
                  }
                  Err(error) => {
                     println!("{}", error);
@@ -7162,12 +6883,69 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                 app.add_message(MessageRole::User, input.clone());
                                                 let _ = tx.send((id, ChatOutbound::PolicyAuthor(text)));
                                             }
+                                            Ok(SlashCommand::SentinelStop(reason)) => {
+                                                let root_session_id = get_root_session_id(app);
+                                                let reason = reason.unwrap_or_else(|| {
+                                                    "operator triggered Sentinel stop from TUI".to_string()
+                                                });
+                                                if let Some(exec) = execution_for_interactions {
+                                                    match exec
+                                                        .emergency_stop_root_session(
+                                                            &root_session_id,
+                                                            &reason,
+                                                            "operator",
+                                                            "chat-tui",
+                                                            "sentinel_stop",
+                                                            None,
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                            app.add_message(
+                                                                MessageRole::System,
+                                                                format!(
+                                                                    "Sentinel stop requested for root session: {}",
+                                                                    root_session_id
+                                                                ),
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            app.add_message(
+                                                                MessageRole::System,
+                                                                format!(
+                                                                    "Failed to Sentinel-stop root session {}: {}",
+                                                                    root_session_id, e
+                                                                ),
+                                                            );
+                                                        }
+                                                    }
+                                                } else {
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        "Execution service unavailable: cannot Sentinel-stop root session from chat TUI.".to_string(),
+                                                    );
+                                                }
+                                            }
                                             Ok(SlashCommand::ReturnToAgent { force, message }) => {
                                                 let id = app.next_id();
+                                                let Some(wb_overview) = app.active_workbench.as_ref() else {
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        "No active workbench to return. Use /wb status to check.".to_string(),
+                                                    );
+                                                    continue;
+                                                };
+                                                let Some(store) = gateway_store else {
+                                                    app.add_message(
+                                                        MessageRole::System,
+                                                        "Gateway store not available.".to_string(),
+                                                    );
+                                                    continue;
+                                                };
                                                 let return_status =
                                                     prepare_return_to_agent_wakeup(
-                                                        gateway_store,
-                                                        app.active_workbench.as_ref(),
+                                                        store,
+                                                        &wb_overview.workbench_id,
                                                         force,
                                                         message.as_deref(),
                                                     );
@@ -7176,12 +6954,6 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                         app.add_message(
                                                             MessageRole::System,
                                                             reason,
-                                                        );
-                                                    }
-                                                    ReturnToAgentStatus::NoWorkbench => {
-                                                        app.add_message(
-                                                            MessageRole::System,
-                                                            "No active workbench to return. Use /wb status to check.".to_string(),
                                                         );
                                                     }
                                                     ReturnToAgentStatus::Ready {
@@ -7200,11 +6972,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                                             force = force_label,
                                                             note = note_label,
                                                             target = target_agent_id,
-                                                            wb = app
-                                                                .active_workbench
-                                                                .as_ref()
-                                                                .map(|w| w.workbench_id.as_str())
-                                                                .unwrap_or("?"),
+                                                            wb = wb_overview.workbench_id,
                                                         );
                                                         app.add_message(MessageRole::User, echo);
                                                         app.add_pending(id);
@@ -7341,6 +7109,50 @@ async fn run_loop<B: ratatui::backend::Backend>(
                                         app.add_message(
                                             MessageRole::System,
                                             "Execution service unavailable: cannot cancel root session from chat TUI.".to_string(),
+                                        );
+                                    }
+                                }
+                                HandleKeyAction::SentinelStop(reason) => {
+                                    let root_session_id = get_root_session_id(app);
+                                    let reason = reason.unwrap_or_else(|| {
+                                        "operator triggered Sentinel stop from TUI".to_string()
+                                    });
+
+                                    if let Some(exec) = execution_for_interactions {
+                                        match exec
+                                            .emergency_stop_root_session(
+                                                &root_session_id,
+                                                &reason,
+                                                "operator",
+                                                "chat-tui",
+                                                "sentinel_stop",
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "Sentinel stop requested for root session: {}",
+                                                        root_session_id
+                                                    ),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                app.add_message(
+                                                    MessageRole::System,
+                                                    format!(
+                                                        "Failed to Sentinel-stop root session {}: {}",
+                                                        root_session_id, e
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        app.add_message(
+                                            MessageRole::System,
+                                            "Execution service unavailable: cannot Sentinel-stop root session from chat TUI.".to_string(),
                                         );
                                     }
                                 }
@@ -7789,6 +7601,7 @@ enum HandleKeyAction {
     ApprovePlanInline(String),
     PauseSession,
     CancelSession,
+    SentinelStop(Option<String>),
     OpenPendingOverlay,
     OverlayApprove(usize),
     OverlayAnswerInteraction { index: usize, option_id: Option<String> },
@@ -7983,6 +7796,14 @@ fn handle_key(
         // Open pending approvals/interactions overlay
         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Ok(HandleKeyAction::OpenPendingOverlay);
+        }
+
+        // Operator-initiated Sentinel intervention: emergency-stop the root session
+        // without waiting for a pushed prompt (Phase 2 D.7a).
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Ok(HandleKeyAction::SentinelStop(Some(
+                "operator triggered Sentinel stop from TUI".to_string(),
+            )));
         }
 
         _ => {}
@@ -8354,6 +8175,22 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             format!("  page_id: {}", clamp_chat_field(page_id)),
             format!("  title: {}", clamp_chat_field(title)),
         ],
+        ScheduledAction::PlanFrame { plan_id, version, envelope } => {
+            let mut v = vec![
+                "type: plan_frame".to_string(),
+                format!("  plan_id: {}", clamp_chat_field(plan_id)),
+                format!("  version: {version}"),
+            ];
+            if !envelope.is_empty() {
+                if let Ok(s) = serde_json::to_string_pretty(envelope) {
+                    v.push("  envelope:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            v
+        }
     }
 }
 
@@ -8602,42 +8439,87 @@ fn approve_plan_frame_in_chat(
     wake_planner: bool,
     tx: Option<&tokio::sync::mpsc::UnboundedSender<(u64, ChatOutbound)>>,
 ) {
-    match autonoetic_gateway::scheduler::approve_plan_frame_operator(
-        config,
-        store,
-        plan_id,
-        "operator",
-    ) {
-        Ok(plan) => {
-            app.pending_plan_ids.retain(|id| id != plan_id);
-            app.pending_plan_summaries.retain(|(id, _)| id != plan_id);
+    let plan = match store.load_plan_frame(plan_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
             app.add_message(
                 MessageRole::System,
-                format!(
-                    "Plan approved: {} — \"{}\" (v{})",
-                    plan.plan_id, plan.title, plan.version
-                ),
+                format!("Plan {plan_id} not found."),
             );
-            if wake_planner {
-                if let Some(tx) = tx {
-                    let wake = plan.execution_wake_hint().unwrap_or_else(|| {
-                        format!(
-                            "[Operator approved plan {}] \"{}\" (v{}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.",
-                            plan.plan_id, plan.title, plan.version
-                        )
-                    });
-                    let id = app.next_id();
-                    app.add_pending(id);
-                    app.add_message(MessageRole::User, wake.clone());
-                    let _ = tx.send((id, ChatOutbound::Chat(wake)));
-                }
-            } else {
+            return;
+        }
+        Err(e) => {
+            app.add_message(
+                MessageRole::System,
+                format!("Failed to load plan {plan_id}: {e}"),
+            );
+            return;
+        }
+    };
+    if plan.status != autonoetic_types::plan_frame::PlanStatus::AwaitingApproval {
+        app.add_message(
+            MessageRole::System,
+            format!(
+                "Plan {plan_id} is in '{}' status; only awaiting_approval plans can be approved.",
+                plan.status.as_str()
+            ),
+        );
+        return;
+    }
+
+    let request_id =
+        autonoetic_gateway::runtime::tools::plan_frame::plan_approval_request_id(
+            plan_id,
+            plan.version,
+        );
+    match autonoetic_gateway::scheduler::approval::approve_request(
+        config,
+        Some(store),
+        &request_id,
+        "operator",
+        None,
+        None,
+        None,
+        None,
+    ) {
+        Ok(_) => match store.load_plan_frame(plan_id) {
+            Ok(Some(plan)) => {
+                app.pending_plan_ids.retain(|id| id != plan_id);
+                app.pending_plan_summaries.retain(|(id, _)| id != plan_id);
                 app.add_message(
                     MessageRole::System,
-                    "Send a message to the planner to continue execution.".to_string(),
+                    format!(
+                        "Plan approved: {} — \"{}\" (v{})",
+                        plan.plan_id, plan.title, plan.version
+                    ),
+                );
+                if wake_planner {
+                    if let Some(tx) = tx {
+                        let wake = plan.execution_wake_hint().unwrap_or_else(|| {
+                            format!(
+                                "[Operator approved plan {}] \"{}\" (v{}) is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list.",
+                                plan.plan_id, plan.title, plan.version
+                            )
+                        });
+                        let id = app.next_id();
+                        app.add_pending(id);
+                        app.add_message(MessageRole::User, wake.clone());
+                        let _ = tx.send((id, ChatOutbound::Chat(wake)));
+                    }
+                } else {
+                    app.add_message(
+                        MessageRole::System,
+                        "Send a message to the planner to continue execution.".to_string(),
+                    );
+                }
+            }
+            _ => {
+                app.add_message(
+                    MessageRole::System,
+                    format!("Plan {plan_id} approved but disappeared from store."),
                 );
             }
-        }
+        },
         Err(e) => {
             app.add_message(
                 MessageRole::System,
@@ -8663,6 +8545,7 @@ fn action_summary(action: &autonoetic_types::background::ScheduledAction) -> &'s
         autonoetic_types::background::ScheduledAction::AgentInstall { .. } => "agent.install",
         autonoetic_types::background::ScheduledAction::ProfileShare { .. } => "profile.share",
         autonoetic_types::background::ScheduledAction::LayerMount { .. } => "layer.mount",
+        autonoetic_types::background::ScheduledAction::PlanFrame { .. } => "plan.frame",
         _ => "other",
     }
 }
@@ -9274,10 +9157,13 @@ fn copy_selection_to_clipboard(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_return_to_agent_wakeup, extract_approval_request_id, extract_structured_approval,
-        format_lifecycle_line, format_user_interaction_prompt, format_workflow_event_card,
-        parse_slash_command, prepare_return_to_agent_wakeup, ReturnToAgentInput, ReturnToAgentStatus,
+        extract_approval_request_id, extract_structured_approval, format_lifecycle_line,
+        format_user_interaction_prompt, format_workflow_event_card, parse_slash_command,
         SlashCommand, WorkbenchOverview,
+    };
+    use autonoetic_gateway::runtime::workbench_return::{
+        build_return_to_agent_wakeup, prepare_return_to_agent_wakeup, ReturnToAgentInput,
+        ReturnToAgentStatus,
     };
     use autonoetic_types::background::{
         UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
@@ -9623,6 +9509,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_slash_command_waive() {
+        // Bare /waive shows the waiver status card.
+        assert_eq!(
+            parse_slash_command("/waive").unwrap(),
+            SlashCommand::Waive {
+                validation_id: None,
+                reason: None,
+            }
+        );
+        // /waive with validation_id but no reason.
+        assert_eq!(
+            parse_slash_command("/waive unit_tests").unwrap(),
+            SlashCommand::Waive {
+                validation_id: Some("unit_tests".to_string()),
+                reason: None,
+            }
+        );
+        // /waive with validation_id and multi-token reason.
+        assert_eq!(
+            parse_slash_command("/waive unit_tests doc only change").unwrap(),
+            SlashCommand::Waive {
+                validation_id: Some("unit_tests".to_string()),
+                reason: Some("doc only change".to_string()),
+            }
+        );
+    }
+
     fn make_wakeup_input(
         workbench_id: &str,
         base_artifact_id: &str,
@@ -9722,9 +9636,20 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_return_no_workbench() {
-        let status = prepare_return_to_agent_wakeup(None, None, false, None);
-        assert!(matches!(status, ReturnToAgentStatus::NoWorkbench));
+    fn test_prepare_return_missing_workbench_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .unwrap();
+        let status = prepare_return_to_agent_wakeup(&store, "wb-does-not-exist", false, None);
+        match status {
+            ReturnToAgentStatus::Refused { reason } => {
+                assert!(reason.contains("wb-does-not-exist"));
+                assert!(reason.contains("gateway store"));
+            }
+            other => panic!("expected Refused, got {:?}", other),
+        }
     }
 
     #[test]
@@ -9777,7 +9702,7 @@ mod tests {
             changed_files: 1,
         };
         let status =
-            prepare_return_to_agent_wakeup(Some(&store), Some(&overview), false, None);
+            prepare_return_to_agent_wakeup(&store, "wb-test-1", false, None);
         match status {
             ReturnToAgentStatus::Refused { reason } => {
                 assert!(reason.contains("1 unsaved edit"));
@@ -9832,7 +9757,7 @@ mod tests {
             changed_files: 1,
         };
         let status =
-            prepare_return_to_agent_wakeup(Some(&store), Some(&overview), true, Some("ok"));
+            prepare_return_to_agent_wakeup(&store, "wb-test-2", true, Some("ok"));
         match status {
             ReturnToAgentStatus::Ready {
                 target_agent_id,
@@ -9905,7 +9830,7 @@ mod tests {
             file_count: 3,
             changed_files: 0,
         };
-        let status = prepare_return_to_agent_wakeup(Some(&store), Some(&overview), false, None);
+        let status = prepare_return_to_agent_wakeup(&store, "wb-test-3", false, None);
         match status {
             ReturnToAgentStatus::Ready {
                 target_agent_id,

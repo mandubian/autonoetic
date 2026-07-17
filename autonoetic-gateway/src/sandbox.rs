@@ -8,17 +8,21 @@ use sha2::{Digest, Sha256};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
 };
 
 pub const SDK_BRIDGE_RATE_LIMIT_PER_SEC: u32 = 100;
 pub const SDK_BRIDGE_MAX_PAYLOAD_BYTES: usize = 1_048_576;
+/// Reuse SDK bridge sockets across sequential `sandbox_exec` calls for the same
+/// `(agent_dir, root_session_id)` within this idle window.
+const SDK_BRIDGE_IDLE_TTL: Duration = Duration::from_secs(300);
 
 const DOCKER_IMAGE_ENV: &str = "AUTONOETIC_DOCKER_IMAGE";
 const FIRECRACKER_CONFIG_ENV: &str = "AUTONOETIC_FIRECRACKER_CONFIG";
@@ -133,21 +137,72 @@ pub fn init_sdk_deployed_path(gateway_dir: &Path) {
     }
 }
 
-struct SdkBridgeGuard {
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct SdkBridgeCacheKey {
+    agent_dir: String,
+    root_session_id: Option<String>,
+}
+
+struct SdkBridgeShared {
     stop: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
+    handle: Mutex<Option<thread::JoinHandle<()>>>,
     socket_path_host: PathBuf,
+    socket_name: String,
+    ref_count: AtomicUsize,
+    idle_deadline: Mutex<Option<Instant>>,
+}
+
+impl SdkBridgeShared {
+    fn shutdown(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = UnixStream::connect(&self.socket_path_host);
+        if let Ok(mut guard) = self.handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+        let _ = fs::remove_file(&self.socket_path_host);
+    }
+}
+
+struct SdkBridgeGuard {
+    shared: Arc<SdkBridgeShared>,
 }
 
 impl Drop for SdkBridgeGuard {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        let _ = UnixStream::connect(&self.socket_path_host);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        let prev = self.shared.ref_count.fetch_sub(1, Ordering::SeqCst);
+        if prev == 1 {
+            if let Ok(mut deadline) = self.shared.idle_deadline.lock() {
+                *deadline = Some(Instant::now() + SDK_BRIDGE_IDLE_TTL);
+            }
         }
-        let _ = fs::remove_file(&self.socket_path_host);
     }
+}
+
+static SDK_BRIDGE_CACHE: LazyLock<Mutex<HashMap<SdkBridgeCacheKey, Arc<SdkBridgeShared>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn purge_idle_sdk_bridges(cache: &mut HashMap<SdkBridgeCacheKey, Arc<SdkBridgeShared>>) {
+    let now = Instant::now();
+    cache.retain(|_, shared| {
+        if shared.ref_count.load(Ordering::SeqCst) > 0 {
+            return true;
+        }
+        let expired = shared
+            .idle_deadline
+            .lock()
+            .ok()
+            .and_then(|d| *d)
+            .map(|deadline| now >= deadline)
+            .unwrap_or(true);
+        if expired {
+            shared.shutdown();
+            false
+        } else {
+            true
+        }
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +226,30 @@ impl SandboxDriverKind {
             "microvm" | "firecracker" => Ok(Self::MicroVm),
             "wasm" | "wasi" => Ok(Self::Wasm),
             other => anyhow::bail!("Unsupported sandbox driver '{}'", other),
+        }
+    }
+
+    /// Whether this driver guarantees the run has **no network access** under the
+    /// given isolation overrides. Single source of truth for "is this execution
+    /// physically offline" — used by the promotion gate to decide whether a
+    /// deterministic test suite can be trusted to run in isolation (P-3.10)
+    /// instead of being statically pre-denied on mere import detection.
+    ///
+    /// - **Bubblewrap**: offline iff `force_network_off` (the gate sets it via
+    ///   [`BwrapIsolationOverrides::promotion_gate_overrides`]); enforced by
+    ///   `--unshare-all` with no `--share-net`.
+    /// - **Docker**: always offline — `docker_command` hardcodes `--network none`.
+    /// - **Wasm**: always offline — the in-process WASI preview1 tier exposes no
+    ///   sockets (only a preopened workspace dir, args, env).
+    /// - **MicroVm**: NOT guaranteed — network is whatever the operator's
+    ///   firecracker `--config-file` declares; the gateway passes only that file
+    ///   and cannot assert the absence of a NIC. Conservative `false`.
+    pub fn guarantees_network_off(self, overrides: &BwrapIsolationOverrides) -> bool {
+        match self {
+            Self::Bubblewrap => overrides.force_network_off,
+            Self::Docker => true,
+            Self::Wasm => true,
+            Self::MicroVm => false,
         }
     }
 }
@@ -354,7 +433,7 @@ impl SandboxRunner {
             }
         };
 
-        let mut command = Command::new(program);
+        let mut command = Command::new(&program);
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -363,7 +442,7 @@ impl SandboxRunner {
 
         apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
 
-        let child = command.spawn()?;
+        let child = spawn_driver_process(&mut command, &program)?;
         Ok(Self {
             process: child,
             driver,
@@ -443,7 +522,7 @@ impl SandboxRunner {
             }
         };
 
-        let mut command = Command::new(program);
+        let mut command = Command::new(&program);
         command
             .args(args)
             .stdin(Stdio::piped())
@@ -452,7 +531,7 @@ impl SandboxRunner {
 
         apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
 
-        let child = command.spawn()?;
+        let child = spawn_driver_process(&mut command, &program)?;
         Ok(Self {
             process: child,
             driver,
@@ -473,6 +552,41 @@ fn start_sdk_bridge(
     agent_dir: &str,
     root_session_id: Option<String>,
 ) -> anyhow::Result<StartedSdkBridge> {
+    let key = SdkBridgeCacheKey {
+        agent_dir: agent_dir.to_string(),
+        root_session_id: root_session_id.clone(),
+    };
+
+    let mut cache = SDK_BRIDGE_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    purge_idle_sdk_bridges(&mut cache);
+
+    if let Some(shared) = cache.get(&key) {
+        let active = shared.ref_count.load(Ordering::SeqCst) > 0;
+        let idle_valid = shared
+            .idle_deadline
+            .lock()
+            .ok()
+            .and_then(|d| *d)
+            .map(|deadline| Instant::now() < deadline)
+            .unwrap_or(false);
+        if active || idle_valid {
+            shared.ref_count.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut deadline) = shared.idle_deadline.lock() {
+                *deadline = None;
+            }
+            return Ok(StartedSdkBridge {
+                socket_name: shared.socket_name.clone(),
+                guard: SdkBridgeGuard {
+                    shared: Arc::clone(shared),
+                },
+            });
+        }
+        shared.shutdown();
+        cache.remove(&key);
+    }
+
     let mut hasher = Sha256::new();
     hasher.update(agent_dir.as_bytes());
     hasher.update(std::process::id().to_ne_bytes());
@@ -507,13 +621,19 @@ fn start_sdk_bridge(
         );
     });
 
+    let shared = Arc::new(SdkBridgeShared {
+        stop,
+        handle: Mutex::new(Some(handle)),
+        socket_path_host: host_socket_path,
+        socket_name: socket_name.clone(),
+        ref_count: AtomicUsize::new(1),
+        idle_deadline: Mutex::new(None),
+    });
+    cache.insert(key, Arc::clone(&shared));
+
     Ok(StartedSdkBridge {
         socket_name,
-        guard: SdkBridgeGuard {
-            stop,
-            handle: Some(handle),
-            socket_path_host: host_socket_path,
-        },
+        guard: SdkBridgeGuard { shared },
     })
 }
 
@@ -549,6 +669,29 @@ struct SdkBridgeWiring {
     docker_env: Vec<(String, String)>,
 }
 
+/// Spawn the sandbox driver process, mapping a missing-driver `ENOENT` to a
+/// clear, terminal error instead of the bare `No such file or directory
+/// (os error 2)` that `Command::spawn` returns when the binary is absent.
+///
+/// The `resource:` tag makes it a recoverable structured tool error (the agent
+/// sees it and can stop cleanly), and the `[sandbox_driver_unavailable]` marker
+/// routes it through `classify_message` to a non-retryable
+/// `GateUnableToEvaluate` failure so it does not burn the divergence budget.
+/// See issue #600.
+fn spawn_driver_process(command: &mut Command, program: &str) -> anyhow::Result<Child> {
+    match command.spawn() {
+        Ok(child) => Ok(child),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "sandbox_unavailable: sandbox driver '{program}' not found on PATH — this host is missing the \
+             sandbox backend this agent requires. Install it (bubblewrap provides 'bwrap', Docker \
+             provides 'docker') or run `autonoetic gateway preflight` to inspect host \
+             capabilities. [sandbox_driver_unavailable]"
+        ),
+        Err(e) => Err(anyhow::Error::new(e)
+            .context(format!("failed to spawn sandbox driver '{program}'"))),
+    }
+}
+
 fn wire_sdk_bridge(
     driver: SandboxDriverKind,
     agent_dir: &str,
@@ -561,7 +704,7 @@ fn wire_sdk_bridge(
     }
 
     let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
-    let host_socket = bridge.guard.socket_path_host.clone();
+    let host_socket = bridge.guard.shared.socket_path_host.clone();
     let sandbox_socket = sdk_socket_sandbox_path(driver, &bridge.socket_name)
         .expect("driver supports the bridge (checked above)");
     wiring.socket_path_sandbox = Some(sandbox_socket.clone());
@@ -1584,6 +1727,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use serial_test::serial;
+
+    #[test]
+    fn spawn_driver_process_explains_missing_driver() {
+        // A driver binary that cannot exist on PATH → clear, tagged terminal
+        // error instead of a bare "No such file or directory". (#600)
+        let mut cmd = Command::new("autonoetic-no-such-sandbox-driver-xyz");
+        let err = spawn_driver_process(&mut cmd, "autonoetic-no-such-sandbox-driver-xyz")
+            .expect_err("spawning a missing driver must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("not found on PATH"), "got: {msg}");
+        assert!(msg.contains("sandbox_driver_unavailable"), "got: {msg}");
+        assert!(msg.contains("preflight"), "got: {msg}");
+    }
 
     #[test]
     fn test_parse_driver_kind() {

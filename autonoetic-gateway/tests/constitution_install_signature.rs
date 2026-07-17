@@ -36,6 +36,7 @@ fn test_manifest() -> AgentManifest {
             id: "revision.tester".to_string(),
             name: "revision.tester".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -54,8 +55,10 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

@@ -35,6 +35,7 @@ fn enabled_config() -> PromotionGovernorConfig {
         flapping_lookback: 4,
         eval_regression_streak: 3,
         eval_regression_lookback: 6,
+        max_promotion_attempts_per_revision: 3,
     }
 }
 
@@ -58,6 +59,7 @@ fn seed_promotion(
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "promotion_governor_integration".to_string(),
         origin_node_id: "gateway".to_string(),
+        pre_authorization: None,
     };
     store.insert_promotion_record(&rec).unwrap();
 }
@@ -74,6 +76,8 @@ fn seed_revision_with_artifact(store: &GatewayStore, agent_id: &str, revision_id
         created_at: Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "promotion_governor_integration".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -81,6 +85,7 @@ fn seed_revision_with_artifact(store: &GatewayStore, agent_id: &str, revision_id
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -109,6 +114,7 @@ fn seed_verdict_with_findings(
             true,
             findings,
             None,
+            None,
         )
         .unwrap();
 }
@@ -131,7 +137,7 @@ fn governor_disabled_passes_unconditionally() {
         enabled: false,
         ..enabled_config()
     };
-    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-new").unwrap();
+    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-new", None).unwrap();
     assert!(rejection.is_none());
 }
 
@@ -363,7 +369,7 @@ fn run_governor_returns_velocity_before_flapping() {
         );
     }
     // candidate matches one of them → flapping would also fire
-    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-1")
+    let rejection = run_governor_checks(&cfg, &store, &gateway_dir, agent_id, "rev-1", None)
         .unwrap()
         .unwrap();
     assert_eq!(rejection.error, "promotion_velocity_exceeded");
@@ -374,7 +380,7 @@ fn run_governor_returns_none_when_clear() {
     let (_temp, store, gateway_dir) = temp_setup();
     let cfg = enabled_config();
     let rejection =
-        run_governor_checks(&cfg, &store, &gateway_dir, "agent.clean", "rev-fresh").unwrap();
+        run_governor_checks(&cfg, &store, &gateway_dir, "agent.clean", "rev-fresh", None).unwrap();
     assert!(rejection.is_none());
 }
 

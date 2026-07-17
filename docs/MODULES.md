@@ -349,7 +349,7 @@ metadata:
       temperature: 0.1
     capabilities:
       - type: "ToolInvoke"
-        allowed: ["content.", "knowledge."]
+        allowed: ["content_", "knowledge_"]
       - type: "MemoryWrite"
         scopes: ["self.*", "skills/*"]
     execution_mode: "reasoning"  # or "script"

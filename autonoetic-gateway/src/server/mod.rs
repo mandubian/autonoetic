@@ -37,6 +37,10 @@ impl GatewayServer {
         std::env::set_var("AUTONOETIC_NODE_ID", &node_id);
         std::env::set_var("AUTONOETIC_NODE_NAME", &node_name);
 
+        // Cache the resolved node id for the process lifetime so hot-path timeline/
+        // event builders avoid a per-event `std::env::var` syscall (#586).
+        crate::execution::init_gateway_node_id(&node_id);
+
         // Initialize sandbox config (config is authoritative by default; env overrides
         // are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true).
         crate::sandbox::init_sandbox_config(&self.config.sandbox);
@@ -97,6 +101,20 @@ impl GatewayServer {
         )?);
         gateway_store.set_approval_flood_cap(self.config.max_pending_approvals_per_root);
         gateway_store.set_escalation_flood_cap(self.config.max_pending_escalations_per_root);
+        gateway_store
+            .set_anomaly_flag_flood_cap(self.config.max_pending_anomaly_flags_per_reporter);
+
+        // Seed the built-in civic eval suite (#772 E.1). Idempotent.
+        if let Err(e) = crate::runtime::civic_evals::ensure_civic_eval_suite(
+            &gateway_store,
+            &node_id,
+        ) {
+            tracing::warn!(
+                target: "bootstrap",
+                error = %e,
+                "Failed to seed civic eval suite"
+            );
+        }
 
         {
             let probe_result = crate::vault::probe_master_key(&self.config.agents_dir);
@@ -130,23 +148,8 @@ impl GatewayServer {
             }
         }
 
-        // Reap orphaned continuation files from crash/restart
-        match crate::runtime::continuation::reap_orphaned_continuations(
-            &self.config,
-            &gateway_store,
-        ) {
-            Ok(n) if n > 0 => tracing::info!(
-                target: "gateway",
-                "Reaped {} orphaned continuation file(s)",
-                n
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                target: "gateway",
-                error = %e,
-                "Continuation reaper failed"
-            ),
-        }
+        // Continuation files are obsolete — all suspension state is now captured
+        // in enriched checkpoints.  No reclamation needed.
 
         // Reconcile system agents (create cron jobs if missing)
         let reconcile_results =
@@ -260,7 +263,7 @@ impl GatewayServer {
             self.config.port,
         )?;
         let background_scheduler =
-            crate::scheduler::start_background_scheduler(jsonrpc_router.execution_service());
+            crate::scheduler::start_background_scheduler(jsonrpc_router.clone());
         let fast_scheduler = crate::scheduler::fast_scheduler::start_fast_scheduler(
             jsonrpc_router.execution_service(),
         );

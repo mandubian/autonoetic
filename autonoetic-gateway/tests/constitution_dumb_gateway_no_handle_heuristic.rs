@@ -27,6 +27,7 @@ fn manifest(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "test agent".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::CodeExecution {
@@ -51,8 +52,10 @@ fn manifest(agent_id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -87,7 +90,8 @@ fn run_sandbox_exec(command: &str) -> anyhow::Result<serde_json::Value> {
 }
 
 fn assert_natural_exec_failure(body: &serde_json::Value, expected_path_fragment: &str) {
-    assert_eq!(body["ok"], false);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["command_succeeded"], false);
     assert_ne!(
         body["exit_code"].as_i64(),
         Some(0),

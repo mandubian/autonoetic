@@ -426,9 +426,39 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             decided_at: None,
             published_in_release: None,
             created_at: now,
+            sla_breached_at: None,
         };
 
         store.insert_constitutional_proposal(&proposal)?;
+
+        // #771 D.2: filing a proposal answers any open amendment
+        // invitations whose rule (or clause family) the proposal targets.
+        // Mechanical matching only — the gateway never judges whether the
+        // proposal "really" answers the invitation; worst case an
+        // invitation expires unanswered, which is itself recorded.
+        let invitations_answered = store
+            .mark_amendment_invitations_answered(
+                &proposal.proposer_agent_id,
+                &proposal_id,
+                proposal.target_id.as_deref(),
+                &chrono::Utc::now().to_rfc3339(),
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to mark amendment invitations answered for {}: {}",
+                    proposal_id, e
+                );
+                0
+            });
+        if invitations_answered > 0 {
+            tracing::info!(
+                target: "amendment_invitation",
+                proposal_id = %proposal_id,
+                proposer = %proposal.proposer_agent_id,
+                answered = invitations_answered,
+                "Proposal filing answered open amendment invitations"
+            );
+        }
 
         let notification = NotificationRecord::new(
             format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),

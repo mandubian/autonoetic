@@ -238,12 +238,12 @@ mod tests {
         assert_eq!(
             resolve_preset_name_for_agent("planner.default", &mapping)
                 .map(String::as_str),
-            Some("planner.default")
+            Some("planner")
         );
         assert_eq!(
             resolve_preset_name_for_agent("coder.default", &mapping)
                 .map(String::as_str),
-            Some("default")
+            Some("default-preset")
         );
     }
 

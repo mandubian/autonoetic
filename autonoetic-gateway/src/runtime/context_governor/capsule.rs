@@ -344,6 +344,52 @@ fn bootstrap_capsule_from_compressed_markers(
     None
 }
 
+/// Decide the working capsule for this compression pass.
+///
+/// Precedence (first wins):
+/// 1. **Reuse** the prior capsule carried in from the previous governor run
+///    (`prior`). This is the incremental path: `extract_delta` then only sees
+///    the newly-compressible turns against the accumulated state, instead of
+///    re-summarizing the whole history into an empty shell every time.
+/// 2. **Legacy bootstrap** from a `[COMPRESSED CONTEXT` marker in the live
+///    history — kept so old sessions / fresh histories (no prior capsule yet)
+///    still recover their compressed context.
+/// 3. **Fresh empty shell** for the very first compression of a session.
+///
+/// `reused` is `true` on path 1 so the caller can record provenance
+/// (`previous_version_handle`) before `apply_delta` mutates the capsule.
+fn seed_capsule(
+    prior: Option<&StateCapsule>,
+    session_id: &str,
+    history: &[crate::llm::Message],
+    turn_number: u64,
+) -> (StateCapsule, bool) {
+    if let Some(prior) = prior {
+        // Clone the prior capsule as-is; the caller stamps provenance and
+        // apply_delta bumps version/last_update_turn.
+        return (prior.clone(), true);
+    }
+    let bootstrapped = bootstrap_capsule_from_compressed_markers(session_id, history, turn_number);
+    (bootstrapped.unwrap_or_else(|| fresh_capsule(session_id, turn_number)), false)
+}
+
+/// Construct a brand-new empty capsule (the first-compression baseline).
+fn fresh_capsule(session_id: &str, turn_number: u64) -> StateCapsule {
+    StateCapsule {
+        version: 1,
+        session_id: session_id.to_string(),
+        last_update_turn: turn_number,
+        objective_and_criteria: String::new(),
+        decisions_and_rationale: Vec::new(),
+        stable_identifiers: Vec::new(),
+        open_tasks: Vec::new(),
+        prior_decisions_summary: None,
+        previous_version_handle: None,
+        source_history_handle: None,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 fn cap_decisions(capsule: &mut StateCapsule, max_decisions: usize) {
     if capsule.decisions_and_rationale.len() > max_decisions {
         let overflow_count = capsule.decisions_and_rationale.len() - max_decisions;
@@ -408,7 +454,14 @@ pub(crate) async fn extract_delta(
         temperature: Some(0.0),
         metadata: None,
         thinking: None,
-        prompt_cache_key: None,
+        // Per-session sticky routing so a session's successive capsule
+        // delta-extraction calls reuse the same upstream provider instance
+        // (and its implicit cache). The static system instruction is too small
+        // (~14 tokens) to warrant a system_cache_prefix breakpoint; the bulk
+        // of the tokens live in the varying user prompt. Kept harmless for
+        // providers that ignore the field.
+        prompt_cache_key: Some(format!("agw-capsule-{}", capsule.session_id)),
+        system_cache_prefix_bytes: None,
     };
 
     let resp = driver.complete(&req).await?;
@@ -483,26 +536,17 @@ impl super::ReductionStrategy for CapsuleStrategy {
             });
         }
 
-        let mut capsule = match bootstrap_capsule_from_compressed_markers(
-            &ctx.session_id,
-            &ctx.history,
-            ctx.turn_number,
-        ) {
-            Some(c) => c,
-            None => StateCapsule {
-                version: 1,
-                session_id: ctx.session_id.clone(),
-                last_update_turn: ctx.turn_number,
-                objective_and_criteria: String::new(),
-                decisions_and_rationale: Vec::new(),
-                stable_identifiers: Vec::new(),
-                open_tasks: Vec::new(),
-                prior_decisions_summary: None,
-                previous_version_handle: None,
-                source_history_handle: None,
-                updated_at: chrono::Utc::now().to_rfc3339(),
-            },
-        };
+        let (mut capsule, reused) =
+            seed_capsule(ctx.capsule_state.as_ref(), &ctx.session_id, &ctx.history, ctx.turn_number);
+
+        // Provenance: if we are evolving a prior capsule, record the handle of
+        // the capsule it descended from (the prior's own persisted handle) before
+        // apply_delta bumps the version. This chains capsule versions for audit.
+        if reused {
+            if let Some(prior) = ctx.capsule_state.as_ref() {
+                capsule.previous_version_handle = prior.source_history_handle.clone();
+            }
+        }
 
         let delta = extract_delta(
             compressible,
@@ -519,8 +563,14 @@ impl super::ReductionStrategy for CapsuleStrategy {
         apply_delta(&mut capsule, delta, ctx.turn_number)?;
         cap_decisions(&mut capsule, max_capsule_decisions);
         cap_completed_tasks(&mut capsule, max_completed_tasks);
-        ctx.capsule_state = Some(capsule.clone());
 
+        // Persist the evolved capsule to the content store. The handle returned
+        // by `store.write` is the capsule's own content-addressed handle; stamp
+        // it into `source_history_handle` so the *next* compression can record
+        // it as its `previous_version_handle` (chain of versions for audit).
+        // We assign `ctx.capsule_state` only after the handle is known, so the
+        // value carried forward (into self.capsule_state at the govern call
+        // site) carries provenance.
         if let Some(ref dir) = self.gateway_dir {
             match ContentStore::new(dir) {
                 Ok(store) => {
@@ -528,6 +578,9 @@ impl super::ReductionStrategy for CapsuleStrategy {
                         Ok(json_bytes) => {
                             match store.write(&json_bytes) {
                                 Ok(handle) => {
+                                    // This capsule's own handle — the next
+                                    // pass reads it as previous_version_handle.
+                                    capsule.source_history_handle = Some(handle.clone());
                                     if let Err(e) = store.register_name_with_visibility(
                                         &ctx.session_id,
                                         &format!("capsule_v{}_turn_{}", capsule.version - 1, ctx.turn_number),
@@ -546,9 +599,67 @@ impl super::ReductionStrategy for CapsuleStrategy {
                 Err(e) => tracing::warn!(target: "capsule", "Failed to open content store: {e}"),
             }
         }
+        ctx.capsule_state = Some(capsule.clone());
 
         let injection_text = compile_capsule_injection(&capsule);
         let injection_msg = crate::llm::Message::system(injection_text);
+
+        // RFC #780 Part E.1: archive the full pre-compression message history
+        // to the content store BEFORE replacing it. The capsule itself is
+        // already persisted above (for structured audit); this archives the
+        // raw uncompressed messages so the exact pre-compression state can be
+        // restored. Sets `compressed_context_handle` on the metadata (previously
+        // always None — the helper existed at compression.rs:427 but was never
+        // called).
+        //
+        // Metadata is updated unconditionally when compression occurs — even
+        // if the archive write fails, the checkpoints must reflect that
+        // compression happened (compression_count, messages_summarized, turn).
+        // `compressed_context_handle` is set to the handle on success or None
+        // on failure, so the audit trail is honest about what was archived.
+        let compressible_count = compressible.len() as u64;
+        let mut archive_handle: Option<String> = None;
+        if let Some(ref dir) = self.gateway_dir {
+            match ContentStore::new(dir) {
+                Ok(store) => {
+                    match serde_json::to_vec(&ctx.history) {
+                        Ok(json) => {
+                            match store.write(&json) {
+                                Ok(handle) => {
+                                    let name = format!("compressed_context_turn_{}", ctx.turn_number);
+                                    if let Err(e) = store.register_name_with_visibility(
+                                        &ctx.session_id,
+                                        &name,
+                                        &handle,
+                                        ContentVisibility::Private,
+                                    ) {
+                                        tracing::warn!(target: "capsule", error = %e, "Failed to register compressed context name");
+                                    }
+                                    archive_handle = Some(handle);
+                                }
+                                Err(e) => tracing::warn!(target: "capsule", error = %e, "Failed to write compressed context to content store"),
+                            }
+                        }
+                        Err(e) => tracing::warn!(target: "capsule", error = %e, "Failed to serialize pre-compression history"),
+                    }
+                }
+                Err(e) => tracing::warn!(target: "capsule", error = %e, "Failed to open content store for pre-compression archive"),
+            }
+        }
+        // Update metadata unconditionally — compression IS happening
+        // regardless of whether the archive succeeded.
+        let meta = ctx.compression_metadata.get_or_insert_with(|| {
+            crate::runtime::compression::CompressionMetadata {
+                last_compression_turn: 0,
+                messages_summarized: 0,
+                compressed_context_handle: None,
+                compression_count: 0,
+            }
+        });
+        meta.compressed_context_handle = archive_handle;
+        meta.last_compression_turn = ctx.turn_number;
+        meta.messages_summarized = compressible_count;
+        meta.compression_count += 1;
 
         let mut new_history = Vec::with_capacity(kept.len() + 1);
         new_history.push(injection_msg);
@@ -919,6 +1030,60 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[test]
+    fn seed_capsule_reuses_prior_when_present() {
+        // When a prior capsule is supplied, seed_capsule returns it verbatim
+        // (the reuse path) and reports reused=true. The governor then evolves
+        // it via extract_delta instead of re-summarizing into an empty shell.
+        let mut prior = make_capsule();
+        prior.version = 7;
+        prior.source_history_handle = Some("sha-prior-handle".into());
+        let history = vec![]; // not consulted when prior is Some
+        let (capsule, reused) = seed_capsule(Some(&prior), "sess-1", &history, 12);
+        assert!(reused, "prior present ⇒ reused path");
+        assert_eq!(capsule.version, 7, "prior capsule returned as-is (apply_delta bumps later");
+        assert_eq!(capsule.objective_and_criteria, prior.objective_and_criteria);
+        assert_eq!(
+            capsule.source_history_handle.as_deref(),
+            Some("sha-prior-handle"),
+            "prior handle carried through"
+        );
+    }
+
+    #[test]
+    fn seed_capsule_falls_back_to_bootstrap_when_no_prior_but_marker_present() {
+        // Legacy path: no prior capsule, but history carries a compressed
+        // marker — recover the prior context from it.
+        let history = vec![crate::llm::Message {
+            role: crate::llm::Role::System,
+            content: "[COMPRESSED CONTEXT] recovered objective".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+        let (capsule, reused) = seed_capsule(None, "sess-1", &history, 9);
+        assert!(!reused, "no prior ⇒ bootstrapped, not reused");
+        assert!(capsule.objective_and_criteria.contains("recovered objective"));
+    }
+
+    #[test]
+    fn seed_capsule_fresh_shell_when_no_prior_no_marker() {
+        let history = vec![crate::llm::Message {
+            role: crate::llm::Role::User,
+            content: "hello".into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+        let (capsule, reused) = seed_capsule(None, "sess-1", &history, 3);
+        assert!(!reused);
+        assert_eq!(capsule.version, 1, "fresh baseline capsule");
+        assert!(capsule.objective_and_criteria.is_empty());
+        assert_eq!(capsule.session_id, "sess-1");
+    }
+
     fn make_plan_summary() -> PlanFrameSummary {
         PlanFrameSummary {
             plan_id: "plan_abc".into(),
@@ -991,5 +1156,79 @@ mod tests {
         assert!(!prompt.contains("operator/shared steps"));
         assert!(!prompt.contains("required validations"));
         assert!(!prompt.contains("advisory validations"));
+    }
+
+    // ---- RFC #780 Part E.1: pre-compression history archiving tests ----
+
+    #[test]
+    fn persist_compressed_context_writes_history_and_returns_handle() {
+        use crate::runtime::compression::CompressionMetadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ContentStore::new(tmp.path()).unwrap();
+        let history = vec![
+            crate::llm::Message::system("system prompt"),
+            crate::llm::Message::user("hello"),
+            crate::llm::Message::assistant("hi there"),
+        ];
+        let metadata = CompressionMetadata {
+            last_compression_turn: 5,
+            messages_summarized: 2,
+            compressed_context_handle: None,
+            compression_count: 1,
+        };
+
+        let handle = crate::runtime::compression::persist_compressed_context(
+            tmp.path(),
+            "test-session",
+            &history,
+            &metadata,
+        )
+        .unwrap();
+
+        assert!(handle.is_some(), "should return a content handle");
+        let handle = handle.unwrap();
+
+        // The content store should have the full history registered.
+        let name = "compressed_context_turn_5";
+        let resolved = store
+            .resolve_name("test-session", name)
+            .unwrap();
+        assert_eq!(resolved.to_string(), handle);
+    }
+
+    #[test]
+    fn persist_compressed_context_handle_is_round_trippable() {
+        use crate::runtime::compression::CompressionMetadata;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let history = vec![
+            crate::llm::Message::user("turn 1"),
+            crate::llm::Message::assistant("reply 1"),
+            crate::llm::Message::user("turn 2"),
+        ];
+        let metadata = CompressionMetadata {
+            last_compression_turn: 3,
+            messages_summarized: 3,
+            compressed_context_handle: None,
+            compression_count: 1,
+        };
+
+        let handle = crate::runtime::compression::persist_compressed_context(
+            tmp.path(),
+            "session-rt",
+            &history,
+            &metadata,
+        )
+        .unwrap()
+        .unwrap();
+
+        // Read back and verify the history round-trips.
+        let store = ContentStore::new(tmp.path()).unwrap();
+        let bytes = store.read(&handle).unwrap();
+        let restored: Vec<crate::llm::Message> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].content, "turn 1");
+        assert_eq!(restored[2].content, "turn 2");
     }
 }

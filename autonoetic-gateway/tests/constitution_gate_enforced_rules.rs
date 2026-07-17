@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use autonoetic_gateway::runtime::human_gate::{
-    ClearanceSource, GateKind, GateRequest, GateResult, GateService, MatchStrategy,
+    ClearanceSource, DecisionContext, GateKind, GateRequest, GateResult, GateService, MatchStrategy,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
@@ -32,6 +32,7 @@ fn test_manifest() -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test agent".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -48,8 +49,10 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -83,10 +86,12 @@ fn r3_pre_validated_bypass_enforces_r_2_6() -> Result<()> {
         session_id: Some("ses-1"),
         run_context: None,
         config: None,
-        reason: "test".into(),
+        context: DecisionContext::tier1("approval action (test)", "test gate rule"),
         summary: "test".into(),
         approval_ref: None,
+        request_id: None,
         pre_validated: true,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -130,10 +135,12 @@ fn r3_session_grant_clearance_enforces_r_2_4() -> Result<()> {
         session_id: Some("ses-grant"),
         run_context: None,
         config: None,
-        reason: "test".into(),
+        context: DecisionContext::tier1("approval action (test)", "test gate rule"),
         summary: "test".into(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -166,10 +173,12 @@ fn r3_dedup_enforces_r_2_3() -> Result<()> {
         session_id: Some(sid),
         run_context: None,
         config: None,
-        reason: "first".into(),
+        context: DecisionContext::tier1("approval action (first)", "test gate rule"),
         summary: "first".into(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -183,10 +192,12 @@ fn r3_dedup_enforces_r_2_3() -> Result<()> {
         session_id: Some(sid),
         run_context: None,
         config: None,
-        reason: "second".into(),
+        context: DecisionContext::tier1("approval action (second)", "test gate rule"),
         summary: "second".into(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -217,18 +228,35 @@ fn r3_new_approval_enforces_r_2_1_r_2_2_r_2_18() -> Result<()> {
         session_id: Some("ses-new"),
         run_context: None,
         config: None,
-        reason: "network access".into(),
+        context: DecisionContext::tier1(
+            "credential request to localhost (network access)",
+            "NetworkAccess policy",
+        ),
         summary: "fetch API".into(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"P-2.1"), "must record P-2.1, got {:?}", rules);
-    assert!(rules.contains(&"P-2.2"), "must record P-2.2, got {:?}", rules);
-    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
+    assert!(
+        rules.contains(&"P-2.1"),
+        "must record P-2.1, got {:?}",
+        rules
+    );
+    assert!(
+        rules.contains(&"P-2.2"),
+        "must record P-2.2, got {:?}",
+        rules
+    );
+    assert!(
+        rules.contains(&"P-2.18"),
+        "must record P-2.18, got {:?}",
+        rules
+    );
     Ok(())
 }
 
@@ -259,12 +287,12 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
         evidence_ref: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
     store.record_decision(
@@ -285,10 +313,12 @@ fn r3_approval_ref_clearance_enforces_r_2_6() -> Result<()> {
         session_id: Some(sid),
         run_context: None,
         config: None,
-        reason: "test".into(),
+        context: DecisionContext::tier1("approval action (test)", "test gate rule"),
         summary: "test".into(),
         approval_ref: Some(&ref_id),
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -328,17 +358,30 @@ fn r3_user_input_gate_enforces_r_2_13_r_2_18() -> Result<()> {
         session_id: Some("ses-ui"),
         run_context: None,
         config: None,
-        reason: String::new(),
+        context: DecisionContext::tier1(
+            "operator input required (test)",
+            "agent requested an operator decision",
+        ),
         summary: String::new(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"P-2.13"), "must record P-2.13, got {:?}", rules);
-    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
+    assert!(
+        rules.contains(&"P-2.13"),
+        "must record P-2.13, got {:?}",
+        rules
+    );
+    assert!(
+        rules.contains(&"P-2.18"),
+        "must record P-2.18, got {:?}",
+        rules
+    );
     Ok(())
 }
 
@@ -352,21 +395,32 @@ fn r3_escalation_gate_enforces_r_2_18() -> Result<()> {
     let result = svc.check(GateRequest {
         kind: GateKind::Escalation {
             reason: "Policy ambiguity".into(),
+            original_gate_id: None,
+            agent_decider: false,
         },
         manifest: &manifest,
         session_id: Some("ses-esc"),
         run_context: None,
         config: None,
-        reason: String::new(),
+        context: DecisionContext::tier1(
+            "operator input required (test)",
+            "agent requested an operator decision",
+        ),
         summary: String::new(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
     assert!(matches!(result, GateResult::Suspended { .. }));
     let rules = result.enforced_rules();
-    assert!(rules.contains(&"P-2.18"), "must record P-2.18, got {:?}", rules);
+    assert!(
+        rules.contains(&"P-2.18"),
+        "must record P-2.18, got {:?}",
+        rules
+    );
     Ok(())
 }
 
@@ -388,10 +442,12 @@ fn r_2_19_gate_enrichment_recorded_with_sender() -> Result<()> {
         session_id: Some("ses-enrich"),
         run_context: None,
         config: None,
-        reason: "API access".into(),
+        context: DecisionContext::tier1("API access", "NetworkAccess policy"),
         summary: "fetch data".into(),
         approval_ref: None,
+        request_id: None,
         pre_validated: false,
+        cache_backfill: None,
         turn_id: None,
     })?;
 
@@ -401,7 +457,11 @@ fn r_2_19_gate_enrichment_recorded_with_sender() -> Result<()> {
     };
 
     svc.add_gate_message(&gate_id, "operator", "What is the API used for?")?;
-    svc.add_gate_message(&gate_id, "system", "Agent context: data retrieval for analysis")?;
+    svc.add_gate_message(
+        &gate_id,
+        "system",
+        "Agent context: data retrieval for analysis",
+    )?;
 
     let msgs = svc.get_gate_messages(&gate_id)?;
     assert!(msgs.len() >= 3, "should have seed + 2 added messages");

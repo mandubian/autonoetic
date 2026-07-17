@@ -223,6 +223,10 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
         rule_id: "P-2.21",
         fail_mode: FailMode::RefuseSessionStart,
     },
+    FailModeEntry {
+        rule_id: "P-2.29",
+        fail_mode: FailMode::RefuseSessionStart,
+    },
     // §3 Sandbox Isolation
     FailModeEntry {
         rule_id: "P-3.1",

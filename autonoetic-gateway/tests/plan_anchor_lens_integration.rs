@@ -11,7 +11,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, Runti
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{
-    PlanFrame, PlanStatus, PlanStep, StepOwner, ValidationClass, ValidationEntry,
+    PlanFrame, PlanStatus, PlanStep, StepOwner, StepStatus, ValidationClass, ValidationEntry,
     ValidationPolicy, ValidationRequirement,
 };
 use tempfile::tempdir;
@@ -31,6 +31,7 @@ fn planner_manifest() -> AgentManifest {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
             description: "Test planner".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::ReadAccess { scopes: vec!["*".to_string()] },
@@ -52,7 +53,9 @@ fn planner_manifest() -> AgentManifest {
         middleware: None,
         agentskills_import: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -75,6 +78,8 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 depends_on: vec![],
                 agent_id: None,
                 notes: None,
+                status: StepStatus::Pending,
+                required_capabilities: vec![],
             },
             PlanStep {
                 step_id: "agent_oauth".to_string(),
@@ -83,6 +88,8 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 depends_on: vec!["op_login".to_string()],
                 agent_id: None,
                 notes: None,
+                status: StepStatus::Pending,
+                required_capabilities: vec![],
             },
         ],
         validation_policy: ValidationPolicy {
@@ -101,11 +108,13 @@ fn make_plan(workflow_id: &str, root_session: &str) -> PlanFrame {
                 },
             ],
         },
+        capability_envelope: Vec::new(),
         approved_by: Some("operator".to_string()),
         approved_at: Some("2026-06-01T00:00:00Z".to_string()),
         created_by_agent_id: "planner.collaborative".to_string(),
         reason: Some("initial draft".to_string()),
         created_at: "2026-06-01T00:00:00Z".to_string(),
+        expires_at: None,
     }
 }
 

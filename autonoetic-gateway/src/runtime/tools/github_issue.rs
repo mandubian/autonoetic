@@ -26,7 +26,7 @@ pub struct GithubIssueCreateTool;
 
 impl NativeTool for GithubIssueCreateTool {
     fn name(&self) -> &'static str {
-        "github.issue.create"
+        "github_issue_create"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

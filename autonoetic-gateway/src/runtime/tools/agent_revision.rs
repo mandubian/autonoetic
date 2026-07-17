@@ -1,6 +1,9 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::human_gate::{DecisionContext, GateKind, GateRequest, GateResult, GateService};
+use crate::runtime::promotion_governor::GovernorRejection;
+use crate::runtime::remote_access::{extract_host_from_url_literal, RemoteAccessAnalyzer};
 use crate::runtime::tools::{validate_relative_agent_path, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{
     AgentIO, AgentIdentity, AgentManifest, ExecutionMode, LlmConfig, Middleware, ScriptInputMode,
@@ -263,6 +266,10 @@ fn capability_from_shorthand(s: &str) -> anyhow::Result<Capability> {
             "capability 'CodeExecution' cannot be a bare string — explicit command patterns required. \
              Use {{ \"type\": \"CodeExecution\", \"patterns\": [\"python*\"] }} instead."
         )),
+        "ArtifactExecution" => Err(anyhow::anyhow!(
+            "capability 'ArtifactExecution' cannot be a bare string — use a tagged object instead. \
+             Use {{ \"type\": \"ArtifactExecution\" }} instead."
+        )),
         "AgentMessage" => Err(anyhow::anyhow!(
             "capability 'AgentMessage' cannot be a bare string — explicit patterns required. \
              Use {{ \"type\": \"AgentMessage\", \"patterns\": [\"*\"] }} instead."
@@ -331,7 +338,7 @@ where
         .collect()
 }
 
-fn parse_frontmatter_capabilities(
+pub(crate) fn parse_frontmatter_capabilities(
     frontmatter: &serde_yaml::Value,
 ) -> anyhow::Result<Vec<Capability>> {
     let frontmatter_json = serde_json::to_value(frontmatter).map_err(|e| {
@@ -368,6 +375,215 @@ fn parse_frontmatter_capabilities(
         .into());
     }
     Ok(caps)
+}
+
+// =============================================================================
+// Revision shape + slot-reassignment detection (issues #657 / #658).
+//
+// A promotion into an EXISTING agent slot may be a categorical reassignment —
+// replacing the agent that occupies the slot with a different kind of agent —
+// rather than an in-place version bump. Two gates key off this:
+//
+//   * The smoke-test gate (#657) treats a shape-changing replacement like a
+//     new agent: the candidate must be smoke-tested before it can replace the
+//     live revision. Independently, any caller-supplied smoke-test evidence is
+//     always verified, even for an unchanged slot.
+//   * The reassignment approval gate (#658) requires a distinct operator
+//     approval (surfacing execution_mode / description / capability-shrinkage
+//     changes) so a slot replacement cannot hide behind a routine-looking
+//     "capability broadened" approval, or behind no approval at all on pure
+//     capability shrinkage.
+// =============================================================================
+
+/// The observable "shape" of a revision relevant to reassignment detection.
+/// Two revisions with the same shape are in-place upgrades; a differing shape
+/// is a categorical slot reassignment.
+#[derive(Debug, Clone, Default)]
+struct RevisionShape {
+    execution_mode: ExecutionMode,
+    script_entry: Option<String>,
+    description: String,
+    capabilities: Vec<Capability>,
+}
+
+impl RevisionShape {
+    /// Extract the shape from a parsed SKILL.md frontmatter (the same lenient
+    /// raw frontmatter the promotion gate already uses). Capabilities reuse
+    /// `parse_frontmatter_capabilities` for consistency with the gate.
+    fn from_frontmatter(frontmatter: &serde_yaml::Value) -> Self {
+        let json = serde_json::to_value(frontmatter).unwrap_or_default();
+        let auto = json
+            .get("metadata")
+            .and_then(|m| m.get("autonoetic"))
+            .cloned()
+            .unwrap_or_default();
+        let execution_mode = auto
+            .get("execution_mode")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "script" => Some(ExecutionMode::Script),
+                "reasoning" => Some(ExecutionMode::Reasoning),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let script_entry = auto
+            .get("script_entry")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let description = auto
+            .get("agent")
+            .and_then(|a| a.get("description"))
+            .and_then(|v| v.as_str())
+            .or_else(|| json.get("description").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let capabilities = parse_frontmatter_capabilities(frontmatter).unwrap_or_default();
+        RevisionShape {
+            execution_mode,
+            script_entry,
+            description,
+            capabilities,
+        }
+    }
+}
+
+/// Structured signal describing how a candidate differs categorically from the
+/// outgoing revision it would replace.
+#[derive(Debug, Clone, Default)]
+struct ReassignmentSignal {
+    execution_mode_changed: bool,
+    /// Script entrypoint changed while remaining in script mode — the
+    /// entrypoint *is* the agent, so this is a wholesale replacement.
+    script_entry_changed: bool,
+    /// Descriptions share almost no vocabulary — a strong proxy for a
+    /// different agent role occupying the same slot.
+    description_unrelated: bool,
+    /// Full capability delta (including removed / narrowed), computed via the
+    /// public `compute_capability_delta`. The promotion gate's private wrapper
+    /// discards non-broadening deltas; this one retains them so capability
+    /// shrinkage can be surfaced and gated.
+    capability_delta: autonoetic_types::capability::CapabilityDelta,
+}
+
+impl ReassignmentSignal {
+    /// A categorical change to what kind of agent occupies the slot.
+    fn is_slot_reassignment(&self) -> bool {
+        self.execution_mode_changed || self.script_entry_changed || self.description_unrelated
+    }
+
+    /// The capability surface shrank (capabilities removed or scopes narrowed).
+    fn capabilities_removed_or_narrowed(&self) -> bool {
+        !self.capability_delta.removed.is_empty() || !self.capability_delta.narrowed.is_empty()
+    }
+
+    /// Whether this signal warrants a distinct operator approval.
+    fn requires_approval(&self) -> bool {
+        self.is_slot_reassignment() || self.capabilities_removed_or_narrowed()
+    }
+}
+
+fn compute_reassignment_signal(
+    outgoing: &RevisionShape,
+    incoming: &RevisionShape,
+) -> ReassignmentSignal {
+    let execution_mode_changed = outgoing.execution_mode != incoming.execution_mode;
+    let script_entry_changed = outgoing.execution_mode == ExecutionMode::Script
+        && incoming.execution_mode == ExecutionMode::Script
+        && outgoing.script_entry.as_deref() != incoming.script_entry.as_deref();
+    let description_unrelated =
+        description_token_overlap(&outgoing.description, &incoming.description) < 0.2;
+    let capability_delta = autonoetic_types::capability::compute_capability_delta(
+        &outgoing.capabilities,
+        &incoming.capabilities,
+    );
+    ReassignmentSignal {
+        execution_mode_changed,
+        script_entry_changed,
+        description_unrelated,
+        capability_delta,
+    }
+}
+
+/// Jaccard similarity over lowercased alphanumeric word tokens. Returns 1.0
+/// when both descriptions are empty (treat as unchanged). A low score means the
+/// two descriptions share almost no vocabulary.
+fn description_token_overlap(a: &str, b: &str) -> f64 {
+    let tokenize = |s: &str| -> BTreeSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .map(|t| t.to_string())
+            .collect()
+    };
+    let sa = tokenize(a);
+    let sb = tokenize(b);
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    let inter = sa.intersection(&sb).count() as f64;
+    let union = sa.union(&sb).count() as f64;
+    if union == 0.0 {
+        1.0
+    } else {
+        inter / union
+    }
+}
+
+/// Render the human-facing reassignment annotation appended to an approval
+/// message so the operator can see the severity of a slot replacement (#658).
+fn reassignment_message_suffix(
+    signal: &ReassignmentSignal,
+    outgoing: Option<&RevisionShape>,
+    incoming: Option<&RevisionShape>,
+) -> String {
+    if !signal.is_slot_reassignment() && !signal.capabilities_removed_or_narrowed() {
+        return String::new();
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if signal.is_slot_reassignment() {
+        if signal.execution_mode_changed {
+            parts.push(format!(
+                "execution_mode {:?}→{:?}",
+                outgoing.map(|o| o.execution_mode).unwrap_or_default(),
+                incoming.map(|i| i.execution_mode).unwrap_or_default(),
+            ));
+        }
+        if signal.script_entry_changed {
+            parts.push("script entrypoint changed".to_string());
+        }
+        if signal.description_unrelated {
+            parts.push(format!(
+                "role/description changed ({:?}→{:?})",
+                outgoing
+                    .map(|o| truncate_desc(&o.description, 40))
+                    .unwrap_or_default(),
+                incoming
+                    .map(|i| truncate_desc(&i.description, 40))
+                    .unwrap_or_default(),
+            ));
+        }
+        format!(
+            " ⚠️ Slot reassignment — agent slot would be replaced by a categorically \
+             different agent ({}).",
+            parts.join("; ")
+        )
+    } else {
+        format!(
+            " ⚠️ Capability surface narrowed — removed {:?}, narrowed {:?}.",
+            signal.capability_delta.removed, signal.capability_delta.narrowed
+        )
+    }
+}
+
+fn truncate_desc(s: &str, max: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -424,6 +640,9 @@ struct RevisionCreateFromIntentArgs {
     /// script-mode agents that read credentials from env vars.
     #[serde(default)]
     credential_services: Vec<String>,
+    /// When true, allows `NetworkAccess.hosts: ["*"]` for genuine open-web agents.
+    #[serde(default)]
+    open_web: bool,
 }
 
 fn normalized_llm_preset(preset: &Option<String>) -> Option<String> {
@@ -448,6 +667,7 @@ struct RevisionCreateCommonArgs {
     manifest_meta: Option<serde_json::Value>,
     source_kind: String,
     source_ref: Option<String>,
+    detected_network_hosts: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -567,9 +787,60 @@ fn parse_agent_owned_lock_sections_strict(
     Ok((agent_deps, agent_arts))
 }
 
+/// #803 — derive the designing/requesting principal from the calling
+/// session's spawn lineage, as tracked by the gateway store. Rule: the
+/// requester is the agent bound to the PARENT session of the session that
+/// invoked this tool (the delegator that spawned the installer, e.g.
+/// `agent-factory.default`). If the calling session has no recorded parent
+/// (invoked at root, e.g. directly by the operator via CLI/chat), or the
+/// lineage/owner can't be resolved, this returns `None` — it never falls
+/// back to LLM-supplied tool arguments, since an agent must not be able to
+/// assert an arbitrary requester.
+fn derive_requested_by(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    session_id: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(session_id) = session_id else {
+        return (None, None);
+    };
+    // A missing parent (root-invoked) is expected and silent; a *lookup error*
+    // silently dropping lineage would undermine the durability goal, so warn.
+    let parent_session_id = match gateway_store.parent_session_id(session_id) {
+        Ok(Some(parent)) => parent,
+        Ok(None) => return (None, None),
+        Err(e) => {
+            tracing::warn!(
+                target: "agent_revision",
+                session_id,
+                error = %e,
+                "#803: parent-session lookup failed; recording revision without requester lineage"
+            );
+            return (None, None);
+        }
+    };
+    match gateway_store.session_owner_agent(&parent_session_id) {
+        Ok(Some(agent_id)) => (
+            Some(PrincipalKind::AutonoeticAgent.tag().to_string()),
+            Some(agent_id),
+        ),
+        Ok(None) => (None, None),
+        Err(e) => {
+            tracing::warn!(
+                target: "agent_revision",
+                session_id,
+                parent_session_id,
+                error = %e,
+                "#803: parent-session owner lookup failed; recording revision without requester lineage"
+            );
+            (None, None)
+        }
+    }
+}
+
 fn create_revision_from_files(
     common: &RevisionCreateCommonArgs,
     created_by_id: &str,
+    session_id: Option<&str>,
     gateway_dir: &Path,
     gateway_store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
     bundle: Option<&ArtifactBundle>,
@@ -649,10 +920,28 @@ fn create_revision_from_files(
             file_map,
             script_entry,
         )?;
+
+        // If the existing revision is Archived, resurrect it back to Candidate
+        // so it becomes usable again. Otherwise the LLM loops forever: same
+        // content → same digest → same "already_exists" response, but the
+        // archived revision can't be promoted.
+        let status_label = if matches!(
+            existing_rev.status,
+            autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+        ) {
+            let _ = gateway_store.update_agent_revision_status(
+                &revision_id,
+                autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            );
+            "reactivated"
+        } else {
+            "already_exists"
+        };
+
         return Ok(PersistedRevisionResult {
             response: serde_json::json!({
                 "ok": true,
-                "status": "already_exists",
+                "status": status_label,
                 "revision_id": revision_id,
                 "content_digest": existing_rev.content_digest,
                 "agent_id": common.agent_id,
@@ -682,6 +971,8 @@ fn create_revision_from_files(
         }
     });
 
+    let (requested_by_type, requested_by_id) = derive_requested_by(gateway_store, session_id);
+
     let rev = autonoetic_types::agent_revision::AgentRevisionRecord {
         revision_id: revision_id.clone(),
         agent_id: common.agent_id.clone(),
@@ -693,6 +984,8 @@ fn create_revision_from_files(
         created_at: now,
         created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
         created_by_id: created_by_id.to_string(),
+        requested_by_type,
+        requested_by_id,
         source_kind: common.source_kind.clone(),
         source_ref: common.source_ref.clone(),
         origin_node_id: "gateway".to_string(),
@@ -714,15 +1007,48 @@ fn create_revision_from_files(
         short_id: String::new(),
         signature,
         signer_id,
+        detected_network_hosts: common.detected_network_hosts.clone(),
     };
 
-    let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
-
+    // Fail-fast: creating a new revision with a different content digest would
+    // invalidate existing promotion evidence for the same artifact identity.
     if let Some(artifact_id) = &common.artifact_id {
         let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
+        if let Some(record) = promo_store.get_promotion(artifact_id) {
+            let has_passing_evidence = record.auditor_pass
+                || record.static_evaluator_pass
+                || record.evaluator_pass
+                || record.sealed_evaluator_pass
+                || record.unit_test_runner_pass;
+            if has_passing_evidence {
+                if let Some(record_digest) = record.content_digest.as_deref() {
+                    if record_digest != rev.content_digest.as_str() {
+                        let error_json = ToolError::permission(format!(
+                            "Promotion gate: creating this revision would change the content digest for artifact '{}' \
+                             from '{}' to '{}' and invalidate existing promotion evidence. \
+                             Promote the existing candidate revision or re-run gate roles before creating a new revision.",
+                            artifact_id, record_digest, rev.content_digest
+                        ))
+                        .with_code("promotion_gate_content_digest_would_change")
+                        .with_repair_hint("Use agent_revision_promote with the existing candidate revision, or re-run auditor/evaluator and obtain new promotion records before creating a new revision.")
+                        .to_error_response();
+                        let response_value = serde_json::from_str(&error_json)
+                            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": error_json}));
+                        return Ok(PersistedRevisionResult {
+                            response: response_value,
+                            normalized_lock,
+                        });
+                    }
+                }
+                // If content_digest is not yet bound, let reconcile_content_digest_for_revision
+                // bind it below instead of failing.
+            }
+        }
         let _ =
             promo_store.reconcile_content_digest_for_revision(artifact_id, &rev.content_digest)?;
     }
+
+    let short_id = gateway_store.insert_agent_revision_transactional(&rev)?;
 
     let short_ref = format!("{}@rev_{}", common.agent_id, short_id);
 
@@ -761,6 +1087,10 @@ fn create_revision_from_files(
                     "detected_external_imports".to_string(),
                     serde_json::json!(hr.detected_external_imports),
                 );
+            }
+            // Advisory warnings (missing io.returns, re-pasted doctrine, ...) are
+            // not all tied to unresolved dependencies — surface them whenever present.
+            if !hr.warnings.is_empty() {
                 obj.insert("warnings".to_string(), serde_json::json!(hr.warnings));
             }
         }
@@ -911,7 +1241,7 @@ impl NativeTool for AgentRevisionCreateTool {
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -1026,6 +1356,16 @@ impl NativeTool for AgentRevisionCreateTool {
             args.agent_id
         );
 
+        let host_contract = match crate::runtime::network_host_contract::validate_network_host_contract(
+            &bundle_manifest.capabilities,
+            &file_map,
+            bundle_manifest.open_web,
+        ) {
+            Err(err) => return Ok(err.to_error_response()),
+            Ok(contract) => contract,
+        };
+        let detected_network_hosts = host_contract.detected_hosts;
+
         let lock_rel_path = bundle_manifest.runtime.runtime_lock.clone();
         validate_relative_agent_path(&lock_rel_path)?;
         let lock_content = file_map.get(&lock_rel_path);
@@ -1088,10 +1428,12 @@ impl NativeTool for AgentRevisionCreateTool {
             manifest_meta: Some(manifest_meta),
             source_kind: "artifact".to_string(),
             source_ref: Some(args.artifact_id.clone()),
+            detected_network_hosts: Some(detected_network_hosts),
         };
         let persisted = create_revision_from_files(
             &common,
             &manifest.agent.id,
+            session_id,
             gateway_dir,
             &gateway_store,
             Some(&bundle),
@@ -1105,6 +1447,284 @@ impl NativeTool for AgentRevisionCreateTool {
         )?;
         Ok(persisted.response.to_string())
     }
+}
+
+/// JSON Schema `oneOf` branches for the `Capability` enum, mirroring
+/// `#[serde(tag = "type", deny_unknown_fields)]`. Surfacing each variant's
+/// required fields in the tool definition stops the LLM from omitting
+/// mandatory fields like `SandboxFunctions.allowed` (it previously only saw
+/// `"type": "array"` + prose examples).
+///
+/// Kept in sync with `autonoetic_types::capability::Capability` — the
+/// `capability_oneof_schema_covers_all_variants` test guards against drift.
+fn capability_oneof_schema() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": "object",
+            "description": "MCP tool access by prefix. Tool names are mcp_<server>_<tool>, so prefix-match on that form.",
+            "properties": {
+                "type": { "const": "SandboxFunctions" },
+                "allowed": { "type": "array", "items": { "type": "string" }, "description": "MCP tool prefixes (prefix-matched, trailing * optional), e.g. [\"mcp_web_*\",\"mcp_docs_fetch\",\"mcp_*\"]" }
+            },
+            "required": ["type", "allowed"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Read access to content/memory/knowledge (includes search).",
+            "properties": {
+                "type": { "const": "ReadAccess" },
+                "scopes": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"self.*\",\"content.*\"]" }
+            },
+            "required": ["type", "scopes"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Write access to content/memory/knowledge (includes share).",
+            "properties": {
+                "type": { "const": "WriteAccess" },
+                "scopes": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"self.*\",\"content.*\"]" }
+            },
+            "required": ["type", "scopes"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "HTTP/network access — escapes the sandbox boundary.",
+            "properties": {
+                "type": { "const": "NetworkAccess" },
+                "hosts": { "type": "array", "items": { "type": "string" }, "description": "Host patterns, e.g. [\"*\"] or [\"api.example.com\"]" }
+            },
+            "required": ["type", "hosts"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Create child agent sessions.",
+            "properties": {
+                "type": { "const": "AgentSpawn" },
+                "max_children": { "type": "integer", "minimum": 0, "description": "Limit on concurrent children." },
+                "max_spawn_depth": { "type": "integer", "minimum": 0, "default": 0, "description": "Max spawn chain depth (0 = system default)." }
+            },
+            "required": ["type", "max_children"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Send messages to other agents.",
+            "properties": {
+                "type": { "const": "AgentMessage" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Periodic wake-ups for background processing.",
+            "properties": {
+                "type": { "const": "BackgroundReevaluation" },
+                "min_interval_secs": { "type": "integer", "minimum": 1 },
+                "allow_reasoning": { "type": "boolean" }
+            },
+            "required": ["type", "min_interval_secs", "allow_reasoning"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Execute scripts/code in the sandbox.",
+            "properties": {
+                "type": { "const": "CodeExecution" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "Command prefix patterns." },
+                "commands": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Specific shell commands (word-boundary match)." }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Execute immutable artifact entrypoints. Does not authorize arbitrary shell commands.",
+            "properties": {
+                "type": { "const": "ArtifactExecution" }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Request a gateway-level emergency stop (dedicated responders only).",
+            "properties": { "type": { "const": "EmergencyStop" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to agent revision operations (create, promote, rollback).",
+            "properties": {
+                "type": { "const": "AgentRevision" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to evaluation operations (suite publish, run, report).",
+            "properties": {
+                "type": { "const": "Evaluation" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to approval queue operations.",
+            "properties": {
+                "type": { "const": "ApprovalQueue" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to scheduler signal operations.",
+            "properties": {
+                "type": { "const": "SchedulerSignal" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to credential operations (check, request, setup).",
+            "properties": {
+                "type": { "const": "CredentialAccess" },
+                "services": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "e.g. [\"github\"]" }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to user profile operations (read, update, share, revoke).",
+            "properties": {
+                "type": { "const": "UserProfileAccess" },
+                "scopes": { "type": "array", "items": { "type": "string" }, "description": "e.g. [\"read\"] or [\"read\",\"write\"]" }
+            },
+            "required": ["type", "scopes"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to scheduler/cron operations.",
+            "properties": {
+                "type": { "const": "SchedulerAccess" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Install a remote SKILL.md as a new local agent.",
+            "properties": {
+                "type": { "const": "SkillInstall" },
+                "allowed_sources": { "type": "array", "items": { "type": "string" }, "default": ["*"], "description": "Permitted URL hosts." }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Submit constitutional amendment proposals.",
+            "properties": {
+                "type": { "const": "ConstitutionalProposal" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Read reasoning traces from other agents' sessions.",
+            "properties": {
+                "type": { "const": "ReasoningAudit" },
+                "targets": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Allow running with max_session_price_usd while model price metadata is unavailable.",
+            "properties": { "type": { "const": "budget.no_price_available.allow" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Create GitHub issues.",
+            "properties": {
+                "type": { "const": "GithubIssueCreate" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Submit adversarial attack-pattern proposals (system-tier red-team only).",
+            "properties": { "type": { "const": "SecurityRedTeam" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Export/import Cognitive Capsules across machines or gateways.",
+            "properties": { "type": { "const": "CapsuleExport" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Export one's *own* cognitive capsule only (Ri-0.17 emigration); scoped to the caller's agent_id.",
+            "properties": { "type": { "const": "SelfCapsuleExport" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Propose new wiki pages to be curated into the platform wiki.",
+            "properties": { "type": { "const": "WikiContribute" } },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Access to PlanFrame participation (propose, amend, list, get); `[\"*\"]` grants all of these. `planframe.approve` is an AUTHORITY that `[\"*\"]` does NOT grant — it must be listed exactly so a proposer cannot approve its own plan.",
+            "properties": {
+                "type": { "const": "PlanFrameAccess" },
+                "patterns": { "type": "array", "items": { "type": "string" }, "default": ["*"] }
+            },
+            "required": ["type"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Pre-authorizes promotion of an agent whose declared capabilities fall within this set.",
+            "properties": {
+                "type": { "const": "PromoteWith" },
+                "agent_id": { "type": "string", "default": "" },
+                "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } }
+            },
+            "required": ["type", "capabilities"],
+            "additionalProperties": false
+        }
+    ])
 }
 
 pub struct AgentRevisionCreateFromIntentTool;
@@ -1122,9 +1742,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
     }
 
     fn definition(&self) -> ToolDefinition {
+        let capability_branches = capability_oneof_schema();
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. For pure reasoning agents that only use existing gateway tools (no custom code), omit artifact_ref — capability enforcement is the security gate. For script agents or agents with CodeExecution/AgentSpawn, pass the artifact_ref returned by artifact_build.".to_string(),
+            description: "Create a new immutable agent revision from semantic intent, canonicalizing SKILL.md and runtime.lock server-side. Every promotion of a revision with a non-empty capability set requires a reviewed artifact_ref (from artifact_build): CodeExecution/AgentSpawn, and NetworkAccess when an artifact is present, face the Full evidence+audit gate; other non-empty capability sets with an artifact face an audit-only gate. Only a revision with an empty capability set may direct-promote without an artifact (and only when the gateway config allows it). Pass the artifact_ref returned by artifact_build whenever the agent declares any capability.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1140,7 +1761,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "llm_config": { "type": "object", "description": "Legacy inline provider/model — prefer llm_preset" },
                     "capabilities": {
                         "type": "array",
-                        "description": "Each item must be a tagged Capability object — bare strings are rejected. Examples: {\"type\":\"NetworkAccess\",\"hosts\":[\"*\"]}, {\"type\":\"ReadAccess\",\"scopes\":[\"self.*\"]}, {\"type\":\"SandboxFunctions\",\"allowed\":[\"content.\",\"knowledge.\"]}, {\"type\":\"EmergencyStop\"}."
+                        "description": "Each item is a tagged Capability object (bare strings are rejected). See $defs/Capability for each variant's required fields.",
+                        "items": { "$ref": "#/$defs/Capability" }
                     },
                     "io": {
                         "type": "object",
@@ -1149,11 +1771,15 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     "middleware": { "type": "object" },
                     "base_revision_id": { "type": "string" },
                     "summary": { "type": "string" },
-                    "replace": { "type": "boolean", "description": "Set to true to archive the existing active revision and install this as the new one. Required when updating an already-installed agent." },
-                    "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." }
+                    "replace": { "type": "boolean", "description": "Set to true when updating an already-installed agent. The existing active revision is archived automatically at promote time — atomically, when the new revision becomes active — not at create time, so a candidate that is never promoted (smoke-test failure / operator reject / eval gate) leaves the live revision untouched. Required when updating an already-installed agent." },
+                    "credential_services": { "type": "array", "items": { "type": "string" }, "description": "Service names whose credentials the agent needs at spawn time. The env-var name is derived deterministically from the service name (e.g. 'moltbook' → MOLTBOOK_SECRET). Only meaningful for script-mode agents." },
+                    "open_web": { "type": "boolean", "description": "Set true only for genuine open-web agents that require NetworkAccess hosts: [\"*\"]. Default false." }
                 },
                 "required": ["agent_id", "instructions", "description", "capabilities"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "$defs": {
+                    "Capability": { "oneOf": capability_branches }
+                }
             }),
         }
     }
@@ -1302,53 +1928,70 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             });
 
         let existing = gateway_store.list_agent_revisions(&args.agent_id)?;
-        let active_revisions: Vec<String> = existing
+        let ready_revisions: Vec<String> = existing
             .iter()
             .filter(|rev| {
                 matches!(
                     rev.status,
-                    autonoetic_types::agent_revision::AgentRevisionStatus::Ready
-                        | autonoetic_types::agent_revision::AgentRevisionStatus::Candidate
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
                 )
             })
             .map(|r| r.revision_id.clone())
             .collect();
-        if !active_revisions.is_empty() {
-            if args.replace {
-                // Archive all active revisions before installing the new one.
-                for rev_id in &active_revisions {
-                    gateway_store
-                        .update_agent_revision_status(
-                            rev_id,
-                            autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
-                        )
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to archive existing revision {}: {}", rev_id, e)
-                        })?;
-                }
-            } else {
-                return Ok(ToolError::fatal(
-                    format!(
-                        "Agent '{}' already has an active revision ({}). \
-                         Use agent_revision_list / agent_revision_inspect (or agent_inspect if you hold ReadAccess) to check before installing. \
-                         If you need to update, pass replace: true to archive the existing revision first.",
-                        args.agent_id,
-                        active_revisions.join(", ")
-                    ),
-                    None::<String>,
-                ).to_error_response());
+        // Auto-archive any Candidate (never-promoted) revisions — they are
+        // aborted install attempts and should not block a fresh install.
+        for rev in &existing {
+            if matches!(
+                rev.status,
+                autonoetic_types::agent_revision::AgentRevisionStatus::Candidate,
+            ) {
+                let _ = gateway_store.update_agent_revision_status(
+                    &rev.revision_id,
+                    autonoetic_types::agent_revision::AgentRevisionStatus::Archived,
+                );
             }
         }
+        if !ready_revisions.is_empty() && !args.replace {
+            return Ok(ToolError::fatal(
+                format!(
+                    "Agent '{}' already has a promoted revision ({}). \
+                     Use agent_revision_list / agent_revision_inspect (or agent_inspect if you hold ReadAccess) to check before installing. \
+                     If you need to update, pass replace: true to install a new candidate; the existing revision is archived atomically at promote time.",
+                    args.agent_id,
+                    ready_revisions.join(", ")
+                ),
+                None::<String>,
+            ).to_error_response());
+        }
+        // NOTE: with `replace: true` the existing Ready revision is intentionally
+        // left in place here. `atomic_promote` archives the outgoing revision
+        // atomically in the SAME transaction that repoints the alias and sets
+        // the new revision Ready. Archiving at create time would leave the alias
+        // pointing at an Archived revision with no Ready backing if the candidate
+        // is never promoted (smoke-test failure, operator reject, eval gate, or
+        // an abandoned run) — see issue #652.
+
+        // RFC #799 F.4a: reasoning agents without a declared io.returns hand back
+        // unstructured text (the gateway-injected `anomalies` witness contract and
+        // the Output Contract both key off it). Computed once, ahead of both
+        // execution paths below, since a pure-reasoning agent never reaches the
+        // artifact branch.
+        let declares_io_returns = args
+            .io
+            .as_ref()
+            .and_then(|io| io.returns.as_ref())
+            .is_some();
 
         // Two execution paths: with artifact (code agents) vs without (pure reasoning agents).
         let (
             resolved_mode,
             resolved_script_entry,
             mut file_map,
-            health_report,
+            mut health_report,
             bundle_opt,
             source_kind,
             source_ref,
+            detected_network_hosts,
         ) = if let Some(resolved_artifact) = resolved_artifact.as_ref() {
             let artifact_id = &resolved_artifact.artifact_id;
             anyhow::ensure!(
@@ -1447,7 +2090,19 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 &args.capabilities,
                 has_layers,
                 resolved_script_entry.as_deref(),
+                resolved_mode,
+                declares_io_returns,
             );
+
+            let host_contract = match crate::runtime::network_host_contract::validate_network_host_contract(
+                &args.capabilities,
+                &file_map,
+                args.open_web,
+            ) {
+                Err(err) => return Ok(err.to_error_response()),
+                Ok(contract) => contract,
+            };
+            let detected_network_hosts = host_contract.detected_hosts;
 
             (
                 resolved_mode,
@@ -1457,33 +2112,50 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 Some(bundle),
                 "intent_artifact".to_string(),
                 Some(resolved_artifact.source_ref.clone()),
+                Some(detected_network_hosts),
             )
         } else {
-            // Pure reasoning agent — no artifact, no custom code.
-            // Validate that this path is safe: no script mode, no CodeExecution/AgentSpawn.
-            anyhow::ensure!(
-                    !matches!(args.execution_mode, Some(ExecutionMode::Script)),
-                    "execution_mode 'script' requires an artifact_ref or artifact_id — script agents must have source files"
-                );
-            anyhow::ensure!(
-                args.script_entry.is_none(),
-                "script_entry requires an artifact_ref or artifact_id — pure reasoning agents have no scripts"
-            );
-            anyhow::ensure!(
-                revision_declares_inference(&args),
-                "llm_preset or llm_config is required for pure reasoning agents (no artifact_ref/artifact_id)"
-            );
+            // No artifact_ref or artifact_id was provided (or it failed to resolve).
+            // Detect the caller's intent and produce ONE actionable error that
+            // names the exact missing field — instead of three separate confusing
+            // messages that send the model down the wrong recovery path.
+            let wants_script = matches!(args.execution_mode, Some(ExecutionMode::Script))
+                || args.script_entry.is_some();
             let forbidden_cap = args
                 .capabilities
                 .iter()
                 .find(|cap| crate::runtime::install_contract::requires_artifact_review(cap));
-            if let Some(cap) = forbidden_cap {
+
+            if wants_script || forbidden_cap.is_some() {
+                let mut hints: Vec<String> = Vec::new();
+                if matches!(args.execution_mode, Some(ExecutionMode::Script)) {
+                    hints.push("execution_mode: \"script\"".to_string());
+                }
+                if args.script_entry.is_some() {
+                    hints.push("script_entry".to_string());
+                }
+                if let Some(cap) = forbidden_cap {
+                    hints.push(format!("capability {:?}", cap));
+                }
                 return Ok(ToolError::validation(
                     format!(
-                        "Capability '{:?}' requires an artifact_ref or artifact_id for code review and promotion gating. \
-                         Pure reasoning agents (no artifact_id) may not use CodeExecution or AgentSpawn.",
-                        cap
+                        "Missing artifact_ref or artifact_id. You provided {} but no artifact reference. \
+                         Script/code agents require an artifact built via artifact_build. \
+                         Add \"artifact_ref\": \"ar.XXXX\" (the short ref returned by artifact_build \
+                         or artifact_inspect) to your arguments.",
+                        hints.join(", ")
                     ),
+                    None::<String>,
+                ).to_error_response());
+            }
+
+            if !revision_declares_inference(&args) {
+                return Ok(ToolError::validation(
+                    "Missing artifact_ref/artifact_id AND missing llm_preset/llm_config. \
+                     For a pure reasoning agent (no code), add \"llm_preset\": \"agentic\" \
+                     (or \"coding\"/\"smart\"). For a script/code agent, add \
+                     \"artifact_ref\": \"ar.XXXX\" (from artifact_build)."
+                        .to_string(),
                     None::<String>,
                 ).to_error_response());
             }
@@ -1492,9 +2164,17 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 ExecutionMode::Reasoning,
                 None,
                 BTreeMap::new(),
-                None,
+                Some(crate::runtime::install_contract::analyze_bundle_health(
+                    &BTreeMap::new(),
+                    &args.capabilities,
+                    false,
+                    None,
+                    ExecutionMode::Reasoning,
+                    declares_io_returns,
+                )),
                 None,
                 "intent_reasoning".to_string(),
+                None,
                 None,
             )
         };
@@ -1511,7 +2191,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 id: args.agent_id.clone(),
                 name: args.agent_id.clone(),
                 description: args.description.clone(),
-            },
+            singleton: false,
+        },
             capabilities: args.capabilities.clone(),
             llm_preset: normalized_llm_preset(&args.llm_preset),
             llm_overrides: args.llm_overrides.clone(),
@@ -1531,8 +2212,10 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: args.open_web,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
 
@@ -1541,6 +2224,17 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             &args.instructions,
         )?;
         let skill_content = canonical_skill.as_bytes().to_vec();
+
+        // RFC #799 F.4b: the CI doctrine guard (skill_doctrine_guard.rs) never sees
+        // runtime-born agents, so scan the SKILL.md body here at create-time too.
+        let doctrine_warnings =
+            crate::runtime::install_contract::scan_body_for_migrated_doctrine(&args.instructions);
+        if !doctrine_warnings.is_empty() {
+            health_report
+                .get_or_insert_with(Default::default)
+                .warnings
+                .extend(doctrine_warnings);
+        }
 
         file_map.insert("SKILL.md".to_string(), skill_content.clone());
 
@@ -1575,11 +2269,13 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             metadata: args.metadata.clone(),
             manifest_meta: Some(manifest_meta),
             source_kind,
-            source_ref,
+            source_ref: source_ref.clone(),
+            detected_network_hosts,
         };
         let persisted = create_revision_from_files(
             &common,
             &manifest.agent.id,
+            session_id,
             gateway_dir,
             &gateway_store,
             bundle_opt.as_ref(),
@@ -1623,6 +2319,54 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 ]),
             );
         }
+
+        // Emit a workflow event so orchestrators can discover and reuse the candidate.
+        if response.get("ok") == Some(&serde_json::Value::Bool(true))
+            && response.get("status").and_then(|v| v.as_str()) == Some("created")
+        {
+            if let (Some(config), Some(session_id)) = (_config, session_id) {
+                let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+                let workflow_lookup = crate::scheduler::resolve_workflow_id_for_root_session(
+                    config,
+                    &root_session_id,
+                )
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &root_session_id,
+                        Some(manifest.agent.id.as_str()),
+                    )
+                    .ok()
+                    .map(|w| w.workflow_id)
+                });
+                if let Some(workflow) = workflow_lookup {
+                    let payload = serde_json::json!({
+                        "agent_id": args.agent_id,
+                        "revision_id": response.get("revision_id").cloned().unwrap_or(serde_json::Value::Null),
+                        "artifact_id": common.artifact_id,
+                        "artifact_ref": source_ref,
+                        "content_digest": response.get("content_digest").cloned().unwrap_or(serde_json::Value::Null),
+                    });
+                    let _ = crate::scheduler::workflow_store::append_workflow_event(
+                        config,
+                        Some(gateway_store.as_ref()),
+                        &autonoetic_types::workflow::WorkflowEventRecord {
+                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            workflow_id: workflow,
+                            task_id: None,
+                            event_type: "workflow.revision.created".to_string(),
+                            agent_id: Some(args.agent_id.clone()),
+                            payload,
+                            occurred_at: chrono::Utc::now().to_rfc3339(),
+                        },
+                    );
+                }
+            }
+        }
+
         Ok(response.to_string())
     }
 }
@@ -1801,7 +2545,7 @@ impl NativeTool for AgentRevisionInspectTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Inspect a specific agent revision's metadata and execution closure."
+            description: "Inspect a specific agent revision's metadata and execution closure. At least one of agent_ref or revision_id must be provided; the gateway validates this at execution time."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -1809,10 +2553,6 @@ impl NativeTool for AgentRevisionInspectTool {
                     "agent_ref": { "type": "string", "description": "Agent ref or alias target to inspect" },
                     "revision_id": { "type": "string", "description": "Full revision ID (rev_sha256:...)" }
                 },
-                "anyOf": [
-                    {"required": ["agent_ref"]},
-                    {"required": ["revision_id"]}
-                ],
                 "additionalProperties": false
             }),
         }
@@ -1880,6 +2620,8 @@ impl NativeTool for AgentRevisionInspectTool {
                 "created_at": rev.created_at,
                 "created_by_type": rev.created_by_type,
                 "created_by_id": rev.created_by_id,
+                "requested_by_type": rev.requested_by_type,
+                "requested_by_id": rev.requested_by_id,
                 "base_revision_id": rev.base_revision_id,
                 "content_digest": rev.content_digest,
                 "runtime_lock_hash": rev.runtime_lock_hash,
@@ -1974,6 +2716,52 @@ struct RevisionPromoteArgs {
     /// Required when `force = true`.
     #[serde(default)]
     force_reason: Option<String>,
+    /// Task id of a successful smoke-test run for this candidate revision.
+    /// Required for new capability-bearing agents (NetworkAccess / CodeExecution).
+    #[serde(default)]
+    smoke_test_task_id: Option<String>,
+    /// Workflow id containing the smoke-test task.
+    #[serde(default)]
+    smoke_test_workflow_id: Option<String>,
+    /// Operator-confirmed input used for the smoke test. Required when the
+    /// candidate is classified operator-directed (credentials or external WriteAccess).
+    #[serde(default)]
+    smoke_test_input: Option<String>,
+}
+
+/// Best-effort ledger write for a terminal promotion-attempt outcome
+/// (issue #720). Failures are logged but do not block the tool response.
+fn record_promotion_attempt_outcome(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    content_digest: &str,
+    outcome: &str,
+    gate: Option<&str>,
+    error_code: Option<&str>,
+    session_id: Option<&str>,
+    workflow_id: Option<&str>,
+) {
+    let attempt_id = format!("patt-{}", uuid::Uuid::new_v4());
+    if let Err(e) = store.record_promotion_attempt(
+        &attempt_id,
+        agent_id,
+        revision_id,
+        content_digest,
+        outcome,
+        gate,
+        error_code,
+        session_id,
+        workflow_id,
+    ) {
+        tracing::warn!(
+            target: "promotion",
+            agent_id = %agent_id,
+            revision_id = %revision_id,
+            error = %e,
+            "Failed to record promotion attempt outcome"
+        );
+    }
 }
 
 pub struct AgentRevisionPromoteTool;
@@ -1990,6 +2778,28 @@ impl NativeTool for AgentRevisionPromoteTool {
             .any(|cap| matches!(cap, Capability::AgentRevision { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        vec![GuidanceBlock {
+            id: "promote.approval_continuation",
+            when: GuidanceCondition::ToolPresent("agent_revision_promote"),
+            priority: 9,
+            prose: "**Promotion resumes automatically — don't loop.** If `agent_revision_promote` \
+returns `approval_required: true` (e.g. `capability_delta_requires_approval`), return the exact \
+`request_id`/`approval_ref` to your caller and end your turn. When the operator approves, the gateway \
+**re-executes the approved promote for you** and resumes your session with the real result already in \
+hand (#719) — do **not** re-spawn the builder, re-run the gates, or re-issue the promote. A locked \
+session capability envelope (PromoteWith) \
+pre-authorizes the capability acknowledgement, so a covered promotion needs no new approval at all. \
+On success the response is terminal: `status:\"promoted\"`, `installed:true`. That means the agent is \
+now the **active installed revision** — use it by calling `agent_spawn` with its `agent_id`; do not \
+rebuild, re-promote, or re-inspect to \"confirm\" it. If it returns `status:\"coalesced\"` with \
+`retry_advice:\"wait\"`, an equivalent promote is already running: end your turn and let it finish — \
+do not re-issue."
+                .to_string(),
+        }]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
@@ -2003,7 +2813,10 @@ impl NativeTool for AgentRevisionPromoteTool {
                     "required_eval_run_id": { "type": "string", "description": "Optional: if provided, promotion requires this eval run to have passed for the target revision" },
                     "approval_ref": { "type": "string", "description": "Optional: approval ID returned by an earlier promote call that hit the capability-delta gate (R++2). Pass it on retry to bypass the gate." },
                     "force": { "type": "boolean", "description": "Optional: bypass the promotion safety governor (issue #25). Requires `force_reason`; emits a `governor.override` causal event." },
-                    "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." }
+                    "force_reason": { "type": "string", "description": "Required when `force = true`. Operator-supplied justification recorded with the override event." },
+                    "smoke_test_task_id": { "type": "string", "description": "Task id of a successful smoke-test run for this candidate revision. Required for new capability-bearing agents (NetworkAccess or CodeExecution)." },
+                    "smoke_test_workflow_id": { "type": "string", "description": "Workflow id containing the smoke-test task. Required alongside smoke_test_task_id for new capability-bearing agents." },
+                    "smoke_test_input": { "type": "string", "description": "Operator-confirmed test input used when spawning the smoke test. Required when the candidate declares credential_services or external WriteAccess scopes." }
                 },
                 "required": ["agent_id", "revision_id"],
                 "additionalProperties": false
@@ -2072,6 +2885,57 @@ impl NativeTool for AgentRevisionPromoteTool {
             rev.status
         );
 
+        // Convenience closure for the durable promotion-attempt ledger (issue #720).
+        // For rejected outcomes, the count read and the insert are serialized in
+        // one SQLite transaction to close the concurrent-promote TOCTOU window.
+        // If the cap is reached, the closure returns the exhaustion rejection for
+        // the caller to return.
+        let governor_config_default = autonoetic_types::config::PromotionGovernorConfig::default();
+        let governor_config = config
+            .map(|c| &c.promotion_governor)
+            .unwrap_or(&governor_config_default);
+        let record_attempt =
+            |outcome: &str, gate: Option<&str>, error_code: Option<&str>| -> Option<GovernorRejection> {
+                if outcome == "rejected" {
+                    match crate::runtime::promotion_governor::record_rejected_attempt(
+                        governor_config,
+                        &gateway_store,
+                        &args.agent_id,
+                        &args.revision_id,
+                        &rev.content_digest,
+                        gate,
+                        error_code,
+                        session_id,
+                        run_context.and_then(|rc| rc.workflow_id.as_deref()),
+                    ) {
+                        Ok(Some(rejection)) => return Some(rejection),
+                        Ok(None) => return None,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "promotion",
+                                agent_id = %args.agent_id,
+                                revision_id = %args.revision_id,
+                                error = %e,
+                                "Failed to record rejected promotion attempt"
+                            );
+                            return None;
+                        }
+                    }
+                }
+                record_promotion_attempt_outcome(
+                    &gateway_store,
+                    &args.agent_id,
+                    &args.revision_id,
+                    &rev.content_digest,
+                    outcome,
+                    gate,
+                    error_code,
+                    session_id,
+                    run_context.and_then(|rc| rc.workflow_id.as_deref()),
+                );
+                None
+            };
+
         let single_flight_scope = if let (Some(config), Some(session_id)) = (config, session_id) {
             let root_session_id = crate::runtime::content_store::root_session_id(session_id);
             let workflow = crate::scheduler::ensure_workflow_for_root_session(
@@ -2118,6 +2982,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                             occurred_at: chrono::Utc::now().to_rfc3339(),
                         },
                     )?;
+                    record_attempt("coalesced", None, None);
                     return Ok(serde_json::json!({
                         "ok": true,
                         "status": "coalesced",
@@ -2170,6 +3035,36 @@ impl NativeTool for AgentRevisionPromoteTool {
         })?;
 
         let current_capabilities = parse_frontmatter_capabilities(&skill_frontmatter)?;
+
+        // --- Revision shape + slot-reassignment signal (issues #657 / #658) ---
+        // Computed once here so the approval gate, the reassignment gate, and
+        // the smoke-test gate all share one classification. `None` for a
+        // brand-new agent (nothing to compare against) or when the outgoing
+        // SKILL is unavailable.
+        let incoming_shape = RevisionShape::from_frontmatter(&skill_frontmatter);
+        let outgoing_shape: Option<RevisionShape> = match gateway_store
+            .resolve_alias(&args.agent_id)?
+        {
+            Some(alias) if alias.revision_id != args.revision_id => {
+                let outgoing_skill_path = gateway_dir
+                    .join("revisions/agents")
+                    .join(&args.agent_id)
+                    .join(&alias.revision_id)
+                    .join("SKILL.md");
+                std::fs::read_to_string(&outgoing_skill_path)
+                    .ok()
+                    .and_then(|text| {
+                        crate::runtime::install_contract::extract_frontmatter_raw(&text)
+                            .ok()
+                            .map(|fm| RevisionShape::from_frontmatter(&fm))
+                    })
+            }
+            _ => None,
+        };
+        let reassignment_signal: Option<ReassignmentSignal> = outgoing_shape
+            .as_ref()
+            .map(|o| compute_reassignment_signal(o, &incoming_shape));
+
         let delta_mode = config
             .map(|c| c.capability_delta_gate_mode)
             .unwrap_or(CapabilityDeltaGateMode::Strict);
@@ -2204,7 +3099,24 @@ impl NativeTool for AgentRevisionPromoteTool {
                 },
                 Some(_) => false,
             };
+        // #738: a federation-minted merged `RevisionPromote` (carrying
+        // `federation_context`) is the single operator decision for this
+        // promotion. If one is already approved, it covers the R++2 capability
+        // gate for both new AND existing agents — no second approval needed.
+        let merged_federation_promote_approved = match rev.artifact_id.as_deref() {
+            Some(aid) => {
+                find_merged_federation_promote_approval(
+                    &gateway_store,
+                    &args.agent_id,
+                    &args.revision_id,
+                    aid,
+                )?
+                .is_some()
+            }
+            None => false,
+        };
         let gate_bypassed_by_approval = new_agent_approved_via_escalation
+            || merged_federation_promote_approved
             || if let Some(ref approval_ref) = args.approval_ref {
                 check_revision_promote_approval(
                     &gateway_store,
@@ -2215,12 +3127,20 @@ impl NativeTool for AgentRevisionPromoteTool {
             } else {
                 false
             };
+        // Set inside the gate bypass block below, but referenced in the
+        // response — declared here for scope.
+        let mut pre_auth_envelope_id: Option<i64> = None;
 
         if !gate_bypassed_by_approval {
             let gate_new_agents = config
                 .map(|c| c.require_operator_approval_for_new_agents)
                 .unwrap_or(true);
-            if let Some(delta) = check_capability_delta(
+            let root_sid = run_context
+                .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
+                .or_else(|| {
+                    session_id.map(|s| crate::runtime::content_store::root_session_id(s).to_string())
+                });
+            let mut capability_delta = check_capability_delta(
                 &gateway_store,
                 gateway_dir,
                 &args.agent_id,
@@ -2228,26 +3148,133 @@ impl NativeTool for AgentRevisionPromoteTool {
                 &current_capabilities,
                 delta_mode,
                 gate_new_agents,
-            )? {
+            )?;
+            if capability_delta.is_some() {
+                if let Some(ref root) = root_sid {
+                    match crate::runtime::session_envelope::find_promote_with_envelope_id(
+                        &gateway_store,
+                        root,
+                        &args.agent_id,
+                        &current_capabilities,
+                    ) {
+                        Ok(Some(envelope_id)) => {
+                            tracing::info!(
+                                target: "promotion",
+                                agent_id = %args.agent_id,
+                                root_session_id = %root,
+                                envelope_id,
+                                "pre-authorized by session envelope PromoteWith (P-2.27)"
+                            );
+                            pre_auth_envelope_id = Some(envelope_id);
+                            capability_delta = None;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::debug!(
+                                target: "promotion",
+                                error = %e,
+                                "session envelope pre-auth check failed; falling through to capability gate"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Reassignment gate (#658). A categorical change to the agent
+            // occupying an EXISTING slot — execution_mode / script entrypoint /
+            // unrelated description — or a pure capability SHRINKAGE requires a
+            // distinct operator approval, even when no capability broadened.
+            // The broadening gate above returns None for non-broadening deltas,
+            // so without this a planner could replace a ground agent under a
+            // routine-looking approval (or none at all on pure shrinkage).
+            let needs_reassignment_approval = reassignment_signal
+                .as_ref()
+                .map(|r| r.requires_approval())
+                .unwrap_or(false);
+
+            if capability_delta.is_some() || needs_reassignment_approval {
                 let outgoing_revision_id = gateway_store
                     .resolve_alias(&args.agent_id)?
                     .map(|alias| alias.revision_id)
                     .unwrap_or_default();
-                let added_capabilities: Vec<String> = delta.added.clone();
-                let broadened_capabilities: Vec<String> = delta
-                    .broadened
-                    .iter()
-                    .map(|b| b.capability_type.clone())
-                    .collect();
+                let added_capabilities: Vec<String> = capability_delta
+                    .as_ref()
+                    .map(|d| d.added.clone())
+                    .unwrap_or_default();
+                let broadened_capabilities: Vec<String> = capability_delta
+                    .as_ref()
+                    .map(|d| {
+                        d.broadened
+                            .iter()
+                            .map(|b| b.capability_type.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Reassignment detail surfaced in the approval payload so the
+                // operator can give informed consent for a slot replacement
+                // (#658). Empty object when this is a pure in-place upgrade.
+                let reassignment_payload = reassignment_signal
+                    .as_ref()
+                    .map(|r| {
+                        serde_json::json!({
+                            "slot_reassignment": r.is_slot_reassignment(),
+                            "execution_mode_changed": r.execution_mode_changed,
+                            "script_entry_changed": r.script_entry_changed,
+                            "description_unrelated": r.description_unrelated,
+                            "removed_capabilities": r.capability_delta.removed,
+                            "narrowed_capabilities": r.capability_delta.narrowed,
+                        })
+                    })
+                    .unwrap_or_else(|| serde_json::json!({}));
+
+                let broadened_structured = capability_delta
+                    .as_ref()
+                    .map(|d| serde_json::to_value(&d.broadened).unwrap_or_default())
+                    .unwrap_or_default();
                 let payload = serde_json::json!({
-                    "added": delta.added,
-                    "broadened": delta.broadened,
+                    "added": added_capabilities,
+                    "broadened": broadened_structured,
+                    "reassignment": reassignment_payload,
                 });
 
-                let request_id = format!(
-                    "apr-{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..16]
-                );
+                let reass_suffix = reassignment_signal
+                    .as_ref()
+                    .map(|r| {
+                        reassignment_message_suffix(
+                            r,
+                            outgoing_shape.as_ref(),
+                            Some(&incoming_shape),
+                        )
+                    })
+                    .unwrap_or_default();
+
+                let approval_message = if outgoing_revision_id.is_empty() {
+                    format!(
+                        "Promoting new agent '{}' for the first time: all declared capabilities \
+                         require operator acknowledgement (R++2 / promotion-completeness). \
+                         Operator approval is required.{}",
+                        args.agent_id, reass_suffix
+                    )
+                } else if capability_delta.is_some() {
+                    format!(
+                        "Capability set broadened relative to outgoing revision '{}'. Operator \
+                         approval is required (R++2).{}",
+                        outgoing_revision_id, reass_suffix
+                    )
+                } else {
+                    format!(
+                        "Revision '{}' replaces outgoing revision '{}' for agent '{}'. Operator \
+                         approval is required.{}",
+                        args.revision_id, outgoing_revision_id, args.agent_id, reass_suffix
+                    )
+                };
+
+                // Route the R++2 capability/reassignment ack through the unified
+                // GateService. It provides the same cross-root dedup that
+                // find_matching_revision_promote_approval_for_root used to do
+                // (#723's identical-action join now handles cross-session joins),
+                // plus a typed DecisionContext and the standard approval pipeline.
                 let action = autonoetic_types::background::ScheduledAction::RevisionPromote {
                     agent_id: args.agent_id.clone(),
                     revision_id: args.revision_id.clone(),
@@ -2255,89 +3282,94 @@ impl NativeTool for AgentRevisionPromoteTool {
                     added_capabilities: added_capabilities.clone(),
                     broadened_capabilities: broadened_capabilities.clone(),
                     payload: Some(payload.clone()),
+                    federation_context: None,
                 };
-                let approval_level = config
-                    .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, &action))
-                    .unwrap_or(autonoetic_types::background::ApprovalLevel::Operator);
-                let mut req = autonoetic_types::background::ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: session_id.unwrap_or("").to_string(),
-                    root_session_id: None,
-                    workflow_id: None,
-                    task_id: None,
-                    action,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    reason: args.reason.clone().or_else(|| {
-                        Some(if outgoing_revision_id.is_empty() {
-                            format!(
-                                "First promotion of new agent '{}' (revision '{}') — operator must acknowledge all declared capabilities",
-                                args.agent_id, args.revision_id
-                            )
-                        } else {
-                            format!(
-                                "Promote revision '{}' would broaden capabilities relative to '{}'",
-                                args.revision_id, outgoing_revision_id
-                            )
-                        })
-                    }),
-                    evidence_ref: None,
-                    decision_reason: None,
-                    approval_level: approval_level.clone(),
-                    similar_to_request_id: None,
-                    similarity_score: None,
-                    min_dwell_ms: None,
-                    confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-                };
-                // Resolve root_session_id so the approval is visible on the
-                // canonical timeline (human_gate does this via resolve_execution_context).
-                let root_sid = run_context
-                    .and_then(|rc| Some(rc.root_session_id.clone()).filter(|s| !s.is_empty()))
-                    .or_else(|| session_id.map(|s| crate::runtime::content_store::root_session_id(s).to_string()));
-                req.root_session_id = root_sid.clone();
 
-                gateway_store.create_approval(&mut req)?;
-                if let (Some(config), Some((workflow_id, spec))) = (config, single_flight_scope.as_ref()) {
-                    crate::scheduler::single_flight::attach_approval_request(
-                        config,
-                        workflow_id,
-                        &spec.dedupe_key,
-                        &request_id,
-                    )?;
-                }
-                if let Some(guard) = single_flight_guard.as_mut() {
-                    guard.disarm();
-                }
-
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "permission",
-                    "error": "capability_delta_requires_approval",
-                    "message": if outgoing_revision_id.is_empty() {
-                        format!(
-                            "Promoting new agent '{}' for the first time: all declared capabilities require operator acknowledgement (R++2 / promotion-completeness). Operator approval is required.",
-                            args.agent_id
-                        )
-                    } else {
-                        format!(
-                            "Capability set broadened relative to outgoing revision '{}'. Operator approval is required (R++2).",
-                            outgoing_revision_id
-                        )
+                let gate_service = GateService::new(gateway_store.clone());
+                let gate_req = GateRequest {
+                    kind: GateKind::Approval {
+                        action: action.clone(),
+                        targets: Vec::new(),
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
                     },
-                    "approval_required": true,
-                    "request_id": request_id,
-                    "approval_ref": request_id,
-                    "added_capabilities": added_capabilities,
-                    "broadened_capabilities": broadened_capabilities,
-                    "delta": payload,
-                    "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
-                })
-                .to_string());
+                    manifest,
+                    session_id,
+                    run_context,
+                    config,
+                    context: DecisionContext::tier2(
+                        format!(
+                            "Promote revision {} of agent {} to active alias",
+                            args.revision_id, args.agent_id
+                        ),
+                        "R++2 capability/reassignment acknowledgement required before promotion",
+                        format!(
+                            "Capabilities being added: {:?}; broadened: {:?}; outgoing baseline: {}",
+                            added_capabilities, broadened_capabilities, outgoing_revision_id
+                        ),
+                        "Approve only if you acknowledge every added/broadened capability by name and accept the reassignment (if any)",
+                    )
+                    .with_analysis(format!(
+                        "Reassignment details: {}",
+                        reassignment_payload.to_string()
+                    )),
+                    summary: approval_message.clone(),
+                    approval_ref: args.approval_ref.as_deref(),
+                    request_id: None,
+                    pre_validated: false,
+                    cache_backfill: None,
+                    turn_id,
+                };
+
+                match gate_service.check(gate_req)? {
+                    GateResult::Cleared { source, .. } => {
+                        // Approved via approval_ref or session grant; proceed.
+                        tracing::info!(
+                            target: "promotion",
+                            agent_id = %args.agent_id,
+                            revision_id = %args.revision_id,
+                            source = ?source,
+                            "R++2 capability gate cleared via GateService"
+                        );
+                    }
+                    GateResult::AlreadyPending { gate_id, .. }
+                    | GateResult::Suspended { gate_id, .. } => {
+                        if let Some(guard) = single_flight_guard.as_mut() {
+                            guard.disarm();
+                        }
+                        record_attempt(
+                            "approval_required",
+                            Some("capability_delta"),
+                            Some("capability_delta_requires_approval"),
+                        );
+                        if let (Some(config), Some((workflow_id, spec))) =
+                            (config, single_flight_scope.as_ref())
+                        {
+                            crate::scheduler::single_flight::attach_approval_request(
+                                config,
+                                workflow_id,
+                                &spec.dedupe_key,
+                                &gate_id,
+                            )?;
+                        }
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "error": "capability_delta_requires_approval",
+                            "message": approval_message,
+                            "approval_required": true,
+                            "request_id": gate_id,
+                            "approval_ref": gate_id,
+                            "added_capabilities": added_capabilities,
+                            "broadened_capabilities": broadened_capabilities,
+                            "delta": payload,
+                            "repair_hint": "Operator must approve the request and acknowledge each added/broadened capability by name. Then retry agent_revision_promote with `approval_ref`.",
+                        })
+                        .to_string());
+                    }
+                    GateResult::PolicyAllowed => {
+                        // No approval required by policy; proceed.
+                    }
+                }
             }
         }
 
@@ -2377,81 +3409,192 @@ impl NativeTool for AgentRevisionPromoteTool {
             FullJury,
         }
 
+        // Returns Ok(None) when the gate passes, Ok(Some(json)) carrying a
+        // structured P-5.11 failure envelope (ok:false + stable `error` code)
+        // when blocked, and Err only for genuine infrastructure failures.
+        // Messages are kept verbatim (callers/tests read them); the stable code
+        // lets an orchestrator branch on one field instead of parsing prose.
         let enforce_promotion_gate = |artifact_id: &str,
                                       mode: PromotionGateMode,
                                       missing_record_message: &str|
-         -> anyhow::Result<()> {
+         -> anyhow::Result<Option<String>> {
+            use autonoetic_types::tool_error::ToolError;
             let promo_store = crate::runtime::promotion_store::PromotionStore::new(gateway_dir)?;
             let _ = promo_store.bind_content_digest_if_unset(artifact_id, &rev.content_digest)?;
-            let record = promo_store
-                .get_promotion(artifact_id)
-                .ok_or_else(|| anyhow::anyhow!("{}", missing_record_message))?;
+            let Some(record) = promo_store.get_promotion(artifact_id) else {
+                if let Some(rejection) = record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("promotion_record_missing"),
+                ) {
+                    return Ok(Some(rejection.to_tool_error().to_string()));
+                }
+                return Ok(Some(
+                    ToolError::permission(missing_record_message.to_string())
+                        .with_code("promotion_record_missing")
+                        .with_repair_hint(
+                            "Obtain the required gate pass record(s) for this artifact, then retry agent_revision_promote.",
+                        )
+                        .to_error_response(),
+                ));
+            };
 
             let record_content_digest = record.content_digest.as_deref().unwrap_or("<none>");
-            anyhow::ensure!(
-                    record.content_digest.as_deref() == Some(rev.content_digest.as_str()),
-                    "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
-                     but revision requires '{}'. Re-run gate roles for this revision content.",
-                    artifact_id,
-                    record_content_digest,
-                    rev.content_digest
-                );
+            if record.content_digest.as_deref() != Some(rev.content_digest.as_str()) {
+                if let Some(rejection) = record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("promotion_gate_content_digest_mismatch"),
+                ) {
+                    return Ok(Some(rejection.to_tool_error().to_string()));
+                }
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: promotion record for artifact '{}' is bound to content digest '{}' \
+                         but revision requires '{}'. Re-run gate roles for this revision content.",
+                        artifact_id, record_content_digest, rev.content_digest
+                    ))
+                    .with_code("promotion_gate_content_digest_mismatch")
+                    .with_repair_hint("Re-run the gate roles against this revision's content, then retry.")
+                    .to_error_response(),
+                ));
+            }
 
-            anyhow::ensure!(
-                record.auditor_pass,
-                "Promotion gate: auditor did not pass for artifact '{}'. \
+            if !record.auditor_pass {
+                if let Some(rejection) = record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("auditor_pass_missing"),
+                ) {
+                    return Ok(Some(rejection.to_tool_error().to_string()));
+                }
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: auditor did not pass for artifact '{}'. \
                      Fix the audit findings and re-run auditor.default.",
-                artifact_id
-            );
-            let audit_id = record.auditor_id.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Promotion gate: auditor identity missing for artifact '{}' (P-2.17). \
+                        artifact_id
+                    ))
+                    .with_code("auditor_pass_missing")
+                    .with_repair_hint("Obtain a passing auditor record for this artifact, then retry.")
+                    .to_error_response(),
+                ));
+            }
+            let Some(audit_id) = record.auditor_id.as_deref() else {
+                if let Some(rejection) = record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("auditor_identity_missing"),
+                ) {
+                    return Ok(Some(rejection.to_tool_error().to_string()));
+                }
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: auditor identity missing for artifact '{}' (P-2.17). \
                      Re-run auditor.default to record its identity.",
-                    artifact_id
-                )
-            })?;
+                        artifact_id
+                    ))
+                    .with_code("auditor_identity_missing")
+                    .with_repair_hint("Re-record the audit with an attributed identity, then retry.")
+                    .with_enforced_rules(vec!["P-2.17".to_string()])
+                    .to_error_response(),
+                ));
+            };
 
             match mode {
                 PromotionGateMode::Full => {
-                    anyhow::ensure!(
-                        record.evaluator_pass
-                            || record.sealed_evaluator_pass
-                            || record.static_evaluator_pass,
-                        "Promotion gate: no evaluator role passed for artifact '{}'. \
+                    if !(record.evaluator_pass
+                        || record.sealed_evaluator_pass
+                        || record.static_evaluator_pass)
+                    {
+                        if let Some(rejection) = record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("evaluator_pass_missing"),
+                        ) {
+                            return Ok(Some(rejection.to_tool_error().to_string()));
+                        }
+                        return Ok(Some(
+                            ToolError::permission(format!(
+                                "Promotion gate: no evaluator role passed for artifact '{}'. \
                          Fix the evaluation findings and re-run sealed_evaluator.default or static_evaluator.default.",
-                        artifact_id
-                    );
-                    let eval_id = record
+                                artifact_id
+                            ))
+                            .with_code("evaluator_pass_missing")
+                            .with_repair_hint("Obtain a passing evaluator record (evaluator/sealed/static), then retry.")
+                            .to_error_response(),
+                        ));
+                    }
+                    let Some(eval_id) = record
                         .evaluator_id
                         .as_deref()
                         .or(record.sealed_evaluator_id.as_deref())
                         .or(record.static_evaluator_id.as_deref())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
+                    else {
+                        if let Some(rejection) = record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("evaluator_identity_missing"),
+                        ) {
+                            return Ok(Some(rejection.to_tool_error().to_string()));
+                        }
+                        return Ok(Some(
+                            ToolError::permission(format!(
                                 "Promotion gate: evaluator identity missing for artifact '{}' (P-2.17). \
                                  Re-run an evaluator role to record its identity.",
                                 artifact_id
-                            )
-                        })?;
-                    anyhow::ensure!(
-                        eval_id != audit_id,
-                        "Promotion gate: evaluator and auditor are the same agent '{}' (P-2.17). \
+                            ))
+                            .with_code("evaluator_identity_missing")
+                            .with_repair_hint("Re-record the evaluation with an attributed identity, then retry.")
+                            .with_enforced_rules(vec!["P-2.17".to_string()])
+                            .to_error_response(),
+                        ));
+                    };
+                    if eval_id == audit_id {
+                        if let Some(rejection) = record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("gate_identity_collision"),
+                        ) {
+                            return Ok(Some(rejection.to_tool_error().to_string()));
+                        }
+                        return Ok(Some(
+                            ToolError::permission(format!(
+                                "Promotion gate: evaluator and auditor are the same agent '{}' (P-2.17). \
                          A single agent cannot self-approve. Use distinct evaluator and auditor agents.",
-                        eval_id
-                    );
+                                eval_id
+                            ))
+                            .with_code("gate_identity_collision")
+                            .with_repair_hint("Use distinct evaluator and auditor identities, then retry.")
+                            .with_enforced_rules(vec!["P-2.17".to_string()])
+                            .to_error_response(),
+                        ));
+                    }
                 }
                 PromotionGateMode::AuditOnly => {
                     // P-2.17 reduced: auditor must be a distinct identity
                     // from the agent that proposed the install. With no
                     // evaluator in this mode, the proposer is the relevant
                     // counterparty for the self-approval ban.
-                    anyhow::ensure!(
-                        audit_id != rev.created_by_id,
-                        "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (P-2.17, audit-only). \
+                    if audit_id == rev.created_by_id {
+                        if let Some(rejection) = record_attempt(
+                            "rejected",
+                            Some("promotion_gate"),
+                            Some("gate_identity_collision"),
+                        ) {
+                            return Ok(Some(rejection.to_tool_error().to_string()));
+                        }
+                        return Ok(Some(
+                            ToolError::permission(format!(
+                                "Promotion gate: auditor '{}' is the same identity that proposed revision '{}' (P-2.17, audit-only). \
                          A single agent cannot propose and audit. Use a distinct auditor identity.",
-                        audit_id,
-                        args.revision_id
-                    );
+                                audit_id, args.revision_id
+                            ))
+                            .with_code("gate_identity_collision")
+                            .with_repair_hint("Use an auditor identity distinct from the proposer, then retry.")
+                            .with_enforced_rules(vec!["P-2.17".to_string()])
+                            .to_error_response(),
+                        ));
+                    }
                 }
                 // FullJury enforcement is handled separately after the
                 // legacy gate; this variant is only used for event emission.
@@ -2459,13 +3602,25 @@ impl NativeTool for AgentRevisionPromoteTool {
             }
 
             // P-2.26: All executed gate roles must pass.
-            if record.unit_test_runner_id.is_some() {
-                anyhow::ensure!(
-                    record.unit_test_runner_pass,
-                    "Promotion gate: unit_test_runner did not pass for artifact '{}' (P-2.26). \
+            if record.unit_test_runner_id.is_some() && !record.unit_test_runner_pass {
+                if let Some(rejection) = record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("unit_test_runner_pass_missing"),
+                ) {
+                    return Ok(Some(rejection.to_tool_error().to_string()));
+                }
+                return Ok(Some(
+                    ToolError::permission(format!(
+                        "Promotion gate: unit_test_runner did not pass for artifact '{}' (P-2.26). \
                      Fix the failing tests and re-run unit_test_runner.default.",
-                    artifact_id
-                );
+                        artifact_id
+                    ))
+                    .with_code("unit_test_runner_pass_missing")
+                    .with_repair_hint("Resolve the failing tests and re-record a unit_test_runner pass, then retry.")
+                    .with_enforced_rules(vec!["P-2.26".to_string()])
+                    .to_error_response(),
+                ));
             }
 
             let has_unresolved = rev
@@ -2473,13 +3628,47 @@ impl NativeTool for AgentRevisionPromoteTool {
                 .get("has_unresolved_dependencies")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            anyhow::ensure!(
-                !has_unresolved,
-                "Promotion gate: revision has unresolved dependencies. \
+            if has_unresolved {
+                if let Some(rejection) = record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some("unresolved_dependencies"),
+                ) {
+                    return Ok(Some(rejection.to_tool_error().to_string()));
+                }
+                return Ok(Some(
+                    ToolError::permission(
+                        "Promotion gate: revision has unresolved dependencies. \
                      Run packager.default to install dependencies as layers, \
-                     then re-submit the revision.",
-            );
-            Ok(())
+                     then re-submit the revision."
+                            .to_string(),
+                    )
+                    .with_code("unresolved_dependencies")
+                    .with_repair_hint("Resolve the revision's dependencies (install as layers), then re-submit and retry.")
+                    .to_error_response(),
+                ));
+            }
+            if let Some((code, message)) =
+                crate::runtime::promotion_evidence::verify_stored_execution_traces(
+                    gateway_store.as_ref(),
+                    &record,
+                )?
+            {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_gate"),
+                    Some(code.as_str()),
+                );
+                return Ok(Some(
+                    ToolError::permission(message)
+                        .with_code(&code)
+                        .with_repair_hint(
+                            "Re-run the gate role with a successful execution trace, then retry agent_revision_promote.",
+                        )
+                        .to_error_response(),
+                ));
+            }
+            Ok(None)
         };
 
         // Emit a causal event after each enforced promotion gate so forensics
@@ -2526,7 +3715,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                     args.revision_id
                 )
             })?;
-            enforce_promotion_gate(
+            if let Some(json) = enforce_promotion_gate(
                 artifact_id,
                 PromotionGateMode::Full,
                 &format!(
@@ -2535,13 +3724,15 @@ impl NativeTool for AgentRevisionPromoteTool {
                      evaluator and auditor pass records before promotion.",
                     artifact_id
                 ),
-            )?;
+            )? {
+                return Ok(json);
+            }
             emit_gate_event(PromotionGateMode::Full, Some(artifact_id));
         } else if has_high_risk && rev.artifact_id.is_some() {
             // NetworkAccess without CodeExecution/AgentSpawn, but an artifact was provided.
             // Still apply the full eval+audit gate since code exists to review.
             let artifact_id = rev.artifact_id.as_deref().unwrap();
-            enforce_promotion_gate(
+            if let Some(json) = enforce_promotion_gate(
                 artifact_id,
                 PromotionGateMode::Full,
                 &format!(
@@ -2550,7 +3741,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                      evaluator and auditor pass records before promotion.",
                     artifact_id
                 ),
-            )?;
+            )? {
+                return Ok(json);
+            }
             emit_gate_event(PromotionGateMode::Full, Some(artifact_id));
         } else if rev.artifact_id.is_some() && !current_capabilities.is_empty() {
             // Pure-skill intent-only bundle (no CodeExecution/AgentSpawn, no
@@ -2566,7 +3759,7 @@ impl NativeTool for AgentRevisionPromoteTool {
             // for such an agent is trivial. Runtime capability enforcement
             // on every tool call remains the security gate for that case.
             let artifact_id = rev.artifact_id.as_deref().unwrap();
-            enforce_promotion_gate(
+            if let Some(json) = enforce_promotion_gate(
                 artifact_id,
                 PromotionGateMode::AuditOnly,
                 &format!(
@@ -2576,7 +3769,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                      promotion.",
                     artifact_id
                 ),
-            )?;
+            )? {
+                return Ok(json);
+            }
             emit_gate_event(PromotionGateMode::AuditOnly, Some(artifact_id));
         } else {
             // Reaching here ⇒ either zero declared capabilities, or a
@@ -2593,6 +3788,11 @@ impl NativeTool for AgentRevisionPromoteTool {
                 .map(|c| c.allow_zero_capability_direct_promote)
                 .unwrap_or(true);
             if !(inoffensive && cursor_allows) {
+                record_attempt(
+                    "rejected",
+                    Some("promotion_incomplete"),
+                    Some("promotion_incomplete"),
+                );
                 let (message, repair_hint) = if !inoffensive {
                     (
                         format!(
@@ -2644,48 +3844,150 @@ impl NativeTool for AgentRevisionPromoteTool {
                 // revision proposer.
                 let proposer = rev.created_by_id.as_str();
                 for id in &fed_ids {
-                    anyhow::ensure!(
-                        id != proposer,
-                        "Promotion gate (FullJury): federation role '{}' is the same identity \
+                    if id == proposer {
+                        if let Some(rejection) = record_attempt(
+                            "rejected",
+                            Some("full_jury"),
+                            Some("jury_identity_collision"),
+                        ) {
+                            return Ok(rejection.to_tool_error().to_string());
+                        }
+                        return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                            "Promotion gate (FullJury): federation role '{}' is the same identity \
                          that proposed revision '{}' (P-2.17). Each federation role must be \
                          a distinct agent from the proposer.",
-                        id,
-                        args.revision_id
-                    );
+                            id, args.revision_id
+                        ))
+                        .with_code("jury_identity_collision")
+                        .with_repair_hint("Use federation role identities distinct from the proposer, then retry.")
+                        .with_enforced_rules(vec!["P-2.17".to_string(), "P-2.22".to_string()])
+                        .to_error_response());
+                    }
                 }
                 if fed_ids.len() > 1 {
                     for i in 0..fed_ids.len() {
                         for j in (i + 1)..fed_ids.len() {
-                            anyhow::ensure!(
-                                fed_ids[i] != fed_ids[j],
-                                "Promotion gate (FullJury): federation roles '{}' and '{}' \
+                            if fed_ids[i] == fed_ids[j] {
+                                if let Some(rejection) = record_attempt(
+                                    "rejected",
+                                    Some("full_jury"),
+                                    Some("jury_identity_collision"),
+                                ) {
+                                    return Ok(rejection.to_tool_error().to_string());
+                                }
+                                return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                                    "Promotion gate (FullJury): federation roles '{}' and '{}' \
                                  are the same agent (P-2.17). Each federation role must be \
                                  a distinct agent.",
-                                fed_ids[i],
-                                fed_ids[j]
-                            );
+                                    fed_ids[i], fed_ids[j]
+                                ))
+                                .with_code("jury_identity_collision")
+                                .with_repair_hint("Use distinct identities for each federation role, then retry.")
+                                .with_enforced_rules(vec!["P-2.17".to_string(), "P-2.22".to_string()])
+                                .to_error_response());
+                            }
                         }
                     }
                 }
 
-                let escalation = gateway_store.find_escalation(
-                    artifact_id,
+                // #738: the single-decision path. A federation-minted merged
+                // `RevisionPromote` (carrying `federation_context`) authorizes
+                // both the capability delta AND this jury review. Bind by
+                // artifact_id + content_digest so an approval for different
+                // content never satisfies the gate (closes the #653 pattern
+                // structurally — `find_approved_escalation_for_artifact` was
+                // artifact-scoped only, so a re-promotion of different content
+                // under the same artifact_id could reuse a stale approval).
+                let merged_approval_id = find_merged_federation_promote_approval(
+                    &gateway_store,
+                    &args.agent_id,
                     &args.revision_id,
-                    autonoetic_types::escalation::EscalationStatus::Approved,
+                    artifact_id,
                 )?;
-                let escalation = match escalation {
-                    Some(e) => Some(e),
-                    None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
+                let merged_satisfies_jury = match merged_approval_id.as_deref() {
+                    Some(approval_id) => match gateway_store.get_approval(approval_id)? {
+                        Some(approval) => {
+                            if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+                                federation_context: Some(ctx),
+                                ..
+                            } = &approval.action
+                            {
+                                // Digest binding (#653 structural fix): when the
+                                // approval carries a content_digest, require the
+                                // escalation projection for this artifact+revision
+                                // to carry the same digest. This prevents an
+                                // approval for different content (re-promotion
+                                // under the same artifact_id) from satisfying the
+                                // gate. Missing digest on either side is tolerated
+                                // for backward-compat (pre-digest approvals).
+                                // Fail closed (#746 review): both projection
+                                // lookups must propagate DB errors. Swallowing
+                                // them would leave current_digest = None and the
+                                // match below would treat the digest binding as
+                                // satisfied on a lookup *failure*.
+                                let approved_esc = gateway_store.find_escalation(
+                                    artifact_id,
+                                    &args.revision_id,
+                                    autonoetic_types::escalation::EscalationStatus::Approved,
+                                )?;
+                                let esc = match approved_esc {
+                                    Some(e) => Some(e),
+                                    None => gateway_store.find_escalation(
+                                        artifact_id,
+                                        &args.revision_id,
+                                        autonoetic_types::escalation::EscalationStatus::Pending,
+                                    )?,
+                                };
+                                let current_digest = esc.and_then(|e| e.artifact_digest);
+                                match (ctx.content_digest.as_deref(), current_digest.as_deref()) {
+                                    (Some(approved), Some(current)) => approved == current,
+                                    _ => true,
+                                }
+                            } else {
+                                false
+                            }
+                        }
+                        None => false,
+                    },
+                    None => false,
                 };
-                anyhow::ensure!(
-                    escalation.is_some(),
-                    "Promotion gate (FullJury): revision '{}' has federation role verdicts \
+
+                // Legacy path: an approved SessionEscalate{PromotionReview}
+                // projection (pre-#738 in-flight approvals, or the no-delta
+                // jury-only review path).
+                let escalation = if merged_satisfies_jury {
+                    None // already satisfied; skip the legacy lookup
+                } else {
+                    let esc = gateway_store.find_escalation(
+                        artifact_id,
+                        &args.revision_id,
+                        autonoetic_types::escalation::EscalationStatus::Approved,
+                    )?;
+                    match esc {
+                        Some(e) => Some(e),
+                        None => gateway_store.find_approved_escalation_for_artifact(artifact_id)?,
+                    }
+                };
+                if !merged_satisfies_jury && escalation.is_none() {
+                    if let Some(rejection) = record_attempt(
+                        "rejected",
+                        Some("full_jury"),
+                        Some("jury_escalation_required"),
+                    ) {
+                        return Ok(rejection.to_tool_error().to_string());
+                    }
+                    return Ok(autonoetic_types::tool_error::ToolError::permission(format!(
+                        "Promotion gate (FullJury): revision '{}' has federation role verdicts \
                      but no approved operator escalation. \
-                     The planner must call federation.escalate with revision_id='{}' \
+                     The planner must call federation_escalate with revision_id='{}' \
                      and the operator must approve before promotion.",
-                    args.revision_id,
-                    args.revision_id
-                );
+                        args.revision_id, args.revision_id
+                    ))
+                    .with_code("jury_escalation_required")
+                    .with_repair_hint("Obtain an approved operator escalation for this revision, then retry.")
+                    .with_enforced_rules(vec!["P-2.22".to_string()])
+                    .to_error_response());
+                }
 
                 emit_gate_event(PromotionGateMode::FullJury, Some(artifact_id));
             }
@@ -2727,6 +4029,13 @@ impl NativeTool for AgentRevisionPromoteTool {
                     .any(|a| a == &args.agent_id)
             {
                 if args.required_eval_run_id.is_none() {
+                    if let Some(rejection) = record_attempt(
+                        "rejected",
+                        Some("protected_agent"),
+                        Some("protected_agent_requires_eval_run"),
+                    ) {
+                        return Ok(rejection.to_tool_error().to_string());
+                    }
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "permission",
@@ -2754,6 +4063,11 @@ impl NativeTool for AgentRevisionPromoteTool {
             if force_requested {
                 let reason = args.force_reason.as_deref().unwrap_or("").trim();
                 if reason.is_empty() {
+                    record_attempt(
+                        "validation_failed",
+                        Some("governor_force"),
+                        Some("governor_force_requires_reason"),
+                    );
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "validation",
@@ -2764,6 +4078,11 @@ impl NativeTool for AgentRevisionPromoteTool {
                     .to_string());
                 }
                 if reason.len() > 512 {
+                    record_attempt(
+                        "validation_failed",
+                        Some("governor_force"),
+                        Some("governor_force_reason_too_long"),
+                    );
                     return Ok(serde_json::json!({
                         "ok": false,
                         "error_type": "validation",
@@ -2790,6 +4109,7 @@ impl NativeTool for AgentRevisionPromoteTool {
                     gateway_dir,
                     &args.agent_id,
                     &args.revision_id,
+                    Some(&rev.content_digest),
                 )? {
                     crate::runtime::promotion_governor::emit_rejected_event(
                         gateway_store.as_ref(),
@@ -2799,6 +4119,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                         &args.revision_id,
                         &rejection,
                     );
+                    if let Some(rejection) = record_attempt("rejected", Some("governor"), Some(rejection.error)) {
+                        return Ok(rejection.to_tool_error().to_string());
+                    }
                     return Ok(rejection.to_tool_error().to_string());
                 }
             }
@@ -2825,6 +4148,13 @@ impl NativeTool for AgentRevisionPromoteTool {
                         );
                     }
                     Ok(crate::sentinel::GateOutcome::Blocked { reason, critical_count }) => {
+                        if let Some(rejection) = record_attempt(
+                            "rejected",
+                            Some("sentinel"),
+                            Some("sentinel_critical_findings_block_promotion"),
+                        ) {
+                            return Ok(rejection.to_tool_error().to_string());
+                        }
                         return Ok(serde_json::json!({
                             "ok": false,
                             "error_type": "sentinel_gate",
@@ -2840,6 +4170,9 @@ impl NativeTool for AgentRevisionPromoteTool {
                         .to_string());
                     }
                     Err(e) => {
+                        if let Some(rejection) = record_attempt("rejected", Some("sentinel"), Some("sentinel_gate_failed")) {
+                            return Ok(rejection.to_tool_error().to_string());
+                        }
                         // Fail-closed: timeout or sweep error blocks promotion.
                         return Ok(serde_json::json!({
                             "ok": false,
@@ -2854,6 +4187,165 @@ impl NativeTool for AgentRevisionPromoteTool {
             }
         }
 
+        // Smoke-test gate (P-2.28 / #578, hardened #657).
+        //
+        // Two independent rules:
+        //  (A) Caller-supplied smoke-test evidence is ALWAYS verified, regardless
+        //      of whether the agent is new. Volunteering a smoke_test_task_id is
+        //      a request to enforce it — a failed task blocks promotion. This
+        //      closes the gap that let a failed smoke test be silently ignored
+        //      when promoting into an existing slot.
+        //  (B) New agents AND shape-changing replacements (#658) must supply a
+        //      successful smoke test when the candidate carries executable
+        //      capabilities. A categorical slot replacement is treated like a
+        //      brand-new agent because the candidate is effectively untrusted
+        //      code taking over the slot.
+        let is_new_agent = gateway_store.resolve_alias(&args.agent_id)?.is_none();
+        let runtime_lock_rel = crate::runtime::parser::SkillParser::parse(&skill_text)
+            .map(|(m, _)| m.runtime.runtime_lock)
+            .unwrap_or_else(|_| "runtime.lock".to_string());
+        let credential_services = crate::runtime::smoke_test_gate::load_revision_credential_services(
+            &revision_dir,
+            &runtime_lock_rel,
+        );
+        let smoke_involvement = crate::runtime::smoke_test_gate::smoke_test_involvement(
+            &current_capabilities,
+            &credential_services,
+        );
+
+        // A categorical slot replacement (existing agent whose candidate changes
+        // execution_mode / script entrypoint / unrelated description) is treated
+        // as smoke-test-required, like a new agent.
+        let shape_changed = reassignment_signal
+            .as_ref()
+            .map(|r| r.is_slot_reassignment())
+            .unwrap_or(false);
+        let smoke_required = (is_new_agent || shape_changed)
+            && smoke_involvement != crate::runtime::smoke_test_gate::SmokeTestInvolvement::NotRequired;
+
+        // (A) Verify any caller-supplied evidence. If either id is present, both
+        // must be, and the referenced task must have succeeded against this
+        // candidate revision. This runs even for an unchanged existing agent.
+        if args.smoke_test_task_id.is_some() || args.smoke_test_workflow_id.is_some() {
+            let Some(workflow_id) = args.smoke_test_workflow_id.as_deref() else {
+                if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_required")) {
+                    return Ok(rejection.to_tool_error().to_string());
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": "smoke_test_task_id was provided without smoke_test_workflow_id. \
+                                Supply both from the same successful smoke-test run.",
+                    "repair_hint": "Pass both smoke_test_workflow_id and smoke_test_task_id (or omit both).",
+                })
+                .to_string());
+            };
+            let Some(task_id) = args.smoke_test_task_id.as_deref() else {
+                if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_required")) {
+                    return Ok(rejection.to_tool_error().to_string());
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": "smoke_test_workflow_id was provided without smoke_test_task_id. \
+                                Supply both from the same successful smoke-test run.",
+                    "repair_hint": "Pass both smoke_test_workflow_id and smoke_test_task_id (or omit both).",
+                })
+                .to_string());
+            };
+            if let Err(e) = verify_smoke_test_task(
+                config.ok_or_else(|| anyhow::anyhow!("GatewayConfig required for smoke-test verification"))?,
+                &gateway_store,
+                workflow_id,
+                task_id,
+                &args.agent_id,
+                &args.revision_id,
+                args.smoke_test_input.as_deref(),
+            ) {
+                if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_failed_or_mismatched")) {
+                    return Ok(rejection.to_tool_error().to_string());
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_failed_or_mismatched",
+                    "message": format!(
+                        "Smoke-test evidence for agent '{}' is missing or invalid: {}",
+                        args.agent_id,
+                        e
+                    ),
+                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...) and confirm the task succeeds, then retry promotion with the correct workflow_id and task_id.",
+                })
+                .to_string());
+            }
+        }
+
+        // (B) Require evidence for new agents and shape-changing replacements.
+        //     (If evidence was supplied it was already verified by rule A above.)
+        if smoke_required {
+            if smoke_involvement
+                == crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected
+            {
+                let input = args.smoke_test_input.as_deref().unwrap_or("").trim();
+                if input.is_empty() {
+                    if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_input_required")) {
+                        return Ok(rejection.to_tool_error().to_string());
+                    }
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "error_type": "validation",
+                        "error": "smoke_test_input_required",
+                        "message": format!(
+                            "Agent '{}' requires operator-directed smoke test input (credential_services or external WriteAccess declared).",
+                            args.agent_id
+                        ),
+                        "smoke_test_involvement": "operator_directed",
+                        "repair_hint": "Propose a representative test input, confirm it with the operator via user_ask, run agent_spawn(revision_id=...) with that message, then retry promotion with smoke_test_input plus smoke_test_workflow_id and smoke_test_task_id.",
+                    })
+                    .to_string());
+                }
+            }
+
+            let has_evidence =
+                args.smoke_test_workflow_id.is_some() && args.smoke_test_task_id.is_some();
+            if !has_evidence {
+                let reason = if is_new_agent {
+                    format!(
+                        "Agent '{}' is new and declares executable capabilities.",
+                        args.agent_id
+                    )
+                } else {
+                    format!(
+                        "Agent '{}' candidate is a categorical slot replacement \
+                         (execution_mode / entrypoint / role changed) and declares executable \
+                         capabilities — it must be smoke-tested before replacing the live revision.",
+                        args.agent_id
+                    )
+                };
+                if let Some(rejection) = record_attempt("rejected", Some("smoke_test"), Some("smoke_test_required")) {
+                    return Ok(rejection.to_tool_error().to_string());
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "validation",
+                    "error": "smoke_test_required",
+                    "message": format!(
+                        "{} Provide smoke_test_workflow_id and smoke_test_task_id from a successful smoke-test run.",
+                        reason
+                    ),
+                    "smoke_test_involvement": match smoke_involvement {
+                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::AutoRun => "auto_run",
+                        crate::runtime::smoke_test_gate::SmokeTestInvolvement::OperatorDirected => "operator_directed",
+                        _ => "required",
+                    },
+                    "repair_hint": "Run the candidate revision once with agent_spawn(revision_id=...), wait for success, then retry promotion with smoke_test_workflow_id and smoke_test_task_id.",
+                })
+                .to_string());
+            }
+        }
+
         let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
             &format!(
@@ -2864,6 +4356,13 @@ impl NativeTool for AgentRevisionPromoteTool {
             ),
         );
 
+        let pre_authorization = pre_auth_envelope_id.map(|eid| {
+            serde_json::json!({
+                "method": "envelope",
+                "envelope_id": eid,
+                "rule": "P-2.27",
+            }).to_string()
+        });
         let previous_revision_id = gateway_store.atomic_promote(
             &args.agent_id,
             &args.revision_id,
@@ -2872,7 +4371,10 @@ impl NativeTool for AgentRevisionPromoteTool {
             &manifest.agent.id,
             args.reason.as_deref(),
             args.required_eval_run_id.as_deref(),
+            pre_authorization.as_deref(),
         )?;
+
+        record_attempt("promoted", None, None);
 
         crate::bootstrap::update_latest_symlink(gateway_dir, &args.agent_id, &args.revision_id);
 
@@ -2887,7 +4389,7 @@ impl NativeTool for AgentRevisionPromoteTool {
         }
 
         let short_ref = format!("{}@rev_{}", args.agent_id, rev.short_id);
-        Ok(serde_json::json!({
+        let mut response = serde_json::json!({
             "ok": true,
             "status": "promoted",
             "agent_id": args.agent_id,
@@ -2895,8 +4397,56 @@ impl NativeTool for AgentRevisionPromoteTool {
             "short_ref": short_ref,
             "previous_revision_id": previous_revision_id,
             "promotion_id": promotion_id,
-        })
-        .to_string())
+            // Terminal signal: promotion IS installation — the alias now points
+            // at this revision. Make the single next action explicit so the
+            // orchestrator spawns the agent instead of rebuilding/re-promoting.
+            "installed": true,
+            "next": format!(
+                "Agent '{}' is now the active (installed) revision. To use it, call \
+                 agent_spawn with agent_id '{}'. Do not rebuild or promote it again.",
+                args.agent_id, args.agent_id
+            ),
+        });
+        if let Some(eid) = pre_auth_envelope_id {
+            response["pre_authorized_by_envelope"] = serde_json::json!(eid);
+            response["pre_auth_rule"] = serde_json::json!("P-2.27");
+        }
+
+        // E.3 advisory: for high-risk revisions, surface civic eval scores as
+        // non-blocking advisory evidence (#772). Binding thresholds come later,
+        // once the suites prove stable (RFC invariant 5). Advisory only — never
+        // blocks promotion here.
+        if has_high_risk {
+            let civic_advisory = match gateway_store
+                .find_latest_completed_eval_run(
+                    crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
+                    &args.revision_id,
+                ) {
+                Ok(Some(run)) => {
+                    let status_str = format!("{:?}", run.status);
+                    serde_json::json!({
+                        "status": status_str,
+                        "eval_run_id": run.eval_run_id,
+                        "summary": run.summary_json,
+                        "advisory_note": "Civic eval scores are advisory evidence (#772 E.3); they do not block promotion. Binding thresholds will be added once the suites prove stable."
+                    })
+                }
+                Ok(None) => serde_json::json!({
+                    "status": "not_run",
+                    "advisory_note": "No civic eval run found for this revision. Consider running eval_run with civic-core-v1 to measure civic behavior (#772 E.3, advisory)."
+                }),
+                Err(e) => {
+                    tracing::warn!(target: "agent_revision", error = %e, "Failed to query civic eval advisory");
+                    serde_json::json!({
+                        "status": "query_failed",
+                        "advisory_note": "Civic eval advisory query failed (non-blocking)."
+                    })
+                }
+            };
+            response["civic_eval_advisory"] = civic_advisory;
+        }
+
+        Ok(response.to_string())
     }
 }
 
@@ -3302,6 +4852,31 @@ impl NativeTool for AgentRevisionDiffTool {
     }
 }
 
+/// Resolve `(root_session_id, workflow_id, task_id)` for approval rows created
+/// from native tools. Mirrors `human_gate::resolve_execution_context` so
+/// workflow-bound promote gates unblock via `unblock_task_on_approval`.
+fn approval_execution_context(
+    run_context: Option<&NativeToolRunContext>,
+    session_id: Option<&str>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    if let Some(rc) = run_context {
+        let root_session_id = if rc.root_session_id.is_empty() {
+            None
+        } else {
+            Some(rc.root_session_id.clone())
+        };
+        (root_session_id, rc.workflow_id.clone(), rc.task_id.clone())
+    } else if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        (
+            Some(crate::runtime::content_store::root_session_id(sid).to_string()),
+            None,
+            None,
+        )
+    } else {
+        (None, None, None)
+    }
+}
+
 /// Look up an existing approval by ID and decide whether the R++2 gate may be
 /// bypassed for this retry. All four conditions must hold:
 ///   (a) the action is `RevisionPromote` for exactly this `(agent_id, revision_id)`,
@@ -3311,6 +4886,88 @@ impl NativeTool for AgentRevisionDiffTool {
 ///       if it has, a fresh promote attempt must produce a new approval
 ///       against the new baseline (otherwise an unrelated revision flip
 ///       between approval-mint and retry could let unacknowledged caps through).
+/// Verify that a smoke-test task ran the candidate revision successfully.
+///
+/// Returns `Ok(())` if the task exists, reached `Succeeded` status, and its
+/// metadata records `_autonoetic_spawn_revision_id` matching the target revision.
+fn verify_smoke_test_task(
+    config: &autonoetic_types::config::GatewayConfig,
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    workflow_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    revision_id: &str,
+    expected_input: Option<&str>,
+) -> anyhow::Result<()> {
+    let task = crate::scheduler::workflow_store::load_task_run(config, Some(gateway_store), workflow_id, task_id)?
+        .ok_or_else(|| anyhow::anyhow!("Smoke-test task '{}' not found in workflow '{}'", task_id, workflow_id))?;
+
+    if task.agent_id != agent_id {
+        anyhow::bail!(
+            "Smoke-test task '{}' targeted agent '{}', not '{}'",
+            task_id,
+            task.agent_id,
+            agent_id
+        );
+    }
+
+    if !matches!(
+        task.status,
+        autonoetic_types::workflow::TaskRunStatus::Succeeded
+    ) {
+        anyhow::bail!(
+            "Smoke-test task '{}' did not succeed (status: {:?}). The candidate revision cannot be promoted.",
+            task_id,
+            task.status
+        );
+    }
+
+    let spawned_revision_id = task
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("_autonoetic_spawn_revision_id"))
+        .and_then(|v| v.as_str());
+
+    match spawned_revision_id {
+        Some(rid) if rid == revision_id => {}
+        Some(rid) => anyhow::bail!(
+            "Smoke-test task '{}' ran revision '{}', not '{}'",
+            task_id,
+            rid,
+            revision_id
+        ),
+        None => anyhow::bail!(
+            "Smoke-test task '{}' is not tagged with a candidate revision id",
+            task_id
+        ),
+    }
+
+    if let Some(expected) = expected_input.map(str::trim).filter(|s| !s.is_empty()) {
+        // Compare against the RAW spawn message persisted in metadata, not the
+        // wrapped `task.message` (which carries [Context]/[Metadata] framing).
+        // Fall back to `task.message` only for tasks spawned before the raw
+        // message was persisted (issue #648).
+        let raw_spawn_message = task
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("_autonoetic_spawn_message"))
+            .and_then(|v| v.as_str());
+        let actual = raw_spawn_message
+            .unwrap_or_else(|| task.message.as_deref().unwrap_or(""))
+            .trim();
+        if actual != expected {
+            anyhow::bail!(
+                "Smoke-test task '{}' message does not match smoke_test_input (expected {:?}, got {:?})",
+                task_id,
+                expected,
+                actual
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn check_revision_promote_approval(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     approval_ref: &str,
@@ -3348,7 +5005,83 @@ fn check_revision_promote_approval(
     Ok(current_outgoing == approved_outgoing.as_str())
 }
 
-fn check_capability_delta(
+/// #738: discover an approved merged `RevisionPromote` (one carrying
+/// `federation_context`) linked to an escalation projection for this
+/// `(artifact_id, revision_id)`. Returns the approval id when found, so
+/// `agent_revision_promote` can treat the single federation-minted decision as
+/// covering both the R++2 capability gate and the FullJury review gate —
+/// avoiding a second operator approval for the same promotion.
+///
+/// The lookup chain is: escalation projection (by artifact+revision) → its
+/// `approval_request_id` → the approval row → verify it is an approved
+/// `RevisionPromote` for the same agent+revision with a matching
+/// `federation_context.artifact_id`. The `content_digest` match is enforced
+/// separately by the FullJury gate (digest binding — closes #653).
+fn find_merged_federation_promote_approval(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    artifact_id: &str,
+) -> anyhow::Result<Option<String>> {
+    // Look for an escalation projection (approved or pending) for this
+    // artifact+revision whose linked approval is the merged RevisionPromote.
+    for status in [
+        autonoetic_types::escalation::EscalationStatus::Approved,
+        autonoetic_types::escalation::EscalationStatus::Pending,
+    ] {
+        let Some(esc) = gateway_store.find_escalation(artifact_id, revision_id, status)? else {
+            continue;
+        };
+        let Some(approval_id) = esc.approval_request_id.as_deref() else {
+            continue;
+        };
+        let Some(req) = gateway_store.get_approval(approval_id)? else {
+            continue;
+        };
+        if !matches!(
+            req.status,
+            Some(autonoetic_types::background::ApprovalStatus::Approved)
+        ) {
+            continue;
+        }
+        if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+            agent_id: a_id,
+            revision_id: r_id,
+            outgoing_revision_id: approved_outgoing,
+            federation_context: Some(ctx),
+            ..
+        } = &req.action
+        {
+            if a_id == agent_id && r_id == revision_id && ctx.artifact_id == artifact_id {
+                // Baseline TOCTOU (#746 review): the alias must still point to
+                // the revision the operator acknowledged against when they
+                // approved — same rule as check_revision_promote_approval. If
+                // the baseline moved (another promote landed in between), the
+                // merged approval is stale and must not satisfy either gate;
+                // the promote re-gates for a fresh decision.
+                let current_outgoing = gateway_store
+                    .resolve_alias(agent_id)?
+                    .map(|a| a.revision_id)
+                    .unwrap_or_default();
+                if current_outgoing != *approved_outgoing {
+                    tracing::info!(
+                        target: "promotion",
+                        agent_id = %agent_id,
+                        revision_id = %revision_id,
+                        approved_outgoing = %approved_outgoing,
+                        current_outgoing = %current_outgoing,
+                        "merged federation approval baseline drifted; re-gating"
+                    );
+                    continue;
+                }
+                return Ok(Some(approval_id.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn check_capability_delta(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     gateway_dir: &Path,
     agent_id: &str,
@@ -3431,6 +5164,84 @@ fn check_capability_delta(
     Ok(Some(delta))
 }
 
+/// Load the declared capabilities from an artifact bundle's `SKILL.md`.
+/// Used by `federation_escalate` when the proposed revision has not been
+/// seeded yet (new-agent escalate-before-install flow): the promote gate
+/// binds the approved escalation by artifact, so the capability delta shown
+/// to the operator must come from the same artifact the approval covers.
+pub(crate) fn load_artifact_capabilities(
+    gateway_dir: &Path,
+    artifact_id: &str,
+) -> anyhow::Result<Vec<Capability>> {
+    let artifact_store = crate::ArtifactStore::new(gateway_dir)?;
+    let files = artifact_store.resolve_files(artifact_id).map_err(|e| {
+        anyhow::anyhow!("Cannot resolve files for artifact '{}': {}", artifact_id, e)
+    })?;
+    let skill_bytes = files
+        .iter()
+        .find(|(name, _)| name == &"SKILL.md" || name.ends_with("/SKILL.md"))
+        .map(|(_, content)| content)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Artifact '{}' contains no SKILL.md", artifact_id)
+        })?;
+    let skill_text = String::from_utf8_lossy(skill_bytes);
+    let frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot parse SKILL.md frontmatter in artifact '{}': {}",
+                artifact_id,
+                e
+            )
+        })?;
+    parse_frontmatter_capabilities(&frontmatter)
+}
+
+/// Load the declared capabilities from a revision's `SKILL.md` frontmatter.
+/// Used by the promotion flow and, since #738, by `federation_escalate` to
+/// compute the capability delta at escalate time so a single merged
+/// `RevisionPromote` approval can carry both the jury context and the delta.
+pub(crate) fn load_revision_capabilities(
+    gateway_dir: &Path,
+    agent_id: &str,
+    revision_id: &str,
+) -> anyhow::Result<Vec<Capability>> {
+    let revision_dir = gateway_dir
+        .join("revisions/agents")
+        .join(agent_id)
+        .join(revision_id);
+    let skill_path = revision_dir.join("SKILL.md");
+    let skill_bytes = std::fs::read(&skill_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot read SKILL.md for revision '{}': {}",
+            revision_id,
+            e
+        )
+    })?;
+    let skill_text = String::from_utf8_lossy(&skill_bytes);
+    let frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot parse SKILL.md frontmatter for revision '{}': {}",
+                revision_id,
+                e
+            )
+        })?;
+    parse_frontmatter_capabilities(&frontmatter)
+}
+
+/// Resolve the currently-active outgoing revision id for an agent (the baseline
+/// a promotion would replace), or `None` for a brand-new agent. Shared between
+/// the promote flow and `federation_escalate` (#738) so both compute the delta
+/// against the same baseline.
+pub(crate) fn outgoing_revision_id(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+) -> anyhow::Result<Option<String>> {
+    Ok(gateway_store
+        .resolve_alias(agent_id)?
+        .map(|alias| alias.revision_id))
+}
+
 fn scope_change_within_existing_envelope(previous_scope: &[String], new_scope: &[String]) -> bool {
     use std::collections::BTreeSet;
 
@@ -3504,6 +5315,100 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod approval_execution_context_tests {
+    use super::*;
+    use crate::runtime::active_execution_registry::ActiveExecutionRegistry;
+
+    #[test]
+    fn run_context_supplies_workflow_task_and_root() {
+        let rc = NativeToolRunContext {
+            registry: ActiveExecutionRegistry::new(),
+            root_session_id: "session-root".to_string(),
+            workflow_id: Some("wf-abc".to_string()),
+            task_id: Some("task-xyz".to_string()),
+            session_id: "session-root/specialized_builder.default-child".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            live_digest: None,
+            live_report: None,
+            user_id: None,
+            artifact_id: None,
+            sentinel_suppress_target: None,
+            discovered_tools: None,
+            tool_discovery_catalog: None,
+            wake_hints_map: None,
+            wake_hint: None,
+        };
+        let (root, wf, task) =
+            approval_execution_context(Some(&rc), Some(rc.session_id.as_str()));
+        assert_eq!(root.as_deref(), Some("session-root"));
+        assert_eq!(wf.as_deref(), Some("wf-abc"));
+        assert_eq!(task.as_deref(), Some("task-xyz"));
+    }
+
+    #[test]
+    fn session_only_falls_back_to_root_without_workflow_task() {
+        let sid = "session-root/specialized_builder.default-child";
+        let (root, wf, task) = approval_execution_context(None, Some(sid));
+        assert_eq!(root.as_deref(), Some("session-root"));
+        assert!(wf.is_none());
+        assert!(task.is_none());
+    }
+}
+
+#[cfg(test)]
+mod derive_requested_by_tests {
+    use super::derive_requested_by;
+    use crate::scheduler::gateway_store::GatewayStore;
+    use tempfile::tempdir;
+
+    /// #803 — the requester is the agent bound to the parent session of the
+    /// calling session (spawn lineage), derived from the store — never from
+    /// tool arguments.
+    #[test]
+    fn requester_derived_from_parent_session_lineage() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // root spawned agent-factory, which spawned the builder.
+        store
+            .upsert_session_spawn_lineage(
+                "root/factory-1",
+                "root",
+                "root",
+                2,
+                "agent-factory.default",
+                "2026-07-01T00:00:00Z",
+            )
+            .unwrap();
+        store
+            .upsert_session_spawn_lineage(
+                "root/factory-1/builder-2",
+                "root/factory-1",
+                "root",
+                4,
+                "specialized_builder.default",
+                "2026-07-01T00:00:01Z",
+            )
+            .unwrap();
+
+        let (kind, id) = derive_requested_by(&store, Some("root/factory-1/builder-2"));
+        assert_eq!(kind.as_deref(), Some("autonoetic_agent"));
+        assert_eq!(id.as_deref(), Some("agent-factory.default"));
+    }
+
+    #[test]
+    fn requester_none_when_no_parent_or_no_session() {
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // No spawn lineage recorded — builder invoked at root (e.g. operator CLI).
+        assert_eq!(derive_requested_by(&store, Some("root")), (None, None));
+        // No session at all.
+        assert_eq!(derive_requested_by(&store, None), (None, None));
+    }
 }
 
 #[cfg(test)]
@@ -3764,7 +5669,8 @@ mod capability_lenient_deser_tests {
                 id: "specialized-builder.test".to_string(),
                 name: "specialized-builder.test".to_string(),
                 description: "test manifest".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![Capability::AgentRevision {
                 patterns: vec!["*".to_string()],
             }],
@@ -3782,8 +5688,10 @@ mod capability_lenient_deser_tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -3882,6 +5790,172 @@ mod capability_lenient_deser_tests {
             Some(bundle.artifact_id.as_str())
         );
         assert_eq!(revision.source_ref.as_deref(), Some("ar.testinstall01"));
+    }
+
+    #[test]
+    fn create_from_intent_rejects_undeclared_network_host() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        let session_id = "sess-network-check";
+
+        let code = b"#!/usr/bin/env python3\nimport urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1/forecast')\n";
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store.write(code).unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let artifact_ref = "ar.networkcheck01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "weather-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Fetch weather data",
+                    "instructions": "# Weather Agent",
+                    "execution_mode": "script",
+                    "script_entry": "main.py",
+                    "capabilities": [
+                        {"type": "NetworkAccess", "hosts": ["wrong.host.com"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response_json.get("ok").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        let message = response_json
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        assert!(
+            message.contains("api.open-meteo.com"),
+            "message should mention undeclared host: {message}"
+        );
+        assert!(
+            message.contains("Undeclared hosts"),
+            "message should mention undeclared hosts: {message}"
+        );
+    }
+
+    #[test]
+    fn create_from_intent_accepts_declared_network_hosts() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        let session_id = "sess-network-ok";
+
+        let code = b"#!/usr/bin/env python3\nimport urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1/forecast')\n";
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store.write(code).unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let artifact_ref = "ar.networkok01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "weather-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Fetch weather data",
+                    "instructions": "# Weather Agent",
+                    "execution_mode": "script",
+                    "script_entry": "main.py",
+                    "capabilities": [
+                        {"type": "NetworkAccess", "hosts": ["api.open-meteo.com"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response_json.get("ok").and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -3993,5 +6067,223 @@ mod capability_lenient_deser_tests {
         assert_eq!(response_json["status"].as_str(), Some("coalesced"));
         assert_eq!(response_json["dedupe_key"].as_str(), Some(spec.dedupe_key.as_str()));
         assert_eq!(response_json["retry_advice"].as_str(), Some("wait"));
+    }
+}
+
+#[cfg(test)]
+mod capability_schema_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Drift guard: the `capability_oneof_schema()` oneOf branches must cover
+    /// every `Capability` variant exactly (by serialized `type` tag), and must
+    /// not advertise variants the enum no longer has. When you add or rename a
+    /// `Capability` variant, update the enum, this list, and
+    /// `capability_oneof_schema`.
+    #[test]
+    fn capability_oneof_schema_covers_all_variants() {
+        let representatives: Vec<Capability> = vec![
+            Capability::SandboxFunctions { allowed: vec![] },
+            Capability::ReadAccess { scopes: vec![] },
+            Capability::WriteAccess { scopes: vec![] },
+            Capability::NetworkAccess { hosts: vec![] },
+            Capability::AgentSpawn { max_children: 0, max_spawn_depth: 0 },
+            Capability::AgentMessage { patterns: vec![] },
+            Capability::BackgroundReevaluation { min_interval_secs: 1, allow_reasoning: false },
+            Capability::CodeExecution { patterns: vec![], commands: vec![] },
+            Capability::ArtifactExecution,
+            Capability::EmergencyStop,
+            Capability::AgentRevision { patterns: vec![] },
+            Capability::Evaluation { patterns: vec![] },
+            Capability::ApprovalQueue { patterns: vec![] },
+            Capability::SchedulerSignal { patterns: vec![] },
+            Capability::CredentialAccess { services: vec![] },
+            Capability::UserProfileAccess { scopes: vec![] },
+            Capability::SchedulerAccess { patterns: vec![] },
+            Capability::SkillInstall { allowed_sources: vec![] },
+            Capability::ConstitutionalProposal { patterns: vec![] },
+            Capability::ReasoningAudit { targets: vec![] },
+            Capability::BudgetNoPriceAvailableAllow,
+            Capability::GithubIssueCreate { patterns: vec![] },
+            Capability::SecurityRedTeam,
+            Capability::CapsuleExport,
+            Capability::SelfCapsuleExport,
+            Capability::WikiContribute,
+            Capability::PlanFrameAccess { patterns: vec![] },
+            Capability::PromoteWith { agent_id: String::new(), capabilities: vec![] },
+        ];
+
+        let expected: BTreeSet<String> = representatives
+            .iter()
+            .map(|c| {
+                let v = serde_json::to_value(c).unwrap();
+                v["type"].as_str().unwrap().to_string()
+            })
+            .collect();
+
+        let schema = capability_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        let actual: BTreeSet<String> = branches
+            .iter()
+            .map(|b| {
+                b["properties"]["type"]["const"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("branch missing type const: {b}"))
+                    .to_string()
+            })
+            .collect();
+
+        let missing: Vec<_> = expected.difference(&actual).cloned().collect();
+        let extra: Vec<_> = actual.difference(&expected).cloned().collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "schema/enum drift — missing from schema: {missing:?}, extra in schema: {extra:?}"
+        );
+    }
+
+    /// Every oneOf branch must require `type` (the serde discriminator) and the
+    /// fields that have no `#[serde(default)]` in the enum. This catches the
+    /// original bug: a branch that omits a required field, letting the LLM
+    /// produce JSON serde then rejects.
+    #[test]
+    fn capability_oneof_schema_enforces_required_fields() {
+        let schema = capability_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        assert!(branches.len() > 10);
+
+        // type tag → set of fields that MUST be required (no serde default in the enum).
+        let must_require: &[(&str, &[&str])] = &[
+            ("SandboxFunctions", &["type", "allowed"]),
+            ("ReadAccess", &["type", "scopes"]),
+            ("WriteAccess", &["type", "scopes"]),
+            ("NetworkAccess", &["type", "hosts"]),
+            ("AgentSpawn", &["type", "max_children"]),
+            (
+                "BackgroundReevaluation",
+                &["type", "min_interval_secs", "allow_reasoning"],
+            ),
+            ("UserProfileAccess", &["type", "scopes"]),
+            ("PromoteWith", &["type", "capabilities"]),
+        ];
+
+        for (tag, required_fields) in must_require {
+            let branch = branches
+                .iter()
+                .find(|b| b["properties"]["type"]["const"].as_str() == Some(*tag))
+                .unwrap_or_else(|| panic!("no schema branch for {tag}"));
+            let required: Vec<String> = branch["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{tag} branch missing `required`"))
+                .iter()
+                .map(|r| r.as_str().unwrap().to_string())
+                .collect();
+            for field in *required_fields {
+                assert!(
+                    required.iter().any(|r| r == *field),
+                    "{tag} schema branch must require `{field}` (got required: {required:?})"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod network_access_host_validation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use crate::runtime::network_host_contract::{
+        capability_host_allows, validate_network_host_contract,
+    };
+
+    #[test]
+    fn capability_host_allows_exact_match() {
+        assert!(capability_host_allows("api.example.com", "api.example.com"));
+        assert!(!capability_host_allows("api.example.com", "other.example.com"));
+    }
+
+    #[test]
+    fn capability_host_allows_bare_domain_covers_subdomains() {
+        assert!(capability_host_allows("example.com", "example.com"));
+        assert!(capability_host_allows("example.com", "api.example.com"));
+        assert!(capability_host_allows("example.com", "deep.api.example.com"));
+        assert!(!capability_host_allows("example.com", "otherexample.com"));
+    }
+
+    #[test]
+    fn capability_host_allows_wildcard_subdomain() {
+        assert!(capability_host_allows("*.example.com", "api.example.com"));
+        assert!(!capability_host_allows("*.example.com", "example.com"));
+    }
+
+    #[test]
+    fn capability_host_allows_universal_wildcard() {
+        assert!(capability_host_allows("*", "anything.example.com"));
+    }
+
+    #[test]
+    fn validate_network_access_hosts_accepts_exact_match() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["api.open-meteo.com".to_string()],
+        }];
+        assert!(validate_network_host_contract(&caps, &file_map, false).is_ok());
+    }
+
+    #[test]
+    fn validate_network_access_hosts_rejects_undeclared_host() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["other.example.com".to_string()],
+        }];
+        let err = validate_network_host_contract(&caps, &file_map, false).unwrap_err();
+        assert!(err.undeclared_hosts.iter().any(|h| h.contains("open-meteo")));
+    }
+
+    #[test]
+    fn validate_network_access_hosts_rejects_wildcard_without_open_web() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        assert!(validate_network_host_contract(&caps, &file_map, false).is_err());
+    }
+
+    #[test]
+    fn validate_network_access_hosts_allows_wildcard_with_open_web() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import urllib.request\nurllib.request.urlopen('https://api.open-meteo.com/v1')".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        assert!(validate_network_host_contract(&caps, &file_map, true).is_ok());
+    }
+
+    #[test]
+    fn validate_network_access_hosts_ignores_non_source_files() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "data.bin".to_string(),
+            b"https://api.open-meteo.com/v1".to_vec(),
+        );
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["other.example.com".to_string()],
+        }];
+        assert!(validate_network_host_contract(&caps, &file_map, false).is_ok());
     }
 }

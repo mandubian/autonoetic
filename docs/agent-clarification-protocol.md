@@ -178,6 +178,6 @@ No gateway code changes. No new tools. Uses existing delegation result routing.
 ## See Also
 
 - [Foundation Instructions](../autonoetic-gateway/src/runtime/foundation_instructions.md) — Rule 13
-- [Agent Routing and Roles](./agent_routing_and_roles.md) — Delegation contracts
+- [AGENTS.md](./AGENTS.md) — Delegation contracts and routing rules
 - [Separation of Powers](./separation-of-powers.md) — Agent vs gateway responsibilities
 - [Content Store](./content-store.md) — Content handles for previous work references

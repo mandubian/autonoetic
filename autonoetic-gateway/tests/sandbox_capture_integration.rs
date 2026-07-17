@@ -40,6 +40,7 @@ fn test_manifest() -> AgentManifest {
             id: "test.agent".to_string(),
             name: "Test Agent".to_string(),
             description: "Test agent".to_string(),
+            singleton: false,
         },
         llm_overrides: None,
         llm_preset: None,
@@ -54,6 +55,7 @@ fn test_manifest() -> AgentManifest {
         io: None,
         middleware: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         execution_mode: ExecutionMode::Reasoning,
         script_entry: None,
         script_input_mode: Default::default(),
@@ -61,6 +63,7 @@ fn test_manifest() -> AgentManifest {
         gateway_token: None,
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

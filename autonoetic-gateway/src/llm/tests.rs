@@ -110,6 +110,7 @@ mod tests {
                 metadata: None,
                 thinking: None,
                 prompt_cache_key: None,
+                system_cache_prefix_bytes: None,
             };
             let body = build_payload(&req);
             assert_eq!(body["tools"][0]["type"], "function");
@@ -300,6 +301,7 @@ mod tests {
                 metadata: None,
                 thinking: None,
                 prompt_cache_key: None,
+                system_cache_prefix_bytes: None,
             };
             let body = build_payload(&req);
             // Anthropic uses "input_schema", NOT "parameters"
@@ -473,6 +475,7 @@ mod tests {
                 metadata: None,
                 thinking: None,
                 prompt_cache_key: None,
+                system_cache_prefix_bytes: None,
             };
             let body = build_payload(&req);
             // Gemini wraps tools in functionDeclarations inside a tools array
@@ -603,6 +606,35 @@ mod tests {
         }
 
         #[test]
+        fn context_size_has_been_exceeded_500() {
+            // Observed from a local OpenAI-compatible server: HTTP 500 with a
+            // non-standard "Context size has been exceeded." message and a
+            // generic server_error type. Previously unrecognized → terminal
+            // failure instead of an aggressive-governor retry.
+            let body = r#"{"error":{"code":500,"message":"Context size has been exceeded.","type":"server_error"}}"#;
+            assert!(is_context_overflow_error(500, body));
+        }
+
+        #[test]
+        fn unrelated_context_error_without_overflow_verb_is_not_overflow() {
+            // Guard against the general "context" catch over-matching: an error
+            // mentioning context but no overflow verb must NOT be treated as
+            // overflow.
+            let body = r#"{"error":{"message":"invalid context id provided","type":"invalid_request_error"}}"#;
+            assert!(!is_context_overflow_error(400, body));
+        }
+
+        #[test]
+        fn context_deadline_exceeded_timeout_is_not_overflow() {
+            // "context deadline exceeded" is a timeout/cancellation (Go/gRPC),
+            // NOT a context-size overflow. It has "context" + "exceed" but no
+            // size/length/window/token hint, so it must NOT route into
+            // overflow recovery (trimming context wouldn't help a timeout).
+            let body = r#"{"error":{"message":"context deadline exceeded","type":"server_error"}}"#;
+            assert!(!is_context_overflow_error(500, body));
+        }
+
+        #[test]
         fn n_prompt_tokens_and_n_ctx_keys_alone_are_enough() {
             // Defensive: if the server reports both counters, it's an overflow
             // even if the message wording is unusual.
@@ -648,5 +680,314 @@ mod tests {
         fn non_json_body_returns_false_when_no_known_marker() {
             assert!(!is_context_overflow_error(500, "internal server error"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Fail-fast retry policy — retry_wait_decision / default timeout
+    // -----------------------------------------------------------------------
+    mod retry_policy {
+        use crate::llm::{
+            retry_wait_decision, DEFAULT_REQUEST_TIMEOUT_SECS, MAX_CONNECTION_RETRIES,
+            MAX_TIMEOUT_RETRIES,
+        };
+        use std::time::Duration;
+
+        const DEADLINE: Duration = Duration::from_secs(240);
+
+        #[test]
+        fn non_transient_never_retries() {
+            assert_eq!(
+                retry_wait_decision(false, false, 0, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn timeout_retries_at_most_once() {
+            assert_eq!(MAX_TIMEOUT_RETRIES, 1);
+            // attempt 0 retries…
+            assert!(retry_wait_decision(true, true, 0, Duration::ZERO, DEADLINE).is_some());
+            // …attempt 1 stops.
+            assert_eq!(
+                retry_wait_decision(true, true, 1, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn fast_connection_error_retries_up_to_max() {
+            assert_eq!(MAX_CONNECTION_RETRIES, 3);
+            for attempt in 0..MAX_CONNECTION_RETRIES {
+                assert!(
+                    retry_wait_decision(true, false, attempt, Duration::ZERO, DEADLINE).is_some(),
+                    "attempt {attempt} should retry"
+                );
+            }
+            assert_eq!(
+                retry_wait_decision(true, false, MAX_CONNECTION_RETRIES, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn wall_clock_deadline_stops_retries_even_with_budget() {
+            // attempt 0 (budget remains) but elapsed past the deadline → stop.
+            assert_eq!(
+                retry_wait_decision(true, false, 0, Duration::from_secs(241), DEADLINE),
+                None
+            );
+            assert_eq!(
+                retry_wait_decision(true, true, 0, Duration::from_secs(241), DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn default_timeout_is_two_minutes() {
+            assert_eq!(DEFAULT_REQUEST_TIMEOUT_SECS, 120);
+        }
+
+        #[test]
+        fn backoff_that_would_cross_deadline_stops_now() {
+            // attempt 2 still has connection budget (cap 3) and elapsed (239.5s)
+            // is under the 240s deadline — but the attempt-2 backoff (2000ms)
+            // would push us past it, so we must NOT sleep-then-retry late.
+            assert_eq!(
+                retry_wait_decision(true, false, 2, Duration::from_millis(239_500), DEADLINE),
+                None
+            );
+            // Comfortably under the deadline: attempt 1 at 10s elapsed retries.
+            assert!(
+                retry_wait_decision(true, false, 1, Duration::from_secs(10), DEADLINE).is_some()
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Transient server-error (HTTP 5xx body) retry
+    // -----------------------------------------------------------------------
+    mod server_error_retry {
+        use crate::llm::{
+            is_transient_server_error, next_server_error_retry_wait,
+            server_error_retry_backoff_ms, MAX_5XX_RETRIES,
+        };
+        use std::time::Duration;
+
+        const DEADLINE: Duration = Duration::from_secs(240);
+
+        #[test]
+        fn statuses_outside_5xx_range_are_not_transient() {
+            assert!(!is_transient_server_error(400, "internal server error"));
+            assert!(!is_transient_server_error(401, "unauthorized"));
+            assert!(!is_transient_server_error(429, "rate limited"));
+            assert!(!is_transient_server_error(529, "overloaded"));
+            assert!(!is_transient_server_error(599, "server error"));
+        }
+
+        #[test]
+        fn allowed_5xx_statuses_are_transient_when_body_empty() {
+            for status in [500, 502, 503, 504] {
+                assert!(
+                    is_transient_server_error(status, ""),
+                    "status {status} with empty body should be transient"
+                );
+            }
+        }
+
+        #[test]
+        fn whitespace_only_body_treated_as_empty() {
+            // Some providers return whitespace/newline-only 5xx bodies; these
+            // should be treated the same as a truly empty (transient) body.
+            for body in [" ", "\n", "  \n\t ", "\r\n"] {
+                for status in [500, 502, 503, 504] {
+                    assert!(
+                        is_transient_server_error(status, body),
+                        "status {status} body {:?} should be transient",
+                        body
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn allowed_5xx_statuses_are_transient_for_known_phrases() {
+            let bodies = [
+                "overloaded",
+                "Temporarily Unavailable",
+                "Internal Server Error",
+                "Bad Gateway",
+                "Service Unavailable",
+                "Gateway Timeout",
+                "peg-native",
+                "server_error",
+                "try again",
+                "Please try again later",
+            ];
+            for body in bodies {
+                for status in [500, 502, 503, 504] {
+                    assert!(
+                        is_transient_server_error(status, body),
+                        "status {status} body '{body}' should be transient"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn non_matching_5xx_body_is_not_transient() {
+            assert!(!is_transient_server_error(500, "{\"error\": \"invalid_request\"}"));
+            assert!(!is_transient_server_error(500, "validation failed"));
+            assert!(!is_transient_server_error(500, "permission denied"));
+        }
+
+        #[test]
+        fn backoff_increases_linearly() {
+            assert_eq!(server_error_retry_backoff_ms(0), 1500);
+            assert_eq!(server_error_retry_backoff_ms(1), 3000);
+            assert_eq!(server_error_retry_backoff_ms(2), 4500);
+        }
+
+        #[test]
+        fn retries_up_to_max_5xx_retries() {
+            assert_eq!(MAX_5XX_RETRIES, 2);
+            for attempt in 0..MAX_5XX_RETRIES {
+                assert!(
+                    next_server_error_retry_wait(
+                        500,
+                        "internal server error",
+                        attempt,
+                        Duration::ZERO,
+                        DEADLINE,
+                    )
+                    .is_some(),
+                    "attempt {attempt} should retry"
+                );
+            }
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "internal server error",
+                    MAX_5XX_RETRIES,
+                    Duration::ZERO,
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn non_transient_5xx_never_retries() {
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "{\"error\": \"invalid_request\"}",
+                    0,
+                    Duration::ZERO,
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn deadline_stops_5xx_retries() {
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "internal server error",
+                    0,
+                    Duration::from_secs(241),
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn backoff_crossing_deadline_stops_now() {
+            // attempt 1 backoff is 3000ms; at 238s elapsed it would cross 240s.
+            assert_eq!(
+                next_server_error_retry_wait(
+                    500,
+                    "internal server error",
+                    1,
+                    Duration::from_millis(238_500),
+                    DEADLINE,
+                ),
+                None
+            );
+        }
+    }
+
+    // ---- RFC #779 Part E.2: failover eligibility tests ----
+
+    #[test]
+    fn failover_eligible_on_rate_limit() {
+        let err = anyhow::anyhow!("HTTP 429: too many requests");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_5xx() {
+        let err = anyhow::anyhow!("HTTP 503: Service Unavailable");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_anthropic_overloaded() {
+        let err = anyhow::anyhow!("{}", r#"HTTP 529: {"error":{"type":"overloaded_error"}}"#);
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_connection_refused() {
+        let err = anyhow::anyhow!("error sending request: connection refused");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_eligible_on_timeout() {
+        let err = anyhow::anyhow!("request timed out after 120s");
+        assert!(crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_bad_request() {
+        let err = anyhow::anyhow!("HTTP 400: invalid model name");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_auth_error() {
+        let err = anyhow::anyhow!("HTTP 401: invalid api key");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_forbidden() {
+        let err = anyhow::anyhow!("HTTP 403: forbidden");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_generic_validation() {
+        let err = anyhow::anyhow!("response validation failed: missing required field");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_context_overflow() {
+        // Context overflow is handled by the context governor (P-6.9), not
+        // by failover — even if the message contains a 5xx status.
+        let err = anyhow::anyhow!(
+            "context_length_exceeded: status=400 context_overflow"
+        );
+        assert!(!crate::llm::is_failover_eligible_error(&err));
+    }
+
+    #[test]
+    fn failover_not_eligible_on_resource_exhausted() {
+        let err = anyhow::anyhow!("RESOURCE_EXHAUSTED: context window exceeded");
+        assert!(!crate::llm::is_failover_eligible_error(&err));
     }
 }

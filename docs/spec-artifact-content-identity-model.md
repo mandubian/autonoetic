@@ -372,7 +372,7 @@ Single implementation pass. No phases, no compatibility shims.
 - `docs/content-store.md`
 - `docs/AGENTS.md`
 - `docs/ARCHITECTURE.md`
-- `docs/agent-capabilities.md`
+- `docs/AGENTS.md`
 - relevant specs for workflow / credential / promotion flows
 
 ## Decision Summary

@@ -128,6 +128,14 @@ where
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(value)?)?;
+    let body = serde_json::to_string_pretty(value)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "data.json".to_string());
+    let tmp = path.with_file_name(format!(".{file_name}.tmp"));
+    std::fs::write(&tmp, body)?;
+    // Rename is atomic on POSIX — readers never see a partial JSON body.
+    std::fs::rename(&tmp, path)?;
     Ok(())
 }

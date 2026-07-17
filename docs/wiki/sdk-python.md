@@ -1,6 +1,6 @@
-# Python SDK Reference (sandbox.exec)
+# Python SDK Reference (sandbox_exec and script-mode agents)
 
-When your code runs inside `sandbox.exec`, it executes in a Python environment with the `autonoetic_sdk` package available.
+When your code runs inside **`sandbox_exec`** or as a **`execution_mode: script`** agent entrypoint, it executes in a Python environment with the `autonoetic_sdk` package available. Always call **`sdk = autonoetic_sdk.init()`** first.
 
 ## Import
 
@@ -78,4 +78,4 @@ import os
 api_key = os.environ.get("OPENWEATHER_API_KEY")
 ```
 
-The gateway injects credentials into the sandbox via the `credential_env` parameter on `sandbox.exec` and `artifact.exec`. The secret is resolved server-side from the encrypted vault and never exposed to LLM context. When delegating execution that requires credentials, include the `credential_env` mapping so the secret is available at runtime.
+The gateway injects credentials into the sandbox via the `credential_env` parameter on `sandbox_exec` and `artifact_exec`. The secret is resolved server-side from the encrypted vault and never exposed to LLM context. When delegating execution that requires credentials, include the `credential_env` mapping so the secret is available at runtime.

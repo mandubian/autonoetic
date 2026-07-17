@@ -6,6 +6,7 @@ use autonoetic_gateway::llm::{
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -61,6 +62,7 @@ fn test_manifest() -> AgentManifest {
             id: "report.tester".to_string(),
             name: "report.tester".to_string(),
             description: "session report integration".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -89,8 +91,10 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -148,7 +152,7 @@ capabilities: []
     ];
 
     let _ = runtime.execute_with_history(&mut history).await?;
-    runtime.close_session("structured session report integration complete")?;
+    runtime.close_session(SessionCloseOutcome::ExecuteLoopComplete)?;
 
     let session_dir = gateway_dir.join("sessions").join("session-report-a");
     let live = std::fs::read_to_string(session_dir.join("session_overview.md"))?;

@@ -218,6 +218,7 @@ fn make_sandbox_exec_request(
             dependencies: None,
             requires_approval: true,
             evidence_ref: None,
+            intent: None,
         },
         created_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
         reason: Some("test approval".to_string()),
@@ -227,12 +228,11 @@ fn make_sandbox_exec_request(
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     }
 }
 

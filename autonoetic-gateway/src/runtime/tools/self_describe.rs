@@ -166,7 +166,8 @@ mod tests {
                 id: "demo.agent".to_string(),
                 name: "Demo".to_string(),
                 description: "a demo".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: caps,
             llm_overrides: None,
             llm_preset: None,
@@ -182,8 +183,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }

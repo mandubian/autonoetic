@@ -7,7 +7,7 @@ use autonoetic_gateway::runtime::checkpoint::{
     delete_checkpoint, list_checkpoints, load_checkpoint, load_latest_checkpoint,
     prune_checkpoints, save_checkpoint, SessionCheckpoint, SessionFork, YieldReason,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_types::config::GatewayConfig;
 
 /// Helper to create a test config with temp directory.
@@ -18,8 +18,8 @@ fn test_config(temp: &tempfile::TempDir) -> GatewayConfig {
     }
 }
 
-fn default_guard_state() -> LoopGuardState {
-    LoopGuardState {
+fn default_guard_state() -> LoopGuard {
+    LoopGuard {
         max_loops_without_progress: 10,
         max_tool_failures: 5,
         max_consecutive_same_progress: 2,
@@ -49,6 +49,7 @@ fn make_checkpoint(
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         loop_guard_state: default_guard_state(),
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
@@ -56,6 +57,8 @@ fn make_checkpoint(
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: Some("abc123hash".to_string()),
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason,
@@ -71,6 +74,9 @@ fn make_checkpoint(
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
+            feedback_events: vec![],
     }
 }
 

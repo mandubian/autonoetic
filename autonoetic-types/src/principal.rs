@@ -26,6 +26,12 @@ pub enum PrincipalKind {
     /// An external AI agent federating in (claude-code, codex, opencode…),
     /// low-privilege under Separation of Powers.
     ForeignAgent { provider: String },
+    /// The end-user a session ultimately serves, when distinct from the
+    /// operator running the gateway (e.g. a hosted or multi-tenant
+    /// deployment). Distinct from `Human` so the two can never be conflated
+    /// once they diverge — see `docs/philosophy.md` §3.3 and §5.1. Carries no
+    /// extra authority by default; it is an attribution kind, not a seat.
+    ServedUser,
 }
 
 impl PrincipalKind {
@@ -36,6 +42,7 @@ impl PrincipalKind {
             Self::AutonoeticAgent => "autonoetic_agent",
             Self::Script => "script",
             Self::ForeignAgent { .. } => "foreign_agent",
+            Self::ServedUser => "served_user",
         }
     }
 
@@ -57,6 +64,11 @@ impl PrincipalKind {
 /// accountable agent.
 ///
 /// - `"operator"` ⇒ Human.
+/// - `"user:<id>"` ⇒ ServedUser — the end-user a session serves, distinct
+///   from the operator once the two diverge (hosted/multi-tenant
+///   deployments). Checked before the agent-shape heuristic below so a
+///   dotted user id (e.g. `"user:alice.smith"`) is never misclassified as an
+///   agent.
 /// - Mechanical / executor resolutions ⇒ `None` (no §O obligation attaches):
 ///   empty, `"gateway"`, `"system"`, and the `"emergency_stop:<id>"` cascade.
 /// - An agent decider ⇒ AutonoeticAgent, recognized positively by an agent-id
@@ -69,6 +81,9 @@ pub fn decider_principal_kind(decided_by: &str) -> Option<PrincipalKind> {
     let s = decided_by.trim();
     if s == "operator" {
         return Some(PrincipalKind::Human);
+    }
+    if s.starts_with("user:") {
+        return Some(PrincipalKind::ServedUser);
     }
     if s.is_empty() || s == "gateway" || s == "system" || s.starts_with("emergency_stop:") {
         return None;
@@ -102,6 +117,10 @@ impl Principal {
         }
     }
 
+    pub fn served_user(id: impl Into<String>) -> Self {
+        Self { kind: PrincipalKind::ServedUser, id: id.into() }
+    }
+
     /// Encode the kind for a single text column: `"foreign_agent:<provider>"`
     /// for foreign principals, the bare tag otherwise. Round-trips via
     /// [`Principal::kind_from_storage`].
@@ -118,6 +137,7 @@ impl Principal {
         match s {
             "human" => PrincipalKind::Human,
             "script" => PrincipalKind::Script,
+            "served_user" => PrincipalKind::ServedUser,
             s if s.starts_with("foreign_agent") => {
                 let provider = s.strip_prefix("foreign_agent:").unwrap_or("").to_string();
                 PrincipalKind::ForeignAgent { provider }
@@ -177,6 +197,21 @@ mod tests {
         assert_eq!(decider_principal_kind("emergency_stop:estop-1a2b3c4d"), None);
         // Fail-safe: an unrecognized bare token is not claimed as an agent.
         assert_eq!(decider_principal_kind("mystery"), None);
+        // Served-user attribution is distinct from the operator (Human), and
+        // is recognized even when the id itself contains a dot.
+        assert_eq!(decider_principal_kind("user:alice"), Some(PrincipalKind::ServedUser));
+        assert_eq!(
+            decider_principal_kind("user:alice.smith"),
+            Some(PrincipalKind::ServedUser)
+        );
+        assert_ne!(decider_principal_kind("user:alice"), decider_principal_kind("operator"));
+    }
+
+    #[test]
+    fn served_user_round_trips_through_storage() {
+        let p = Principal::served_user("user-42");
+        assert_eq!(p.kind_to_storage(), "served_user");
+        assert_eq!(Principal::kind_from_storage(&p.kind_to_storage()), PrincipalKind::ServedUser);
     }
 
     #[test]

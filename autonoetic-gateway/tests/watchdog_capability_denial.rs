@@ -12,6 +12,7 @@
 //! This pins the watchdog's "observer-only" contract: if a future capability
 //! change accidentally widened its surface, this test will fail.
 
+use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::{default_registry, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
@@ -35,6 +36,7 @@ fn watchdog_manifest() -> AgentManifest {
             id: "watchdog.default".to_string(),
             name: "Watchdog".to_string(),
             description: "Observer that reviews agent sessions for trajectory divergence.".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             // digest_query gates on ReadAccess. execution_search and
@@ -60,8 +62,10 @@ fn watchdog_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -105,7 +109,7 @@ fn watchdog_cannot_call_privileged_tools() {
     // If any of them appear in `available`, the watchdog has been
     // accidentally promoted beyond its observer-only contract.
     for forbidden in [
-        "sandbox_exec",      // SandboxFunctions { allowed: ["sandbox."] } or similar
+        "sandbox_exec",      // SandboxFunctions { allowed: ["sandbox_"] } or similar
         "agent_spawn",       // AgentSpawn capability
         "agent_revision_create", // AgentRevision capability
         "agent_revision_promote", // AgentRevision capability
@@ -171,5 +175,90 @@ fn empty_registry_exposes_no_tools_regardless_of_manifest() {
          could call always-available tools like `session_escalate` \
          and contaminate target sessions. Got: {:?}",
         available
+    );
+}
+
+/// Manifest that mirrors `agents/specialists/researcher.default/SKILL.md` with
+/// the OLD dotted prefix ("web.") — used to pin against regression:
+/// `can_invoke_tool` (SandboxFunctions prefix match) must NOT leak into the
+/// discovered-tools surfacing path; native tool gating is `is_available` by
+/// capability type.
+fn researcher_manifest_with_dotted_web() -> AgentManifest {
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: autonoetic_types::agent::RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: autonoetic_types::agent::AgentIdentity {
+            id: "researcher.default".to_string(),
+            name: "Researcher Default".to_string(),
+            description: "Research agent (regression guard)".to_string(),
+            singleton: false,
+        },
+        capabilities: vec![
+            // Mismatched prefix: "web." (dot) does NOT match "web_search" (underscore).
+            Capability::SandboxFunctions {
+                allowed: vec!["knowledge.".to_string(), "web.".to_string(), "mcp_".to_string()],
+            },
+            // These capability types are what actually gate the tools.
+            Capability::NetworkAccess { hosts: vec!["*".to_string()] },
+            Capability::WriteAccess { scopes: vec!["*".to_string()] },
+            Capability::ReadAccess { scopes: vec!["*".to_string()] },
+        ],
+        llm_overrides: None,
+        llm_preset: None,
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+        agentskills_import: None,
+        compression: None,
+            open_web: false,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    }
+}
+
+#[test]
+fn test_researcher_tool_availability_correctly_tracked_despite_sandboxfunctions_prefix_mismatch() {
+    let registry = default_registry();
+    let manifest = researcher_manifest_with_dotted_web();
+
+    // web_search is available via is_available (gated by NetworkAccess),
+    // NOT by SandboxFunctions prefix matching.
+    let available: Vec<String> = registry
+        .available_definitions(&manifest)
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    assert!(
+        available.contains(&"web_search".to_string()),
+        "web_search must be available to researcher (gated by NetworkAccess, \
+         not by SandboxFunctions prefix). If this fails, the is_available \
+         gate for web_search was changed."
+    );
+
+    // can_invoke_tool DENIES web_search for this manifest because the
+    // "web." prefix does NOT match "web_search" (dot vs underscore).
+    // If someone re-adds can_invoke_tool to the discovered-tools path
+    // (lifecycle.rs tool list construction), this researcher would silently
+    // lose web_search and trap the agent in a rediscovery loop.
+    let policy = PolicyEngine::new(manifest);
+    assert!(
+        !policy.can_invoke_tool("web_search").is_allowed(),
+        "web_search must NOT match the 'web.' SandboxFunctions prefix"
     );
 }

@@ -8,6 +8,7 @@
 //!
 //! See <docs/design/human-gate-unification-plan.md> for the full design.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -15,14 +16,15 @@ use serde::{Deserialize, Serialize};
 
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::{
-    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
-    UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
+    ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction, UserInteraction,
+    UserInteractionKind, UserInteractionOption, UserInteractionStatus,
 };
 
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::approved_exec_cache::ApprovedExecCacheBackfill;
 use crate::runtime::content_store;
-use crate::runtime::tools::{build_approval_details, extract_host};
 use crate::runtime::failure_classification::normalize_tool_result_json;
+use crate::runtime::tools::{build_approval_details, extract_host};
 use crate::scheduler::gateway_store::GatewayStore;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +51,12 @@ pub enum GateKind {
     /// Operator escalation (guidance needed).
     Escalation {
         reason: String,
+        /// For agent-decider escalations (P-2.21): the original gate that the
+        /// agent could not decide.
+        original_gate_id: Option<String>,
+        /// True when this escalation was created by an agent-decider exercising
+        /// the P-2.21 escalation-on-uncertainty path.
+        agent_decider: bool,
     },
     /// Agent proposes a wiki page addition/update.
     WikiProposal {
@@ -73,6 +81,104 @@ pub enum MatchStrategy {
     SubstituteCommand,
 }
 
+/// Context a decider needs to choose correctly. Mandatory on every gate.
+///
+/// The gateway supplies the data; it never makes the choice (RFC determinism
+/// §3 E1). A gate cannot be built without real context: the typed constructors
+/// below are the primary enforcement, and `GateService::check` rejects any
+/// context that is empty or boilerplate (`is_sufficient`).
+#[derive(Debug, Clone)]
+pub struct DecisionContext {
+    /// Concrete action + target ("what is being done").
+    what: String,
+    /// The policy/rule that forced the gate, in prose (+ id if known).
+    why_gated: String,
+    /// Secret/payload/query/capability/budget + reversibility/blast radius.
+    at_stake: String,
+    /// How to decide; what would make an agent-decider escalate.
+    recommended_action: String,
+    /// Tier-3 extra (e.g. sandbox-detected network patterns / operator reason).
+    analysis: Option<String>,
+}
+
+impl DecisionContext {
+    /// Tier 1: self-explanatory. `what` + `why_gated` only.
+    pub fn tier1(what: impl Into<String>, why_gated: impl Into<String>) -> Self {
+        Self {
+            what: what.into(),
+            why_gated: why_gated.into(),
+            at_stake: String::new(),
+            recommended_action: String::new(),
+            analysis: None,
+        }
+    }
+
+    /// Tier 2: network/credential/API gates.
+    pub fn tier2(
+        what: impl Into<String>,
+        why_gated: impl Into<String>,
+        at_stake: impl Into<String>,
+        recommended_action: impl Into<String>,
+    ) -> Self {
+        Self {
+            what: what.into(),
+            why_gated: why_gated.into(),
+            at_stake: at_stake.into(),
+            recommended_action: recommended_action.into(),
+            analysis: None,
+        }
+    }
+
+    /// Tier 3: code-exec/elevated/irreversible — Tier 2 + analysis.
+    pub fn with_analysis(mut self, a: impl Into<String>) -> Self {
+        let a = a.into();
+        self.analysis = if a.trim().is_empty() { None } else { Some(a) };
+        self
+    }
+
+    /// Sufficient = non-empty `what` & `why_gated`, and not a known boilerplate
+    /// phrase. This is a programming-error guard; the typed constructors are the
+    /// primary enforcement.
+    pub fn is_sufficient(&self) -> bool {
+        let bad = |s: &str| {
+            let t = s.trim().to_ascii_lowercase();
+            t.is_empty() || t == "user question" || t.ends_with("requires approval")
+        };
+        !bad(&self.what) && !bad(&self.why_gated)
+    }
+
+    /// Human/agent-facing render (used as the persisted gate reason).
+    ///
+    /// Multi-line, omitting empty fields. This is what surfaces to the decider
+    /// (human OR agent) — the same render regardless of decider identity.
+    pub fn render(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        if !self.what.trim().is_empty() {
+            lines.push(format!("What: {}", self.what.trim()));
+        }
+        if !self.why_gated.trim().is_empty() {
+            lines.push(format!("Why gated: {}", self.why_gated.trim()));
+        }
+        if !self.at_stake.trim().is_empty() {
+            lines.push(format!("At stake: {}", self.at_stake.trim()));
+        }
+        if !self.recommended_action.trim().is_empty() {
+            lines.push(format!("Recommended: {}", self.recommended_action.trim()));
+        }
+        if let Some(a) = self.analysis.as_ref() {
+            if !a.trim().is_empty() {
+                lines.push(format!("Analysis: {}", a.trim()));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// The concrete action + target.
+    pub fn what(&self) -> &str {
+        &self.what
+    }
+}
+
 /// What a tool provides to the gate.
 pub struct GateRequest<'a> {
     pub kind: GateKind,
@@ -80,12 +186,22 @@ pub struct GateRequest<'a> {
     pub session_id: Option<&'a str>,
     pub run_context: Option<&'a NativeToolRunContext>,
     pub config: Option<&'a autonoetic_types::config::GatewayConfig>,
-    pub reason: String,
+    /// Typed context the decider sees. Replaces the old free-form `reason`.
+    pub context: DecisionContext,
     pub summary: String,
     pub approval_ref: Option<&'a str>,
+    /// Optional explicit approval request ID. When set, the gate uses this
+    /// value as the primary key for the newly created approval row instead of
+    /// minting a random UUID. Useful for approval subjects that have a stable
+    /// canonical ID (e.g. plan frames: `apr-plan-{plan_id}-v{version}`).
+    pub request_id: Option<&'a str>,
     /// Tool-specific cache hit (e.g. `ApprovedExecCache`).  When `true` the
     /// gate short-circuits to `GateResult::Cleared`.
     pub pre_validated: bool,
+    /// Optional exec-cache backfill data.  When the gate clears without a
+    /// cache hit, the entry is recorded so future identical executions skip
+    /// approval.
+    pub cache_backfill: Option<ApprovedExecCacheBackfill>,
     /// Current turn ID (used for UserInput checkpoint tracking).
     pub turn_id: Option<&'a str>,
 }
@@ -198,6 +314,16 @@ impl GateService {
     /// or `GateResult::Suspended` when a new gate was created and the tool
     /// must suspend execution.
     pub fn check(&self, req: GateRequest<'_>) -> Result<GateResult> {
+        // Programming-error guard: a gate must never be built without real,
+        // decider-facing context. The typed constructors are the primary
+        // enforcement; this catches boilerplate / empty contexts (rule:
+        // determinism-E1).
+        if !req.context.is_sufficient() {
+            anyhow::bail!(
+                "gate constructed without sufficient DecisionContext (rule: determinism-E1): {}",
+                req.summary
+            );
+        }
         match &req.kind {
             GateKind::Approval {
                 action,
@@ -232,7 +358,10 @@ impl GateService {
         // 2. approval_ref validation.
         if let Some(ref_id) = req.approval_ref {
             match self.validate_approval_ref(ref_id, req, action, targets, match_strategy)? {
-                Some(result) => return Ok(result),
+                Some(result) => {
+                    self.maybe_backfill_exec_cache(req, &result)?;
+                    return Ok(result);
+                }
                 None => {}
             }
         }
@@ -243,10 +372,12 @@ impl GateService {
                 if !sid.is_empty() {
                     let root_sid = content_store::root_session_id(sid);
                     if self.store.session_grants_cover_targets(root_sid, targets) {
-                        return Ok(GateResult::Cleared {
+                        let result = GateResult::Cleared {
                             source: ClearanceSource::SessionGrant,
                             enforced_rules: vec!["P-2.4"],
-                        });
+                        };
+                        self.maybe_backfill_exec_cache(req, &result)?;
+                        return Ok(result);
                     }
                 }
             }
@@ -256,11 +387,62 @@ impl GateService {
         //    same session + action kind + targets.
         if let Some(sid) = req.session_id {
             if !sid.is_empty() {
-                if let Some(pending_id) = self.find_pending_for_targets(sid, action, targets)? {
+                if let Some(pending_id) =
+                    self.find_pending_for_targets(sid, action, targets, match_strategy)?
+                {
                     return Ok(GateResult::AlreadyPending {
                         gate_id: pending_id,
                         enforced_rules: vec!["P-2.3"],
                     });
+                }
+
+                // 4b. #723: root-scoped join. A sibling under the same root
+                //     making the *structurally identical* call joins the
+                //     existing pending approval instead of minting a duplicate,
+                //     so one operator decision releases all of them. Restricted
+                //     to identical actions so the resume action-equality TOCTOU
+                //     check (execution.rs) still holds for the joined session.
+                //     The caller is registered as a waiter so resolution fans in.
+                if let Some(pending_id) = self.find_pending_identical_for_root(sid, action)? {
+                    // Only join if we can actually track the waiter for fan-in.
+                    // A workflow/task-bound waiter that registers successfully is
+                    // resumed when the shared approval resolves; without a
+                    // binding (or if registration fails) the joined session would
+                    // suspend on the shared id and never be resumed — so in that
+                    // case we fall through and mint its own approval row instead.
+                    let (_root, workflow_id, task_id) = resolve_execution_context(&req);
+                    match (workflow_id.as_deref(), task_id.as_deref()) {
+                        (Some(wf), Some(task)) => {
+                            match self.store.add_approval_waiter(&pending_id, sid, Some(wf), Some(task))
+                            {
+                                Ok(()) => {
+                                    return Ok(GateResult::AlreadyPending {
+                                        gate_id: pending_id,
+                                        enforced_rules: vec!["P-2.3"],
+                                    });
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        target: "human_gate",
+                                        request_id = %pending_id,
+                                        session_id = %sid,
+                                        error = %e,
+                                        "approval waiter registration failed; minting a \
+                                         separate approval instead of joining (#723)"
+                                    );
+                                }
+                            }
+                        }
+                        _ => {
+                            tracing::debug!(
+                                target: "human_gate",
+                                session_id = %sid,
+                                "no workflow/task binding to fan-in a joined approval; \
+                                 minting a separate approval (#723)"
+                            );
+                        }
+                    }
+                    // Fall through to step 5 (mint a new approval row).
                 }
             }
         }
@@ -268,14 +450,14 @@ impl GateService {
         // 5. Create new approval row.
         let gate_id = self.create_approval_row(req, action)?;
 
-        // 5b. Seed enrichment thread with reason + targets.
+        // 5b. Seed enrichment thread with the summary + targets.
         {
             let targets_str = if targets.is_empty() {
                 String::new()
             } else {
                 format!(" (targets: {})", targets.join(", "))
             };
-            let seed = format!("{}{}", req.reason, targets_str);
+            let seed = format!("{}{}", req.summary, targets_str);
             if !seed.trim().is_empty() {
                 let _ = self.add_gate_message(&gate_id, "system", &seed);
             }
@@ -308,10 +490,7 @@ impl GateService {
         };
 
         let sid = req.session_id.unwrap_or("");
-        anyhow::ensure!(
-            !sid.is_empty(),
-            "GateKind::UserInput requires a session_id"
-        );
+        anyhow::ensure!(!sid.is_empty(), "GateKind::UserInput requires a session_id");
 
         // Dedup: if a pending interaction already exists for this session, reuse it.
         if let Some(pending_id) = self.find_pending_user_input(sid)? {
@@ -324,6 +503,15 @@ impl GateService {
         let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
+
+        let expires_at = req.config.and_then(|c| {
+            let ttl = c.interaction_timeout_secs;
+            if ttl == 0 {
+                None
+            } else {
+                Some((chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).to_rfc3339())
+            }
+        });
 
         let interaction = UserInteraction {
             interaction_id: interaction_id.clone(),
@@ -342,7 +530,7 @@ impl GateService {
             answered_by: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             answered_at: None,
-            expires_at: None,
+            expires_at,
             workflow_id,
             task_id,
             checkpoint_turn_id: req.turn_id.map(|t| t.to_string()),
@@ -350,7 +538,11 @@ impl GateService {
 
         self.store.create_user_interaction(&interaction)?;
 
-        let _ = self.add_gate_message(&interaction_id, "system", &format!("Agent asks: {}", question));
+        let _ = self.add_gate_message(
+            &interaction_id,
+            "system",
+            &format!("Agent asks: {}", question),
+        );
 
         let response_json = serde_json::json!({
             "ok": true,
@@ -372,7 +564,12 @@ impl GateService {
     // -----------------------------------------------------------------------
 
     fn check_escalation(&self, req: &GateRequest<'_>) -> Result<GateResult> {
-        let GateKind::Escalation { ref reason } = req.kind else {
+        let GateKind::Escalation {
+            ref reason,
+            ref original_gate_id,
+            ref agent_decider,
+        } = req.kind
+        else {
             unreachable!()
         };
 
@@ -388,12 +585,31 @@ impl GateService {
                 context: String::new(),
                 urgency: "normal".to_string(),
                 suggested_actions: Vec::new(),
-                payload: None,
+                payload: original_gate_id.as_ref().map(|id| {
+                    serde_json::json!({
+                        "original_gate_id": id,
+                        "agent_decider": agent_decider,
+                    })
+                }),
+                kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
             };
-            if let Some(pending_id) = self.find_pending_for_targets(sid, &escalate_action, &[])? {
+            if let Some(pending_id) = self.find_pending_for_targets(
+                sid,
+                &escalate_action,
+                &[],
+                // Preserve the previous "any pending of the same kind counts"
+                // semantics for escalation dedup (empty targets). Escalation
+                // dedup is intentionally kind-level here; do not tighten to
+                // ExactPayload without a separate review of fan-out behaviour.
+                MatchStrategy::HostLevel,
+            )? {
                 return Ok(GateResult::AlreadyPending {
                     gate_id: pending_id,
-                    enforced_rules: vec!["P-2.3", "P-2.18"],
+                    enforced_rules: if *agent_decider {
+                        vec!["P-2.3", "P-2.18", "P-2.21"]
+                    } else {
+                        vec!["P-2.3", "P-2.18"]
+                    },
                 });
             }
         }
@@ -411,12 +627,26 @@ impl GateService {
             context: String::new(),
             urgency: "normal".to_string(),
             suggested_actions: Vec::new(),
-            payload: None,
+            payload: original_gate_id.as_ref().map(|id| {
+                serde_json::json!({
+                    "original_gate_id": id,
+                    "agent_decider": agent_decider,
+                })
+            }),
+            kind: autonoetic_types::background::EscalationKind::GuidanceRequest,
         };
 
         let gate_id = self.create_approval_row(req, &action)?;
 
-        let _ = self.add_gate_message(&gate_id, "system", &format!("Escalation: {}", reason));
+        let seed = if let Some(ref orig) = original_gate_id {
+            format!(
+                "Escalation to human (agent-decider {} could not decide gate {}): {}",
+                req.manifest.agent.id, orig, reason
+            )
+        } else {
+            format!("Escalation: {}", reason)
+        };
+        let _ = self.add_gate_message(&gate_id, "system", &seed);
 
         let response_json = serde_json::json!({
             "ok": false,
@@ -430,13 +660,94 @@ impl GateService {
         Ok(GateResult::Suspended {
             gate_id,
             response_json,
-            enforced_rules: vec!["P-2.18"],
+            enforced_rules: if *agent_decider {
+                vec!["P-2.18", "P-2.21"]
+            } else {
+                vec!["P-2.18"]
+            },
         })
     }
 
     // -----------------------------------------------------------------------
     // WikiProposal pipeline
     // -----------------------------------------------------------------------
+
+    fn jaccard<T: std::hash::Hash + Eq>(a: &HashSet<T>, b: &HashSet<T>) -> f64 {
+        if a.is_empty() && b.is_empty() {
+            return 1.0;
+        }
+        let intersection = a.intersection(b).count() as f64;
+        let union = a.union(b).count() as f64;
+        if union == 0.0 {
+            0.0
+        } else {
+            intersection / union
+        }
+    }
+
+    /// Inline Jaccard duplicate detection for wiki proposals. Replaces the
+    /// deleted scheduler/approval_similarity.rs helper, which was only kept
+    /// alive for this advisory warning.
+    fn find_similar_wiki_proposals(
+        new_action: &ScheduledAction,
+        candidates: &[ApprovalRequest],
+        limit: usize,
+        threshold: f64,
+    ) -> Vec<(String, f64)> {
+        let ScheduledAction::WikiProposal {
+            content: new_content,
+            title: new_title,
+            tags: new_tags,
+            ..
+        } = new_action
+        else {
+            return Vec::new();
+        };
+        let new_content_set: HashSet<&str> = new_content.split_whitespace().collect();
+        let new_title_set: HashSet<&str> = new_title.split_whitespace().collect();
+        let new_tags_set: HashSet<&str> = new_tags.iter().map(|s| s.as_str()).collect();
+
+        let mut scored: Vec<(String, f64)> = candidates
+            .iter()
+            .filter_map(|c| {
+                if let ScheduledAction::WikiProposal {
+                    content,
+                    title,
+                    tags,
+                    ..
+                } = &c.action
+                {
+                    let content_sim = Self::jaccard(
+                        &new_content_set,
+                        &content.split_whitespace().collect::<HashSet<&str>>(),
+                    );
+                    let title_sim = Self::jaccard(
+                        &new_title_set,
+                        &title.split_whitespace().collect::<HashSet<&str>>(),
+                    );
+                    let tags_sim = if new_tags_set.is_empty() && tags.is_empty() {
+                        1.0
+                    } else {
+                        Self::jaccard(
+                            &new_tags_set,
+                            &tags.iter().map(|s| s.as_str()).collect::<HashSet<&str>>(),
+                        )
+                    };
+                    let score = 0.5 * content_sim + 0.3 * title_sim + 0.2 * tags_sim;
+                    if score >= threshold {
+                        Some((c.request_id.clone(), score))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        scored
+    }
 
     fn check_wiki_proposal(&self, req: &GateRequest<'_>) -> Result<GateResult> {
         let GateKind::WikiProposal {
@@ -453,9 +764,11 @@ impl GateService {
         };
 
         // 1. Capability check.
-        let has_cap = req.manifest.capabilities.iter().any(|c| {
-            matches!(c, autonoetic_types::capability::Capability::WikiContribute)
-        });
+        let has_cap = req
+            .manifest
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, autonoetic_types::capability::Capability::WikiContribute));
         if !has_cap {
             anyhow::bail!("Missing capability: WikiContribute");
         }
@@ -501,7 +814,16 @@ impl GateService {
                         cfg.wiki_proposal.min_content_length
                     ));
                 }
-                let heading_count = content.lines().filter(|l| l.trim_start().starts_with('#') && l.trim_start().chars().nth(1).map_or(true, |c| c == ' ' || c == '#')).count();
+                let heading_count = content
+                    .lines()
+                    .filter(|l| {
+                        l.trim_start().starts_with('#')
+                            && l.trim_start()
+                                .chars()
+                                .nth(1)
+                                .map_or(true, |c| c == ' ' || c == '#')
+                    })
+                    .count();
                 if heading_count < cfg.wiki_proposal.min_headings {
                     quality_warnings.push(format!(
                         "Few markdown headings ({} found, recommended minimum: {})",
@@ -511,40 +833,17 @@ impl GateService {
             }
             if cfg.wiki_proposal.duplicate_detection_enabled {
                 if let Ok(recent) = self.store.get_pending_approvals() {
-                    let new_req = autonoetic_types::background::ApprovalRequest {
-                        request_id: gate_id.clone(),
-                        agent_id: req.manifest.agent.id.clone(),
-                        session_id: req.session_id.unwrap_or("unknown").to_string(),
-                        action: action.clone(),
-                        created_at: String::new(),
-                        reason: None,
-                        evidence_ref: None,
-                        root_session_id: None,
-                        workflow_id: None,
-                        task_id: None,
-                        status: None,
-                        decided_at: None,
-                        decided_by: None,
-                        decision_reason: None,
-                        approval_level: autonoetic_types::background::ApprovalLevel::Operator,
-                        similar_to_request_id: None,
-                        similarity_score: None,
-                        code_excerpts: None,
-                        risk_summary: None,
-                        confirm_phrase: None,
-                        min_dwell_ms: None,
-                    };
-                    let similar = crate::scheduler::approval_similarity::find_similar_approvals(
-                        &new_req,
+                    let similar = Self::find_similar_wiki_proposals(
+                        &action,
                         &recent,
                         3,
                         cfg.wiki_proposal.duplicate_threshold,
                     );
-                    for s in &similar {
+                    for (request_id, score) in &similar {
                         quality_warnings.push(format!(
                             "Similar to existing proposal {} (score {:.0}%)",
-                            s.request_id,
-                            s.score * 100.0
+                            request_id,
+                            score * 100.0
                         ));
                     }
                 }
@@ -593,8 +892,10 @@ impl GateService {
 
         // 6b. Advisory quality warnings for operator.
         if !quality_warnings.is_empty() {
-            let warning_text = format!("⚠ Quality advisory (advisory only, does not block):\n{}",
-                quality_warnings.iter()
+            let warning_text = format!(
+                "⚠ Quality advisory (advisory only, does not block):\n{}",
+                quality_warnings
+                    .iter()
                     .map(|w| format!("  • {w}"))
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -714,11 +1015,7 @@ impl GateService {
 
     /// Check if the approved action's detected hosts cover the targets
     /// (sandbox SubstituteCommand strategy).
-    fn substitute_command_covers(
-        &self,
-        approval: &ApprovalRequest,
-        targets: &[String],
-    ) -> bool {
+    fn substitute_command_covers(&self, approval: &ApprovalRequest, targets: &[String]) -> bool {
         let approved_hosts = approval.action.detected_hosts().unwrap_or_default();
         if approved_hosts.is_empty() || targets.is_empty() {
             return false;
@@ -735,14 +1032,32 @@ impl GateService {
 
     /// Find an existing pending approval for the same session + action kind
     /// whose detected hosts overlap with the requested targets.
+    ///
+    /// The dedup strength follows `match_strategy`:
+    /// - [`MatchStrategy::ExactPayload`] requires the full `ScheduledAction`
+    ///   payloads to be equal (not just the kind), so non-host actions like
+    ///   `RevisionPromote` only dedup onto a genuinely identical pending gate.
+    ///   Without this, two distinct same-kind actions in one session would
+    ///   collapse onto the first gate's id (review on #734).
+    /// - [`MatchStrategy::HostLevel`] / [`MatchStrategy::SubstituteCommand`]
+    ///   keep the host-overlap semantics: an empty `targets` means "any
+    ///   pending of the same kind counts" (host-targeted actions populate
+    ///   `targets` from `detected_hosts()` at the call site).
     fn find_pending_for_targets(
         &self,
         session_id: &str,
         action: &ScheduledAction,
         targets: &[String],
+        match_strategy: MatchStrategy,
     ) -> Result<Option<String>> {
+        // Use the store's held config when available (issue #740); fall back
+        // to a default for bare-store tests where no config is set.
+        let config = self
+            .store
+            .config()
+            .unwrap_or_else(|| Arc::new(autonoetic_types::config::GatewayConfig::default()));
         let pending = crate::scheduler::approval::pending_approval_requests_for_session(
-            &autonoetic_types::config::GatewayConfig::default(),
+            &config,
             Some(&self.store),
             session_id,
         )?;
@@ -751,7 +1066,38 @@ impl GateService {
             if req.action.kind() != action.kind() {
                 continue;
             }
+            // SessionEscalate is a single ScheduledAction kind but carries
+            // distinct EscalationKind sub-types (guidance-request vs
+            // promotion-review). They must NEVER dedup across sub-types — even
+            // under the "any pending of the same kind" path below — or a
+            // guidance escalate could collide with a promotion-review approval
+            // (and vice versa), reusing the wrong gate id (#724 Part B review).
+            if let (
+                ScheduledAction::SessionEscalate { kind: a_kind, .. },
+                ScheduledAction::SessionEscalate { kind: b_kind, .. },
+            ) = (action, &req.action)
+            {
+                if a_kind != b_kind {
+                    continue;
+                }
+            }
+            // ExactPayload: full structural equality of the action. Two
+            // distinct RevisionPromote deltas (different agent/revision/caps)
+            // must NOT collapse onto each other.
+            if matches!(match_strategy, MatchStrategy::ExactPayload) {
+                if self.exact_payload_covers(req, action) {
+                    return Ok(Some(req.request_id.clone()));
+                }
+                continue;
+            }
             // If no targets specified, any pending of the same kind counts.
+            // This is only reachable for HostLevel/SubstituteCommand strategies
+            // (ExactPayload short-circuits above), where host-targeted actions
+            // populate `targets` from detected_hosts() at the call site. A
+            // non-host action that reaches here with empty targets would dedup
+            // onto an unrelated same-kind pending row — so non-host callers
+            // MUST use MatchStrategy::ExactPayload (see plan_frame.rs and
+            // federation.rs gate construction).
             if targets.is_empty() {
                 return Ok(Some(req.request_id.clone()));
             }
@@ -760,11 +1106,36 @@ impl GateService {
             if !req_hosts.is_empty() {
                 let overlap = targets.iter().any(|t| {
                     let t_host = extract_host_from_target(t);
-                    req_hosts.iter().any(|h| extract_host_from_target(h) == t_host)
+                    req_hosts
+                        .iter()
+                        .any(|h| extract_host_from_target(h) == t_host)
                 });
                 if overlap {
                     return Ok(Some(req.request_id.clone()));
                 }
+            }
+        }
+        Ok(None)
+    }
+
+    /// #723: find a pending approval under the same **root** session (but a
+    /// different session) whose action is **structurally identical** to
+    /// `action`. Identical-only so the joining session's resume passes the
+    /// action-equality TOCTOU check against the shared approval. Same-session
+    /// dedup is handled separately by [`Self::find_pending_for_targets`].
+    fn find_pending_identical_for_root(
+        &self,
+        session_id: &str,
+        action: &ScheduledAction,
+    ) -> Result<Option<String>> {
+        let root = content_store::root_session_id(session_id);
+        let pending = self.store.get_pending_approvals_for_root(root)?;
+        for req in &pending {
+            if req.session_id == session_id {
+                continue; // same-session case is handled by find_pending_for_targets
+            }
+            if &req.action == action {
+                return Ok(Some(req.request_id.clone()));
             }
         }
         Ok(None)
@@ -776,8 +1147,12 @@ impl GateService {
         session_id: &str,
         page_id: &str,
     ) -> Result<Option<String>> {
+        let config = self
+            .store
+            .config()
+            .unwrap_or_else(|| Arc::new(autonoetic_types::config::GatewayConfig::default()));
         let pending = crate::scheduler::approval::pending_approval_requests_for_session(
-            &autonoetic_types::config::GatewayConfig::default(),
+            &config,
             Some(&self.store),
             session_id,
         )?;
@@ -796,7 +1171,9 @@ impl GateService {
 
     /// Find an existing pending user interaction for the same session.
     fn find_pending_user_input(&self, session_id: &str) -> Result<Option<String>> {
-        let pending = self.store.get_pending_interactions_for_session(session_id)?;
+        let pending = self
+            .store
+            .get_pending_interactions_for_session(session_id)?;
         if let Some(first) = pending.first() {
             return Ok(Some(first.interaction_id.clone()));
         }
@@ -807,6 +1184,48 @@ impl GateService {
     // Helpers — approval row creation
     // -----------------------------------------------------------------------
 
+    /// Backfill the approved-exec cache when a gate clears without a cache hit.
+    /// This is the single place the gate layer triggers cache backfill; the
+    /// actual write implementation lives in `approved_exec_cache.rs`.
+    fn maybe_backfill_exec_cache(&self, req: &GateRequest<'_>, result: &GateResult) -> Result<()> {
+        let source = match result {
+            GateResult::Cleared { source, .. } => match source {
+                ClearanceSource::CachedApproval => return Ok(()),
+                _ => source,
+            },
+            _ => return Ok(()),
+        };
+
+        let backfill = match req.cache_backfill.as_ref() {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+
+        // Clone only when necessary: if clearance came from an approval_ref, we
+        // need to override the approval_request_id field. For other clearance
+        // sources the backfill is used as-is.
+        let cloned = match source {
+            ClearanceSource::ApprovalRef(id) => {
+                let mut b = backfill.clone();
+                b.approval_request_id = id.clone();
+                Some(b)
+            }
+            _ => None,
+        };
+        let backfill_to_record = cloned.as_ref().unwrap_or(backfill);
+
+        if let Err(e) = backfill_to_record.record_if_missing() {
+            tracing::warn!(
+                target: "human_gate",
+                error = %e,
+                source = ?source,
+                "Failed to backfill approved exec cache"
+            );
+        }
+
+        Ok(())
+    }
+
     fn create_approval_row(
         &self,
         req: &GateRequest<'_>,
@@ -815,7 +1234,10 @@ impl GateService {
         let sid = req.session_id.unwrap_or("");
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
 
-        let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let request_id = req
+            .request_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]));
         let mut approval_req = ApprovalRequest {
             request_id: request_id.clone(),
             agent_id: req.manifest.agent.id.clone(),
@@ -828,25 +1250,29 @@ impl GateService {
             status: None,
             decided_at: None,
             decided_by: None,
-            reason: if req.reason.is_empty() {
-                None
-            } else {
-                Some(req.reason.clone())
+            reason: {
+                // The same rendered context is persisted regardless of decider
+                // identity (operator vs agent) — this is what surfaces to the
+                // decider (determinism-E1).
+                let rendered = req.context.render();
+                if rendered.trim().is_empty() {
+                    None
+                } else {
+                    Some(rendered)
+                }
             },
             evidence_ref: None,
             decision_reason: None,
             approval_level: req
                 .config
-                .map(|cfg| {
-                    crate::scheduler::approval::resolve_approval_level(cfg, action)
-                })
+                .map(|cfg| crate::scheduler::approval::resolve_approval_level(cfg, action))
                 .unwrap_or(ApprovalLevel::Operator),
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         self.store.create_approval(&mut approval_req)?;
@@ -886,20 +1312,23 @@ impl GateService {
                 status: None,
                 decided_at: None,
                 decided_by: None,
-                reason: if req.reason.is_empty() {
-                    None
-                } else {
-                    Some(req.reason.clone())
+                reason: {
+                    let rendered = req.context.render();
+                    if rendered.trim().is_empty() {
+                        None
+                    } else {
+                        Some(rendered)
+                    }
                 },
                 evidence_ref: None,
                 decision_reason: None,
                 approval_level: ApprovalLevel::Operator,
-                similar_to_request_id: None,
-                similarity_score: None,
                 min_dwell_ms: None,
                 confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
+                code_excerpts: None,
+                risk_summary: None,
+
+                expires_at: None,
             },
             kind_label,
             req.summary.clone(),
@@ -926,12 +1355,7 @@ impl GateService {
     /// Add a message to a gate's enrichment thread.
     ///
     /// Content is redacted before storage (P-2.19, P-4.13 parity).
-    pub fn add_gate_message(
-        &self,
-        gate_id: &str,
-        sender: &str,
-        content: &str,
-    ) -> Result<i64> {
+    pub fn add_gate_message(&self, gate_id: &str, sender: &str, content: &str) -> Result<i64> {
         let redacted = crate::log_redaction::redact_text_for_logs(content);
         self.store.add_gate_message(gate_id, sender, &redacted)
     }
@@ -940,6 +1364,123 @@ impl GateService {
     pub fn get_gate_messages(&self, gate_id: &str) -> Result<Vec<GateMessage>> {
         self.store.get_gate_messages(gate_id)
     }
+
+    // -----------------------------------------------------------------------
+    // Agent-decider paths (P-2.20 / P-2.21)
+    // -----------------------------------------------------------------------
+
+    /// P-2.21: an agent-decider that cannot determine a verdict escalates to a
+    /// human operator rather than rejecting. Creates a new `GateKind::Escalation`
+    /// gate referencing the original gate ID. The original gate remains pending.
+    ///
+    /// The caller must hold the `GateDecider` capability and must not be in the
+    /// spawn tree of the gate it is escalating (R-10.7).
+    pub fn escalate_to_human(
+        &self,
+        gate_id: &str,
+        reason: &str,
+        manifest: &AgentManifest,
+        decider_session_id: Option<&str>,
+    ) -> Result<GateResult> {
+        let original = self
+            .store
+            .get_approval(gate_id)?
+            .ok_or_else(|| anyhow::anyhow!("Original gate '{}' not found", gate_id))?;
+
+        // P-2.20: caller must have GateDecider capability.
+        let policy = crate::policy::PolicyEngine::new(manifest.clone());
+        if !policy.can_decide_gate("escalation").is_allowed() {
+            anyhow::bail!(
+                "Agent '{}' lacks GateDecider capability for escalation (P-2.20)",
+                manifest.agent.id
+            );
+        }
+
+        // R-10.7: authenticate the caller-supplied decider session against the
+        // recorded owner, then ensure it is not in the spawn tree of the gate.
+        let decider_sid = decider_session_id.unwrap_or("");
+        verify_decider_session_binding(
+            decider_sid,
+            &manifest.agent.id,
+            &original.session_id,
+            &self.store,
+        )?;
+
+        // Record the agent's reasoning on the original gate's enrichment thread.
+        let _ = self.add_gate_message(
+            gate_id,
+            &format!("agent:{}", manifest.agent.id),
+            &format!("Escalating to human: {}", reason),
+        );
+
+        let req = GateRequest {
+            kind: GateKind::Escalation {
+                reason: reason.to_string(),
+                original_gate_id: Some(gate_id.to_string()),
+                agent_decider: true,
+            },
+            manifest,
+            session_id: Some(&original.session_id),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier1(
+                format!(
+                    "Agent-decider {} escalates gate {} to human operator",
+                    manifest.agent.id, gate_id
+                ),
+                "P-2.21 escalation-on-uncertainty",
+            ),
+            summary: format!("Agent-decider escalation for gate {}", gate_id),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
+            turn_id: None,
+        };
+
+        self.check(req)
+    }
+
+    /// P-2.20 / R-10.7: verify an agent-decider is allowed to resolve a gate.
+    /// Returns the gate kind label ("approval" or "escalation") on success.
+    pub fn verify_agent_decider(
+        &self,
+        gate_id: &str,
+        manifest: &AgentManifest,
+        decider_session_id: Option<&str>,
+    ) -> Result<&'static str> {
+        let original = self
+            .store
+            .get_approval(gate_id)?
+            .ok_or_else(|| anyhow::anyhow!("Gate '{}' not found", gate_id))?;
+
+        let kind_label = if matches!(original.action, ScheduledAction::SessionEscalate { .. }) {
+            "escalation"
+        } else {
+            "approval"
+        };
+
+        let policy = crate::policy::PolicyEngine::new(manifest.clone());
+        if !policy.can_decide_gate(kind_label).is_allowed() {
+            anyhow::bail!(
+                "Agent '{}' lacks GateDecider capability for {} gates (P-2.20)",
+                manifest.agent.id,
+                kind_label
+            );
+        }
+
+        // R-10.7: authenticate the caller-supplied decider session against the
+        // recorded owner, then ensure it is not in the spawn tree of the gate.
+        let decider_sid = decider_session_id.unwrap_or("");
+        verify_decider_session_binding(
+            decider_sid,
+            &manifest.agent.id,
+            &original.session_id,
+            &self.store,
+        )?;
+
+        Ok(kind_label)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -947,7 +1488,9 @@ impl GateService {
 // ---------------------------------------------------------------------------
 
 /// Resolve (root_session_id, workflow_id, task_id) from a GateRequest.
-fn resolve_execution_context(req: &GateRequest<'_>) -> (Option<String>, Option<String>, Option<String>) {
+fn resolve_execution_context(
+    req: &GateRequest<'_>,
+) -> (Option<String>, Option<String>, Option<String>) {
     let sid = req.session_id.unwrap_or("");
     if let Some(rc) = req.run_context {
         let root_session_id = if rc.root_session_id.is_empty() {
@@ -986,6 +1529,101 @@ fn extract_host_from_target(target: &str) -> String {
     }
 }
 
+/// True when `gate_session_id` is the same session as, or a descendant of,
+/// `decider_session_id` in the spawn tree. Used to enforce R-10.7: an agent
+/// may not decide a gate created by itself or a descendant.
+///
+/// Session IDs are hierarchical (`root/child/grandchild`), so the prefix check
+/// covers the descendant case. When `decider_session_id` is empty, only the
+/// exact-match path remains meaningful.
+pub fn is_session_in_spawn_tree(
+    decider_session_id: &str,
+    gate_session_id: &str,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> bool {
+    if decider_session_id.is_empty() || gate_session_id.is_empty() {
+        return decider_session_id == gate_session_id;
+    }
+
+    // Fast path: hierarchical session IDs.
+    if gate_session_id == decider_session_id
+        || gate_session_id.starts_with(&format!("{}/", decider_session_id))
+    {
+        return true;
+    }
+
+    // Fallback: walk the recorded spawn lineage.
+    let root = crate::runtime::content_store::root_session_id(gate_session_id);
+    if let Ok(entries) = store.list_session_spawn_lineage(root) {
+        let mut current = gate_session_id;
+        while current != root {
+            let parent = entries
+                .iter()
+                .find(|e| e.child_session_id == current)
+                .map(|e| e.parent_session_id.as_str());
+            match parent {
+                Some(p) if p == decider_session_id => return true,
+                Some(p) if p == current || p == root => break,
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+    }
+
+    false
+}
+
+/// R-10.7 trust-boundary verification for an agent-decider.
+///
+/// `decider_session_id` is caller-supplied (ultimately from a JSON-RPC
+/// request), so it must be authenticated against recorded session ownership
+/// *before* the spawn-tree check — otherwise an agent could evade R-10.7 by
+/// supplying an unrelated session ID, or by omitting it entirely (which would
+/// disable the descendant check). Three conditions are enforced:
+///
+/// 1. `decider_session_id` must be present (non-empty).
+/// 2. It must be bound to `agent_id` (the decider's claimed identity).
+/// 3. It must not be in the spawn tree of `gate_session_id`.
+pub fn verify_decider_session_binding(
+    decider_session_id: &str,
+    agent_id: &str,
+    gate_session_id: &str,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> Result<()> {
+    if decider_session_id.is_empty() {
+        anyhow::bail!(
+            "Agent-decider '{}' did not supply a decider_session_id (R-10.7)",
+            agent_id
+        );
+    }
+    match store.session_owner_agent(decider_session_id)? {
+        Some(owner) if owner == agent_id => {}
+        Some(owner) => {
+            anyhow::bail!(
+                "decider_session_id '{}' is bound to agent '{}', not '{}' (R-10.7)",
+                decider_session_id,
+                owner,
+                agent_id
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "decider_session_id '{}' is not a recorded session bound to agent '{}' (R-10.7)",
+                decider_session_id,
+                agent_id
+            );
+        }
+    }
+    if is_session_in_spawn_tree(decider_session_id, gate_session_id, store) {
+        anyhow::bail!(
+            "Agent-decider session '{}' is in the spawn tree of gate session '{}' (R-10.7)",
+            decider_session_id,
+            gate_session_id
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -993,9 +1631,7 @@ fn extract_host_from_target(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autonoetic_types::agent::{
-        AgentIdentity, AgentManifest, RuntimeDeclaration,
-    };
+    use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
     use autonoetic_types::capability::Capability;
 
     fn test_manifest() -> AgentManifest {
@@ -1013,6 +1649,7 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test-agent".to_string(),
                 description: "test agent".to_string(),
+                singleton: false,
             },
             capabilities: vec![],
             llm_overrides: None,
@@ -1029,15 +1666,22 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
 
     fn make_credential_request_action(url: &str) -> ScheduledAction {
         ScheduledAction::CredentialRequest {
-            credential_id: format!("cred_{}", url::Url::parse(url).map(|u| u.host_str().unwrap_or("x").to_string()).unwrap_or_else(|_| "test".to_string())),
+            credential_id: format!(
+                "cred_{}",
+                url::Url::parse(url)
+                    .map(|u| u.host_str().unwrap_or("x").to_string())
+                    .unwrap_or_else(|_| "test".to_string())
+            ),
             url: url.to_string(),
             method: Some("GET".to_string()),
             headers: None,
@@ -1075,7 +1719,10 @@ mod tests {
     #[test]
     fn extract_host_from_target_bare_host() {
         assert_eq!(extract_host_from_target("localhost"), "localhost");
-        assert_eq!(extract_host_from_target("api.example.com"), "api.example.com");
+        assert_eq!(
+            extract_host_from_target("api.example.com"),
+            "api.example.com"
+        );
     }
 
     #[test]
@@ -1117,12 +1764,12 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         assert!(svc.host_level_covers(&approval, &["localhost".to_string()]));
@@ -1151,12 +1798,12 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
 
         assert!(svc.exact_payload_covers(&approval, &action));
@@ -1182,17 +1829,22 @@ mod tests {
             session_id: Some("ses-123"),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test summary".to_string(),
             approval_ref: None,
             pre_validated: true,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
         let result = svc.check(req)?;
         assert!(result.is_cleared());
         match &result {
-            GateResult::Cleared { source: ClearanceSource::CachedApproval, .. } => {}
+            GateResult::Cleared {
+                source: ClearanceSource::CachedApproval,
+                ..
+            } => {}
             other => panic!("expected CachedApproval, got {:?}", other),
         }
         assert!(result.enforced_rules().contains(&"P-2.6"));
@@ -1215,10 +1867,17 @@ mod tests {
             session_id: Some("ses-123"),
             run_context: None,
             config: None,
-            reason: "network access required".to_string(),
+            context: DecisionContext::tier2(
+                "credential request to localhost",
+                "localhost is not in an approved network grant",
+                "uses stored credential for localhost",
+                "approve if expected",
+            ),
             summary: "Fetch API from localhost".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -1227,7 +1886,11 @@ mod tests {
         assert!(result.enforced_rules().contains(&"P-2.2"));
         assert!(result.enforced_rules().contains(&"P-2.18"));
         match result {
-            GateResult::Suspended { gate_id, response_json, .. } => {
+            GateResult::Suspended {
+                gate_id,
+                response_json,
+                ..
+            } => {
                 assert!(gate_id.starts_with("apr-"));
                 let json: serde_json::Value = serde_json::from_str(&response_json)?;
                 assert_eq!(json["ok"], false);
@@ -1264,10 +1927,12 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "first".to_string(),
+            context: DecisionContext::tier1("first action", "first rule"),
             summary: "first".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result1 = svc.check(req1)?;
@@ -1287,10 +1952,12 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "second".to_string(),
+            context: DecisionContext::tier1("second action", "second rule"),
             summary: "second".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result2 = svc.check(req2)?;
@@ -1300,6 +1967,134 @@ mod tests {
                 assert_eq!(gate_id, gate_id_1);
             }
             other => panic!("expected AlreadyPending, got {:?}", other),
+        }
+        Ok(())
+    }
+
+    /// Regression for the review on #734: a `GateRequest` with
+    /// `targets: Vec::new()` + `MatchStrategy::ExactPayload` (as
+    /// `agent_revision_promote` now builds) must NOT collapse two distinct
+    /// same-kind actions onto the first pending gate's id. Previously the
+    /// pending dedup treated empty targets as "any pending of the same kind
+    /// counts", so a second RevisionPromote for a different agent/revision
+    /// would suspend on the wrong gate. ExactPayload now requires full
+    /// serialized-action equality in the dedup step.
+    #[test]
+    fn exact_payload_dedup_keeps_distinct_actions_separate() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = GateService::new(Arc::new(GatewayStore::open(tmp.path()).unwrap()));
+        let manifest = test_manifest();
+        let sid = "ses-revpromote-734";
+
+        fn rev_promote(agent: &str, rev: &str) -> ScheduledAction {
+            ScheduledAction::RevisionPromote {
+                agent_id: agent.to_string(),
+                revision_id: rev.to_string(),
+                outgoing_revision_id: format!("{}-old", rev),
+                added_capabilities: vec!["NetworkAccess".to_string()],
+                broadened_capabilities: vec![],
+                payload: None,
+                federation_context: None,
+            }
+        }
+
+        // First promote -> Suspended (mints a new gate).
+        let action1 = rev_promote("agent-a", "rev-1");
+        let req1 = GateRequest {
+            kind: GateKind::Approval {
+                action: action1.clone(),
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "Promote rev-1 of agent-a to active alias",
+                "R++2 capability delta ack needed before promotion",
+                "NetworkAccess added vs rev-1-old baseline",
+                "Acknowledge each added capability by name before approving",
+            ),
+            summary: "promote a/r1".to_string(),
+            approval_ref: None,
+            request_id: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        let gate_id_1 = match svc.check(req1)? {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!("first promote: expected Suspended, got {:?}", other),
+        };
+
+        // Second promote — same kind, different agent/revision. Must NOT be
+        // dedup'd onto gate_id_1; it must mint its own gate.
+        let action2 = rev_promote("agent-b", "rev-2");
+        let req2 = GateRequest {
+            kind: GateKind::Approval {
+                action: action2.clone(),
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "Promote rev-2 of agent-b to active alias",
+                "R++2 capability delta ack needed before promotion",
+                "NetworkAccess added vs rev-2-old baseline",
+                "Acknowledge each added capability by name before approving",
+            ),
+            summary: "promote a/r2".to_string(),
+            approval_ref: None,
+            request_id: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        let gate_id_2 = match svc.check(req2)? {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!(
+                "second distinct promote: expected Suspended (own gate), got {:?}",
+                other
+            ),
+        };
+        assert_ne!(
+            gate_id_2, gate_id_1,
+            "distinct RevisionPromote actions must not collapse onto the same gate"
+        );
+
+        // An identical re-issue of action1 must still dedup onto gate_id_1.
+        let req1b = GateRequest {
+            kind: GateKind::Approval {
+                action: action1,
+                targets: Vec::new(),
+                match_strategy: MatchStrategy::ExactPayload,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "Promote rev-1 of agent-a to active alias (retry)",
+                "R++2 capability delta ack needed before promotion",
+                "NetworkAccess added vs rev-1-old baseline",
+                "Acknowledge each added capability by name before approving",
+            ),
+            summary: "promote a/r1 retry".to_string(),
+            approval_ref: None,
+            request_id: None,
+            pre_validated: false,
+            cache_backfill: None,
+            turn_id: None,
+        };
+        match svc.check(req1b)? {
+            GateResult::AlreadyPending { gate_id, .. } => {
+                assert_eq!(gate_id, gate_id_1, "identical re-issue must dedup");
+            }
+            other => panic!("identical re-issue: expected AlreadyPending, got {:?}", other),
         }
         Ok(())
     }
@@ -1332,15 +2127,21 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval)?;
-        store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        store.record_decision(
+            &ref_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
 
         // Now check with approval_ref -> should clear.
         let req = GateRequest {
@@ -1353,16 +2154,21 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
         assert!(result.enforced_rules().contains(&"P-2.6"));
         match result {
-            GateResult::Cleared { source: ClearanceSource::ApprovalRef(id), .. } => {
+            GateResult::Cleared {
+                source: ClearanceSource::ApprovalRef(id),
+                ..
+            } => {
                 assert_eq!(id, ref_id);
             }
             other => panic!("expected Cleared(ApprovalRef), got {:?}", other),
@@ -1398,15 +2204,21 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval)?;
-        store.record_decision(&ref_id, "approved", "operator", &chrono::Utc::now().to_rfc3339(), None)?;
+        store.record_decision(
+            &ref_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
 
         let req = GateRequest {
             kind: GateKind::Approval {
@@ -1418,10 +2230,12 @@ mod tests {
             session_id: Some(sid),
             run_context: None,
             config: None,
-            reason: "test".to_string(),
+            context: DecisionContext::tier1("test action", "test rule"),
             summary: "test".to_string(),
             approval_ref: Some(&ref_id),
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
         let result = svc.check(req)?;
@@ -1431,13 +2245,118 @@ mod tests {
     }
 
     #[test]
+    fn substitute_command_match_strategy_approval_ref_clears() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+        let sid = "ses-substitute-123";
+
+        // Approved action: a specific command that accessed api.example.com.
+        let approved_action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/fetch.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["api.example.com".to_string()]),
+            intent: None,
+        };
+
+        let ref_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let mut approval = ApprovalRequest {
+            request_id: ref_id.clone(),
+            agent_id: manifest.agent.id.clone(),
+            session_id: sid.to_string(),
+            root_session_id: Some(sid.to_string()),
+            workflow_id: None,
+            task_id: None,
+            action: approved_action.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            reason: Some("test".to_string()),
+            evidence_ref: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+
+            expires_at: None,
+        };
+        store.create_approval(&mut approval)?;
+        store.record_decision(
+            &ref_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
+
+        // Retry with a *different* command string but the same concrete target.
+        // SubstituteCommand strategy should clear because the approved hosts cover
+        // the requested targets, regardless of command string equality.
+        let retry_action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/wrapper.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(vec!["api.example.com".to_string()]),
+            intent: None,
+        };
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: retry_action,
+                targets: vec!["api.example.com".to_string()],
+                match_strategy: MatchStrategy::SubstituteCommand,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier1("test action", "test rule"),
+            summary: "test".to_string(),
+            approval_ref: Some(&ref_id),
+            pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
+            turn_id: None,
+        };
+        let result = svc.check(req)?;
+        assert!(
+            result.is_cleared(),
+            "expected SubstituteCommand approval_ref to clear"
+        );
+        match result {
+            GateResult::Cleared {
+                source: ClearanceSource::ApprovalRef(id),
+                ..
+            } => {
+                assert_eq!(id, ref_id);
+            }
+            other => panic!("expected Cleared(ApprovalRef), got {:?}", other),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn gate_messages_store_and_retrieve() -> Result<()> {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
         let svc = GateService::new(store.clone());
 
-        let id1 = svc.add_gate_message("apr-test123", "operator", "Why does the agent need localhost?")?;
-        let id2 = svc.add_gate_message("apr-test123", "system", "Agent says: API runs on localhost:9876")?;
+        let id1 = svc.add_gate_message(
+            "apr-test123",
+            "operator",
+            "Why does the agent need localhost?",
+        )?;
+        let id2 = svc.add_gate_message(
+            "apr-test123",
+            "system",
+            "Agent says: API runs on localhost:9876",
+        )?;
 
         let msgs = svc.get_gate_messages("apr-test123")?;
         assert_eq!(msgs.len(), 2);
@@ -1469,10 +2388,17 @@ mod tests {
             session_id: Some("ses-seed-123"),
             run_context: None,
             config: None,
-            reason: "API access required".to_string(),
-            summary: "Fetch data".to_string(),
+            context: DecisionContext::tier2(
+                "credential request to api.example.com",
+                "api.example.com is not in an approved network grant",
+                "uses stored credential for api.example.com",
+                "approve if expected",
+            ),
+            summary: "API access required".to_string(),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 
@@ -1497,5 +2423,416 @@ mod tests {
             msgs[0].content
         );
         Ok(())
+    }
+
+    #[test]
+    fn session_grant_clearance_backfills_exec_cache() -> Result<()> {
+        use crate::runtime::approved_exec_cache::{
+            compute_fingerprint, ApprovedExecCache, ApprovedExecCacheBackfill,
+        };
+        use autonoetic_types::background::{GrantScope, GrantTarget};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+        let sid = "ses-cache-backfill-123";
+        let root_sid = sid;
+        let agent_id = manifest.agent.id.clone();
+
+        // Seed a session grant covering api.example.com.
+        store.insert_session_grant(
+            root_sid,
+            sid,
+            &agent_id,
+            &GrantScope::RootSession,
+            &[GrantTarget::ExactHost("api.example.com".to_string())],
+            "test",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+            None,
+        )?;
+
+        // Build the cache backfill payload as sandbox_exec would.
+        let code_content = r#"print("https://api.example.com/data")"#;
+        let targets = vec!["api.example.com".to_string()];
+        let fingerprint = compute_fingerprint(
+            &agent_id,
+            &targets,
+            code_content,
+            None,
+            &manifest.capabilities,
+        );
+
+        let action = ScheduledAction::SandboxExec {
+            command: "python3 /tmp/fetch.py".to_string(),
+            dependencies: None,
+            requires_approval: true,
+            evidence_ref: None,
+            detected_hosts: Some(targets.clone()),
+            intent: None,
+        };
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action,
+                targets: targets.clone(),
+                match_strategy: MatchStrategy::SubstituteCommand,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context: DecisionContext::tier2(
+                "sandbox.exec: python3 /tmp/fetch.py",
+                "api.example.com is not covered by an approved network grant",
+                "runs agent-supplied code reaching api.example.com",
+                "approve if expected",
+            ),
+            summary: "fetch data".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: Some(ApprovedExecCacheBackfill {
+                gateway_dir: tmp.path().to_path_buf(),
+                fingerprint: fingerprint.clone(),
+                agent_id,
+                remote_targets: targets.clone(),
+                code_content: code_content.to_string(),
+                approval_request_id: String::new(),
+            }),
+            request_id: None,
+            turn_id: None,
+        };
+
+        let result = svc.check(req)?;
+        assert!(
+            result.is_cleared(),
+            "session grant should clear the gate without creating an approval"
+        );
+        match result {
+            GateResult::Cleared {
+                source: ClearanceSource::SessionGrant,
+                ..
+            } => {}
+            other => panic!("expected Cleared(SessionGrant), got {:?}", other),
+        }
+
+        // The cache should have been backfilled automatically.
+        let cache = ApprovedExecCache::new(tmp.path())?;
+        let entry = cache
+            .find(&fingerprint)
+            .expect("cache entry was backfilled");
+        assert_eq!(entry.remote_targets, targets);
+        assert_eq!(entry.code_content, code_content);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // DecisionContext (determinism-E1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decision_context_rejects_boilerplate() {
+        // Boilerplate `what` ending in "requires approval" with empty `why_gated`.
+        assert!(
+            !DecisionContext::tier1("web.fetch x requires approval", "").is_sufficient(),
+            "boilerplate 'requires approval' + empty why_gated must be insufficient"
+        );
+
+        // The classic "user question" boilerplate.
+        assert!(
+            !DecisionContext::tier1("user question", "x").is_sufficient(),
+            "'user question' boilerplate must be insufficient"
+        );
+
+        // Boilerplate detection is case-insensitive (capitalized variants too).
+        assert!(
+            !DecisionContext::tier1("Web.fetch x Requires Approval", "").is_sufficient(),
+            "capitalized 'Requires Approval' boilerplate must be insufficient"
+        );
+        assert!(
+            !DecisionContext::tier1("User Question", "x").is_sufficient(),
+            "capitalized 'User Question' boilerplate must be insufficient"
+        );
+
+        // Empty fields are insufficient.
+        assert!(!DecisionContext::tier1("", "").is_sufficient());
+
+        // A real tier2 context is sufficient.
+        let real = DecisionContext::tier2(
+            "web.fetch https://api.example.com/data",
+            "api.example.com is not in an approved network grant (NetworkAccess policy)",
+            "fetches remote content from api.example.com; read-only",
+            "Approve if the host is expected for this agent's task",
+        );
+        assert!(
+            real.is_sufficient(),
+            "a real tier2 context must be sufficient"
+        );
+    }
+
+    #[test]
+    fn gate_check_rejects_insufficient_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let svc = GateService::new(Arc::new(GatewayStore::open(tmp.path()).unwrap()));
+        let manifest = test_manifest();
+
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: make_credential_request_action("http://localhost:8080/api"),
+                targets: vec!["localhost".to_string()],
+                match_strategy: MatchStrategy::HostLevel,
+            },
+            manifest: &manifest,
+            session_id: Some("ses-insufficient-123"),
+            run_context: None,
+            config: None,
+            // Boilerplate context: insufficient.
+            context: DecisionContext::tier1("user question", ""),
+            summary: "boilerplate summary".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
+            turn_id: None,
+        };
+
+        let err = svc
+            .check(req)
+            .expect_err("check must reject insufficient context");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("determinism-E1"),
+            "error should cite the determinism-E1 rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn decider_symmetry_same_context() -> Result<()> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let manifest = test_manifest();
+        let sid = "ses-symmetry-123";
+
+        let context = DecisionContext::tier2(
+            "credential request to api.example.com",
+            "api.example.com is not in an approved network grant (NetworkAccess policy)",
+            "uses stored credential for api.example.com",
+            "Approve if this host is an expected credential target for the agent's task",
+        );
+        let expected_reason = context.render();
+
+        let req = GateRequest {
+            kind: GateKind::Approval {
+                action: make_credential_request_action("http://api.example.com/data"),
+                targets: vec!["api.example.com".to_string()],
+                match_strategy: MatchStrategy::HostLevel,
+            },
+            manifest: &manifest,
+            session_id: Some(sid),
+            run_context: None,
+            config: None,
+            context,
+            summary: "Credential request to api.example.com".to_string(),
+            approval_ref: None,
+            pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
+            turn_id: None,
+        };
+
+        let result = svc.check(req)?;
+        let gate_id = match result {
+            GateResult::Suspended { gate_id, .. } => gate_id,
+            other => panic!("expected Suspended, got {:?}", other),
+        };
+
+        // The persisted reason is exactly the rendered context — and does not
+        // depend on the decider identity (operator vs agent). We resolve the
+        // gate by two different deciders and assert the stored context is
+        // unchanged in both cases.
+        let stored = store
+            .get_approval(&gate_id)?
+            .expect("approval row exists")
+            .reason
+            .expect("reason was persisted from context.render()");
+        assert_eq!(
+            stored, expected_reason,
+            "stored reason must equal context.render()"
+        );
+
+        // Resolve by an operator.
+        store.record_decision(
+            &gate_id,
+            "approved",
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+            None,
+        )?;
+        let after_operator = store
+            .get_approval(&gate_id)?
+            .expect("approval row exists")
+            .reason
+            .expect("reason persisted");
+        assert_eq!(
+            after_operator, expected_reason,
+            "stored context must not change when an operator decides"
+        );
+
+        // The same render is what an agent decider would see — it is a pure
+        // function of the context and is independent of decider identity.
+        assert_eq!(after_operator, expected_reason);
+        Ok(())
+    }
+
+    /// #723: root-scoped join matches a *different* session under the same root
+    /// with a structurally-identical action, skips the same session, and does
+    /// not match a different action.
+    #[test]
+    fn find_pending_identical_for_root_matches_only_identical_cross_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+
+        let write = |path: &str| ScheduledAction::WriteFile {
+            path: path.to_string(),
+            content: "x".to_string(),
+            requires_approval: true,
+            evidence_ref: None,
+        };
+        let mk = |id: &str, session: &str, action: ScheduledAction| ApprovalRequest {
+            request_id: id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: session.to_string(),
+            action,
+            approval_level: ApprovalLevel::Operator,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("root-1".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+
+        // Sibling A (session root-1/a) has a pending WriteFile(/tmp/x).
+        let mut a = mk("apr-a", "root-1/a", write("/tmp/x"));
+        store.create_approval(&mut a).unwrap();
+
+        // Sibling B (same root, different session) making the identical call joins A.
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-1/b", &write("/tmp/x")).unwrap(),
+            Some("apr-a".to_string()),
+            "identical action under the same root joins the sibling's pending approval"
+        );
+
+        // A different action does not join (would break the resume TOCTOU).
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-1/b", &write("/tmp/other")).unwrap(),
+            None,
+            "a non-identical action must not join"
+        );
+
+        // The owning session itself is skipped (same-session dedup handles it).
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-1/a", &write("/tmp/x")).unwrap(),
+            None,
+            "the owning session is skipped"
+        );
+
+        // A different root does not match.
+        assert_eq!(
+            svc.find_pending_identical_for_root("root-2/c", &write("/tmp/x")).unwrap(),
+            None,
+            "a different root must not match"
+        );
+    }
+
+    /// #724 Part B: a guidance-request SessionEscalate and a promotion-review
+    /// SessionEscalate share the `session_escalate` ScheduledAction kind, but
+    /// must NOT dedup onto each other in `find_pending_for_targets` — even under
+    /// the HostLevel "any pending of the same kind" path — or a guidance
+    /// escalate would collide with a promotion-review approval and reuse the
+    /// wrong gate id.
+    #[test]
+    fn session_escalate_dedup_discriminates_by_escalation_kind() {
+        use autonoetic_types::background::EscalationKind;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(GatewayStore::open(tmp.path()).unwrap());
+        let svc = GateService::new(store.clone());
+        let sid = "root-esc/a";
+
+        let escalate = |kind: EscalationKind| ScheduledAction::SessionEscalate {
+            session_id: sid.to_string(),
+            root_session_id: "root-esc".to_string(),
+            requested_by_agent_id: "coder.default".to_string(),
+            reason: "r".to_string(),
+            context: "c".to_string(),
+            urgency: "normal".to_string(),
+            suggested_actions: vec![],
+            payload: None,
+            kind,
+        };
+
+        // Seed a pending GUIDANCE escalation approval.
+        let mut req = ApprovalRequest {
+            request_id: "apr-guid".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: sid.to_string(),
+            action: escalate(EscalationKind::GuidanceRequest),
+            approval_level: ApprovalLevel::Operator,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("root-esc".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+        store.create_approval(&mut req).unwrap();
+
+        // A promotion-review escalate under the same session must NOT match the
+        // pending guidance approval (even under HostLevel/empty-targets).
+        assert_eq!(
+            svc.find_pending_for_targets(
+                sid,
+                &escalate(EscalationKind::PromotionReview),
+                &[],
+                MatchStrategy::HostLevel,
+            )
+            .unwrap(),
+            None,
+            "promotion-review must not dedup onto a guidance-request approval"
+        );
+
+        // A guidance escalate DOES still dedup onto the pending guidance approval.
+        assert_eq!(
+            svc.find_pending_for_targets(
+                sid,
+                &escalate(EscalationKind::GuidanceRequest),
+                &[],
+                MatchStrategy::HostLevel,
+            )
+            .unwrap(),
+            Some("apr-guid".to_string()),
+            "same-kind guidance escalate still dedups"
+        );
     }
 }

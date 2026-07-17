@@ -176,26 +176,13 @@ pub async fn handle_due_wake(
                     decided_at: None,
                     decided_by: None,
                     decision_reason: None,
-                    similar_to_request_id: None,
-                    similarity_score: None,
                     min_dwell_ms: None,
                     confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
+                    code_excerpts: None,
+                    risk_summary: None,
+                    expires_at: None,
                 };
-                crate::scheduler::approval_hardening::enrich_request(&mut request);
                 if let Some(store) = execution.gateway_store() {
-                    let candidates = store.get_recent_approvals_for_agent(&request.agent_id, 10)?;
-                    let similar = crate::scheduler::approval_similarity::find_similar_approvals(
-                        &request,
-                        &candidates,
-                        1,
-                        0.7,
-                    );
-                    if let Some(best) = similar.first() {
-                        request.similar_to_request_id = Some(best.request_id.clone());
-                        request.similarity_score = Some(best.score);
-                    }
                     store.create_approval(&mut request)?;
                 } else {
                     anyhow::bail!("GatewayStore is required to create approvals");
@@ -234,7 +221,17 @@ pub async fn handle_due_wake(
         Some(
             execution
                 .spawn_agent_once(
-                    agent_id, &kickoff, session_id, None, false, None, None, None, None, None, &[],
+                    agent_id,
+                    &kickoff,
+                    session_id,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
                 )
                 .await
                 .map(|spawn| spawn.assistant_reply.unwrap_or_default()),

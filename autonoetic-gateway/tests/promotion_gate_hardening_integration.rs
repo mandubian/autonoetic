@@ -142,6 +142,7 @@ fn builder_manifest() -> AgentManifest {
             id: "specialized_builder.default".to_string(),
             name: "specialized_builder.default".to_string(),
             description: "Builder".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::AgentSpawn {
@@ -166,8 +167,10 @@ fn builder_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -187,6 +190,7 @@ fn evaluator_manifest() -> AgentManifest {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator.default".to_string(),
             description: "Sealed Evaluator".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
@@ -205,8 +209,10 @@ fn evaluator_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -226,6 +232,7 @@ fn auditor_manifest() -> AgentManifest {
             id: "auditor.default".to_string(),
             name: "auditor.default".to_string(),
             description: "Auditor".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
@@ -244,8 +251,10 @@ fn auditor_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -298,17 +307,19 @@ fn record_promotion(
     builder_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
+    session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} check — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -317,10 +328,10 @@ fn record_promotion(
             builder_dir,
             Some(gateway_dir),
             &serde_json::to_string(&args).unwrap(),
-            Some(&format!("session-{role}")),
+            Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion.record should succeed");
@@ -345,10 +356,14 @@ fn try_promote(
     agent_id: &str,
     revision_id: &str,
 ) -> Result<serde_json::Value, String> {
+    let (smoke_wf, smoke_task) =
+        support::promotion_trace::seed_smoke_test_task(config, store.as_ref(), agent_id, revision_id);
     let promote_args = serde_json::json!({
         "agent_id": agent_id,
         "revision_id": revision_id,
         "reason": "integration test",
+        "smoke_test_workflow_id": smoke_wf,
+        "smoke_test_task_id": smoke_task,
     });
     match registry.execute(
         "agent_revision_promote",
@@ -368,6 +383,31 @@ fn try_promote(
             Ok(parsed)
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Extract the failure message from a `try_promote` result. Promotion-gate
+/// blocks are now structured `Ok(ok:false)` envelopes (P-5.11); only genuine
+/// infra failures surface as `Err`.
+fn gate_err(result: Result<serde_json::Value, String>) -> String {
+    match result {
+        Ok(v) => {
+            assert_eq!(v["ok"], false, "expected a failure envelope, got: {v}");
+            v["message"].as_str().unwrap_or_default().to_string()
+        }
+        Err(e) => e,
+    }
+}
+
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err` so the
+/// `.is_err()` "promote should fail" preconditions read naturally; a genuine
+/// success stays `Ok`.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
     }
 }
 
@@ -453,10 +493,10 @@ fn test_promote_rejects_high_risk_without_promotion_records() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail without promotion records"
     );
-    let err = result.unwrap_err();
+    let err = gate_err(result);
     assert!(
         err.contains("Promotion gate") && err.contains("no promotion.record"),
         "error should mention promotion gate: {err}"
@@ -479,9 +519,11 @@ fn test_promote_succeeds_with_both_evaluator_and_auditor_pass() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -493,9 +535,11 @@ fn test_promote_succeeds_with_both_evaluator_and_auditor_pass() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -536,9 +580,11 @@ fn test_promote_rejects_when_evaluator_fails() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         false,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -550,9 +596,11 @@ fn test_promote_rejects_when_evaluator_fails() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -567,8 +615,8 @@ fn test_promote_rejects_when_evaluator_fails() {
         &revision_id,
     );
 
-    assert!(result.is_err(), "promote should fail when evaluator fails");
-    let err = result.unwrap_err();
+    assert!(as_outcome(result.clone()).is_err(), "promote should fail when evaluator fails");
+    let err = gate_err(result);
     assert!(
         err.contains("no evaluator role passed"),
         "error should mention evaluator failure: {err}"
@@ -592,9 +640,11 @@ fn test_promote_rejects_when_auditor_missing() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let result = try_promote(
@@ -610,10 +660,10 @@ fn test_promote_rejects_when_auditor_missing() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail when auditor is missing"
     );
-    let err = result.unwrap_err();
+    let err = gate_err(result);
     assert!(
         err.contains("auditor did not pass"),
         "error should mention auditor failure: {err}"
@@ -694,6 +744,8 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test_harness".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -705,6 +757,7 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
             "detected_external_imports": ["requests"],
         }),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -722,9 +775,11 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     let audit_manifest = auditor_manifest();
@@ -736,9 +791,11 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let b_manifest = builder_manifest();
@@ -756,10 +813,10 @@ fn test_promote_rejects_high_risk_with_unresolved_dependencies() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail with unresolved dependencies"
     );
-    let err = result.unwrap_err();
+    let err = gate_err(result);
     assert!(
         err.contains("unresolved dependencies"),
         "error should mention unresolved dependencies: {err}"
@@ -793,30 +850,26 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
     let promo_store = PromotionStore::new(&gateway_dir).unwrap();
     // record_promotion auto-timestamps "now". We then create a revision with a future
     // created_at to verify timestamp ordering no longer blocks promotion.
-    promo_store
-        .record_promotion(
-            artifact_id.to_string(),
-            None,
-            None,
-            PromotionRole::Evaluator,
-            "evaluator.default",
-            true,
-            vec![],
-            Some("eval pass".to_string()),
-        )
-        .unwrap();
-    promo_store
-        .record_promotion(
-            artifact_id.to_string(),
-            None,
-            None,
-            PromotionRole::Auditor,
-            "auditor.default",
-            true,
-            vec![],
-            Some("audit pass".to_string()),
-        )
-        .unwrap();
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promo_store,
+        store.as_ref(),
+        artifact_id,
+        PromotionRole::Evaluator,
+        "evaluator.default",
+        true,
+        "session-evaluator",
+        None,
+    );
+    support::promotion_trace::seed_promotion_store_execution_role(
+        &promo_store,
+        store.as_ref(),
+        artifact_id,
+        PromotionRole::Auditor,
+        "auditor.default",
+        true,
+        "session-auditor",
+        None,
+    );
 
     // Create the revision with created_at in the future relative to pre-recorded evidence.
     let revision_id = "rev_sha256:test_stale_freshness_001";
@@ -839,6 +892,8 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
         created_at: future_ts,
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test_harness".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -846,6 +901,7 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -892,10 +948,10 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &revision_id,
     );
     assert!(
-        fail_result.is_err(),
+        as_outcome(fail_result.clone()).is_err(),
         "Step 1: promote should fail without records"
     );
-    assert!(fail_result.unwrap_err().contains("no promotion.record"));
+    assert!(gate_err(fail_result).contains("no promotion.record"));
 
     // Step 2: Evaluator records pass
     let eval_manifest = evaluator_manifest();
@@ -907,9 +963,11 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
+        "session-sealed_evaluator",
     );
 
     // Step 3: Attempt promotion with only evaluator — should still fail
@@ -925,10 +983,10 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &revision_id,
     );
     assert!(
-        partial_result.is_err(),
+        as_outcome(partial_result.clone()).is_err(),
         "Step 3: promote should fail with only evaluator"
     );
-    assert!(partial_result.unwrap_err().contains("auditor did not pass"));
+    assert!(gate_err(partial_result).contains("auditor did not pass"));
 
     // Step 4: Auditor records pass
     let audit_manifest = auditor_manifest();
@@ -940,9 +998,11 @@ fn test_full_pipeline_with_builder_and_promotion_gates() {
         &s.builder_dir,
         &s.gateway_dir,
         &s.config,
+        &store,
         &artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     // Step 5: Now promote should succeed

@@ -100,8 +100,7 @@ impl NativeTool for DigestAnnotateTool {
                         source_session_id: ctx.session_id.clone(),
                         turn_id: _turn_id.map(|s| s.to_string()),
                         source_agent_id: Some(ctx.agent_id.clone()),
-                        source_node_id: std::env::var("AUTONOETIC_NODE_ID")
-                            .unwrap_or_else(|_| "gateway".to_string()),
+                        source_node_id: crate::execution::gateway_actor_id(),
                         event_type: "digest_annotate".to_string(),
                         payload: Some(
                             serde_json::json!({

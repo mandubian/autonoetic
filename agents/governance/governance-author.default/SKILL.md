@@ -24,7 +24,7 @@ metadata:
       - type: "ReadAccess"
         scopes: ["constitution_*"]
       - type: "SandboxFunctions"
-        allowed: ["constitution."]
+        allowed: ["constitution_"]
     io:
       returns:
         type: object

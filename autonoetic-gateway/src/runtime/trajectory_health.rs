@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::guard::LoopGuardState;
+use crate::runtime::guard::LoopGuard;
 
 /// Causal-chain category used by every divergence event.
 pub const DIVERGENCE_CATEGORY: &str = "divergence";
@@ -78,6 +78,17 @@ pub enum DivergenceSignalKind {
     /// `budget_tracker::emit_context_pressure_high_if_warranted` — the
     /// monitor (P1) will subscribe to that signal here too.
     ContextPressure,
+    /// The gateway is blocked by an irrecoverable condition
+    /// (`Permission`, `QuotaExceeded`, `SandboxUnavailable`, signal-derived
+    /// exit). This is distinct from divergence and only produces a
+    /// non-blocking operator alert.
+    BlockedState,
+    /// The agent repeated the same feedback signature after the gateway
+    /// gave it corrective feedback. Strong divergence signal.
+    FeedbackIgnored,
+    /// The agent's errors/violations are changing turn-over-turn, indicating
+    /// the feedback is being incorporated. Advisory only.
+    FeedbackIncorporated,
 }
 
 impl DivergenceSignalKind {
@@ -91,7 +102,23 @@ impl DivergenceSignalKind {
             Self::RepetitionEntropy => "repetition_entropy",
             Self::ErrorBurst => "error_burst",
             Self::ContextPressure => "context_pressure",
+            Self::BlockedState => "blocked_state",
+            Self::FeedbackIgnored => "feedback_ignored",
+            Self::FeedbackIncorporated => "feedback_incorporated",
         }
+    }
+
+    /// `true` for signals that may only ever be advisory (`Watching` at most).
+    pub fn is_advisory_only(&self) -> bool {
+        matches!(
+            self,
+            Self::RepetitionEntropy | Self::FeedbackIncorporated
+        )
+    }
+
+    /// `true` for signals that are allowed to drive `Diverging`/`Critical`.
+    pub fn is_gateworthy(&self) -> bool {
+        matches!(self, Self::FeedbackIgnored | Self::BlockedState)
     }
 }
 
@@ -157,14 +184,17 @@ impl DivergenceSignal {
 ///
 /// `Healthy` means no signal warranted attention. `Watching` is below the
 /// action band — surface it in the causal chain so operators can audit, but
-/// do not message the planner yet. `Diverging` is the action band — planner
-/// notification (P2) fires here. `Critical` is the imminent-trip band —
-/// operator notification (P2) fires here in addition to planner messaging.
+/// do not message the planner yet. `Blocked` means the agent is stuck on a
+/// gateway-side irrecoverable condition (not diverging). `Diverging` is the
+/// action band — planner notification (P2) fires here. `Critical` is the
+/// imminent-trip band — operator notification (P2) fires here in addition to
+/// planner messaging.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "level", rename_all = "snake_case")]
 pub enum TrajectoryHealth {
     Healthy,
     Watching { signals: Vec<DivergenceSignal> },
+    Blocked { signals: Vec<DivergenceSignal> },
     Diverging { signals: Vec<DivergenceSignal> },
     Critical { signals: Vec<DivergenceSignal> },
 }
@@ -176,6 +206,7 @@ impl TrajectoryHealth {
         match self {
             Self::Healthy => "healthy",
             Self::Watching { .. } => "watching",
+            Self::Blocked { .. } => "blocked",
             Self::Diverging { .. } => "diverging",
             Self::Critical { .. } => "critical",
         }
@@ -189,6 +220,7 @@ impl TrajectoryHealth {
         match self {
             Self::Healthy => None,
             Self::Watching { .. } => Some(DIVERGENCE_ACTION_OBSERVED),
+            Self::Blocked { .. } => Some(DIVERGENCE_ACTION_OBSERVED),
             Self::Diverging { .. } => Some(DIVERGENCE_ACTION_DETECTED),
             Self::Critical { .. } => Some(DIVERGENCE_ACTION_ESCALATED),
         }
@@ -199,42 +231,78 @@ impl TrajectoryHealth {
     pub fn signals(&self) -> &[DivergenceSignal] {
         match self {
             Self::Healthy => &[],
-            Self::Watching { signals } | Self::Diverging { signals } | Self::Critical { signals } => signals,
+            Self::Watching { signals }
+            | Self::Blocked { signals }
+            | Self::Diverging { signals }
+            | Self::Critical { signals } => signals,
         }
+    }
+
+    /// Sentinel verdicts are observational only. They may inform planners and
+    /// operators, but they must never gate execution by themselves. The only
+    /// mechanism allowed to halt execution is the [`LoopGuard`](crate::runtime::guard::LoopGuard).
+    pub fn may_block_execution(&self) -> bool {
+        false
     }
 }
 
 /// Aggregate a flat list of signals into a session-level verdict.
 ///
-/// Decision rule (locked in by tests below — change with care):
+/// Decision rule (RFC D.6 — confirmed repetition is the only gate-worthy
+/// signal):
 ///
-/// 1. Any signal with `Critical` severity → [`TrajectoryHealth::Critical`].
-/// 2. Else if ≥ 2 `Warn` signals → [`TrajectoryHealth::Diverging`].
-/// 3. Else if ≥ 1 `Warn` signal → [`TrajectoryHealth::Watching`].
-/// 4. Else → [`TrajectoryHealth::Healthy`].
-///
-/// The rule is intentionally simple: P0 ships a substrate, not a tuned
-/// policy. Threshold tuning and signal-weighting land in P1 with real
-/// session data to calibrate against.
+/// 1. Any `BlockedState` signal → [`TrajectoryHealth::Blocked`].
+/// 2. Any `FeedbackIgnored` signal with `Critical` severity →
+///    [`TrajectoryHealth::Critical`].
+/// 3. Any `FeedbackIgnored` signal with `Warn` severity →
+///    [`TrajectoryHealth::Diverging`].
+/// 4. Remaining signals: `Critical` severity on any non-advisory signal
+///    would previously have driven `Critical`; under D.6 those are capped to
+///    `Watching` unless they are paired with `FeedbackIgnored`. `Warn`
+///    signals → `Watching`. Advisory signals (`RepetitionEntropy`,
+///    `FeedbackIncorporated`) → `Watching` at most.
+/// 5. Else → [`TrajectoryHealth::Healthy`].
 pub fn aggregate(signals: Vec<DivergenceSignal>) -> TrajectoryHealth {
     if signals.is_empty() {
         return TrajectoryHealth::Healthy;
     }
 
-    let critical_count = signals.iter().filter(|s| s.severity == SignalSeverity::Critical).count();
-    if critical_count > 0 {
-        return TrajectoryHealth::Critical { signals };
+    // 1. Blocked state (gateway-side irrecoverable condition) is the only
+    // non-divergence label that escapes `Watching` without feedback evidence.
+    let blocked: Vec<_> = signals
+        .iter()
+        .filter(|s| s.kind == DivergenceSignalKind::BlockedState)
+        .cloned()
+        .collect();
+    if !blocked.is_empty() {
+        return TrajectoryHealth::Blocked { signals: blocked };
     }
 
-    let warn_count = signals.iter().filter(|s| s.severity == SignalSeverity::Warn).count();
-    if warn_count >= 2 {
-        return TrajectoryHealth::Diverging { signals };
-    }
-    if warn_count == 1 {
-        return TrajectoryHealth::Watching { signals };
+    // 2. Feedback-ignored is the only signal allowed to drive `Diverging`
+    // or `Critical`.
+    let ignored: Vec<_> = signals
+        .iter()
+        .filter(|s| s.kind == DivergenceSignalKind::FeedbackIgnored)
+        .cloned()
+        .collect();
+    if !ignored.is_empty() {
+        let has_critical = ignored.iter().any(|s| s.severity == SignalSeverity::Critical);
+        if has_critical {
+            return TrajectoryHealth::Critical { signals: ignored };
+        }
+        return TrajectoryHealth::Diverging { signals: ignored };
     }
 
-    TrajectoryHealth::Healthy
+    // 3. Everything else is advisory at most.
+    let advisory: Vec<_> = signals
+        .into_iter()
+        .filter(|s| !s.kind.is_gateworthy())
+        .collect();
+    if advisory.is_empty() {
+        TrajectoryHealth::Healthy
+    } else {
+        TrajectoryHealth::Watching { signals: advisory }
+    }
 }
 
 /// Classify a pressure value `[0.0, 1.0+]` against the default warn/critical
@@ -283,7 +351,7 @@ pub fn classify_pressure(kind: DivergenceSignalKind, current: f32) -> Option<Div
 ///
 /// Returns an empty vec when nothing crosses the warn threshold — that
 /// translates to `TrajectoryHealth::Healthy` after [`aggregate`].
-pub fn signals_from_loop_guard(state: &LoopGuardState) -> Vec<DivergenceSignal> {
+pub fn signals_from_loop_guard(state: &LoopGuard) -> Vec<DivergenceSignal> {
     let mut signals = Vec::new();
 
     if let Some(s) = loop_pressure_signal(state) {
@@ -299,7 +367,7 @@ pub fn signals_from_loop_guard(state: &LoopGuardState) -> Vec<DivergenceSignal> 
     signals
 }
 
-fn loop_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
+fn loop_pressure_signal(state: &LoopGuard) -> Option<DivergenceSignal> {
     if state.max_loops_without_progress == 0 {
         return None;
     }
@@ -312,7 +380,7 @@ fn loop_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
     })
 }
 
-fn failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
+fn failure_pressure_signal(state: &LoopGuard) -> Option<DivergenceSignal> {
     if state.max_tool_failures == 0 {
         return None;
     }
@@ -329,7 +397,7 @@ fn failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
     })
 }
 
-fn child_failure_pressure_signal(state: &LoopGuardState) -> Option<DivergenceSignal> {
+fn child_failure_pressure_signal(state: &LoopGuard) -> Option<DivergenceSignal> {
     if state.max_child_failures == 0 {
         return None;
     }
@@ -424,28 +492,62 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_two_warns_is_diverging() {
+    fn aggregate_two_warns_is_watching_under_d6_rule() {
         let out = aggregate(vec![
             warn(DivergenceSignalKind::LoopPressure),
             warn(DivergenceSignalKind::FailurePressure),
         ]);
-        assert!(matches!(out, TrajectoryHealth::Diverging { .. }));
+        assert!(matches!(out, TrajectoryHealth::Watching { .. }));
     }
 
     #[test]
-    fn aggregate_any_critical_is_critical() {
-        // Critical wins even when accompanied by warns.
+    fn aggregate_any_non_feedback_critical_is_watching_under_d6_rule() {
+        // Only FeedbackIgnored may drive Critical; other critical signals are
+        // capped to Watching per RFC D.6.
         let out = aggregate(vec![
             warn(DivergenceSignalKind::LoopPressure),
             critical(DivergenceSignalKind::FailurePressure),
         ]);
+        assert!(matches!(out, TrajectoryHealth::Watching { .. }));
+    }
+
+    #[test]
+    fn aggregate_lone_non_feedback_critical_is_watching_under_d6_rule() {
+        let out = aggregate(vec![critical(DivergenceSignalKind::LoopPressure)]);
+        assert!(matches!(out, TrajectoryHealth::Watching { .. }));
+    }
+
+    #[test]
+    fn aggregate_feedback_ignored_warn_is_diverging() {
+        let out = aggregate(vec![DivergenceSignal::new(
+            DivergenceSignalKind::FeedbackIgnored,
+            SignalSeverity::Warn,
+            1.0,
+            1.0,
+        )]);
+        assert!(matches!(out, TrajectoryHealth::Diverging { .. }));
+    }
+
+    #[test]
+    fn aggregate_feedback_ignored_critical_is_critical() {
+        let out = aggregate(vec![DivergenceSignal::new(
+            DivergenceSignalKind::FeedbackIgnored,
+            SignalSeverity::Critical,
+            3.0,
+            1.0,
+        )]);
         assert!(matches!(out, TrajectoryHealth::Critical { .. }));
     }
 
     #[test]
-    fn aggregate_lone_critical_is_critical() {
-        let out = aggregate(vec![critical(DivergenceSignalKind::LoopPressure)]);
-        assert!(matches!(out, TrajectoryHealth::Critical { .. }));
+    fn aggregate_blocked_state_is_blocked() {
+        let out = aggregate(vec![DivergenceSignal::new(
+            DivergenceSignalKind::BlockedState,
+            SignalSeverity::Warn,
+            1.0,
+            1.0,
+        )]);
+        assert!(matches!(out, TrajectoryHealth::Blocked { .. }));
     }
 
     // ── Pressure classification ─────────────────────────────────────────
@@ -478,8 +580,8 @@ mod tests {
 
     // ── LoopGuard bridge ────────────────────────────────────────────────
 
-    fn state_with(loops: u32, max_loops: u32, child_failures: u32, max_children: u32) -> LoopGuardState {
-        LoopGuardState {
+    fn state_with(loops: u32, max_loops: u32, child_failures: u32, max_children: u32) -> LoopGuard {
+        LoopGuard {
             max_loops_without_progress: max_loops,
             max_child_failures: max_children,
             current_loops: loops,
@@ -577,11 +679,15 @@ mod tests {
     }
 
     #[test]
-    fn loop_guard_multiple_pressures_aggregate_to_diverging() {
+    fn loop_guard_multiple_pressures_aggregate_to_watching_under_d6_rule() {
         let mut state = state_with(8, 10, 0, 5); // loop pressure: 8/10 = 0.80 → warn
         state.tool_failure_counts.insert("sandbox.exec".into(), 7); // failure pressure: 7/8 = 0.875 → warn
         let health = aggregate(signals_from_loop_guard(&state));
-        assert!(matches!(health, TrajectoryHealth::Diverging { signals } if signals.len() == 2));
+        assert!(
+            matches!(health, TrajectoryHealth::Watching { ref signals } if signals.len() == 2),
+            "expected Watching for non-feedback signals, got {:?}",
+            health
+        );
     }
 
     // ── Payload + slug stability ────────────────────────────────────────
@@ -589,6 +695,7 @@ mod tests {
     #[test]
     fn level_str_slugs_are_stable() {
         assert_eq!(TrajectoryHealth::Healthy.level_str(), "healthy");
+        assert_eq!(TrajectoryHealth::Blocked { signals: vec![] }.level_str(), "blocked");
         assert_eq!(
             TrajectoryHealth::Watching { signals: vec![] }.level_str(),
             "watching"
@@ -608,6 +715,10 @@ mod tests {
         assert_eq!(TrajectoryHealth::Healthy.causal_action(), None);
         assert_eq!(
             TrajectoryHealth::Watching { signals: vec![] }.causal_action(),
+            Some(DIVERGENCE_ACTION_OBSERVED)
+        );
+        assert_eq!(
+            TrajectoryHealth::Blocked { signals: vec![] }.causal_action(),
             Some(DIVERGENCE_ACTION_OBSERVED)
         );
         assert_eq!(
@@ -650,9 +761,33 @@ mod tests {
             DivergenceSignalKind::RepetitionEntropy,
             DivergenceSignalKind::ErrorBurst,
             DivergenceSignalKind::ContextPressure,
+            DivergenceSignalKind::BlockedState,
+            DivergenceSignalKind::FeedbackIgnored,
+            DivergenceSignalKind::FeedbackIncorporated,
         ] {
             let json = serde_json::to_value(kind).unwrap();
             assert_eq!(json.as_str().unwrap(), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn no_sentinel_verdict_may_block_execution() {
+        // D.3 invariant: the Sentinel is observational only. No level it can
+        // produce may raise an execution-blocking gate; only the LoopGuard can
+        // halt a session.
+        let all = vec![
+            TrajectoryHealth::Healthy,
+            TrajectoryHealth::Watching { signals: vec![] },
+            TrajectoryHealth::Blocked { signals: vec![] },
+            TrajectoryHealth::Diverging { signals: vec![] },
+            TrajectoryHealth::Critical { signals: vec![] },
+        ];
+        for health in all {
+            assert!(
+                !health.may_block_execution(),
+                "Sentinel verdict {:?} must not block execution",
+                health
+            );
         }
     }
 }

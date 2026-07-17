@@ -23,6 +23,7 @@ fn plan_frame_manifest() -> AgentManifest {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
             description: "Test collaborative planner".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::AgentSpawn {
@@ -36,7 +37,10 @@ fn plan_frame_manifest() -> AgentManifest {
                 scopes: vec!["*".to_string()],
             },
             Capability::PlanFrameAccess {
-                patterns: vec!["*".to_string()],
+                // `*` grants participation; `planframe.approve` is an authority
+                // that must be granted EXACTLY (a wildcard no longer confers it),
+                // so this manifest represents an authorized approver.
+                patterns: vec!["*".to_string(), "planframe.approve".to_string()],
             },
         ],
         llm_overrides: None,
@@ -54,7 +58,9 @@ fn plan_frame_manifest() -> AgentManifest {
         middleware: None,
         agentskills_import: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -74,6 +80,7 @@ fn no_plan_frame_manifest() -> AgentManifest {
             id: "agent.no_plan".to_string(),
             name: "No Plan Agent".to_string(),
             description: "Agent without plan frame access".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
@@ -93,7 +100,9 @@ fn no_plan_frame_manifest() -> AgentManifest {
         middleware: None,
         agentskills_import: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -409,15 +418,21 @@ fn operator_approve_plan_frame_via_scheduler_ops() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].plan_id, plan_id);
 
-    let approved = autonoetic_gateway::scheduler::approve_plan_frame_operator(
+    let approved = autonoetic_gateway::scheduler::approval::approve_request(
         &config,
-        store.as_ref(),
-        &plan_id,
+        Some(store.as_ref()),
+        &format!("apr-plan-{plan_id}-v1"),
         "chat-tui",
+        None,
+        None,
+        None,
+        None,
     )
     .unwrap();
-    assert_eq!(approved.status, PlanStatus::Approved);
-    assert_eq!(approved.approved_by.as_deref(), Some("chat-tui"));
+    assert_eq!(approved.status, autonoetic_types::background::ApprovalStatus::Approved);
+
+    let plan = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(plan.status, PlanStatus::Approved);
 
     assert!(
         autonoetic_gateway::scheduler::pending_plan_frames_for_root(
@@ -603,9 +618,14 @@ fn planframe_amend_preserves_original_revision() {
         .unwrap();
 
     let v1 = store.load_plan_frame_revision(&plan_id, 1).unwrap().unwrap();
+    // The original revision's content is preserved immutably...
     assert_eq!(v1.title, "Original Title");
     assert_eq!(v1.objective, "Original objective");
-    assert_eq!(v1.status.as_str(), "awaiting_approval");
+    // ...but amending a still-pending revision supersedes it: its gate is
+    // cancelled and the revision is marked cancelled (see
+    // planframe_amend_supersedes_pending_revision), so the Session Room no
+    // longer offers the stale v1 gate.
+    assert_eq!(v1.status.as_str(), "cancelled");
 
     let v2 = store.load_plan_frame_revision(&plan_id, 2).unwrap().unwrap();
     assert_eq!(v2.title, "Changed Title");
@@ -613,6 +633,321 @@ fn planframe_amend_preserves_original_revision() {
     assert_eq!(v2.status.as_str(), "awaiting_approval");
     assert_eq!(v2.parent_version, Some(1));
     assert_eq!(v2.reason.as_deref(), Some("Scope change"));
+}
+
+/// Propose → approve → amend with a cosmetic-only change (objective rewording
+/// + progress reason). The amendment must INHERIT the prior approval: status
+/// stays `approved`, `inherited == true`, and no `plan.pending` checkpoint is
+/// emitted (a `plan.approved` with `inherited: true` is emitted instead).
+#[test]
+fn planframe_amend_inherits_approval_on_cosmetic_change() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-inherit/planner";
+
+    let propose = json!({
+        "title": "Weather Agent",
+        "objective": "Build a weather agent",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    // Approve v1.
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    // Cosmetic amend: objective rewording + progress reason, same step set.
+    let amend = json!({
+        "plan_id": plan_id,
+        "objective": "Build a reusable weather agent (refined)",
+        "reason": "Steps s1 completed; clarifying objective for the record."
+    });
+    let result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["version"], 2, "new revision created");
+    assert_eq!(parsed["status"], "approved", "cosmetic amend inherits approval");
+    assert_eq!(parsed["inherited"], true);
+    assert_eq!(parsed["diff_summary"], "no envelope change");
+    assert_eq!(parsed["requires_regate"], false);
+
+    let latest = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(latest.status, PlanStatus::Approved);
+    assert_eq!(latest.parent_version, Some(1));
+    assert!(latest.approved_at.is_some(), "inherited approval re-stamped");
+
+    // The timeline must NOT carry a plan.pending for the inherited amend; it
+    // carries plan.approved with inherited:true instead.
+    let tl = store.list_session_timeline("root-session-inherit", None, 50, None, None).unwrap();
+    let v2_events: Vec<_> = tl.entries.iter().filter(|e| {
+        let p = e.payload.as_deref().unwrap_or("");
+        p.contains("\"version\":2")
+    }).collect();
+    assert!(!v2_events.is_empty(), "v2 should be on the timeline");
+    assert!(
+        v2_events.iter().all(|e| e.event_type != "plan.pending"),
+        "inherited amend must not emit plan.pending"
+    );
+    assert!(
+        v2_events.iter().any(|e| e.event_type == "plan.approved"),
+        "inherited amend should emit plan.approved"
+    );
+}
+
+/// Propose → approve → amend that ADDS a step (envelope expansion). The
+/// amendment must RE-OPEN the gate: status `awaiting_approval`, `inherited
+/// == false`, `requires_regate == true`, and the diff_summary calls out the
+/// added step so the operator sees what they are approving.
+#[test]
+fn planframe_amend_regates_on_envelope_expansion() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-regate/planner";
+
+    let propose = json!({
+        "title": "Weather Agent",
+        "objective": "Build a weather agent",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    // Envelope-expanding amend: add step s2.
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Implement" },
+            { "step_id": "s2", "title": "Package" }
+        ],
+        "reason": "Added packaging step"
+    });
+    let result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed["status"], "awaiting_approval", "envelope change re-gates");
+    assert_eq!(parsed["inherited"], false);
+    assert_eq!(parsed["requires_regate"], true);
+    assert!(
+        parsed["diff_summary"].as_str().unwrap().contains("+step s2"),
+        "diff_summary should call out the added step: {}",
+        parsed["diff_summary"]
+    );
+
+    let latest = store.load_plan_frame(&plan_id).unwrap().unwrap();
+    assert_eq!(latest.status, PlanStatus::AwaitingApproval);
+    assert!(latest.approved_at.is_none(), "re-gated revision is not approved");
+
+    // The timeline must carry plan.pending for the re-gated amend.
+    let tl = store.list_session_timeline("root-session-regate", None, 50, None, None).unwrap();
+    assert!(
+        tl.entries.iter().any(|e| e.event_type == "plan.pending"
+            && e.payload.as_deref().unwrap_or("").contains("\"version\":2")),
+        "envelope-expanding amend should emit plan.pending for v2"
+    );
+}
+
+/// Propose v1 (still awaiting approval) → amend to v2. The older revision must
+/// be superseded: its approval cancelled, its plan frame marked cancelled, and
+/// `plan.withdrawn` emitted so the Session Room does not keep offering v1.
+#[test]
+fn planframe_amend_supersedes_pending_revision() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-supersede/planner";
+
+    let propose = json!({
+        "title": "Initial plan",
+        "objective": "First draft",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Implement" },
+            { "step_id": "s2", "title": "Package" }
+        ],
+        "reason": "Expanded scope"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed["status"], "awaiting_approval");
+    assert_eq!(parsed["version"], 2);
+
+    let v1 = store.load_plan_frame_revision(&plan_id, 1).unwrap().unwrap();
+    assert_eq!(v1.status, PlanStatus::Cancelled);
+
+    let v1_approval = store
+        .get_approval(&format!("apr-plan-{plan_id}-v1"))
+        .unwrap()
+        .expect("v1 approval row");
+    assert_eq!(
+        v1_approval.status,
+        Some(autonoetic_types::background::ApprovalStatus::Cancelled)
+    );
+
+    let v2_approval = store
+        .get_approval(&format!("apr-plan-{plan_id}-v2"))
+        .unwrap()
+        .expect("v2 approval row");
+    assert_eq!(v2_approval.status, None);
+
+    let pending = autonoetic_gateway::scheduler::pending_plan_frames_for_root(
+        &store,
+        "root-session-supersede",
+    )
+    .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].version, 2);
+
+    let tl = store
+        .list_session_timeline("root-session-supersede", None, 50, None, None)
+        .unwrap();
+    assert!(
+        tl.entries.iter().any(|e| e.event_type == "plan.withdrawn"
+            && e.payload.as_deref().unwrap_or("").contains("\"version\":1")),
+        "superseded v1 should emit plan.withdrawn"
+    );
+    assert!(
+        tl.entries.iter().any(|e| e.event_type == "plan.pending"
+            && e.payload.as_deref().unwrap_or("").contains("\"version\":2")),
+        "v2 should emit plan.pending"
+    );
+}
+
+/// Race guard: if the prior revision's approval is no longer pending when an
+/// amend runs (operator decided it concurrently), supersession must be skipped
+/// — the old revision is NOT marked cancelled and NO `plan.withdrawn` is emitted.
+#[test]
+fn planframe_amend_skips_supersede_when_prior_approval_no_longer_pending() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-race/planner";
+
+    let propose = json!({
+        "title": "Initial plan",
+        "objective": "First draft",
+        "steps": [{ "step_id": "s1", "title": "Implement" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    // Simulate a concurrent operator decision: the v1 approval is no longer
+    // pending by the time the amend runs. (Any non-pending state makes the
+    // supersede's own cancel_approval fail with rows == 0.)
+    store
+        .cancel_approval(
+            &format!("apr-plan-{plan_id}-v1"),
+            "operator",
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .expect("pre-cancel of v1 approval");
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Implement" },
+            { "step_id": "s2", "title": "Package" }
+        ],
+        "reason": "Expanded scope"
+    });
+    registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    // Supersede was skipped: v1's revision status is untouched (not Cancelled).
+    let v1 = store.load_plan_frame_revision(&plan_id, 1).unwrap().unwrap();
+    assert_eq!(v1.status, PlanStatus::AwaitingApproval);
+
+    // No plan.withdrawn emitted for the amend.
+    let tl = store
+        .list_session_timeline("root-session-race", None, 50, None, None)
+        .unwrap();
+    assert!(
+        !tl.entries.iter().any(|e| e.event_type == "plan.withdrawn"),
+        "no plan.withdrawn should be emitted when the prior approval was already decided"
+    );
+
+    // v2 still created and awaiting approval.
+    let v2 = store.load_plan_frame_revision(&plan_id, 2).unwrap().unwrap();
+    assert_eq!(v2.status, PlanStatus::AwaitingApproval);
 }
 
 #[test]
@@ -982,4 +1317,418 @@ fn planframe_get_with_version_returns_specific_revision() {
 
     let parsed_latest: serde_json::Value = serde_json::from_str(&result_latest).unwrap();
     assert_eq!(parsed_latest["plan"]["version"], 2);
+}
+
+/// Pillar C wiring: approving a plan must surface `grants_materialized` in
+/// the response (and the workflow event payload), and an envelope-expanding
+/// amend must surface `grants_revoked`. With the real installed agents
+/// (planner.default has no NetworkAccess) both counts are 0, but the fields
+/// and code paths are exercised end-to-end. The store-level revoke round-trip
+/// is tested separately in `approval_grant_revocation_integration`.
+#[test]
+fn plan_approval_reports_grants_materialized_and_amend_reports_revoke() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-grant-wiring/planner";
+
+    // Propose + approve a minimal plan.
+    let propose = json!({
+        "title": "Grant Wiring",
+        "objective": "verify the materialize + revoke fields are wired",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let approve_result = registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
+    assert_eq!(parsed["status"], "approved");
+    // planner.default declares no NetworkAccess → no hosts materialized.
+    // The field must exist and be 0 (proves the materialization path ran
+    // and correctly found no concrete hosts).
+    assert!(parsed["grants_materialized"].is_u64());
+    assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 0);
+
+    // Cosmetic amend on the approved v1 → inherit (no envelope change),
+    // status stays approved, grants_revoked stays 0. The cosmetic branch
+    // MUST run first so the parent is Approved; an amend on an
+    // AwaitingApproval plan never inherits regardless of diff.
+    let cosmetic = json!({
+        "plan_id": plan_id,
+        "objective": "refined wording (no envelope change)",
+        "reason": "cosmetic only"
+    });
+    let cosmetic_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&cosmetic).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed_cos: serde_json::Value = serde_json::from_str(&cosmetic_result).unwrap();
+    assert_eq!(parsed_cos["inherited"], true);
+    assert!(parsed_cos["grants_revoked"].is_u64());
+    assert_eq!(parsed_cos["grants_revoked"].as_u64().unwrap(), 0);
+
+    // Envelope-expanding amend (add a step) on the inherited-approved v2 →
+    // re-gate branch revokes the plan's prior grants by source. With 0 prior
+    // grants (planner has no NetworkAccess), 0 are revoked; the field must
+    // exist and the code path must execute.
+    let amend = json!({
+        "plan_id": plan_id,
+        "steps": [
+            { "step_id": "s1", "title": "Step 1" },
+            { "step_id": "s2", "title": "Step 2 (new)" }
+        ],
+        "reason": "envelope expansion to exercise the revoke branch"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t4"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed_amend: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed_amend["requires_regate"], true);
+    assert_eq!(parsed_amend["inherited"], false);
+    assert!(parsed_amend["grants_revoked"].is_u64());
+    assert_eq!(parsed_amend["grants_revoked"].as_u64().unwrap(), 0);
+}
+
+fn curl_trace(session_id: &str, command: &str) -> autonoetic_types::causal_chain::ExecutionTraceRecord {
+    autonoetic_types::causal_chain::ExecutionTraceRecord {
+        trace_id: format!("trace-{}", uuid::Uuid::new_v4()),
+        event_id: None,
+        agent_id: "researcher.default".to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        timestamp: "2026-06-14T12:00:00Z".to_string(),
+        tool_name: "sandbox_exec".to_string(),
+        command: Some(command.to_string()),
+        exit_code: Some(0),
+        stdout: None,
+        stderr: None,
+        duration_ms: 10,
+        success: 1,
+        error_type: None,
+        error_summary: None,
+        approval_required: None,
+        approval_request_id: None,
+        arguments: Some(format!(r#"{{"command":"{command}"}}"#)),
+        result: None,
+    }
+}
+
+#[test]
+fn plan_approval_materializes_declared_capability_envelope() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let root = "root-cap-envelope";
+    let session_id = format!("{root}/planner");
+
+    let propose = json!({
+        "title": "Declared envelope",
+        "objective": "verify capability_envelope grants",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }],
+        "capability_envelope": [
+            { "type": "NetworkAccess", "hosts": ["api.example.com"] }
+        ]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(&session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let approve_result = registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(&session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
+    assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 1);
+    assert!(store.session_grants_cover_targets(root, &["api.example.com".to_string()]));
+
+    let proposed = store.get_proposed_envelopes(root).unwrap();
+    assert_eq!(proposed.len(), 1);
+    assert!(matches!(
+        &proposed[0].capability,
+        Capability::NetworkAccess { hosts } if hosts == &vec!["api.example.com".to_string()]
+    ));
+}
+
+#[test]
+fn plan_approval_proposes_discovered_hosts_when_envelope_empty() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let root = "root-discover-envelope";
+    let session_id = format!("{root}/planner");
+
+    store
+        .create_execution_trace(&curl_trace(
+            root,
+            "curl -s https://api.open-meteo.com/v1/forecast",
+        ))
+        .unwrap();
+
+    let propose = json!({
+        "title": "Discovery envelope",
+        "objective": "verify discovery fallback",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(&session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    let approve_result = registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(&session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
+    assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 0);
+
+    // With auto-lock, the discovered envelope is immediately locked and
+    // grants are materialized — no pending proposal remains.
+    let proposed = store.get_proposed_envelopes(root).unwrap();
+    assert_eq!(proposed.len(), 0);
+    let active = store.get_active_envelopes(root).unwrap();
+    assert_eq!(active.len(), 1);
+    assert!(matches!(
+        &active[0].capability,
+        Capability::NetworkAccess { hosts } if hosts == &vec!["api.open-meteo.com".to_string()]
+    ));
+}
+
+#[test]
+fn planframe_amend_regates_on_capability_envelope_broadening() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-cap-regate/planner";
+
+    let propose = json!({
+        "title": "Cap regate",
+        "objective": "test capability delta regate",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }],
+        "capability_envelope": [
+            { "type": "NetworkAccess", "hosts": ["api.example.com"] }
+        ]
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "capability_envelope": [
+            { "type": "NetworkAccess", "hosts": ["api.example.com", "cdn.example.com"] }
+        ],
+        "reason": "add CDN host discovered during research"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed["requires_regate"], true);
+    assert_eq!(parsed["inherited"], false);
+    assert!(parsed["diff_summary"]
+        .as_str()
+        .unwrap()
+        .contains("+capability"));
+}
+
+#[test]
+fn planframe_amend_inherits_when_capability_envelope_unchanged() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-cap-inherit/planner";
+
+    let envelope = json!([
+        { "type": "NetworkAccess", "hosts": ["api.example.com"] }
+    ]);
+    let propose = json!({
+        "title": "Cap inherit",
+        "objective": "unchanged capability_envelope should inherit",
+        "steps": [{ "step_id": "s1", "title": "Step 1" }],
+        "capability_envelope": envelope
+    });
+    let result = registry
+        .execute("planframe_propose", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&propose).unwrap(),
+            Some(session_id), Some("t1"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let plan_id = serde_json::from_str::<serde_json::Value>(&result).unwrap()["plan_id"]
+        .as_str().unwrap().to_string();
+
+    registry
+        .execute("planframe_approve", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&json!({ "plan_id": plan_id })).unwrap(),
+            Some(session_id), Some("t2"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+
+    let amend = json!({
+        "plan_id": plan_id,
+        "objective": "progress note only",
+        "capability_envelope": envelope,
+        "reason": "same network scope"
+    });
+    let amend_result = registry
+        .execute("planframe_amend", &manifest, &policy, dir.path(),
+            Some(&gateway_dir), &serde_json::to_string(&amend).unwrap(),
+            Some(session_id), Some("t3"), Some(&config), Some(store.clone()), None)
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(parsed["inherited"], true);
+    assert_eq!(parsed["requires_regate"], false);
+    assert_eq!(parsed["diff_summary"], "no envelope change");
+}
+
+// Auto-approve convenience (config: plan_auto_approve). When enabled, a proposed
+// plan is approved immediately by the configured authority identity, so
+// local/dev and autonomous runs (no operator in the loop) don't stall waiting
+// for approval. Default remains off (separation of powers). (#602 follow-up)
+#[test]
+fn planframe_propose_auto_approves_when_config_enabled() {
+    let dir = tempdir().unwrap();
+    let mut config = make_config(dir.path());
+    config.plan_auto_approve = true;
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+    let session_id = "root-session-auto/planner-auto";
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({
+                "title": "Auto",
+                "objective": "Auto-approve on propose"
+            }))
+            .unwrap(),
+            Some(session_id),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["status"], "approved", "auto-approve should approve on propose: {result}");
+    assert_eq!(v["auto_approved"], true);
+
+    let plan_id = v["plan_id"].as_str().unwrap();
+    let plan = store.load_plan_frame(plan_id).unwrap().unwrap();
+    assert_eq!(plan.status, PlanStatus::Approved);
+    assert_eq!(plan.approved_by.as_deref(), Some("auto-approve"));
+}
+
+// Default (auto-approve off): proposing leaves the plan awaiting approval.
+#[test]
+fn planframe_propose_defaults_to_awaiting_approval() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path()); // plan_auto_approve defaults to false
+    assert!(!config.plan_auto_approve);
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&json!({"title": "Manual", "objective": "Await approval"})).unwrap(),
+            Some("root-session-manual/planner-manual"),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["status"], "awaiting_approval");
+    assert_eq!(v["auto_approved"], false);
 }

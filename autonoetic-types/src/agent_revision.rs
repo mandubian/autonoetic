@@ -163,6 +163,17 @@ pub struct AgentRevisionRecord {
     pub created_by_type: String,
     /// Actor ID that created this revision.
     pub created_by_id: String,
+    /// The designing/requesting principal: the agent (or human principal) whose
+    /// delegation initiated this revision's creation. Derived by the gateway
+    /// from the calling session's spawn lineage (never from LLM-supplied tool
+    /// arguments); `None` when underivable. Distinct from `created_by_*`, which
+    /// names the installer that actually called the tool (in practice always
+    /// `specialized_builder.default`).
+    #[serde(default)]
+    pub requested_by_type: Option<String>,
+    /// See [`requested_by_type`](Self::requested_by_type).
+    #[serde(default)]
+    pub requested_by_id: Option<String>,
     /// Source kind: `artifact`, `capsule_import`, `peer_import`.
     pub source_kind: String,
     /// Source reference (artifact id, capsule id, or peer ref).
@@ -178,6 +189,10 @@ pub struct AgentRevisionRecord {
     /// Collision-safe short ID for LLM-friendly references (e.g., `abc12345`).
     #[serde(default)]
     pub short_id: String,
+    /// Hostnames detected in artifact source at install time (gateway-owned contract).
+    /// `None` on pre-migration revisions — unconstrained for drift signals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_network_hosts: Option<Vec<String>>,
     /// Ed25519 signature over the canonical revision content digest (base64).
     /// Produced by the gateway at revision creation time (P-9.13 auto-sign).
     /// Verified against the signer's public key for integrity attestation.
@@ -208,6 +223,41 @@ pub struct AgentAliasRecord {
     pub updated_by_id: String,
     /// Optional free-text reason for the update.
     pub reason: Option<String>,
+    /// RFC3339 timestamp when the agent was suspended (None = active).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<String>,
+    /// Reason for suspension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_reason: Option<String>,
+    /// Actor that suspended the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_by: Option<String>,
+}
+
+impl AgentAliasRecord {
+    /// Create a basic alias record with no suspension.
+    pub fn new(
+        alias_id: String,
+        agent_id: String,
+        revision_id: String,
+        updated_at: String,
+        updated_by_type: String,
+        updated_by_id: String,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            alias_id,
+            agent_id,
+            revision_id,
+            updated_at,
+            updated_by_type,
+            updated_by_id,
+            reason,
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
+        }
+    }
 }
 
 /// Session-to-agent-revision binding, pinned at session start.
@@ -225,6 +275,12 @@ pub struct SessionAgentBinding {
     pub revision_id: String,
     /// Pinned runtime closure hash.
     pub runtime_lock_hash: String,
+    /// Constitution version that admitted this session (#821), captured at
+    /// session start from the gateway's active constitution. `None` when
+    /// the constitution runtime was never initialized (e.g. some tests).
+    pub constitution_version: Option<String>,
+    /// Constitution digest paired with `constitution_version` above.
+    pub constitution_digest: Option<String>,
     /// Home node for future distributed placement.
     pub home_node_id: String,
     /// RFC3339 creation timestamp.
@@ -271,6 +327,13 @@ pub struct PromotionRecord {
     pub created_by_id: String,
     /// Origin node for provenance.
     pub origin_node_id: String,
+    /// JSON-encoded pre-authorization metadata when the capability gate was
+    /// bypassed. Examples:
+    /// `{"method":"envelope","envelope_id":42,"rule":"P-2.27"}`
+    /// `{"method":"escalation","escalation_id":"fed-xxx"}`
+    /// `{"method":"approval","approval_id":"appr-yyy"}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_authorization: Option<String>,
 }
 
 /// Crockford Base32 alphabet for human-friendly short IDs.
@@ -520,6 +583,9 @@ mod tests {
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "admin".to_string(),
             reason: Some("initial promotion".to_string()),
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         };
         let json = serde_json::to_string(&record).expect("should serialize");
         let parsed: AgentAliasRecord = serde_json::from_str(&json).expect("should deserialize");
@@ -536,6 +602,8 @@ mod tests {
             agent_id: "planner.default".to_string(),
             revision_id: "rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
             runtime_lock_hash: "sha256:lock123".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
             home_node_id: "gateway-1".to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             requested_target: "planner.default@rev_sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),

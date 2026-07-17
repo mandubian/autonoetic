@@ -6,6 +6,7 @@
 
 use crate::log_redaction::redact_text_for_logs;
 use crate::runtime::live_digest::{base_session_id, session_depth};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -150,6 +151,7 @@ pub struct SessionReportWriter {
     depth: usize,
     payload_counter: u32,
     content_store: Option<crate::runtime::content_store::ContentStore>,
+    live_html_on_update: bool,
 }
 
 impl SessionReportState {
@@ -201,6 +203,15 @@ impl AgentReport {
 
 impl SessionReportWriter {
     pub fn open(gateway_dir: &Path, session_id: &str, agent_id: &str) -> anyhow::Result<Self> {
+        Self::open_with_options(gateway_dir, session_id, agent_id, false)
+    }
+
+    pub fn open_with_options(
+        gateway_dir: &Path,
+        session_id: &str,
+        agent_id: &str,
+        live_html_on_update: bool,
+    ) -> anyhow::Result<Self> {
         let base = base_session_id(session_id);
         let dir = gateway_dir.join("sessions").join(base);
         std::fs::create_dir_all(&dir)?;
@@ -224,6 +235,7 @@ impl SessionReportWriter {
             depth: session_depth(session_id),
             payload_counter,
             content_store,
+            live_html_on_update,
         })
     }
 
@@ -692,12 +704,13 @@ impl SessionReportWriter {
 
     pub fn finish_session(
         &mut self,
-        reason: &str,
+        outcome: SessionCloseOutcome,
         latest_assistant_output: Option<&str>,
     ) -> anyhow::Result<()> {
         self.update_state_and_finalize(|state| {
             let now = chrono::Utc::now().to_rfc3339();
-            let status = status_from_close_reason(reason);
+            let status = status_from_close_reason(outcome.as_str());
+            let reason = outcome.as_str();
             state.status = status.to_string();
             state.ended_at = Some(now.clone());
             let agent = ensure_agent(state, &self.session_id, &self.agent_id, self.depth);
@@ -760,10 +773,12 @@ impl SessionReportWriter {
         f(&mut state);
         state.generated_at = chrono::Utc::now().to_rfc3339();
         let live_md = render_live_markdown(&state);
-        let live_html = render_live_html(&state);
         write_json_atomic(&self.state_path, &state)?;
         write_string_atomic(&self.live_md_path, &live_md)?;
-        write_string_atomic(&self.live_html_path, &live_html)?;
+        if self.live_html_on_update {
+            let live_html = render_live_html(&state);
+            write_string_atomic(&self.live_html_path, &live_html)?;
+        }
         Ok(())
     }
 
@@ -3302,24 +3317,23 @@ fn truncate_json(value: &Value, max_len: usize) -> Value {
 }
 
 fn truncate_json_strings(value: &mut Value, max_len: usize) {
-    match value {
-        Value::String(s) => {
-            if s.len() > max_len {
-                let truncated: String = s.chars().take(max_len).collect();
-                *s = format!("{}…", truncated);
+    let mut stack: Vec<&mut Value> = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            Value::String(s) => {
+                if s.len() > max_len {
+                    let truncated: String = s.chars().take(max_len).collect();
+                    *s = format!("{}…", truncated);
+                }
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                truncate_json_strings(item, max_len);
+            Value::Array(items) => {
+                stack.extend(items.iter_mut());
             }
-        }
-        Value::Object(map) => {
-            for value in map.values_mut() {
-                truncate_json_strings(value, max_len);
+            Value::Object(map) => {
+                stack.extend(map.values_mut());
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -3459,7 +3473,7 @@ mod tests {
             )
             .unwrap();
         writer
-            .finish_session("session suspended awaiting approval", None)
+            .finish_session(SessionCloseOutcome::ExecuteLoopSuspended, None)
             .unwrap();
 
         let session_dir = gateway_dir.join("sessions").join("root");
@@ -3488,7 +3502,7 @@ mod tests {
         writer.start_session("Initial task").unwrap();
         writer.start_turn(Some("turn-1")).unwrap();
         writer
-            .finish_session("jsonrpc_spawn_complete", Some("done"))
+            .finish_session(SessionCloseOutcome::JsonRpcSpawnComplete, Some("done"))
             .unwrap();
 
         writer.start_session("stray reopen").unwrap();

@@ -1,0 +1,328 @@
+# Agent Capabilities Reference
+
+> **⚠ SUPERSEDED (2026-07-11).** The canonical capability reference is now
+> `docs/AGENTS.md` → Capabilities System, which is kept in sync with the
+> `Capability` enum in `autonoetic-types/src/capability.rs` (the source of
+> truth). The table below lists only ~8 of the ~30 variants the gateway
+> actually enforces and does not reflect constitution-named capabilities
+> (`GateDecider`, `CapsuleExport`, `ConstitutionalProposal`,
+> `ReasoningAudit`, `AgentRevision`, `EmergencyStop`, `CredentialAccess`,
+> …). Use it only as historical reference.
+
+## Overview
+
+This document describes the capability system used by Autonoetic agents. Capabilities define what tools and resources an agent can access.
+
+## Capability Types
+
+| Capability | Required Fields | Purpose |
+|------------|-----------------|---------|
+| `SandboxFunctions` | `allowed: [string]` | Access to MCP tools by prefix |
+| `ReadAccess` | `scopes: [string]` | Read content, memory, knowledge |
+| `WriteAccess` | `scopes: [string]` | Write content, memory, knowledge |
+| `CodeExecution` | `patterns: [string]` | Execute command strings with `sandbox_exec` |
+| `ArtifactExecution` | none | Execute immutable artifact entrypoints with `artifact_exec` |
+| `NetworkAccess` | `hosts: [string]` | Make HTTP requests |
+| `AgentSpawn` | `max_children: integer` | Create child agent sessions |
+| `AgentMessage` | `patterns: [string]` | Send messages to other agents |
+
+## Tool Capability Mapping
+
+### Content Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `content_write` | `WriteAccess` | Write to content store with visibility |
+
+### Artifact Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `artifact_build` | `WriteAccess` | Build immutable artifact from session content |
+| `artifact_inspect` | `ReadAccess` | Inspect artifact files and metadata |
+| `resolve` | `ReadAccess` | One front door: resolve any artifact/content handle |
+| `artifact_prepare` | `ArtifactExecution` | Preflight for artifact execution (approval + credentials) |
+| `artifact_exec` | `ArtifactExecution` | Execute artifact entrypoint with artifact-bound approval reuse. Legacy promotion-gate manifests may also receive this narrowly through explicit `SandboxFunctions` declarations. |
+
+### Agent Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `agent_spawn` | `AgentSpawn` | Spawn child agent sessions |
+| `agent_discover` | `SandboxFunctions: ["agent_"]` | Discover available agents |
+| `agent_inspect` | `ReadAccess` | Inspect any agent's metadata/capabilities/revision (existence check = it resolves) |
+
+### Revision & Activation Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `agent_revision_create` | `AgentRevision` | Create immutable revision from an AgentBundle artifact |
+| `agent_revision_list` | `AgentRevision` | List revisions for an agent |
+| `agent_revision_inspect` | `AgentRevision` | Inspect revision metadata and status |
+| `agent_revision_promote` | `AgentRevision` | Move alias to a revision (activates it) |
+| `agent_revision_rollback` | `AgentRevision` | Roll alias back to a prior revision |
+| `agent_revision_diff` | `AgentRevision` | File-level diff between two revisions |
+
+> **Note:** `agent.install` has been removed from the runtime tool surface. The only path to activate a new logical agent is: `artifact_build` → `agent_revision_create` → `agent_revision_promote`.
+
+### Knowledge Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `knowledge_recall` | `ReadAccess` | Recall stored knowledge (visibility + session + expiry enforced) |
+| `knowledge_store` | `WriteAccess` | Store or update knowledge; `visibility` (`session` default) and `retention` |
+| `knowledge_search` | `ReadAccess` | Search a scope by content and/or AND-matched tags |
+| `digest_query` | `ReadAccess` | Post-session narrative / digest |
+
+### Sandbox Tools
+| Tool | Requires Capability | Notes |
+|------|---------------------|-------|
+| `sandbox_exec` | `CodeExecution` | Execute scripts with patterns |
+
+`CodeExecution` and `ArtifactExecution` are deliberately disjoint. Holding one
+does not grant the other. This lets shell-oriented roles execute scratch
+commands without running arbitrary artifacts, and artifact-oriented roles run
+content-addressed entrypoints without receiving a general shell.
+
+This is a strict capability boundary: revisions created before the split must
+declare `ArtifactExecution` in a new reviewed revision if they need
+`artifact_exec` or `artifact_prepare`. `CodeExecution` is not treated as a
+compatibility fallback.
+
+## Important: SandboxFunctions vs Native Tools
+
+**Common misconception**: `SandboxFunctions` with prefix `"content_"` grants access to `resolve`, `content_write`, etc.
+
+**Reality**: `SandboxFunctions` is for **MCP (Model Context Protocol) tools only**. Native content tools require `ReadAccess` and `WriteAccess` capabilities.
+
+```
+❌ WRONG:
+  capabilities:
+    - type: "SandboxFunctions"
+      allowed: ["content_"]  # This does NOT grant resolve access!
+
+✅ CORRECT:
+  capabilities:
+    - type: "ReadAccess"
+      scopes: ["self.*"]
+    - type: "WriteAccess"
+      scopes: ["self.*"]
+```
+
+## Agent Capability Matrix
+
+### Standard Agents
+
+| Agent | ReadAccess | WriteAccess | CodeExecution | NetworkAccess | AgentSpawn | AgentRevision |
+|-------|------------|-------------|---------------|---------------|------------|--------------|
+| **planner.default** | ✅ | ✅ | ❌ | ❌ | ✅ (10) | ❌ Delegates to specialized_builder |
+| **specialized_builder.default** | ✅ | ✅ | ❌ | ❌ | ✅ (5) | ✅ **EXCLUSIVE** |
+| **coder.default** | ✅ | ✅ | Artifact only | ❌ | ❌ | ❌ |
+| **researcher.default** | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ |
+| **architect.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **debugger.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **auditor.default** | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **agent-adapter.default** | ✅ | ✅ | ✅ | ❌ | ✅ (5) | ❌ Must delegate |
+
+### Capability Details by Agent
+
+#### planner.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_", "agent_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*"]
+  - type: "AgentSpawn"
+    max_children: 10
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*"]
+```
+- **Role**: Front-door lead agent, interprets goals, delegates to specialists
+- **Cannot**: Execute code, install agents directly, make HTTP requests
+
+#### specialized_builder.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_", "agent_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*", "agents/*"]
+  - type: "AgentSpawn"
+    max_children: 5
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*", "agents/*"]
+  - type: "AgentRevision"
+    patterns: ["*"]
+```
+- **Role**: **EXCLUSIVE** agent activator — only agent that calls `agent_revision_create` + `agent_revision_promote`
+- **Cannot**: Execute code, make HTTP requests
+
+#### coder.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*", "scripts/*"]
+  - type: "ArtifactExecution"
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*", "scripts/*"]
+```
+- **Role**: Code production and immutable artifact execution
+- **Cannot**: Install agents, make HTTP requests directly
+
+#### researcher.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_", "web_", "mcp_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*"]
+  - type: "NetworkAccess"
+    hosts: ["*"]
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*"]
+```
+- **Role**: Evidence gathering, web research
+- **Cannot**: Execute code, install agents
+
+#### architect.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*"]
+  - type: "CodeExecution"
+    patterns: ["python3 scripts/*"]
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*"]
+```
+- **Role**: System design, prototyping
+- **Cannot**: Install agents, make HTTP requests
+
+#### debugger.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_", "sandbox_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*"]
+  - type: "CodeExecution"
+    patterns: ["python3 scripts/*", "node *", "bash *"]
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*"]
+```
+- **Role**: Root cause analysis, targeted fixes
+- **Cannot**: Install agents, make HTTP requests
+
+#### auditor.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*"]
+  - type: "CodeExecution"
+    patterns: ["python3 scripts/*"]
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*"]
+```
+- **Role**: Correctness review, reproducibility verification
+- **Cannot**: Install agents, make HTTP requests
+
+#### agent-adapter.default
+```yaml
+capabilities:
+  - type: "SandboxFunctions"
+    allowed: ["knowledge_", "sandbox_"]
+  - type: "ReadAccess"
+    scopes: ["self.*", "skills/*"]
+  - type: "CodeExecution"
+    patterns: ["python3 scripts/*"]
+  - type: "AgentSpawn"
+    max_children: 5
+  - type: "WriteAccess"
+    scopes: ["self.*", "skills/*"]
+```
+- **Role**: Generate wrapper agents for I/O bridging
+- **Note**: Must delegate agent installation to specialized_builder
+
+## Delegation Model
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              PLANNER (Lead)                                 │
+│  • Interprets goals                                                         │
+│  • Delegates to specialists                                                 │
+│  • Synthesizes responses                                                    │
+│  • CANNOT install agents or execute code                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                ┌───────────────────┼───────────────────┐
+                ▼                   ▼                   ▼
+┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐
+│  SPECIALIZED_BUILDER  │ │      CODER            │ │     RESEARCHER        │
+│  • Creates revisions  │ │  • Writes code        │ │  • Gathers evidence   │
+│  • ONLY agent that    │ │  • Executes in sandbox│ │  • Has network access │
+│    can promote agents │ │  • Tests before return│ │  • Cites sources      │
+└───────────────────────┘ └───────────────────────┘ └───────────────────────┘
+                                    │
+                ┌───────────────────┼───────────────────┐
+                ▼                   ▼                   ▼
+┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐
+│     ARCHITECT         │ │      DEBUGGER         │ │      AUDITOR          │
+│  • Designs systems    │ │  • Root cause analysis│ │  • Review & audit     │
+│  • Creates prototypes │ │  • Targeted fixes     │ │  • Verify results     │
+│  • Documents decisions│ │  • Reproduces issues  │ │  • Risk assessment    │
+└───────────────────────┘ └───────────────────────┘ └───────────────────────┘
+```
+
+## Capability Format Examples
+
+### NetworkAccess (requires `hosts` field)
+```json
+{"type": "NetworkAccess", "hosts": ["api.example.com"]}
+{"type": "NetworkAccess", "hosts": ["*"]}  // Only for genuine open-web agents (e.g. researcher, web-search)
+```
+
+Prefer concrete hosts. During `agent_revision_create_from_intent`, the gateway statically analyzes the artifact source and rejects the revision if the code contacts hosts not listed in the capability. Use `hosts: ["*"]` only when the agent cannot enumerate its targets upfront (e.g., a researcher that follows arbitrary URLs).
+
+### SandboxFunctions (for MCP tools)
+```json
+{"type": "SandboxFunctions", "allowed": ["web_", "resolve"]}
+```
+
+### CodeExecution (script patterns)
+```json
+{"type": "CodeExecution", "patterns": ["python3 scripts/*", "node *"]}
+```
+
+### ReadAccess/WriteAccess (scopes)
+```json
+{"type": "ReadAccess", "scopes": ["self.*", "shared.*"]}
+{"type": "WriteAccess", "scopes": ["self.*", "agents/*"]}
+```
+
+### AgentSpawn (max children)
+```json
+{"type": "AgentSpawn", "max_children": 5}
+```
+
+## Common Mistakes
+
+1. **Using `SandboxFunctions: ["content."]` for content access**
+   - Wrong: Use `ReadAccess`/`WriteAccess` instead
+
+2. **Adding extra fields to capabilities**
+   - Wrong: `{"type": "NetworkAccess", "description": "...", "hosts": [...]}`
+   - Correct: `{"type": "NetworkAccess", "hosts": [...]}`
+
+3. **Planner trying to activate an agent directly**
+   - Wrong: Planner calls `agent_revision_create` or `agent_revision_promote`
+   - Correct: Planner delegates to `specialized_builder.default` via `agent_spawn`
+
+4. **Bypassing eval gating for promotion**
+   - `agent_revision_promote` can require a passed `required_eval_run_id`
+   - Pass `eval_run` output to `specialized_builder` so it can include it in the promote call
+
+## See Also
+
+- [AGENTS.md](AGENTS.md) — agent model, lifecycle, tool surface
+- [ARCHITECTURE.md](ARCHITECTURE.md) — revision & activation model, gateway internals

@@ -294,8 +294,8 @@ fn check_auto_approve_eligibility(
         return false;
     }
 
-    // Constitutional hard rule: L3 never applies to agents with CodeExecution
-    // or AgentSpawn capabilities, regardless of track record. Parse the SKILL.md
+    // Constitutional hard rule: L3 never applies to agents with execution or
+    // AgentSpawn capabilities, regardless of track record. Parse the SKILL.md
     // front-matter to check.
     let skill_path = config.agents_dir.join(agent_id).join("SKILL.md");
     if let Ok(content) = std::fs::read_to_string(&skill_path) {
@@ -303,6 +303,7 @@ fn check_auto_approve_eligibility(
             for cap in &manifest.capabilities {
                 match cap {
                     autonoetic_types::capability::Capability::CodeExecution { .. }
+                    | autonoetic_types::capability::Capability::ArtifactExecution
                     | autonoetic_types::capability::Capability::AgentSpawn { .. } => return false,
                     _ => {}
                 }
@@ -522,6 +523,8 @@ fn propose_improvement(
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
         created_by_id: "autonoetic improve".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "improvement_proposal".to_string(),
         source_ref: Some(format!("sessions:{}", session_ids.join(","))),
         origin_node_id: "gateway".to_string(),
@@ -529,6 +532,7 @@ fn propose_improvement(
         status: AgentRevisionStatus::Candidate,
         metadata_json: metadata,
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -602,6 +606,7 @@ async fn handle_propose_code_fix(
             id: "autonoetic-cli".to_string(),
             name: "Autonoetic CLI".to_string(),
             description: "CLI code-issue-proposer".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::GithubIssueCreate {
             patterns: vec!["*".into()],
@@ -620,8 +625,10 @@ async fn handle_propose_code_fix(
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     };
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
@@ -772,6 +779,7 @@ fn run_ab_replay(
             id: "autonoetic-cli".to_string(),
             name: "Autonoetic CLI".to_string(),
             description: "CLI improve command".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::Evaluation {
             patterns: vec!["*".into()],
@@ -790,8 +798,10 @@ fn run_ab_replay(
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     };
 
@@ -880,6 +890,7 @@ fn promote_manifest() -> AgentManifest {
             id: "autonoetic-cli".to_string(),
             name: "Autonoetic CLI".to_string(),
             description: "CLI improve command".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".into()],
@@ -898,8 +909,10 @@ fn promote_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }

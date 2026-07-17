@@ -312,6 +312,29 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_expired_interactions_for_root_session(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<UserInteraction>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT interaction_id FROM user_interactions WHERE root_session_id = ?1 AND status = 'expired'",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let id = row?;
+            if let Some(interaction) = Self::get_user_interaction_with_conn(&conn, &id)? {
+                results.push(interaction);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn get_answered_standalone_interactions(&self) -> Result<Vec<UserInteraction>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

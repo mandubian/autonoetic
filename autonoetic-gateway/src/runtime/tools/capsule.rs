@@ -1,6 +1,9 @@
 //! Agent-initiated capsule tools: `capsule.export` / `capsule.import`.
 //!
-//! Both gated by [`Capability::CapsuleExport`].
+//! `capsule.export` is gated by [`Capability::CapsuleExport`] (broad,
+//! operator-granted — any agent_id) **or** [`Capability::SelfCapsuleExport`]
+//! (scoped — only the caller's own `agent_id`, per Ri-0.17 emigration).
+//! `capsule.import` is gated by [`Capability::CapsuleExport`] only.
 
 use crate::capsule::{export, import, ExportContext, ExportRequest, ImportContext, ImportRequest};
 use crate::llm::ToolDefinition;
@@ -63,21 +66,24 @@ pub struct CapsuleExportTool;
 
 impl NativeTool for CapsuleExportTool {
     fn name(&self) -> &'static str {
-        "capsule.export"
+        "capsule_export"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
-        manifest
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::CapsuleExport))
+        manifest.capabilities.iter().any(|cap| {
+            matches!(
+                cap,
+                Capability::CapsuleExport | Capability::SelfCapsuleExport
+            )
+        })
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
             description: "Export an agent revision as a Cognitive Capsule archive. \
-                          Requires the CapsuleExport capability."
+                          Requires the CapsuleExport capability (any agent) or \
+                          SelfCapsuleExport (own agent only, Ri-0.17)."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -97,7 +103,7 @@ impl NativeTool for CapsuleExportTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         policy: &PolicyEngine,
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
@@ -108,15 +114,25 @@ impl NativeTool for CapsuleExportTool {
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
-        let decision = policy.can_use_capsule();
-        if !decision.is_allowed() {
-            return Err(anyhow::anyhow!(
-                "CapsuleExport capability is required to invoke '{}'",
-                self.name()
-            ));
-        }
         let args: CapsuleExportArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+        // Two-tier capability gate (Ri-0.17):
+        //   1. Broad `CapsuleExport` (operator-granted) → may export any agent_id.
+        //   2. Scoped `SelfCapsuleExport` → may export only the caller's own
+        //      identity (manifest.agent.id); anything else is denied.
+        //   3. Neither capability → denied.
+        if !policy.can_use_capsule().is_allowed() {
+            let self_decision = policy.can_use_capsule_self(&args.agent_id);
+            if !self_decision.is_allowed() {
+                return Err(anyhow::anyhow!(
+                    "capsule_export for agent_id '{}' was denied (Ri-0.17): \
+                     SelfCapsuleExport only permits exporting your own agent_id \
+                     ('{}'); CapsuleExport is required to export another agent",
+                    args.agent_id,
+                    manifest.agent.id,
+                ));
+            }
+        }
         let config = config.ok_or_else(|| {
             anyhow::anyhow!(
                 "{} requires a gateway config in scope",
@@ -177,7 +193,7 @@ pub struct CapsuleImportTool;
 
 impl NativeTool for CapsuleImportTool {
     fn name(&self) -> &'static str {
-        "capsule.import"
+        "capsule_import"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {

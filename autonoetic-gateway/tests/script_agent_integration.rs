@@ -581,3 +581,134 @@ async fn test_script_agent_args_mode_receives_payload_as_argv1() -> anyhow::Resu
 
     Ok(())
 }
+
+/// Regression test for cross-agent lock contamination.
+///
+/// When a session is already bound to agent-A, but `spawn_agent_once` is called
+/// with agent_id="agent-B" for that same session, the per-agent execution lock
+/// must be keyed by the **bound** agent (agent-A), not the requested agent
+/// (agent-B). Otherwise agent-B's lock is held for the entire duration of
+/// agent-A's turn, blocking all real agent-B executions.
+#[tokio::test]
+async fn test_existing_binding_does_not_contaminate_other_agent_lock() -> anyhow::Result<()> {
+    use std::time::Instant;
+
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    let agent_a = "script-bound-agent";
+    let agent_b = "script-other-agent";
+    install_script_agent(&workspace.agents_dir.join(agent_a), agent_a)?;
+    install_script_agent(&workspace.agents_dir.join(agent_b), agent_b)?;
+    let store = setup_store_for_script(&config, &workspace.agents_dir, agent_a)?;
+    let store = store.unwrap();
+    // Also seed agent_b revision.
+    seed_agent_revision(&store, &config, agent_b, &workspace.agents_dir.join(agent_b))?;
+
+    // Create a session binding: session-bound → agent_a.
+    use autonoetic_types::agent_revision::SessionAgentBinding;
+    let agent_a_rev = store
+        .resolve_alias(agent_a)?
+        .map(|a| a.revision_id)
+        .unwrap_or_default();
+    store.upsert_session_agent_binding(&SessionAgentBinding {
+        session_id: "session-bound".to_string(),
+        root_session_id: "session-bound".to_string(),
+        alias_id: Some(agent_a.to_string()),
+        agent_id: agent_a.to_string(),
+        revision_id: agent_a_rev,
+        runtime_lock_hash: "sha256:seed-lock".to_string(),
+        constitution_version: None,
+        constitution_digest: None,
+        home_node_id: "test-node".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        requested_target: agent_a.to_string(),
+    })?;
+
+    let execution = GatewayExecutionService::new(
+        autonoetic_types::config::GatewayConfig {
+            agents_dir: workspace.agents_dir.clone(),
+            max_pending_spawns_per_agent: 1,
+            ..Default::default()
+        },
+        Some(store),
+    );
+
+    let start = Instant::now();
+
+    // Spawn agent_b on session-bound (will resolve to agent_a due to binding).
+    // With the fix, this acquires agent_a's lock, NOT agent_b's.
+    let exec_clone = execution.clone();
+    let spawn_on_bound_session = tokio::spawn(async move {
+        exec_clone
+            .spawn_agent_once(
+                agent_b,
+                "hello from bound session",
+                "session-bound",
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .await
+    });
+
+    // Concurrently spawn agent_b on a fresh session.
+    // Without the fix this would BLOCK on agent_b's lock.
+    let exec_clone2 = execution.clone();
+    let spawn_on_fresh_session = tokio::spawn(async move {
+        exec_clone2
+            .spawn_agent_once(
+                agent_b,
+                "hello from fresh session",
+                "session-fresh-for-agent-b",
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &[],
+            )
+            .await
+    });
+
+    let fresh_result =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), spawn_on_fresh_session).await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "agent_b spawn on fresh session timed out after 10s — \
+                     cross-agent lock contamination detected (bug not fixed)"
+                ));
+            }
+        };
+
+    let elapsed = start.elapsed();
+    let _ = spawn_on_bound_session.await;
+
+    match fresh_result {
+        Ok(spawn_result) => {
+            let _reply = spawn_result.assistant_reply.expect("should have reply");
+            tracing::info!(
+                elapsed_ms = elapsed.as_millis(),
+                "agent_b on fresh session completed without lock contamination"
+            );
+        }
+        Err(e) => {
+            if e.to_string().contains("bwrap") || e.to_string().contains("bubblewrap") {
+                tracing::warn!("bubblewrap not available, skipping test");
+                return Ok(());
+            }
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}

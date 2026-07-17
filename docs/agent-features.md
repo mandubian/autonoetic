@@ -1,5 +1,14 @@
 # Agent Features Reference
 
+> **⚠ PARTIALLY SUPERSEDED (2026-07-11).** The canonical reference for
+> agent manifest fields, capabilities, I/O schemas, execution modes, and
+> the agent lifecycle is now `docs/AGENTS.md`. This doc is kept because it
+> still carries more detail on a few narrow topics (middleware hooks,
+> disclosure policy, background scheduling internals) that `AGENTS.md`
+> summarizes. For anything else, prefer `docs/AGENTS.md` — when the two
+> disagree, `AGENTS.md` wins (it is the one kept in sync with the
+> `Capability` enum and the constitution).
+
 This document describes all agent features available in the Autonoetic gateway runtime.
 
 ## Table of Contents

@@ -36,6 +36,7 @@ fn high_privilege_manifest() -> AgentManifest {
             id: "test.degraded".to_string(),
             name: "Degraded Agent".to_string(),
             description: "Agent with most action capabilities, used to verify degraded clamp keeps inspection".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::CodeExecution {
@@ -79,8 +80,10 @@ fn high_privilege_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

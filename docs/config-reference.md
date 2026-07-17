@@ -25,22 +25,25 @@ Fields marked **required** must be present or the gateway will fail to start.
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.06.08/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.06.08/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.06.16/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | Require a valid constitution lock signature at startup (`fail-shut` on missing/invalid signature). |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trusted signer registry (`signer_id` -> base64 Ed25519 public key, 32 bytes). Used for non-`gateway:*` signer IDs. |
 | `max_concurrent_spawns` | usize | `8` | Maximum agent runtime executions allowed concurrently across all sessions. |
 | `max_pending_spawns_per_agent` | usize | `4` | Maximum pending executions admitted per target agent (includes the currently running execution). |
 | `max_spawn_depth` | u32 | `8` | System-wide ceiling for spawn-chain depth (P-7.15). Per-agent `AgentSpawn.max_spawn_depth` may be lower; the tighter bound wins. |
 | `max_pending_approvals_per_root` | usize | `50` | Maximum concurrent pending approvals per root session. When a new request would push the count above this cap, the request is rejected with `approval_flood`. Set to `0` to disable (not recommended). Controls the P-7.17 approval flood cap. |
+| `max_pending_anomaly_flags_per_reporter` | usize | `50` | Maximum concurrent un-adjudicated anomaly flags (`pending`/`under_review`) per reporter agent — the Ri-0.18 spam triage bound (#770). A filing beyond the cap is rejected loudly with `anomaly_flag_flood` (never silently dropped) and an operator notification is emitted once per flood window. Terminal adjudications (confirmed/dismissed/deferred) free capacity. Set to `0` to disable (not recommended). |
 | `continuation_key` | string | `null` | HMAC-SHA256 key for signing turn continuation files. When unset, the gateway derives a deterministic key from `node_id` (development convenience only). Production deployments should set this to a high-entropy secret. Rotate by changing the value — existing continuations will fail integrity verification and be rejected. |
 | `approval_timeout_secs` | u64 | `600` | Maximum seconds a workflow task can remain in `AwaitingApproval` before auto-failing. `0` disables (not recommended for production). |
 | `workflow_task_heartbeat_secs` | u64 \| null | `null` | Optional heartbeat interval for `Running` workflow tasks (sync + async) to refresh `updated_at` and avoid false stuck resolution during long tails. If `null`, derives from `background_tick_secs` (clamped `1..=5`). Effective range when set: `1..=30`. |
-| `stuck_task_timeout_secs` | u64 \| null | `600` | Max seconds a `Running` workflow task can go without progress before the sweeper force-completes it. The task is **always resolved as `Succeeded`** (not `Failed`), using whatever exit evidence the sweeper can find (manifest exit, digest tail, implicit artifacts); when no evidence is found the task is still resolved as `Succeeded` to keep the parent workflow unblocked. `null` uses the default (600). Set to `0` to disable. |
+| `stuck_task_timeout_secs` | u64 \| null | `600` | Max seconds a `Running` workflow task can go without progress before the stuck-task sweeper resolves it. Tasks with a fresh claim heartbeat are never swept. When the child session has completion evidence (manifest, digest, checkpoint, or implicit artifact), the sweeper force-completes it as `Succeeded`. With no evidence, `stuck_task_no_evidence_action` controls the outcome. `null` uses the default (600). Set to `0` to disable. |
+| `stuck_task_no_evidence_action` | string | `"fail"` | Action the stuck-task sweeper takes when a `Running` task has no completion evidence and a stale claim heartbeat. `"fail"` (default) resolves the task as `Failed`, finalizes its session transcript as failed, and emits a `task.stuck` anomaly event. `"succeed"` preserves legacy behavior and force-completes it as `Succeeded`. |
 | `approval_dwell_multiplier` | f64 | `1.0` | Multiplier applied to approval dwell times (P-2.24). Values above `1.0` slow down approval resolution. Set to `0` to disable dwell enforcement (tests). |
 | `signal_delivery_timeout_secs` | u64 | `60` | Timeout in seconds for signal delivery responses (approval resolution, workflow join). The signal sender waits this long for the planner to finish processing the triggered `event.ingest` turn. |
-| `default_workflow_wait_secs` | u64 | `30` | Default blocking timeout for `workflow.wait` when the caller omits `timeout_secs`. The tool blocks (signal-driven, via the per-session notify registry) until all watched task IDs reach a terminal state or this deadline elapses; it does **not** poll. Set to `0` to restore the legacy immediate-return ("probe") behaviour. See Ri-0.14 — orchestration should prefer the `WaitingForChild` wake-up over blocking here. |
-| `max_session_turns` | u32 | `12` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
+| `default_workflow_wait_secs` | u64 | `30` | Default per-chunk blocking timeout for `workflow.wait` when the caller omits `timeout_secs`. The tool blocks (signal-driven, via the per-session notify registry) until all watched task IDs reach a terminal state or this deadline elapses; it does **not** poll. Set to `0` to restore the legacy immediate-return ("probe") behaviour. See Ri-0.14 — orchestration should prefer the `WaitingForChild` wake-up over blocking here. |
+| `workflow_wait_max_total_secs` | u64 | `300` | **Server-side auto-extension budget (issue #702).** When a `timeout_secs` chunk elapses with tasks still running, the gateway re-issues the wait internally — **without returning to the LLM** — up to this total wall-clock, returning as soon as all watched task IDs reach a terminal state. This removes the expensive `wait → timeout → full LLM round → wait` churn where the model re-reads the whole context only to re-issue the same wait. Callers may lower it per call via the `max_wait_secs` argument (hard-capped at 1800s, floored at one chunk). Set equal to `default_workflow_wait_secs` (or `0`) to disable auto-extension. |
+| `max_session_turns` | u32 | `25` | Maximum turns per agent session (circuit breaker for runaway loops). When exceeded, the session suspends with `MaxTurnsReached`. |
 | `evidence_mode` | string | `"full"` | Evidence storage mode. `"full"`: all tool/LLM results (development). `"errors"`: only failures, approval gates, non-zero exit codes (production recommended). `"off"`: no evidence files (causal chain still captures everything). |
 | `capability_delta_gate_mode` | string | `"strict"` | Capability delta gating during `agent.revision.promote`: `"strict"` (any broadening requires approval), `"evolving"` (broadening inside wildcard envelopes auto-allowed), `"bootstrap"` (gating disabled, dev only). |
 | `require_operator_approval_for_new_agents` | bool | `true` | Promotion-completeness cursor for **first admission of a brand-new agent** (no outgoing revision). `true`: a capability-bearing new agent requires operator approval (its whole capability set is "new"). `false`: a fully-audited new agent may self-promote — the completeness gate (auditor/evaluator pass, distinct identities, reviewable artifact) still applies and is always fail-closed. Re-promotion of an existing agent is unaffected. See `docs/design/promotion-completeness-invariant.md`. |
@@ -61,8 +64,8 @@ Controls which constitutional release the gateway enforces.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.06.08/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
-| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.06.08/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.06.16/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
+| `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | If `true`, unsigned locks are rejected and signed locks must verify. |
 | `constitution.trusted_signers` | map<string,string> | `{ autonoetic:constitution:v1: ... }` | Trust store for constitution lock signatures. Keys are signer IDs, values are base64 Ed25519 public keys (32 bytes). |
 
@@ -101,8 +104,8 @@ Example:
 
 ```yaml
 constitution:
-  source_path: "docs/constitution/versions/2026.06.08/constitution.md"
-  lock_path: "docs/constitution/versions/2026.06.08/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.06.16/constitution.md"
+  lock_path: "docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -112,8 +115,8 @@ To enforce the bootstrapped runtime snapshot instead of the repo docs copy:
 
 ```yaml
 constitution:
-  source_path: ".gateway/constitution/versions/2026.06.08/constitution.md"
-  lock_path: ".gateway/constitution/versions/2026.06.08/gateway-constitution.lock.json"
+  source_path: ".gateway/constitution/versions/2026.06.16/constitution.md"
+  lock_path: ".gateway/constitution/versions/2026.06.16/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -248,6 +251,29 @@ See `docs/response-validation-gate.md` for implementation details and `docs/iter
 
 ---
 
+## Validation Waivers
+
+Optional operator workflow for skipping advisory artifact validations (unit tests, style review, etc.) with recorded audit provenance. Mechanical safety gates (`mechanical_safety`) and security reviews (`security_review`) cannot be waived.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `validation_waivers.enabled` | bool | `false` | Enable the operator-facing waiver workflow. When `false`, `/waive` is not offered in the Chat TUI, but existing waivers remain queryable. |
+| `validation_waivers.auto_propose_after_reconcile` | bool | `false` | When `enabled` is also `true`, automatically set `propose_waivers: true` in `reconciliation.json` after a successful `workbench reconcile`. Clients can use this flag to offer the waiver picklist. |
+
+Example:
+
+```yaml
+validation_waivers:
+  enabled: true
+  auto_propose_after_reconcile: false
+```
+
+Use `/waive` in the Chat TUI to trigger the workflow, or `/waive <validation_id> [reason...]` to ask the orchestrator to waive a specific advisory validation. Waivers are recorded in the `validation_waivers` table and surfaced in `promotion.query` responses.
+
+See `docs/human-agent-collaboration.md` for the broader collaboration workflow.
+
+---
+
 ## Protected Agents
 
 Controls the protected-agent promotion gate (issue #21). Agents listed here
@@ -376,7 +402,7 @@ Controls how the gateway analyzes agent code during `agent_revision_create` for 
 | `code_analysis.capability_provider` | string | `"pattern"` | Provider for capability analysis: `"pattern"`, `"python_ast"`, `"llm"`, `"composite"`, `"none"`. |
 | `code_analysis.security_provider` | string | `"pattern"` | Provider for security analysis: `"pattern"`, `"python_ast"`, `"llm"`, `"composite"`, `"none"`. |
 | `code_analysis.require_capabilities` | bool | `true` | Reject revision creation if code requires undeclared capabilities. |
-| `code_analysis.require_approval_for` | list | `["NetworkAccess", "CodeExecution"]` | Capability types that always require human approval when detected during revision creation. |
+| `code_analysis.require_approval_for` | list | `["NetworkAccess", "CodeExecution", "ArtifactExecution"]` | Capability types that always require human approval when detected during revision creation. |
 
 ### LLM-based analysis (when provider is `"llm"` or `"composite"`)
 
@@ -426,13 +452,17 @@ Controls the per-session runaway loop detection. Independent of `max_session_tur
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by any tool call returning `ok: true` with a new (tool, arguments) fingerprint. |
+| `loop_guard.max_loops_without_progress` | u32 | `5` | Maximum turns without meaningful progress before suspension. Reset by mutating tool calls that count as progress (a new or still-allowed (tool, arguments) fingerprint, up to `max_consecutive_same_progress` repeats). Read-only, side-effect-free tools (`resolve`, `workflow_state`, `planframe_get`, `approval_list`, `knowledge_search`, …) do NOT reset it (issue #701) — they advance no workflow, so a planner cannot keep the counter pinned by interleaving one probe between every failed mutation. |
 | `loop_guard.max_tool_failures` | u32 | `5` | Maximum total failures per tool name before suspension. NOT reset by `register_progress()`. Catches alternating-failure patterns where the same tool keeps failing regardless of arguments. |
 | `loop_guard.max_consecutive_same_progress` | u32 | `1` | Number of consecutive identical (tool, arguments) calls allowed before repeats stop counting as progress. Default `1` means the first call counts as progress, but the second identical call does not. |
 | `loop_guard.max_child_failures` | u32 | `5` | Maximum total child-agent spawn failures before suspension. Prevents agents from repeatedly spawning failing children. |
 | `loop_guard.rotation_window_size` | usize | `16` | **Rotating-polling detector window (issue #287).** *System-config only* (not overridable from agent manifests). The detector tracks the last N successful-tool-call fingerprints; trips when the window is full and has only `rotation_distinct_floor` or fewer distinct values. Set to `0` to disable the detector entirely. |
 | `loop_guard.rotation_distinct_floor` | usize | `6` | **Rotating-polling detector floor (issue #287).** *System-config only* (not overridable from agent manifests). When the window is full and the distinct fingerprint count is `<=` this value, the guard trips. Default `6` paired with default window `16` means any rotation that uses 6 or fewer unique calls in the last 16 trips; healthy varied work with 7+ unique calls passes. |
 | `loop_guard.roster_repeat_floor` | u32 | `3` | **Redundant-roster-polling fast path.** Trips when a read-only roster tool (`agent_list`, `agent_inspect`, `agent_discover`) is called this many times consecutively with the same normalized arguments — without waiting for `rotation_window_size` to fill. These directory reads are idempotent (re-listing never adds fields), so a tight repeat is a stuck spawn, not progress. The corrective trip message tells the agent that reasoning agents take a free-text `message` and to spawn directly or end the turn. Set to `0` to disable the fast path (the generic rotating-polling detector still applies). |
+| `loop_guard.child_failure_loop_penalty` | u32 | `2` | **Child-failure loop penalty (issue #704).** Loops added to `current_loops` on each child task failure (`workflow_wait` returning `any_failed: true`). A queued `agent_spawn` returns `ok: true` and resets progress, but a child that later fails means that spawn produced no net progress — so each failure *advances* (does not reset) the no-progress counter by this amount, in addition to bumping `max_child_failures`'s separate budget. Combined with read-only tools no longer resetting progress (#701), a `spawn → probe → spawn` death spiral reaches `max_loops_without_progress` after a couple of cycles instead of never. Set to `0` to disable (legacy behavior). |
+| `loop_guard.recurring_error_window` | usize | `10` | **Recurring-error detector window (issue #703).** Each error tool-result is fingerprinted (session/task/workflow ids, UUIDs, timestamps, numbers stripped) and tracked in a sliding window of the last N errors. Set to `0` to disable the detector. |
+| `loop_guard.recurring_error_distinct_tools` | usize | `3` | **Recurring-error trip threshold (issue #703).** When the same normalized error fingerprint has surfaced from at least this many *distinct* tool names within `recurring_error_window`, the guard trips with `RecurringUnrecoverableError`. Catches an agent trying different tools (`agent_spawn`, `agent_revision_create_from_intent`, `workflow_wait`, …) that all hit one unrecoverable root cause — a pattern the per-tool failure budget misses because each tool's individual count stays low. |
+| `loop_guard.max_irrecoverable_repeats` | u32 | `3` | **Repeated-irrecoverable-rejection trip threshold (issue #718).** `permission` / `quota_exceeded` / `sandbox_unavailable` rejections are excluded from `max_tool_failures` (retrying with different arguments can't fix them), so the first occurrences are free — the agent legitimately ends its turn to await an operator. But re-issuing the *same* call for the *same* deterministic rejection (e.g. `agent_revision_promote` against a standing `capability_delta_requires_approval`) is a no-progress loop, so when the same `(tool, normalized-error)` rejection recurs this many times the guard trips with `RepeatedIrrecoverableRejection` (attributed to P-7.7). The count is keyed per `(tool, error-fingerprint)` — distinct rejections never accumulate together — and rides in the checkpointed guard state, so a post-approval resume that re-hits the identical gate keeps counting across the suspend. Set to `0` to disable. |
 
 Example:
 
@@ -445,6 +475,9 @@ loop_guard:
   rotation_window_size: 16
   rotation_distinct_floor: 6
   roster_repeat_floor: 3
+  child_failure_loop_penalty: 2
+  recurring_error_window: 10
+  recurring_error_distinct_tools: 3
 ```
 
 The loop guard trips when ANY of these conditions is met:
@@ -453,12 +486,13 @@ The loop guard trips when ANY of these conditions is met:
 3. Child-agent spawn failure count reaches `max_child_failures`
 4. **Rotating-polling pattern** (issue #287): the recent `rotation_window_size` successful calls contain `<= rotation_distinct_floor` distinct fingerprints. Catches agents that cycle through a small set of read-only tools (`workflow.wait → workflow.state → content.read → artifact.inspect → agent.exists → workflow.wait …`) without making semantic progress — a pattern that defeats condition #1 because each call's fingerprint is technically new.
 5. **Redundant roster polling** (fast path): a read-only roster tool (`agent_list` / `agent_inspect` / `agent_discover`) is called `roster_repeat_floor` times in a row with identical normalized arguments. Fires in a few calls rather than waiting for condition #4's window to fill, with a corrective message: reasoning agents take a free-text `message`, so spawn directly or end the turn.
+6. **Recurring unrecoverable error** (issue #703): the same normalized error fingerprint surfaces from `recurring_error_distinct_tools` or more distinct tool names within `recurring_error_window`. Catches an agent rotating through *different* tools that all hit one unrecoverable root cause (e.g. a reactivated workflow rejecting every spawn), which the per-tool failure budget cannot see.
 
 "Meaningful progress" requires a tool call with a fingerprint different from the previous `max_consecutive_same_progress` calls. This prevents agents from spinning on the same successful-but-useless tool call indefinitely.
 
 **Terminal-progress exemption.** Tools may opt out of the rotating-polling window by stamping `side_effect_state: "committed"` in their result (P-5.14 / P-6.26 uniform error/result envelope). A committed side effect clears the window — the agent just landed real state, so any prior monotony is stale. Read-only tools should not set this; mutating tools (`artifact.build`, `agent.spawn`, `agent.revision.promote`, `content.write`, `knowledge.write`, etc.) are encouraged to. The exemption itself is backward-compatible: existing tools that do not set `side_effect_state` continue to be tracked by the detector (the intended behavior for read-only tools), while tools that adopt the `committed` stamp gain the window-clear benefit.
 
-When the guard trips, it emits a `loop_guard.tripped` causal event with `reason` taken from a stable identifier (`no_meaningful_progress`, `tool_failure_budget`, `rotating_polling_pattern`, `child_failure_budget`, `redundant_roster_polling`) and the parsed detail in the payload. The divergence sentinel correlates these events to detect cross-session pathologies.
+When the guard trips, it emits a `loop_guard.tripped` causal event with `reason` taken from a stable identifier (`no_meaningful_progress`, `tool_failure_budget`, `rotating_polling_pattern`, `child_failure_budget`, `redundant_roster_polling`, `recurring_unrecoverable_error`) and the parsed detail in the payload. The divergence sentinel correlates these events to detect cross-session pathologies.
 
 Per-agent manifests may declare stricter loop limits under
 `metadata.autonoetic.loop_guard`. Gateway treats `config.loop_guard` as the
@@ -472,7 +506,7 @@ Circuit breaker for runaway agent sessions.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_session_turns` | u32 | `12` | Maximum turns per session before forced suspension (`MaxTurnsReached`). |
+| `max_session_turns` | u32 | `25` | Maximum turns per session before forced suspension (`MaxTurnsReached`). |
 
 ---
 
@@ -486,14 +520,20 @@ Controls context window transparency and enforcement for prompt construction.
 | `prompt_budget.tool_definitions_max_tokens` | usize | `0` | Maximum tokens for all tool definitions combined. `0` = unlimited. |
 | `prompt_budget.warn_at_pct` | float | `80.0` | Warn when total prompt utilization exceeds this percentage of context window. |
 | `prompt_budget.margin_tokens` | usize | `4096` | Reserve this many tokens at the end of the context window for LLM output. |
-| `prompt_budget.compress_tool_schemas_after_turn_0` | bool | `false` | Strip tool JSON schemas to `{}` after the first turn to save tokens. |
+| `prompt_budget.compress_tool_schemas_after_turn_0` | bool | `false` | **DEPRECATED (no-op).** Tool schemas are never compressed: stripping them to a minimal `{"type": "object"}` placeholder corrupted tool-calling on turn 1+ (the model needs the full schema on every turn). Tool tokens are now saved losslessly via provider tool-array caching (`prompt_cache_enabled`). Retained only for config backward-compat. |
 | `prompt_budget.max_tool_definitions` | usize | `0` | Maximum number of tool definitions sent to the LLM per turn (`0` = unlimited). When the deduplicated list exceeds this cap, lower-tier tools are dropped first (Specialized → Workflow → Core). |
 | `prompt_budget.progressive_tool_disclosure` | bool | `false` | When `true`, root sessions start with Core + Workflow tools only and escalate to all tiers after the first Specialized tool call. |
+| `prompt_budget.soft_budget_tokens` | u32 \| null | `null` | Soft token budget that triggers the context governor proactively, before the hard context-window limit is reached. Useful for large context-window models (e.g. 200K tokens) where waiting for the hard limit wastes tokens on every round. Set to `30000`–`50000` for such models; leave unset to disable. |
+| `prompt_budget.strip_reasoning_from_request` | bool | `false` | Strip `reasoning_content` / `reasoning_details` from assistant messages before sending them to the LLM. Disabled by default: many thinking/reasoning models (DeepSeek, OpenRouter reasoning models, etc.) require reasoning blocks to be replayed on subsequent turns. Enable only when your model does not need replay. |
+| `prompt_budget.max_tool_result_chars` | usize | `4000` | Maximum characters to allow in a tool-result message content before it is truncated for the LLM request. JSON results have their large string *values* shortened in-place — structure + metadata (`offset`, `next_offset`, `total_bytes`, `error_type`) survive so agents can paginate. Non-JSON results get a head+tail ellipsis. The full result is always stored. Set to `0` to disable. |
+| `prompt_budget.dedup_tool_results` | bool | `true` | Collapse duplicate tool-result messages into a short marker after the first occurrence. Re-reading artifacts, polling `approval.status`, or repeated `workflow.state` snapshots often produce identical output across turns; this saves tokens while keeping full results in storage. |
+| `prompt_budget.collapse_repeated_errors` | bool | `true` | Collapse *recurring errors* (issue #705). Unlike `dedup_tool_results` (byte-identical, consecutive), this fingerprints the error text (volatile ids/timestamps/numbers stripped) so the same root-cause failure surfacing non-consecutively — the hallmark of an install/spawn death spiral — is collapsed to a marker on all but its most recent occurrence. Full results remain in storage. |
+| `prompt_budget.prompt_cache_enabled` | bool | `true` | Mark the stable leading portion of the system prompt (foundation doctrine + SKILL instructions + guidance + output contract) **and the tool definitions** as provider prompt-cache prefixes. Cache-capable drivers attach `cache_control: {type: ephemeral}` to both the system prefix and the last tool definition — **Anthropic** (which otherwise sends no cache markers, so caching was fully off) and **OpenRouter** when routing a **Claude/Gemini** model. The volatile per-turn tail (state attestation, degradation notice, memory context) sits after the breakpoint and is never cached. **OpenAI** and **llama.cpp** reuse a stable prefix automatically (no markers), so a stable prefix benefits them regardless. Repeated turns re-read the ~10k-token static prefix **and the full tool catalog** at cache rates instead of full price. |
 | `prompt_budget.chars_per_token` | float \| null | `null` | Override the chars-per-token ratio used by the prompt-budget estimator. `null` = use the built-in default of `3.0` (conservative; matches Qwen3 / Llama3 / GPT-4o on code/JSON content, typically 2.2–3.5 chars/token). The previous default of `4.0` systematically underestimated such prompts and let the context governor stay silent until the LLM call returned a 400. Out-of-range values are clamped to `[0.5, 16.0]`; non-finite values fall back to the default. |
 
 When utilization exceeds the budget, the context governor cascades reduction
-strategies (tool-schema compression → hierarchical capsule summarization →
-history trimming → tool demotion). See [docs/prompt-budget.md](prompt-budget.md).
+strategies (history trimming → hierarchical capsule summarization →
+tool demotion). See [docs/prompt-budget.md](prompt-budget.md).
 
 Example:
 
@@ -538,6 +578,28 @@ rules:
 `tier` values: `core`, `workflow`, `specialized`.
 
 ---
+
+## LLM request timeout & retries
+
+Each non-streaming `complete()` call applies a **per-request timeout** and a
+bounded, fail-fast retry policy so a slow or overloaded endpoint cannot stall a
+turn for many minutes.
+
+| Setting | Value | Notes |
+|---|---|---|
+| per-request timeout | `120s` default | Override with env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (floor 5s). |
+| connect timeout | `15s` | Fail fast on unreachable endpoints (vs ~2min OS TCP timeout). |
+| retries — fast connection errors (refused/reset) | up to `3` | Quick backoff; these fail in well under the timeout. |
+| retries — request **timeout** | at most `1` | A timeout already consumed a full attempt; retrying it is how a degraded endpoint compounds. |
+| overall retry deadline | `2 × per-request timeout` | Stops retrying once cumulative wall-clock (incl. the next backoff) would reach this — caps the *request-timeout* worst case at ~one timeout + one retry. |
+
+Worst case for a hung endpoint is therefore ~`2 × timeout` (≈4 min at the
+default), not the previous ~`4 × 300s` (≈20 min).
+
+> The deadline bounds *request timeouts*. The `connect timeout` (15s, fixed) is
+> separate: at very low `request_timeout` settings (near the 5s floor) a single
+> connect attempt can exceed `2 × timeout`. The deadline still caps the number
+> of retries; it does not shorten an in-flight connect attempt.
 
 ## LLM Presets
 
@@ -780,12 +842,25 @@ A decision is BLOCKING when made by a *principal* (operator / agent — mechanic
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `decider_obligations.enabled` | bool | `true` | Require a motivation for BLOCKING-tier decisions. `false` disables enforcement (decisions may be recorded without a reason). |
+| `decider_obligations.adjudication_sla_secs` | u64 | `604800` | Adjudication SLA (#771 D.1): a constitutional proposal (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is stamped `sla_breached_at` and a causal event + notification are emitted. The item's status is unchanged — the decision is still owed. `0` disables the check. |
+
+### Amendment Invitations
+
+Mechanical civic invitation from repeated friction (#771 D.2). When the same rule is denied to the same agent alias at least `threshold` times within `window_secs`, the gateway issues a durable invitation to draft an amendment (Ri-0.8). The gateway executes a pre-committed threshold and never judges the rule (Lawful Executor). An invitation is not an amendment and carries no authority; it is surfaced in the agent's signed turn attestation as a one-line summary (rule + denial count) and as a `ConstitutionalProposal` notification. Open invitations expire after `window_secs` elapses.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `amendment_invitations.enabled` | bool | `true` | Master switch for the invitation tick. `false` disables issuance entirely. |
+| `amendment_invitations.threshold` | u64 | `3` | Number of denials of the same rule for the same agent alias within `window_secs` that triggers an invitation. `0` disables issuance. |
+| `amendment_invitations.window_secs` | u64 | `604800` | Telemetry window in seconds. An open invitation also expires after this window elapses without an answer. `0` disables issuance. |
 
 Example:
 
 ```yaml
-decider_obligations:
+amendment_invitations:
   enabled: true
+  threshold: 3
+  window_secs: 604800
 ```
 
 ---
@@ -1107,8 +1182,8 @@ tls: false
 node_id: "gateway"
 node_name: "gateway"
 constitution:
-  source_path: "docs/constitution/versions/2026.06.08/constitution.md"
-  lock_path: "docs/constitution/versions/2026.06.08/gateway-constitution.lock.json"
+  source_path: "docs/constitution/versions/2026.06.16/constitution.md"
+  lock_path: "docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"
   require_signature: true
   trusted_signers:
     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
@@ -1117,13 +1192,15 @@ max_pending_spawns_per_agent: 4
 max_spawn_depth: 8
 approval_timeout_secs: 600
 max_pending_approvals_per_root: 50
+max_pending_anomaly_flags_per_reporter: 50
 # continuation_key: "set-me-in-production-from-a-secret-source"
 workflow_task_heartbeat_secs: 2
 stuck_task_timeout_secs: 600
+stuck_task_no_evidence_action: fail
 approval_dwell_multiplier: 1.0
 signal_delivery_timeout_secs: 60
 evidence_mode: full
-max_session_turns: 12
+max_session_turns: 25
 capability_delta_gate_mode: strict
 require_operator_approval_for_new_agents: true
 allow_zero_capability_direct_promote: true
@@ -1156,6 +1233,7 @@ code_analysis:
   require_approval_for:
     - NetworkAccess
     - CodeExecution
+    - ArtifactExecution
 
 session_budget:
   profile: dev

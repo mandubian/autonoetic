@@ -12,6 +12,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, Runti
 use autonoetic_types::agent_revision::PromotionKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// LLM configuration for template rendering
@@ -568,6 +569,7 @@ fn admin_revision_manifest() -> AgentManifest {
             id: "cli.admin".to_string(),
             name: "CLI Admin".to_string(),
             description: "CLI administrative operator".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -586,8 +588,10 @@ fn admin_revision_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }
@@ -807,6 +811,53 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
                 }
             }
         }
+        AgentAliasCommands::Suspend {
+            alias_id,
+            reason,
+            by,
+            json,
+        } => {
+            // Confirm the alias exists for a clearer error than a silent no-op.
+            if store.resolve_alias(alias_id)?.is_none() {
+                anyhow::bail!("Alias '{}' not found. Promote a revision first.", alias_id);
+            }
+            let changed = store.suspend_agent(alias_id, by, reason.as_deref())?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "alias_id": alias_id,
+                        "suspended": changed,
+                    }))?
+                );
+            } else if changed {
+                println!(
+                    "Agent '{}' suspended. In-flight sessions keep running; no new session can start until unsuspended or re-promoted.",
+                    alias_id
+                );
+            } else {
+                println!("Agent '{}' was already suspended; no change.", alias_id);
+            }
+        }
+        AgentAliasCommands::Unsuspend { alias_id, json } => {
+            if store.resolve_alias(alias_id)?.is_none() {
+                anyhow::bail!("Alias '{}' not found. Promote a revision first.", alias_id);
+            }
+            let changed = store.unsuspend_agent(alias_id)?;
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "alias_id": alias_id,
+                        "unsuspended": changed,
+                    }))?
+                );
+            } else if changed {
+                println!("Agent '{}' unsuspended; it can start new sessions again.", alias_id);
+            } else {
+                println!("Agent '{}' was not suspended; no change.", alias_id);
+            }
+        }
     }
     Ok(())
 }
@@ -902,6 +953,7 @@ pub fn handle_agent_seed(
         "cli.seed",
         reason,
         None,
+        None,
     )?;
     let payload = serde_json::json!({
         "ok": true,
@@ -938,7 +990,48 @@ pub fn handle_agent_bootstrap(
         config_path.display()
     );
     let config = autonoetic_gateway::config::load_config(config_path)?;
+    let install = install_reference_agents(&config, from, overwrite)?;
+
+    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
+        println!(
+            "Created vault master key at {} — back it up; without it encrypted credentials cannot be decrypted.",
+            autonoetic_gateway::execution::gateway_root_dir(&config)
+                .join("vault.key")
+                .display()
+        );
+    }
+
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
+
+    println!(
+        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} activated (target: {}).",
+        install.copied,
+        install.overwritten,
+        install.skipped,
+        activated,
+        config.agents_dir.display()
+    );
+
+    Ok(())
+}
+
+/// Result of copying reference agent bundles into `config.agents_dir`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallReferenceAgentsResult {
+    pub copied: usize,
+    pub overwritten: usize,
+    pub skipped: usize,
+}
+
+/// Copy bundled reference agents from the repo (or `--from`) into `config.agents_dir`.
+/// When `overwrite` is true, existing agent directories are replaced with the
+/// latest reference bundles.
+pub fn install_reference_agents(
+    config: &autonoetic_types::config::GatewayConfig,
+    from: Option<&str>,
+    overwrite: bool,
+) -> anyhow::Result<InstallReferenceAgentsResult> {
     std::fs::create_dir_all(&config.agents_dir)?;
 
     let reference_root = resolve_reference_agents_dir(from)?;
@@ -982,25 +1075,11 @@ pub fn handle_agent_bootstrap(
         println!("Installed '{}' from {}", agent_id, bundle.display());
     }
 
-    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
-        println!(
-            "Created vault master key at {} — back it up; without it encrypted credentials cannot be decrypted.",
-            gateway_dir.join("vault.key").display()
-        );
-    }
-
-    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
-
-    println!(
-        "Bootstrap complete: {} installed, {} overwritten, {} skipped, {} activated (target: {}).",
+    Ok(InstallReferenceAgentsResult {
         copied,
         overwritten,
         skipped,
-        activated,
-        config.agents_dir.display()
-    );
-
-    Ok(())
+    })
 }
 
 fn resolve_reference_agents_dir(from: Option<&str>) -> anyhow::Result<std::path::PathBuf> {
@@ -1060,7 +1139,13 @@ fn discover_reference_bundles(root: &Path) -> anyhow::Result<Vec<std::path::Path
         if !group.file_type()?.is_dir() {
             continue;
         }
-        for entry in std::fs::read_dir(group.path())? {
+        let group_path = group.path();
+        if group_path.join("SKILL.md").exists() {
+            // Top-level bundle (e.g. agents/autonoetic.digest/) — not nested under a role group.
+            bundles.push(group_path);
+            continue;
+        }
+        for entry in std::fs::read_dir(group_path)? {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
                 continue;
@@ -1292,43 +1377,19 @@ pub fn load_agent_runtime_context(
     Ok((loaded.manifest, loaded.instructions, loaded.dir))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CliSessionCloseReason {
-    HeadlessComplete,
-    HeadlessCompleteEmpty,
-    HeadlessSuspendedApproval,
-    HeadlessSuspendedUserInput,
-    HeadlessEscalated,
-    HeadlessError,
-    InteractiveError,
-    InteractiveExit,
-}
-
-impl CliSessionCloseReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::HeadlessComplete => "headless_complete",
-            Self::HeadlessCompleteEmpty => "headless_complete_empty",
-            Self::HeadlessSuspendedApproval => "headless_suspended",
-            Self::HeadlessSuspendedUserInput => "headless_suspended_user_input",
-            Self::HeadlessEscalated => "headless_escalated",
-            Self::HeadlessError => "headless_error",
-            Self::InteractiveError => "interactive_error",
-            Self::InteractiveExit => "interactive_exit",
+fn session_close_outcome_from_headless_turn_outcome(
+    outcome: &autonoetic_gateway::runtime::lifecycle::TurnOutcome,
+) -> SessionCloseOutcome {
+    use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
+    match outcome {
+        TurnOutcome::Completed(Some(_)) => SessionCloseOutcome::HeadlessComplete,
+        TurnOutcome::Completed(None) => SessionCloseOutcome::HeadlessCompleteEmpty,
+        TurnOutcome::Suspended { .. } => SessionCloseOutcome::HeadlessSuspended,
+        TurnOutcome::SuspendedUserInput { .. } => {
+            SessionCloseOutcome::HeadlessSuspendedUserInput
         }
-    }
-
-    fn for_headless_turn_outcome(
-        outcome: &autonoetic_gateway::runtime::lifecycle::TurnOutcome,
-    ) -> Self {
-        use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
-        match outcome {
-            TurnOutcome::Completed(Some(_)) => Self::HeadlessComplete,
-            TurnOutcome::Completed(None) => Self::HeadlessCompleteEmpty,
-            TurnOutcome::Suspended { .. } => Self::HeadlessSuspendedApproval,
-            TurnOutcome::SuspendedUserInput { .. } => Self::HeadlessSuspendedUserInput,
-            TurnOutcome::Escalated { .. } => Self::HeadlessEscalated,
-        }
+        TurnOutcome::Escalated { .. } => SessionCloseOutcome::HeadlessEscalated,
+        TurnOutcome::WaitingForChild => SessionCloseOutcome::HeadlessSuspended,
     }
 }
 
@@ -1417,13 +1478,16 @@ pub async fn run_agent_with_runtime_with_driver(
                         escalation_request_id
                     );
                 }
+                TurnOutcome::WaitingForChild => {
+                    println!("[Turn suspended waiting for child tasks]");
+                }
             }
             runtime.close_session(
-                CliSessionCloseReason::for_headless_turn_outcome(&outcome).as_str(),
+                session_close_outcome_from_headless_turn_outcome(&outcome),
             )?;
         }
         Err(e) => {
-            let _ = runtime.close_session(CliSessionCloseReason::HeadlessError.as_str());
+            let _ = runtime.close_session(SessionCloseOutcome::HeadlessError);
             return Err(e);
         }
     }
@@ -1499,8 +1563,14 @@ pub async fn run_interactive_session(
                     .await?;
                 stdout.flush().await?;
             }
+            Ok(TurnOutcome::WaitingForChild) => {
+                stdout
+                    .write_all(b"[Turn suspended waiting for child tasks]\n")
+                    .await?;
+                stdout.flush().await?;
+            }
             Err(e) => {
-                let _ = runtime.close_session(CliSessionCloseReason::InteractiveError.as_str());
+                let _ = runtime.close_session(SessionCloseOutcome::InteractiveError);
                 return Err(e);
             }
         };
@@ -1575,13 +1645,19 @@ pub async fn run_interactive_session(
                     .await?;
                 stdout.flush().await?;
             }
+            Ok(TurnOutcome::WaitingForChild) => {
+                stdout
+                    .write_all(b"[Turn suspended waiting for child tasks]\n")
+                    .await?;
+                stdout.flush().await?;
+            }
             Err(e) => {
-                let _ = runtime.close_session(CliSessionCloseReason::InteractiveError.as_str());
+                let _ = runtime.close_session(SessionCloseOutcome::InteractiveError);
                 return Err(e);
             }
         };
     }
-    runtime.close_session(CliSessionCloseReason::InteractiveExit.as_str())?;
+    runtime.close_session(SessionCloseOutcome::InteractiveExit)?;
     Ok(())
 }
 
@@ -1637,6 +1713,11 @@ pub fn handle_agent_import_skill(
             compatibility: import_compatibility.clone(),
             allowed_tools: import_allowed_tools.clone(),
             needs_tool_bridging: !import_allowed_tools.is_empty(),
+            // Propagate the parser's inferred-vs-declared record verbatim.
+            capabilities_inferred: parsed_manifest
+                .agentskills_import
+                .as_ref()
+                .is_some_and(|ai| ai.capabilities_inferred),
         })
     } else {
         parsed_manifest.agentskills_import.clone()
@@ -1748,6 +1829,7 @@ pub fn handle_agent_import_skill(
             id: agent_id.to_string(),
             name: parsed_manifest.agent.name.clone(),
             description: parsed_manifest.agent.description.clone(),
+            singleton: parsed_manifest.agent.singleton,
         },
         capabilities,
         llm_preset: parsed_manifest.llm_preset.clone(),
@@ -1764,8 +1846,10 @@ pub fn handle_agent_import_skill(
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
+        excluded_tools: parsed_manifest.excluded_tools.clone(),
         agentskills_import,
         compression: parsed_manifest.compression.clone(),
+            open_web: false,
         sandbox_network: parsed_manifest.sandbox_network,
     };
 
@@ -2239,24 +2323,23 @@ mod tests {
     }
 
     #[test]
-    fn cli_session_close_reason_headless_mapping_is_closed_and_stable() {
+    fn cli_session_close_outcome_headless_mapping_is_closed_and_stable() {
         use autonoetic_gateway::runtime::lifecycle::TurnOutcome;
 
-        let completed = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(
-            Some("ok".to_string()),
-        ));
+        let completed = session_close_outcome_from_headless_turn_outcome(
+            &TurnOutcome::Completed(Some("ok".to_string())),
+        );
         let completed_empty =
-            CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Completed(None));
-        let suspended = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Suspended {
+            session_close_outcome_from_headless_turn_outcome(&TurnOutcome::Completed(None));
+        let suspended = session_close_outcome_from_headless_turn_outcome(&TurnOutcome::Suspended {
             approval_request_id: "apr-1".to_string(),
-            continuation: None,
         });
-        let suspended_user = CliSessionCloseReason::for_headless_turn_outcome(
+        let suspended_user = session_close_outcome_from_headless_turn_outcome(
             &TurnOutcome::SuspendedUserInput {
                 interaction_id: "ui-1".to_string(),
             },
         );
-        let escalated = CliSessionCloseReason::for_headless_turn_outcome(&TurnOutcome::Escalated {
+        let escalated = session_close_outcome_from_headless_turn_outcome(&TurnOutcome::Escalated {
             escalation_request_id: "esc-1".to_string(),
         });
 
@@ -2268,13 +2351,13 @@ mod tests {
     }
 
     #[test]
-    fn cli_session_close_reason_interactive_tags_are_stable() {
+    fn cli_session_close_outcome_interactive_tags_are_stable() {
         assert_eq!(
-            CliSessionCloseReason::InteractiveError.as_str(),
+            SessionCloseOutcome::InteractiveError.as_str(),
             "interactive_error"
         );
         assert_eq!(
-            CliSessionCloseReason::InteractiveExit.as_str(),
+            SessionCloseOutcome::InteractiveExit.as_str(),
             "interactive_exit"
         );
     }
@@ -2484,6 +2567,20 @@ Use tools when needed.
         assert_eq!(llm.model, "gemini-pro");
     }
 
+    fn write_top_level_reference_bundle(root: &std::path::Path, agent_id: &str, marker: &str) {
+        let dir = root.join(agent_id);
+        std::fs::create_dir_all(&dir).expect("bundle dir should create");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: \"{agent_id}\"\ndescription: \"{marker}\"\nmetadata:\n  autonoetic:\n    version: \"1.0\"\n    runtime:\n      engine: \"autonoetic\"\n      gateway_version: \"0.1.0\"\n      sdk_version: \"0.1.0\"\n      type: \"stateful\"\n      sandbox: \"bubblewrap\"\n      runtime_lock: \"runtime.lock\"\n    agent:\n      id: \"{agent_id}\"\n      name: \"{agent_id}\"\n      description: \"{marker}\"\n---\n#{agent_id}\n"
+            ),
+        )
+        .expect("skill should write");
+        std::fs::write(dir.join("runtime.lock"), default_runtime_lock_contents())
+            .expect("runtime.lock should write");
+    }
+
     fn write_reference_bundle(root: &std::path::Path, group: &str, agent_id: &str, marker: &str) {
         let dir = root.join(group).join(agent_id);
         std::fs::create_dir_all(&dir).expect("bundle dir should create");
@@ -2499,6 +2596,33 @@ Use tools when needed.
     }
 
     #[test]
+    fn test_discover_reference_bundles_includes_top_level_digest() {
+        let temp = tempdir().expect("tempdir should create");
+        let reference_root = temp.path().join("reference_agents");
+        write_reference_bundle(&reference_root, "lead", "planner.default", "planner");
+        write_top_level_reference_bundle(&reference_root, "digest", "post-session digest");
+
+        let bundles =
+            discover_reference_bundles(&reference_root).expect("discover should succeed");
+        let names: Vec<String> = bundles
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name == "digest"),
+            "expected top-level digest bundle, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name == "planner.default"),
+            "expected grouped planner bundle, got: {names:?}"
+        );
+    }
+
+    #[test]
     #[serial]
     fn test_handle_agent_bootstrap_installs_reference_bundles() {
         autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
@@ -2506,6 +2630,7 @@ Use tools when needed.
         let reference_root = temp.path().join("reference_agents");
         write_reference_bundle(&reference_root, "lead", "planner.default", "planner");
         write_reference_bundle(&reference_root, "specialists", "coder.default", "coder");
+        write_top_level_reference_bundle(&reference_root, "digest", "post-session digest");
 
         let config_path = temp.path().join("config.yaml");
         let agents_dir = temp.path().join("runtime_agents");
@@ -2530,6 +2655,10 @@ Use tools when needed.
             .join("coder.default")
             .join("runtime.lock")
             .exists());
+        assert!(
+            agents_dir.join("digest").join("SKILL.md").exists(),
+            "top-level digest bundle should be installed by bootstrap"
+        );
 
         let constitution_root = agents_dir.join(".gateway").join("constitution");
         assert!(
@@ -2615,6 +2744,33 @@ Use tools when needed.
             current,
             "ACTIVE constitution version must match CURRENT"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn test_install_reference_agents_creates_missing_agents_dir() {
+        autonoetic_gateway::constitution_digest::reset_constitution_runtime_for_tests();
+        let temp = tempdir().expect("tempdir should create");
+        let reference_root = temp.path().join("reference_agents");
+        write_reference_bundle(&reference_root, "lead", "planner.default", "v1");
+
+        let agents_dir = temp.path().join("runtime_agents");
+        assert!(!agents_dir.exists());
+
+        let mut config = autonoetic_gateway::config::load_config(&temp.path().join("nope.yaml"))
+            .expect("default config should load");
+        config.agents_dir = agents_dir.clone();
+
+        let install = install_reference_agents(
+            &config,
+            Some(reference_root.to_str().expect("utf-8 path")),
+            false,
+        )
+        .expect("install should succeed");
+
+        assert!(agents_dir.exists());
+        assert_eq!(install.copied, 1);
+        assert!(agents_dir.join("planner.default").join("SKILL.md").exists());
     }
 
     #[test]
@@ -2731,6 +2887,8 @@ Use tools when needed.
             created_at: "2026-01-01T00:00:00Z".to_string(),
             created_by_type: "human".to_string(),
             created_by_id: "operator".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
             source_kind: "artifact".to_string(),
             source_ref: Some("art_1234".to_string()),
             origin_node_id: "gateway".to_string(),
@@ -2738,6 +2896,7 @@ Use tools when needed.
             status: AgentRevisionStatus::Ready,
             metadata_json: serde_json::json!({}),
             short_id: "abc12345".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };
@@ -2753,6 +2912,9 @@ Use tools when needed.
                 updated_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
                 updated_by_id: "operator".to_string(),
                 reason: Some("initial seed".to_string()),
+                suspended_at: None,
+                suspended_reason: None,
+                suspended_by: None,
             })
             .expect("alias should upsert");
         store
@@ -2769,6 +2931,7 @@ Use tools when needed.
                 created_by_type: "human".to_string(),
                 created_by_id: "operator".to_string(),
                 origin_node_id: "gateway".to_string(),
+                pre_authorization: None,
             })
             .expect("promotion history should insert");
 
@@ -2821,6 +2984,8 @@ Use tools when needed.
                 created_at: "2026-01-01T00:00:00Z".to_string(),
                 created_by_type: "human".to_string(),
                 created_by_id: "operator".to_string(),
+                requested_by_type: None,
+                requested_by_id: None,
                 source_kind: "artifact".to_string(),
                 source_ref: Some("art_list".to_string()),
                 origin_node_id: "gateway".to_string(),
@@ -2828,6 +2993,7 @@ Use tools when needed.
                 status: AgentRevisionStatus::Ready,
                 metadata_json: serde_json::json!({}),
                 short_id: "list1234".to_string(),
+        detected_network_hosts: None,
                 signature: None,
                 signer_id: None,
             })
@@ -2841,6 +3007,9 @@ Use tools when needed.
                 updated_by_type: autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
                 updated_by_id: "operator".to_string(),
                 reason: Some("seed".to_string()),
+                suspended_at: None,
+                suspended_reason: None,
+                suspended_by: None,
             })
             .expect("alias insert should succeed");
 
@@ -2881,6 +3050,8 @@ Use tools when needed.
             created_at: "2026-01-01T00:00:00Z".to_string(),
             created_by_type: "human".to_string(),
             created_by_id: "operator".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
             source_kind: "artifact".to_string(),
             source_ref: Some("art_seed".to_string()),
             origin_node_id: "gateway".to_string(),
@@ -2888,6 +3059,7 @@ Use tools when needed.
             status: AgentRevisionStatus::Candidate,
             metadata_json: serde_json::json!({}),
             short_id: "seed1234".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };

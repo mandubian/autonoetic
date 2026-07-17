@@ -7,7 +7,7 @@ use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     list_checkpoints, save_checkpoint, SessionCheckpoint, YieldReason,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
@@ -54,6 +54,8 @@ fn fixture(agent_id: &str, revision_id: &str) -> Fixture {
         created_at: "2026-05-28T00:00:00Z".to_string(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "artifact".to_string(),
         source_ref: None,
         origin_node_id: "node-A".to_string(),
@@ -61,6 +63,7 @@ fn fixture(agent_id: &str, revision_id: &str) -> Fixture {
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::Value::Null,
         short_id: "abcd1234".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -73,6 +76,9 @@ fn fixture(agent_id: &str, revision_id: &str) -> Fixture {
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 
@@ -232,7 +238,8 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        blocked_state_event_emitted: false,
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,
@@ -250,6 +257,8 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: Some("abc".to_string()),
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason: YieldReason::Hibernation,
@@ -265,6 +274,9 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(&f.config, &ckpt).unwrap();
 
@@ -617,7 +629,8 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        blocked_state_event_emitted: false,
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,
@@ -635,6 +648,8 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: None,
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason: YieldReason::Hibernation,
@@ -650,6 +665,9 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(&f.config, &ckpt).unwrap();
 

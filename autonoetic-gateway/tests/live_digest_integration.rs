@@ -6,6 +6,7 @@ use autonoetic_gateway::llm::{
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -60,6 +61,7 @@ fn test_manifest() -> AgentManifest {
             id: "digest.tester".to_string(),
             name: "digest.tester".to_string(),
             description: "live digest integration".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -89,8 +91,10 @@ fn test_manifest() -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -152,7 +156,7 @@ capabilities: []
         .execute_with_history(&mut history)
         .await
         .expect("execute should succeed");
-    runtime.close_session("integration test complete")?;
+    runtime.close_session(SessionCloseOutcome::ExecuteLoopComplete)?;
 
     let digest_path = gateway_dir
         .join("sessions")
@@ -173,7 +177,7 @@ capabilities: []
         "expected session summary: {digest}"
     );
     assert!(
-        digest.contains("integration test complete"),
+        digest.contains("execute_loop_complete"),
         "expected close reason in summary"
     );
 

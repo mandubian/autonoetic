@@ -309,6 +309,9 @@ struct SessionTimelineStreamQuery {
 /// Create the HTTP router for content API
 pub fn create_router(state: HttpState) -> Router {
     Router::new()
+        .route("/", get(handle_serve_index))
+        .route("/index.html", get(handle_serve_index))
+        .route("/api/jsonrpc", post(handle_jsonrpc))
         .route("/api/event/ingest", post(handle_event_ingest))
         .route(
             "/api/session/stream/{session_id}",
@@ -801,6 +804,33 @@ async fn handle_list_names(
         .collect();
 
     Ok(Json(ListResponse { names }))
+}
+
+/// Serve the web dashboard index.html
+async fn handle_serve_index() -> impl IntoResponse {
+    axum::response::Html(include_str!("../../../web/index.html"))
+}
+
+/// POST /api/jsonrpc - Handle JSON-RPC requests from the web dashboard
+async fn handle_jsonrpc(
+    State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
+    Json(mut req): Json<JsonRpcRequest>,
+) -> Result<Json<JsonRpcResponse>, ErrorResponse> {
+    validate_auth(&headers, &state.shared_secret)?;
+
+    let Some(router) = state.router.clone() else {
+        return Err(ErrorResponse {
+            error: "HTTP ingress router not configured".to_string(),
+            code: 503,
+        });
+    };
+
+    // Make sure auth_token is set correctly for validation down the line
+    req.auth_token = Some(state.shared_secret.clone());
+
+    let resp = router.dispatch(req).await;
+    Ok(Json(resp))
 }
 
 #[cfg(test)]

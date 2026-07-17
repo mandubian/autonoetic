@@ -33,6 +33,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
             id: "test-coder".to_string(),
             name: "Test Coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         llm_overrides: None,
         llm_preset: None,
@@ -50,8 +51,10 @@ fn make_manifest(has_network: bool) -> AgentManifest {
         io: None,
         disclosure: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
     }
 }
 

@@ -1,10 +1,11 @@
 //! Capability enums for agent permission declarations.
 //!
 //! Capability categories:
-//! - **SandboxFunctions**: MCP tool access by prefix (web.*, sandbox.*)
+//! - **SandboxFunctions**: MCP tool access by prefix (web_, sandbox_)
 //! - **ReadAccess**: Read content, memory, knowledge (includes search)
 //! - **WriteAccess**: Write content, memory, knowledge (includes share)
-//! - **CodeExecution**: Execute scripts in sandbox
+//! - **CodeExecution**: Execute command strings with `sandbox_exec`
+//! - **ArtifactExecution**: Execute immutable artifact entrypoints
 //! - **NetworkAccess**: Make HTTP requests
 //! - **AgentSpawn**: Create child agent sessions
 //! - **AgentMessage**: Send messages to other agents
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A typed capability that an Agent may request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum Capability {
     /// MCP tool access by prefix.
@@ -67,6 +68,13 @@ pub enum Capability {
         #[serde(default)]
         commands: Vec<String>,
     },
+
+    /// Execute immutable artifact entrypoints with `artifact_exec`.
+    ///
+    /// This is intentionally separate from [`Capability::CodeExecution`]:
+    /// artifact execution is bound to a content-addressed artifact and does not
+    /// authorize arbitrary command strings.
+    ArtifactExecution,
 
     /// Request a gateway-level emergency stop for a root session (dedicated responders only).
     EmergencyStop,
@@ -171,19 +179,107 @@ pub enum Capability {
     /// `docs/cognitive-capsule.md`.
     CapsuleExport,
 
+    /// Export one's *own* cognitive capsule via `capsule.export` (Ri-0.17:
+    /// emigration). A scoped companion to `CapsuleExport`: an agent holding
+    /// only this capability may export the capsule of `agent_id ==` its own
+    /// identity (`manifest.agent.id`), and no other. The broad `CapsuleExport`
+    /// remains the operator-grant path for exporting any agent. Not a default.
+    /// See `docs/cognitive-capsule.md`.
+    SelfCapsuleExport,
+
     /// Propose new wiki pages (docs) to be curated into the platform wiki.
     /// Writing durable documentation is a trust boundary — requires judgment.
     /// Only agents with this capability can call wiki.propose.
     WikiContribute,
 
-    /// Access to PlanFrame operations (propose, amend, approve, list, get).
+    /// Access to PlanFrame operations (propose, amend, list, get).
     /// Controls whether an agent can create and modify collaborative plans.
     /// The `patterns` field restricts which operations are allowed.
-    /// Use ["*"] for all operations, or specific patterns like "planframe.propose".
+    /// Use ["*"] for all *participation* operations, or specific patterns like
+    /// "planframe.propose".
+    ///
+    /// `planframe.approve` is an **authority**, not participation: it is NEVER
+    /// granted by `["*"]` or a prefix and must be listed EXACTLY
+    /// (`"planframe.approve"`). This keeps a proposing agent (e.g. the planner,
+    /// which holds `["*"]`) from approving its own plan — approval is a held
+    /// right exercised by a distinct authority (the operator, or an agent
+    /// explicitly granted it).
     PlanFrameAccess {
         #[serde(default = "default_patterns_all")]
         patterns: Vec<String>,
     },
+
+    /// Pre-authorizes promotion of an agent whose declared capabilities fall
+    /// within this set. Checked at promotion time against locked session envelopes.
+    PromoteWith {
+        #[serde(default)]
+        agent_id: String,
+        capabilities: Vec<Capability>,
+    },
+
+    /// Resolve approval/escalation gates created by other agents.
+    /// The `kinds` field declares which gate kinds the agent may resolve
+    /// (`approval`, `escalation`, or both). An agent without `GateDecider`
+    /// cannot call `approve_request` or `reject_request`. Decider agents are
+    /// subject to the same dwell time, confirmation phrase, and hardening
+    /// rules as human operators (P-2.24).
+    GateDecider {
+        #[serde(default = "default_patterns_all")]
+        kinds: Vec<String>,
+    },
+}
+
+/// Operations that confer **authority** rather than mere participation.
+/// Authority rights must be granted EXACTLY — they are never satisfied by a
+/// `*` wildcard or a prefix pattern. This is the separation-of-powers boundary
+/// for pattern-scoped capabilities: a broad participation grant (e.g.
+/// `PlanFrameAccess: ["*"]`) must NOT let a proposing agent exercise an
+/// authority operation (e.g. `planframe.approve`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityOp {
+    /// Approve a PlanFrame. The authority operation that motivated the
+    /// e316cd53 separation-of-powers fix.
+    PlanFrameApprove,
+}
+
+impl AuthorityOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuthorityOp::PlanFrameApprove => "planframe.approve",
+        }
+    }
+
+    /// True if `operation` is an authority-class operation.
+    pub fn is_authority_operation(operation: &str) -> bool {
+        operation == Self::PlanFrameApprove.as_str()
+    }
+
+    /// Whether a set of patterns grants `operation`.
+    ///
+    /// Empty/whitespace patterns — and degenerate prefixes like `"."` that
+    /// trim to empty — grant nothing. Authority operations require an exact
+    /// grant; participation operations may be granted by exact match, `*`, or
+    /// a non-empty prefix.
+    pub fn patterns_allow(patterns: &[String], operation: &str) -> bool {
+        let authority = Self::is_authority_operation(operation);
+        patterns.iter().any(|raw| {
+            let p = raw.trim();
+            if p.is_empty() {
+                return false;
+            }
+            if p == operation {
+                return true;
+            }
+            if authority {
+                return false;
+            }
+            if p == "*" {
+                return true;
+            }
+            let prefix = p.trim_end_matches('.');
+            !prefix.is_empty() && operation.starts_with(prefix)
+        })
+    }
 }
 
 fn default_patterns_all() -> Vec<String> {
@@ -198,7 +294,7 @@ fn default_sources_all() -> Vec<String> {
     vec!["*".to_string()]
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapabilityDelta {
     pub added: Vec<String>,
     pub broadened: Vec<CapabilityBroadening>,
@@ -284,6 +380,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "AgentMessage",
         "BackgroundReevaluation",
         "CodeExecution",
+        "ArtifactExecution",
         "EmergencyStop",
         "AgentRevision",
         "Evaluation",
@@ -300,7 +397,11 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "budget.no_price_available.allow",
         "SecurityRedTeam",
         "CapsuleExport",
+        "SelfCapsuleExport",
         "PlanFrameAccess",
+        "WikiContribute",
+        "PromoteWith",
+        "GateDecider",
     ]
 }
 
@@ -314,6 +415,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage".to_string(),
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
         Capability::CodeExecution { .. } => "CodeExecution".to_string(),
+        Capability::ArtifactExecution => "ArtifactExecution".to_string(),
         Capability::EmergencyStop => "EmergencyStop".to_string(),
         Capability::AgentRevision { .. } => "AgentRevision".to_string(),
         Capability::Evaluation { .. } => "Evaluation".to_string(),
@@ -329,9 +431,25 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
         Capability::CapsuleExport => "CapsuleExport".to_string(),
+        Capability::SelfCapsuleExport => "SelfCapsuleExport".to_string(),
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
         Capability::WikiContribute => "WikiContribute".to_string(),
+        Capability::PromoteWith { .. } => "PromoteWith".to_string(),
+        Capability::GateDecider { .. } => "GateDecider".to_string(),
     }
+}
+
+/// True when every capability in `artifact_caps` is equal to or narrower than
+/// some capability in `declared`.
+pub fn capability_set_covers(declared: &[Capability], artifact_caps: &[Capability]) -> bool {
+    let declared_map = capability_map(declared);
+    artifact_caps.iter().all(|ac| {
+        let name = capability_type_name(ac);
+        match declared_map.get(&name) {
+            None => false,
+            Some(dc) => capability_broadening(&name, dc, ac).is_none(),
+        }
+    })
 }
 
 fn capability_broadening(
@@ -399,6 +517,10 @@ fn capability_broadening(
         (
             Capability::PlanFrameAccess { patterns: a },
             Capability::PlanFrameAccess { patterns: b },
+        ) => scope_broadening(capability_type, a, b),
+        (
+            Capability::GateDecider { kinds: a },
+            Capability::GateDecider { kinds: b },
         ) => scope_broadening(capability_type, a, b),
         (
             Capability::CodeExecution {
@@ -691,6 +813,7 @@ mod tests {
                 patterns: vec![],
                 commands: vec![],
             },
+            Capability::ArtifactExecution,
             Capability::EmergencyStop,
             Capability::AgentRevision { patterns: vec![] },
             Capability::Evaluation { patterns: vec![] },
@@ -708,7 +831,16 @@ mod tests {
             Capability::BudgetNoPriceAvailableAllow,
             Capability::SecurityRedTeam,
             Capability::CapsuleExport,
+            Capability::SelfCapsuleExport,
             Capability::PlanFrameAccess { patterns: vec![] },
+            Capability::WikiContribute,
+            Capability::PromoteWith {
+                agent_id: "agent.test".into(),
+                capabilities: vec![Capability::ReadAccess {
+                    scopes: vec!["self.*".into()],
+                }],
+            },
+            Capability::GateDecider { kinds: vec![] },
         ];
         for cap in &samples {
             let name = capability_type_name(cap);
@@ -719,5 +851,63 @@ mod tests {
                 name
             );
         }
+    }
+
+    #[test]
+    fn capability_set_covers_equal_and_narrower() {
+        let declared = vec![
+            Capability::NetworkAccess {
+                hosts: vec!["api.example.com".into(), "cdn.example.com".into()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".into()],
+            },
+        ];
+        let artifact = vec![
+            Capability::NetworkAccess {
+                hosts: vec!["api.example.com".into()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".into()],
+            },
+        ];
+        assert!(capability_set_covers(&declared, &artifact));
+        assert!(!capability_set_covers(&artifact, &declared));
+    }
+
+    #[test]
+    fn authority_op_wildcard_does_not_grant_approval() {
+        let p = vec!["*".to_string()];
+        assert!(AuthorityOp::patterns_allow(&p, "planframe.propose"));
+        assert!(!AuthorityOp::patterns_allow(&p, "planframe.approve"));
+    }
+
+    #[test]
+    fn authority_op_prefix_does_not_grant_approval() {
+        let p = vec!["planframe.".to_string()];
+        assert!(AuthorityOp::patterns_allow(&p, "planframe.propose"));
+        assert!(!AuthorityOp::patterns_allow(&p, "planframe.approve"));
+    }
+
+    #[test]
+    fn authority_op_exact_grant_confers_approval() {
+        let p = vec!["planframe.approve".to_string()];
+        assert!(AuthorityOp::patterns_allow(&p, "planframe.approve"));
+    }
+
+    #[test]
+    fn authority_op_empty_patterns_grant_nothing() {
+        for bad in [&[][..], &[""][..], &["   "][..], &["."][..]] {
+            let p: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            assert!(!AuthorityOp::patterns_allow(&p, "planframe.propose"));
+            assert!(!AuthorityOp::patterns_allow(&p, "planframe.approve"));
+        }
+    }
+
+    #[test]
+    fn authority_op_recognizes_planframe_approve() {
+        assert!(AuthorityOp::is_authority_operation("planframe.approve"));
+        assert!(!AuthorityOp::is_authority_operation("planframe.propose"));
+        assert!(!AuthorityOp::is_authority_operation("planframe.amend"));
     }
 }

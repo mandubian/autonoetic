@@ -135,9 +135,17 @@ Integration tests are in `autonoetic-gateway/tests/` (30+ tests). They use `temp
 Notable suite for approval continuation:
 - `autonoetic-gateway/tests/turn_continuation_approval_integration.rs` — suspend/resume, timeout, cancellation, restart, and parallel-join behavior
 
+**Ignored (manual) sandbox e2e** — require a host `bwrap` and execute real code, so they are NOT run in CI:
+- `autonoetic-gateway/tests/promotion_gate_mocked_network_e2e.rs` — proves the promotion gate runs a `urllib`-importing but mocked test suite offline (passes) and that a real network call fails offline. Run with:
+  ```bash
+  cargo test -p autonoetic-gateway --test promotion_gate_mocked_network_e2e -- --ignored --nocapture
+  ```
+  Its CI-safe decision counterpart (no sandbox) is `promotion_gate_network_isolation_decision.rs`.
+
 ## Key Documentation
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow
+- `docs/philosophy.md` — The conceptions behind the constitution: functional autonoesis, bind-direction social contract, correctability over perfection, democratic trajectory, end-user primacy, and the intellectual lineage (Tulving, Fuller, Hart, Popper, Ostrom, Hirschman, Rawls…)
 - `docs/AGENTS.md` — Agent roles, routing, capabilities, lifecycle
 - `docs/CLI.md` — Complete CLI reference
 - `docs/separation-of-powers.md` — Agent vs gateway responsibilities

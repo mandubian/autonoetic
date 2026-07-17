@@ -5,7 +5,7 @@
 //! focused on turn orchestration while all tool-surface / guard wiring lives
 //! in one place.
 
-use autonoetic_types::agent::{AgentManifest, LoopGuardDeclaration};
+use autonoetic_types::agent::{AgentManifest, ExecutionMode, LoopGuardDeclaration};
 use autonoetic_types::config::{GatewayConfig, LoopGuardConfig};
 use std::path::Path;
 
@@ -82,6 +82,117 @@ pub(crate) fn tool_result_counts_as_progress(result: &str) -> bool {
     false
 }
 
+/// Returns `true` when the tool result is a stagnant no-op — a successful
+/// call that carries no new information and therefore should NOT reset the
+/// loop-guard's no-progress counter.
+///
+/// Currently covers:
+/// - `workflow_wait` with `waited_secs == 0` and `join_satisfied == false`
+///   (probe returned "still running" — the agent already knew this)
+/// - `planframe_amend` with `progress_recorded == false` and
+///   `requires_regate == false` (a cosmetic-only amend that changed nothing
+///   but title/objective/reason text — no step status moved, no envelope
+///   expanded). Observed in `session-9d5b3ef1`: the planner re-sent the same
+///   single step 11 times; every amend returned `ok: true` and reset the
+///   no-progress counter, so `max_loops_without_progress` never tripped.
+///   An amend that marks a step `completed` carries `progress_recorded: true`
+///   and is NOT stagnant.
+pub(crate) fn is_stagnant_poll(tool_name: &str, result: &str) -> bool {
+    if tool_name == "workflow_wait" {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+            let waited = parsed.get("waited_secs").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+            let satisfied = parsed.get("join_satisfied").and_then(|v| v.as_bool()).unwrap_or(false);
+            let failed = parsed.get("any_failed").and_then(|v| v.as_bool()).unwrap_or(false);
+            // A 0-second wait that didn't satisfy and didn't fail is a no-op probe.
+            return waited == 0 && !satisfied && !failed;
+        }
+        return false;
+    }
+    if tool_name == "planframe_amend" {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
+            // Only a successful, cosmetic-only amend with no step-status
+            // transition is stagnant. Envelope-expanding amends
+            // (`requires_regate: true`) and progress-recording amends
+            // (`progress_recorded: true`) reset the counter as usual.
+            let ok = parsed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let requires_regate = parsed
+                .get("requires_regate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let progress_recorded = parsed
+                .get("progress_recorded")
+                .and_then(|v| v.as_bool())
+                // Default to true when absent so older shards / partial
+                // results never get silently suppressed.
+                .unwrap_or(true);
+            return ok && !requires_regate && !progress_recorded;
+        }
+        return false;
+    }
+    false
+}
+
+/// Read-only, side-effect-free tools whose successful result advances no
+/// workflow (#701). A successful call to one of these must NOT reset the
+/// LoopGuard's no-progress counter — otherwise a planner can interleave one
+/// read-only probe between every failed mutation and keep
+/// `max_loops_without_progress` from ever tripping (observed in
+/// `session-cc54cec3`, which wasted ~30 planner rounds this way).
+///
+/// This is the vetted subset observed in the death-spiral post-mortem plus the
+/// obvious state-query tools (including roster directory reads). Being
+/// conservative is deliberate: labelling a tool that actually mutates state as
+/// read-only would let a real loop run unbounded, so only tools known to be
+/// pure reads are listed.
+///
+/// Note: `resolve` is listed here because `resolve(include=metadata)` and
+/// `resolve(include=files)` are pure probes. `resolve(include=content)` is
+/// treated as substantive progress at the call site via
+/// `is_resolve_content_read`.
+pub(crate) fn is_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "resolve"
+            | "workflow_state"
+            | "planframe_get"
+            | "planframe_list"
+            | "planframe_history"
+            | "approval_list"
+            | "approval_status"
+            | "agent_discover"
+            | "agent_inspect"
+            | "agent_list"
+            | "artifact_inspect"
+            | "session_peek"
+            | "tool_discover"
+            | "agent_revision_schema"
+            | "promotion_query"
+            | "knowledge_recall"
+            | "knowledge_search"
+            | "digest_query"
+            | "observability_search"
+            | "observability_read"
+            | "observability_read_reasoning"
+            | "execution_search"
+    )
+}
+
+/// Returns true when a tool call is `resolve(include="content")`.
+///
+/// Content reads are substantive progress for review agents, so they should
+/// reset the LoopGuard no-progress counter even though `resolve` is otherwise
+/// classified as read-only (see `is_read_only_tool`). Metadata and files
+/// resolves remain read-only probes.
+pub(crate) fn is_resolve_content_read(tool_name: &str, arguments_json: &str) -> bool {
+    if tool_name != "resolve" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(arguments_json)
+        .ok()
+        .and_then(|v| v.get("include").and_then(|x| x.as_str().map(|s| s == "content")))
+        .unwrap_or(false)
+}
+
 pub(crate) fn load_manifest_loop_guard_declaration(agent_dir: &Path) -> Option<LoopGuardDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
     let skill = std::fs::read_to_string(skill_path).ok()?;
@@ -124,14 +235,57 @@ pub(crate) fn effective_loop_guard_config(
     effective
 }
 
-pub(crate) fn loop_guard_from_config_and_manifest(config: Option<&GatewayConfig>, agent_dir: &Path) -> LoopGuard {
+pub(crate) fn loop_guard_from_config_and_manifest(
+    config: Option<&GatewayConfig>,
+    _agent_dir: &Path,
+    declaration: Option<&LoopGuardDeclaration>,
+    execution_mode: ExecutionMode,
+) -> LoopGuard {
     match config {
         Some(cfg) => {
-            let declaration = load_manifest_loop_guard_declaration(agent_dir);
-            let effective = effective_loop_guard_config(&cfg.loop_guard, declaration.as_ref());
+            // The declaration is loaded once at AgentExecutor construction
+            // time. Do NOT re-read SKILL.md here — the YAML parse is
+            // expensive and unsafe_libyaml 0.2.11 has a SIGSEGV bug in its
+            // realloc path that can crash the process under certain inputs.
+            let manifest_decl = declaration.cloned();
+            if let Some(decl) = manifest_decl {
+                let effective = effective_loop_guard_config(&cfg.loop_guard, Some(&decl));
+                return LoopGuard::with_config(&effective);
+            }
+
+            // No declaration: derive role-aware defaults from execution_mode.
+            // These may raise above the global system defaults so deterministic
+            // executors (test runners, script agents) get headroom appropriate
+            // to their shape.
+            let role_default = LoopGuardDeclaration::for_execution_mode(execution_mode);
+            let mut effective = cfg.loop_guard.clone();
+            if let Some(v) = role_default.max_loops_without_progress {
+                effective.max_loops_without_progress = v;
+            }
+            if let Some(v) = role_default.max_tool_failures {
+                effective.max_tool_failures = v;
+            }
+            if let Some(v) = role_default.max_consecutive_same_progress {
+                effective.max_consecutive_same_progress = v;
+            }
+            if let Some(v) = role_default.max_child_failures {
+                effective.max_child_failures = v;
+            }
             LoopGuard::with_config(&effective)
         }
         None => LoopGuard::new(5),
+    }
+}
+
+/// Resolve per-agent `max_session_turns`, clamped to the system ceiling.
+/// Returns the effective limit to use for this agent's sessions.
+pub(crate) fn effective_max_session_turns(
+    system_turns: u32,
+    declaration: Option<&LoopGuardDeclaration>,
+) -> u32 {
+    match declaration.and_then(|d| d.max_session_turns) {
+        Some(v) => v.min(system_turns),
+        None => system_turns,
     }
 }
 
@@ -388,8 +542,47 @@ impl AgentExecutor {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod loop_guard_tests {
-    use super::tool_result_counts_as_progress;
+mod tests {
+    use super::{is_resolve_content_read, is_stagnant_poll, tool_result_counts_as_progress};
+
+    #[test]
+    fn resolve_content_read_not_read_only() {
+        assert!(is_resolve_content_read(
+            "resolve",
+            r#"{"ref": "ar.x", "include": "content"}"#
+        ));
+    }
+
+    #[test]
+    fn resolve_metadata_read_is_read_only() {
+        assert!(!is_resolve_content_read(
+            "resolve",
+            r#"{"ref": "ar.x", "include": "metadata"}"#
+        ));
+    }
+
+    #[test]
+    fn resolve_files_read_is_read_only() {
+        assert!(!is_resolve_content_read(
+            "resolve",
+            r#"{"ref": "ar.x", "include": "files"}"#
+        ));
+    }
+
+    #[test]
+    fn resolve_without_include_is_read_only() {
+        assert!(!is_resolve_content_read("resolve", r#"{"ref": "ar.x"}"#));
+    }
+
+    #[test]
+    fn resolve_content_malformed_args_fails_closed() {
+        assert!(!is_resolve_content_read("resolve", "not-json"));
+    }
+
+    #[test]
+    fn non_resolve_tool_is_not_content_read() {
+        assert!(!is_resolve_content_read("workflow_state", r#"{}"#));
+    }
 
     #[test]
     fn test_tool_result_counts_as_progress_ok_true() {
@@ -450,6 +643,81 @@ mod loop_guard_tests {
     fn test_tool_result_counts_as_progress_invalid_json() {
         assert!(!tool_result_counts_as_progress("not json"));
     }
+
+    // ── is_stagnant_poll: planframe_amend no-op detection ───────────────
+    // Regression for session-9d5b3ef1's amendment loop. A cosmetic-only
+    // amend (`progress_recorded: false`, `requires_regate: false`) is
+    // stagnant and must NOT reset the no-progress counter; an amend that
+    // records a step-status transition or expands the envelope is real
+    // progress and resets as usual.
+
+    #[test]
+    fn stagnant_planframe_amend_cosmetic_no_progress() {
+        let result = r#"{"ok":true,"inherited":true,"requires_regate":false,"progress_recorded":false,"grants_revoked":0,"diff_summary":"no envelope change"}"#;
+        assert!(
+            is_stagnant_poll("planframe_amend", result),
+            "cosmetic amend with no step-status change must be stagnant"
+        );
+    }
+
+    #[test]
+    fn not_stagnant_planframe_amend_records_step_status() {
+        // Marking a step completed is real progress — reset the counter.
+        let result = r#"{"ok":true,"inherited":true,"requires_regate":false,"progress_recorded":true,"grants_revoked":0,"diff_summary":"no envelope change"}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "amend that recorded a step-status change must NOT be stagnant"
+        );
+    }
+
+    #[test]
+    fn not_stagnant_planframe_amend_envelope_expanded() {
+        // Adding a step expands the envelope → requires_regate → not stagnant.
+        let result = r#"{"ok":true,"inherited":false,"requires_regate":true,"progress_recorded":false,"grants_revoked":0,"diff_summary":"+step s2"}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "envelope-expanding amend must NOT be stagnant"
+        );
+    }
+
+    #[test]
+    fn not_stagnant_planframe_amend_failed() {
+        // A failed amend (ok:false) is a failure, not a stagnant success —
+        // it must not be suppressed here (the failure path handles it).
+        let result = r#"{"ok":false,"error_type":"validation","message":"bad steps"}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "failed amend must not be classified as stagnant"
+        );
+    }
+
+    #[test]
+    fn stagnant_planframe_amend_defaults_progress_recorded_to_true_when_absent() {
+        // Backward safety: a result missing `progress_recorded` must NOT be
+        // suppressed (default to non-stagnant) so older shards never get
+        // silently masked.
+        let result = r#"{"ok":true,"inherited":true,"requires_regate":false,"grants_revoked":0}"#;
+        assert!(
+            !is_stagnant_poll("planframe_amend", result),
+            "missing progress_recorded must default to NOT stagnant"
+        );
+    }
+
+    #[test]
+    fn workflow_wait_stagnant_still_detected_after_generalization() {
+        // The original workflow_wait stagnant-poll path still works.
+        let result = r#"{"ok":true,"waited_secs":0,"join_satisfied":false,"any_failed":false}"#;
+        assert!(is_stagnant_poll("workflow_wait", result));
+        let result = r#"{"ok":true,"waited_secs":5,"join_satisfied":false,"any_failed":false}"#;
+        assert!(!is_stagnant_poll("workflow_wait", result));
+    }
+
+    #[test]
+    fn unrelated_tool_is_never_stagnant() {
+        let result = r#"{"ok":true,"progress_recorded":false,"requires_regate":false}"#;
+        assert!(!is_stagnant_poll("content_write", result));
+        assert!(!is_stagnant_poll("agent_spawn", result));
+    }
 }
 
 #[cfg(test)]
@@ -472,7 +740,8 @@ mod tier_filter_tests {
                 id: "test-agent".to_string(),
                 name: "test".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -488,8 +757,10 @@ mod tier_filter_tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -598,9 +869,70 @@ mod tier_filter_tests {
     fn test_degraded_overrides_manifest_declared_tiers() {
         let mut manifest = test_manifest();
         manifest.allowed_tool_tiers = vec![ToolTier::Core, ToolTier::Specialized];
-        let filter = determine_tool_tier_filter(&manifest, Some("root-session"), false, SessionState::Degraded, true);
+        let filter = determine_tool_tier_filter(&manifest,
+            Some("root-session"),
+            false,
+            SessionState::Degraded,
+            true,
+        );
         assert!(filter.allows("content_write"), "core allowed");
         assert!(!filter.allows("web_search"), "specialized blocked despite manifest");
         assert!(!filter.allows("agent_spawn"), "workflow blocked");
+    }
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::loop_guard_from_config_and_manifest;
+    use autonoetic_types::agent::ExecutionMode;
+    use std::path::Path;
+
+    #[test]
+    fn reasoning_mode_uses_system_loop_guard_defaults() {
+        let cfg = autonoetic_types::config::GatewayConfig::default();
+        let guard = loop_guard_from_config_and_manifest(
+            Some(&cfg),
+            Path::new("/no-such-agent-dir"),
+            None,
+            ExecutionMode::Reasoning,
+        );
+        assert_eq!(
+            guard.max_loops_without_progress,
+            cfg.loop_guard.max_loops_without_progress
+        );
+        assert_eq!(guard.max_tool_failures, cfg.loop_guard.max_tool_failures);
+    }
+
+    #[test]
+    fn script_mode_uses_role_aware_loop_guard_profile() {
+        let cfg = autonoetic_types::config::GatewayConfig::default();
+        let guard = loop_guard_from_config_and_manifest(
+            Some(&cfg),
+            Path::new("/no-such-agent-dir"),
+            None,
+            ExecutionMode::Script,
+        );
+        assert_eq!(guard.max_loops_without_progress, 15);
+        assert_eq!(guard.max_tool_failures, 12);
+    }
+
+    #[test]
+    fn manifest_loop_guard_declaration_overrides_role_profile() {
+        let cfg = autonoetic_types::config::GatewayConfig::default();
+        let declaration = autonoetic_types::agent::LoopGuardDeclaration {
+            max_loops_without_progress: Some(2),
+            max_tool_failures: Some(3),
+            max_consecutive_same_progress: None,
+            max_child_failures: None,
+            max_session_turns: None,
+        };
+        let guard = loop_guard_from_config_and_manifest(
+            Some(&cfg),
+            Path::new("/no-such-agent-dir"),
+            Some(&declaration),
+            ExecutionMode::Script,
+        );
+        assert_eq!(guard.max_loops_without_progress, 2);
+        assert_eq!(guard.max_tool_failures, 3);
     }
 }

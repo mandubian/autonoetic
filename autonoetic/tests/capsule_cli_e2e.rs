@@ -56,6 +56,8 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         created_at: "2026-05-28T00:00:00Z".to_string(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "artifact".to_string(),
         source_ref: None,
         origin_node_id: "node-A".to_string(),
@@ -63,6 +65,7 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::Value::Null,
         short_id: "abcd1234".to_string(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -75,6 +78,9 @@ fn seed_revision(gateway_dir: &std::path::Path, agent_id: &str, revision_id: &st
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 }

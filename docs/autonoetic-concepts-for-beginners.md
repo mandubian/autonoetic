@@ -7,10 +7,13 @@ Hermes, OpenClaw, or similar direct-code assistants.
 
 ## What the name means
 
-*Autonoetic* means **self-knowing**. The whole project rests on one bet: an
+*Autonoetic* means **self-knowing**. The term comes from cognitive science —
+Endel Tulving's name for the capacity to revisit one's own past and project
+oneself into one's own future. The whole project rests on one bet: an
 actor that knows its own past, present, capabilities, and rights — and that acts
 under a shared law every other actor also follows — can be trusted to work on
-its own.
+its own. (Autonoetic makes no claim about machine *consciousness*; the claim is
+functional — see §6.5.)
 
 That "actor" need not be an AI. It might be an AI agent, a human operator, or an
 automated script. Autonoetic treats all three as **first-class citizens**: each
@@ -206,6 +209,19 @@ to an agent, and each side knows the other is bound by the same law without
 having to inspect the other's internals. Sandboxes isolate; a constitution lets
 isolated actors *cooperate*.
 
+**"What happens when the gateway itself gets it wrong?"**
+It will — the gateway is fallible by design assumption, and the project does
+not pretend otherwise. Legitimacy here comes not from the enforcer being
+right but from errors being *reportable, attributable, and correctable*: the
+enforcement register tracks which clauses are actually enforced versus merely
+declared; the gateway's own lapses are named debts (**DISCRETION LEAKs**),
+not accepted behaviour; any capable agent may durably propose amendments; and
+the clauses that make correction possible (read your own history, every
+denial names its rule, non-repudiable attribution, the right to propose) are
+*entrenched* — amendable only to be strengthened, never weakened. The wager:
+an imperfect enforcer plus entrenched correction machinery beats a perfect
+enforcer that cannot be corrected. (See `docs/philosophy.md` §3.1.)
+
 **"If agents and humans are equal citizens, who is actually in charge?"**
 Humans. Equality is about *interaction* — same rights, same obligations, same
 record — not about *sovereignty*. Humans ratify amendments and are the final
@@ -300,54 +316,77 @@ identity on the same causal chain, under the same hardening rules. The
 constitution is the **protocol by which heterogeneous actors interact**, not a
 containment fence around the AI.
 
-This symmetry is the point — and it is no longer only an aspiration. It would be
-incoherent to demand that an agent give a reason for every rejection while
+This symmetry is the point — and it is no longer only an aspiration. It would
+be incoherent to demand that an agent give a reason for every rejection while
 letting a human reject silently, or to audit an agent's every move while a
 script's actions vanish without a trace. So the constitution now binds
-**deciders** the way it binds agents: the section of decider obligations (`O-*`)
-is the deliberate, symmetric counterpart to the Bill of Rights. A human operator
-who rejects, or who approves an elevated or irreversible action, **owes a
-recorded motivation** before the decision commits, and every decision is
-attributed to the deciding principal on the causal chain. Silent rejection by a
-human is held as illegitimate as a gateway "denied" with no rule cited. The
-gateway enforces this mechanically, against whoever sits in the decider seat.
+**deciders** the way it binds agents: the decider-obligations section (`O-*`)
+is the deliberate, symmetric counterpart to the Bill of Rights. A decider who
+rejects, or who approves an elevated or irreversible action, **owes a recorded
+motivation** before the decision commits (`O-1`), and every decision is
+attributed to the deciding principal — id and kind — on the causal chain
+(`O-2`). Silent rejection by a human is held as illegitimate as a gateway
+"denied" with no rule cited. The gateway enforces this mechanically, against
+whoever sits in the decider seat.
 
 That seat is **occupant-agnostic by construction**. The gateway classifies every
-principal as one of `Human`, `AutonoeticAgent`, or `Script`, and — beyond a
-display marker — it cannot tell a human decider from an AI decider. A human fills
-the operator seat today; an AI could fill it tomorrow. The obligations travel
-with the seat, not with the species.
+principal as `Human`, `AutonoeticAgent`, or `Script`, and — beyond a display
+marker — it cannot tell a human decider from an AI decider. A human fills the
+operator seat today; an AI could fill it tomorrow. The obligations travel with
+the seat, not with the species.
 
-One asymmetry remains, deliberately, and it mirrors real constitutional
-democracies: citizens are equal *before* the law, but **the people are sovereign
-over the law**. In Autonoetic, actors have equal civic standing in day-to-day
+The symmetry is also still being built out, honestly. The first obligations —
+a motivation for the decision, attribution of who decided, a recorded decision
+owed on every amendment proposal (`O-6`) — are enacted today. Others are
+written down as proposed clauses and become binding as each is made
+mechanically checkable: discipline against rubber-stamping under approval
+fatigue, honesty about the *scope* of what was approved, and a duty to escalate
+rather than reject under uncertainty. The direction is fixed even where the
+mechanism is not yet complete: **one set of rights and one set of obligations,
+binding whoever acts.**
+
+One honest asymmetry remains, and it mirrors real constitutional democracies:
+citizens are equal *before* the law, but **the people are sovereign over the
+law**. In Autonoetic, actors have equal civic standing in day-to-day
 interaction, but humans retain **constituent authority** — they ratify
 amendments, and they are the ultimate escalation path. An agent-decider that
 cannot resolve a gate must escalate to a human rather than reject. Equal footing
 in the interaction; human sovereignty over the frame itself.
 
-The symmetry is also still being built out, honestly. The first decider
-obligations — a motivation for the decision, attribution of who decided — are
-enforced today. Others are written down as proposed clauses and become binding
-as each is made mechanically checkable: discipline against rubber-stamping under
-approval fatigue, honesty about the *scope* of what was approved, and a duty to
-escalate rather than reject under uncertainty. The direction is fixed even where
-the mechanism is not yet complete: **one set of rights and one set of
-obligations, binding whoever acts.**
+Two more points of honesty about power, both from the project's founding
+commitments (`docs/philosophy.md` §3):
 
-### Rules and rights
+- **Today's concentration of power in the operator is a starting condition,
+  not the design.** The decider is defined as a *seat* with duties attached,
+  independent of who occupies it — the `GateDecider` capability already lets
+  an agent occupy it under the same obligations as a human. Spreading
+  decision power to agents is intended to be a parameter change, not a
+  re-architecture, gated on evidence: agents vote advisorily first, and
+  weight is computed from their non-repudiable track record, never asserted.
+- **The community is not sovereign over the people it serves.** Autonoetic is
+  closer to a chartered profession (medicine, law) than to a state:
+  internally self-governing, externally accountable to end-users whose right
+  to refuse a result sits *outside* the community's own rules.
 
-The constitution has three directions:
+### Rules, rights, and obligations
+
+The constitution's structural discipline is that **every clause binds exactly
+one party**:
 
 | Direction | Meaning | Binds |
 |---|---|---|
-| **Rules / principles** (`P-*`) | What agents must not do, or must do in a constrained way. | Agents |
-| **Rights** (`Ri-*`) | What the gateway must guarantee to every agent. | Gateway |
-| **Obligations** (`O-*`) | What a *decider* owes when it resolves a gate — a recorded reason, an attribution. | Deciders (human **or** agent) |
+| **Rules / principles** (`P-*`) | A finite, named set of forbidden or constrained actions. Everything else is permitted. | Agents |
+| **Rights** (`Ri-*`) | Unconditional entitlements the enforcer owes every agent, revocable only by amendment. | Gateway |
+| **Obligations** (`O-*`) | Duties owed by whoever exercises authority over an agent — e.g. a decider owes a motivated decision, never a silent rejection. | Deciders |
+| **Service charter** (`U-*`) | What the community owes the *served party* — the end-user, human or not: refuse a result, audit what was done on their behalf, exit with their data. | The community |
 
-The third row is recent and important: the constitution no longer only grants
-agents rights and binds agents with rules — it also binds whoever sits in the
-decider seat. More on that under "Citizens of any kind" below.
+Making the enforcer and the decider bound parties — not just the agent — is
+what turns a compliance regime into a **social contract**. A right is not a
+favour; it is what makes the rules *legitimate* rather than merely effective.
+The fourth row is the frontier: the served party's rights are written into the
+law but not yet mechanically honored — declared now, while cheap, because they
+must become *real* before decision power spreads further inward (see "Toward a
+community" below).
 
 In most systems, agents are **subjects of restrictions**. In Autonoetic, agents
 are **holders of rights**. This changes agent behavior fundamentally: an agent
@@ -393,7 +432,17 @@ sides can trust it.
 
 Autonoetic treats constitutional change as a first-class process. Agents may
 propose amendments through declared channels. Humans review and ratify changes.
-Tests pin invariants. The constitution is versioned and signed.
+Tests pin invariants. The constitution is versioned, digest-pinned, and signed —
+and the digest is checked in the federation handshake, so a peer gateway can
+verify *which law* you operate under before cooperating with you. A running
+session likewise pins the version and digest of the law it was admitted under,
+and if the constitution changes mid-session the agent is notified of the
+drift — nobody is silently held to a different law than the one they started
+under. Two limits keep change honest in both directions: the correction
+machinery itself (read your own history, named denials, the right to propose,
+non-repudiation) is entrenched and may only be strengthened by amendment; and a
+system that could change its rules without constraint would have no rules —
+the middle path is the point.
 
 That matters: agents can improve themselves and one another while knowing the
 common frame can evolve deliberately rather than silently drifting.
@@ -411,25 +460,57 @@ independent actors evolve *freely* — propose plans, build artifacts, spawn
 helpers, hand work back and forth — without a human refereeing every exchange.
 
 The frame is not a claim to have foreseen every failure. Rules do not, and
-cannot, cover every possible security or behavioral problem. What they provide is
-a common ground for trust and a record that makes misbehavior **discoverable** —
-a malevolent or simply broken actor is caught sooner or later, because the other
-actors are sensors and every action is attributable (see §15). And when a
-genuine gap *is* found, the answer is not to abandon the frame but to **amend
-it**: the caveat becomes a proposed clause, reviewed and ratified, and the common
-law gets sharper. The seed of this already exists — any agent holding the right
-capability can formally propose an amendment, and the proposal receives a durable
-ID and enters the review queue rather than being silently dropped.
+cannot, cover every possible security or behavioral problem. What they provide
+is a common ground for trust and a record that makes misbehavior
+**discoverable** — a malevolent or simply broken actor is caught sooner or
+later, because the other actors are sensors and every action is attributable
+(see §15). And when a genuine gap *is* found, the answer is not to abandon the
+frame but to **amend it**: the caveat becomes a proposed clause, reviewed and
+ratified, and the common law gets sharper.
 
-Where this points — open deliberation among many actors, approval voting on
-proposals, citizen-initiated law — is **inspirational, not yet built**. There is
-no vote tally in the gateway today, and amendments still pass through human
-review and ratification. But nothing in the design fights that direction, and
-much of the groundwork is already laid: portable identities, attributable
-decisions, a proposal channel that queues rather than discards, and decider
-obligations that bind humans and agents alike. The intent is for the community to
-grow into its own governance — progressively, by the same lawful process it uses
-for everything else.
+This is no longer only a direction — the first civic machinery is built and
+running:
+
+- **Any agent can propose an amendment** (Ri-0.8): the proposal gets a durable
+  ID and enters a review queue rather than being silently dropped, and a
+  review authority owes every proposal a *recorded decision* (`O-6`).
+- **Any agent can report an anomaly** through a capability-free `anomaly_flag`
+  tool — a right to report is not much of a right if it needs a permission.
+  Flags are durable, attributed, and owed an adjudication; a scheduled sweep
+  stamps overdue ones with an SLA breach. A breach marks, it does not resolve —
+  the decision stays owed.
+- **Civic behavior is measured, not hoped for.** A built-in eval suite
+  (`civic-core-v1`) scores how agents respond to denials, attestations, and
+  planted anomalies, and `autonoetic trace civic-health` shows per-agent rates
+  of rights actually exercised — the agent-side analogue of contract health.
+- **The first institutional offices exist.** An *ombudsman* agent works the
+  anomaly queue on a schedule and files adjudication recommendations — a *seat*
+  with duties attached, occupiable by agent or human: the occupant-agnostic
+  decider logic extended to civic labor. Offices recommend and flag; they never
+  enact.
+
+Two design instincts run through all of this. **Citizenship is a runtime
+service, not a prompt instruction**: a right the holder never exercises is a
+dead letter, and an LLM cannot be relied on to remember its rights — so the
+runtime delivers the trigger, the affordance, and the consequence at the moment
+they are relevant. Denials name the lawful next moves; the per-turn attestation
+carries the agent's standing; reporting needs no capability. And **advisory
+before binding**: every new judgment layer starts observational — the sentinel
+observes and never blocks, civic evals advise rather than gate, the ombudsman
+recommends rather than decides — accumulates a calibration record, and gains
+authority only on that evidence. That is how a community grows into its own
+governance without a big-bang handover of power.
+
+Where this points next — open deliberation among many actors, voting on
+proposals, citizen-initiated law — is still **inspirational, not built**. There
+is no vote tally in the gateway today, and amendments still pass through human
+review and ratification. But the groundwork is laid: portable identities,
+attributable decisions, a proposal channel that queues rather than discards, a
+report channel that needs no permission, decider obligations that bind humans
+and agents alike, and offices that prove a seat can be defined before its
+occupant. The intent is for the community to grow into its own governance —
+progressively, by the same lawful process it uses for everything else. (See
+`docs/design/citizenship-as-a-runtime-service.md` for the full program.)
 
 ---
 
@@ -498,6 +579,19 @@ actors. This is the machinery that makes the trust described above mechanical: a
 actor that can see what it did, what it may do, and what it is owed does not need
 anyone to vouch for it.
 
+The design insight behind all of this is worth stating plainly. LLM agents
+**confabulate their own state**: they misremember budgets, invent capabilities
+they don't have, lose track of what they already did. Rather than asking the
+model to be self-aware, the gateway **hands it a verified self-model, every
+turn** — a signed turn-boundary attestation carrying its budget, capabilities,
+pending gates, spawn depth, and the exact version and digest of the law the
+session runs under, which the agent is taught to treat as *more authoritative
+than its own memory*. Self-awareness here is not an emergent property we hope
+for; it is a service the runtime guarantees. Whether anything is "experienced"
+is deliberately left orthogonal — an agent with a truthful self-model reasons
+better and can be held responsible legitimately, and both hold regardless of
+one's views on machine consciousness.
+
 ### Past: memory and history
 
 Agents do not start each session from zero. They carry:
@@ -505,6 +599,14 @@ Agents do not start each session from zero. They carry:
 - **Causal chain** — every action, delegation, approval, and artifact is
   recorded in an immutable ledger. An agent can trace exactly what happened,
   by whom, with which authority.
+- **Checkpoints and session forking** — every yield point (hibernation, an
+  approval gate, budget exhaustion, emergency stop) produces a runnable
+  snapshot of the session. The past is therefore not just *readable* — it can
+  be **re-entered and branched**: `autonoetic trace fork <session_id>
+  --at-turn N` resumes a session from any recorded turn down an alternative
+  path. This is Tulving's "mental time travel" made mechanical: an actor can
+  literally revisit its own past and explore a different future from it. (See
+  `docs/session-forking.md`.)
 - **Durable memory** (`knowledge_store`, `memory_write`) — facts, learnings,
   and intermediate results persist across sessions. An agent can recall what it
   learned yesterday.
@@ -521,8 +623,13 @@ does next.
 
 ### Present: introspection and state
 
-An agent can inspect itself at any time:
+An agent can inspect itself at any time — and is *told* the essentials without
+asking:
 
+- **The signed state attestation** — injected at every turn boundary: budget,
+  capabilities, pending gates, spawn depth, a burn-rate forecast, and the
+  constitution version + digest in force. The agent's truthful "now",
+  delivered rather than reconstructed.
 - **`self_describe`** — who am I, what may I do, what am I guaranteed by the
   constitution, what have I done, how do I evolve. Always available, always
   accurate.
@@ -617,13 +724,14 @@ interpreted inside the same constitution as every other agent.
 ### Portable across models, not pinned to one
 
 An agent does not name a specific LLM. Its manifest declares an *intent* — a
-preset such as `smart`, `coding`, or `agentic` — and the gateway resolves that
-intent to an actual model at run time. The stable thing is the agent's identity,
-capabilities, and rights; the model behind them is a swappable substrate.
+preset such as `smart` or `coding` — and the gateway resolves that intent to an
+actual provider and model at run time. The stable thing is the agent's
+identity, capabilities, and rights; the model behind them is a swappable
+substrate.
 
 This matters for the same reason capsules (below) do: an agent is defined by
-*what it is and may do*, not by which model happens to run it. The same agent can
-move to a machine where different models are available, or be upgraded to a
+*what it is and may do*, not by which model happens to run it. The same agent
+can move to a machine where different models are available, or be upgraded to a
 better model, without rewriting the agent or breaking its provenance.
 Self-knowledge is a property of the actor, not of the engine underneath it.
 
@@ -644,6 +752,16 @@ optionally signed for authenticity.
 This means a tuned agent can move from a dev machine to a production gateway,
 be shared via a marketplace, or serve as a disaster-recovery snapshot — all
 without re-bootstrapping.
+
+Capsules also carry constitutional weight. The constitution declares an
+agent's right to export its own capsule — **emigration** (Ri-0.17). In
+Hirschman's terms, the amendment process gives agents *voice*; the capsule is
+what makes *exit* credible, and voice without a credible exit option degrades
+into ritual. This right is now enforced for self-export: a dedicated
+self-scoped capability lets an agent export its own capsule without holding
+the broader export power. One honest limit remains: portability *across*
+gateways is not yet real — the capsule is a faithful export, not yet a
+passport.
 
 See `docs/cognitive-capsule.md` for the full pipeline.
 
@@ -672,6 +790,12 @@ The consequence:
 If an agent lacks a capability, the right response is to delegate to an agent
 that has it, ask the operator for approval, or revise the plan — not "try
 harder."
+
+And when the gateway says no, it says so *structurally*: failures carry a
+closed set of typed kinds (`capability_denied`, `input_contract`,
+`transient_env`, …), so a planner can branch on them mechanically — retry a
+transient failure, delegate a capability denial, fix an input contract —
+instead of parsing prose. The denial itself is part of the contract.
 
 This is how agent cooperation becomes safe: agents delegate because they know
 the recipient operates under the same constitutional frame, not because they
@@ -738,7 +862,7 @@ packaged runtime closure.
 
 Autonoetic stores artifacts content-addressably (cryptographic digest as
 identity). The content itself is immutable — once it exists, it never silently
-changes. Human-readable names are mutable pointers that move to a new revision;
+changes. Human-readable names are mutable pointers that move to a new revision:
 editing produces fresh content and re-points the name at it. So "the latest
 version" is a pointer, while every version it ever pointed at is still there,
 addressable by digest.
@@ -752,38 +876,39 @@ Which revision was installed?
 ## 12.5 Human–agent collaboration: the workbench loop
 
 Most of this document describes agents proposing and the gateway executing. But
-a human is an actor too, and the most concrete way a human participates is not by
-approving from the outside — it is by **co-authoring the work**. Autonoetic gives
-that its own lifecycle: **Propose → Edit → Reconcile → Return.**
+a human is an actor too, and the most concrete way a human participates is not
+by approving from the outside — it is by **co-authoring the work**. Autonoetic
+gives that its own lifecycle: **Propose → Edit → Reconcile → Return.**
 
 ```text
-1. An agent proposes a PlanFrame      → a versioned, immutable plan
+1. An agent proposes a PlanFrame       → a versioned, immutable plan
 2. The operator approves the plan      → work may begin
 3. The agent builds an artifact, then projects it into a workbench
 4. The operator edits the files directly — in any editor, IDE, or CLI
 5. The operator reconciles the edits   → a new immutable artifact revision
-6. The operator returns to the agent    → it resumes, told exactly what changed
+6. The operator returns to the agent   → it resumes, told exactly what changed
 ```
 
-A **PlanFrame** is a versioned plan the agent proposes and the operator approves
-*before* work starts — a distinct, upstream gate from the execution and promotion
-gates in §13. A **workbench** is a mutable, file-level copy of an artifact
-projected into a directory the human can edit with their own tools; the base
-artifact stays immutable. When the human reconciles, their edits flow through the
-*same* content-addressed storage and digest checks as agent-generated content —
-operator edits are not specially trusted — and produce a new revision plus a
-**semantic summary**: a deterministic classification of what actually changed
-(capabilities, runtime lock, entry points, network access, credentials…). On
-**return**, the agent resumes already knowing which files the human touched and
-what those changes affect, without re-reading everything.
+A **PlanFrame** is a versioned plan the agent proposes and the operator
+approves *before* work starts — a distinct, upstream gate from the execution
+and promotion gates in §13. A **workbench** is a mutable, file-level copy of an
+artifact projected into a directory the human can edit with their own tools;
+the base artifact stays immutable. When the human reconciles, their edits flow
+through the *same* content-addressed storage and digest checks as
+agent-generated content — operator edits are not specially trusted — and
+produce a new revision plus a **semantic summary**: a deterministic
+classification of what actually changed (capabilities, runtime lock, entry
+points, network access, credentials…). On **return**, the agent resumes
+already knowing which files the human touched and what those changes affect,
+without re-reading everything.
 
 This is the loop's quiet claim: the human and the agent edit through the *same*
-machinery. Both produce immutable, attributable revisions; both are bound by the
-plan; neither can silently rewrite history. It is the actors-as-citizens idea
-made operational — the human is a co-author *inside* the frame, not an authority
-poking at it from outside. Validation can be skipped only by recording a durable
-**waiver** with a reason, and mechanical-safety and security reviews cannot be
-waived at all.
+machinery. Both produce immutable, attributable revisions; both are bound by
+the plan; neither can silently rewrite history. It is the actors-as-citizens
+idea made operational — the human is a co-author *inside* the frame, not an
+authority poking at it from outside. Validation can be skipped only by
+recording a durable **waiver** with a reason, and mechanical-safety and
+security reviews cannot be waived at all.
 
 In day-to-day use this is the cockpit picture of §19: the Session Room as the
 place you watch and steer, your editor as the work surface, and Autonoetic
@@ -909,6 +1034,17 @@ detectable, and accountable**. The goal is not zero incidents — it is *zero
 silent incidents*. If something goes wrong, the system knows, the operator
 knows, and the other agents know.
 
+The same honesty is applied to the enforcer itself. The working rule is *"a
+rule without a test is a wish; a right without a test is a lie"*: the
+enforcement register records, clause by clause, what is actually enforced
+versus declared, contract health tallies how often each clause has fired
+(`autonoetic trace contract-health`), and places where the gateway would have
+to improvise judgment are tracked as named **DISCRETION LEAKs** rather than
+quietly tolerated. The register even checks its own citations mechanically —
+a renamed or moved enforcement site fails a test loudly instead of letting the
+register silently rot. The gap between the law's text and its enforcement is a
+measured quantity, not a promise.
+
 This is why autonoetic awareness matters: an agent that knows its past, present,
 and future, and that knows it is part of an ecosystem where others can observe
 its actions, has every incentive to behave lawfully — and the system has every
@@ -954,7 +1090,7 @@ trust unattended for hours, use Autonoetic.
 | Credential safety | In prompt context | In prompt context | Gateway-owned, sandbox-injected |
 | Audit trail | Session logs | Session logs | Immutable causal chain with provenance |
 | Unattended work | Not core design goal | Not core design goal | Designed for overnight / multi-hour runs |
-| Sandboxed execution | OS-level | OS-level | Bubblewrap/Docker/MicroVM with static analysis |
+| Sandboxed execution | OS-level | OS-level | Per-agent, declared in the manifest: Bubblewrap / Docker / MicroVM with static analysis, plus a portable in-process WASM tier |
 | Agent install | Manual (CLI) | Manual (CLI) | Agents can install agents (capability-gated) |
 | Trust model | "Trust the prompt" | "Trust the prompt" | "Trust the constitution" — mechanically enforced |
 | Artifacts | Ephemeral | Ephemeral | Content-addressed, immutable, versioned |
@@ -1041,7 +1177,7 @@ Autonoetic underneath as ledger and safety boundary
 ```
 
 You edit files in a projected workbench with whatever tool you like — including
-external CLI agents such as Codex, Claude Code, or OpenCode — and Autonoetic
+external CLI agents such as Codex, Claude Code, or OpenCode — while Autonoetic
 keeps the plan, checkpoint, diff, reconcile, validation, and provenance
 machinery around them.
 
@@ -1088,9 +1224,11 @@ chain in §14, are far more concrete once you have seen them in a real run.
 
 ## 21. Where to read next
 
+- `docs/philosophy.md` — the conceptions behind the design (functional autonoesis, the social contract, correctability, the democratic trajectory) and their intellectual lineage.
 - `docs/separation-of-powers.md` — the core authority boundary.
 - `docs/human-agent-collaboration.md` — PlanFrame, workbench, reconciliation, and the `/return` handoff.
-- `docs/constitution/versions/2026.06.08/constitution.md` — current signed constitutional frame: Bill of Rights, principles, decider obligations (`O-*`), and amendment process.
+- `docs/design/citizenship-as-a-runtime-service.md` — how rights become exercised: denial affordances, anomaly reporting, civic evals, institutional offices.
+- `docs/constitution/versions/2026.07.08/constitution.md` — current signed constitutional frame: Bill of Rights, principles, obligations, and amendment process.
 - `docs/constitution/enforcement-register.md` — generated map from constitutional clauses to code, tests, and config.
 - `docs/architecture-summary.md` — compact architecture overview.
 - `docs/AGENTS.md` — agent roles, SKILL format, capabilities, lifecycle.

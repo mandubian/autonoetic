@@ -30,14 +30,14 @@ When `docs/constitution/versions/<version>/constitution.md` changes, run the
 maintained script (requires PyNaCl: `python3 -m pip install pynacl`):
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.05.30 \
+python3 docs/constitution/recompute_lock.py --version 2026.07.08 \
   --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
 ```
 
 To intentionally rotate signer material:
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.05.30 --generate-key
+python3 docs/constitution/recompute_lock.py --version 2026.07.08 --generate-key
 ```
 
 If you rotate keys, update `trusted_signers` for `autonoetic:constitution:v1`
@@ -114,20 +114,23 @@ agents/                  Agent bundles (SKILL.md manifests)
 1. Add the variant to `ScheduledAction` in `autonoetic-types/src/background.rs`
 2. Update **all** construction sites and match arms — grep for `ScheduledAction::`
 3. If it requires approval, wire it into `scheduler/approval.rs` and `scheduler/decision.rs`
-4. Update `LoopGuardState` if the checkpoint format changes
+4. Update `LoopGuard` if the checkpoint format changes
 
 ### Approval system
-Four layers of approval dedup (checked in order):
+Five layers of approval dedup (checked in order):
 1. **Exec cache** (fingerprint-level, cross-session) — only when all patterns are concrete (url_literal/ip_address)
-2. **Session approval grants** (target-level, scope-aware, within root session) — `session_approval_grants` + `session_approval_grant_targets` tables; supports `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`; scoped `RootSession` or `Session`; optional expiry (`expires_at`)
-3. **Existing approved/pending approvals** (domain-level matching)
-4. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
+2. **Plan grants** — operator-approved plan envelope materialized as a session grant; see `docs/plan-capability-grants.md`
+3. **Session approval grants** (target-level, scope-aware, within root session) — `session_approval_grants` + `session_approval_grant_targets` tables; supports `ExactHost`, `HostSuffix`, `HostAndPort`, `UrlPrefix`; scoped `RootSession` or `Session`; optional expiry (`expires_at`)
+4. **Existing approved/pending approvals** (domain-level matching)
+5. **Approval flood cap** (`max_pending_approvals_per_root`, default 50) — rejects requests that would exceed the cap with `approval_flood`
 
 Additional approval features:
-- **Similarity scoring**: on creation, Jaccard similarity over command tokens (70%) + hosts (30%) against recent same-agent approvals. Stored as `similar_to_request_id` + `similarity_score`.
 - **Grant revocation**: `gateway grants revoke --root-session <id> --host X` without emergency stop; emits `grant_revocation` causal event.
 - **Continuation HMAC**: signed with `continuation_key` (or derived from `node_id`); verified on resume; action-equality check vs stored approval.
 - **Continuation cleanup**: on resume, reject/cancel/withdraw, gateway startup reaper, emergency stop, task cancellation.
+
+### Anomaly flag flood cap
+`anomaly_flag` intake is capability-free (Ri-0.18), so un-adjudicated flags (`pending`/`under_review`) are capped per reporter (`max_pending_anomaly_flags_per_reporter`, default 50, 0 disables) — the #770 spam triage bound, same shape as the P-7.17 approval flood cap. Over-cap filings in `gateway_store/anomaly_flags.rs::insert_anomaly_flag` are rejected loudly with `anomaly_flag_flood` plus an operator notification (deduped per reporter until a filing succeeds); terminal adjudications free capacity.
 
 ### Promotion severity gating
 `promotion.record` mechanically rejects:
@@ -143,7 +146,7 @@ Two trip conditions, independent:
 
 Both are configurable via `loop_guard:` in `config-template.yaml`.
 
-When modifying `LoopGuardState`, update all checkpoint construction sites (grep `LoopGuardState {`).
+When modifying `LoopGuard`, update all checkpoint construction sites (grep `loop_guard_state: `).
 
 ## Testing
 
@@ -158,6 +161,7 @@ Notable test suites:
 - `continuation_cleanup_integration.rs` — delete on reject/cancel/withdraw, startup reaper, emergency stop
 - `approval_scope_targets_integration.rs` — session-scoped grants, pattern-based targets, expiry
 - `approval_grant_revocation_integration.rs` — revoke all/specific host, causal event
+- `plan_frame_integration.rs` — plan approval grant materialization, amend revoke, inherit
 - `constitution_abuse_approval_flood.rs` — flood cap enforcement, cap=0 bypass
 
 ## SDKs
@@ -170,6 +174,7 @@ SDKs live outside the Rust workspace:
 
 - `docs/ARCHITECTURE.md` — System design, security model, data flow, emergency stop
 - `docs/approval-system.md` — Full approval lifecycle, session grants, promotion gating
+- `docs/plan-capability-grants.md` — Plan-as-capability-grant: materialization, revocation, dedup layer
 - `docs/remote-access-approval.md` — Static analysis detection, approval flow diagram
 - `docs/credential-management.md` — Credential vault, `credential_env` injection, CLI credential commands
 - `docs/AGENTS.md` — Agent roles, SKILL.md format, capabilities (user-facing, not dev instructions)

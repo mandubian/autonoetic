@@ -26,6 +26,7 @@ fn planner_manifest() -> AgentManifest {
             id: "planner.default".to_string(),
             name: "planner.default".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentSpawn {
             max_children: 4,
@@ -45,8 +46,10 @@ fn planner_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -115,6 +118,7 @@ fn agent_spawn_blocked_while_workflow_task_awaiting_approval() -> anyhow::Result
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         },
         created_at: chrono::Utc::now().to_rfc3339(),
         reason: Some("unit test exec".to_string()),
@@ -127,12 +131,12 @@ fn agent_spawn_blocked_while_workflow_task_awaiting_approval() -> anyhow::Result
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
 
@@ -232,6 +236,7 @@ fn cancelling_awaiting_approval_task_withdraws_pending_approval() -> anyhow::Res
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         },
         created_at: chrono::Utc::now().to_rfc3339(),
         reason: None,
@@ -244,12 +249,12 @@ fn cancelling_awaiting_approval_task_withdraws_pending_approval() -> anyhow::Res
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut approval)?;
 

@@ -15,6 +15,7 @@ metadata:
       id: "sealed_evaluator.default"
       name: "Sealed Evaluator Default"
       description: "Runs artifact code in a sealed (fixture-proxied) sandbox for deterministic evaluation. Operator-invokable diagnostic tool."
+      singleton: true
     llm_preset: coding
     sandbox_network: sealed
     remote_access:
@@ -30,6 +31,7 @@ metadata:
                    "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat",
                    "du", "uname", "hostname", "whoami", "basename", "dirname",
                    "readlink", "file", "sleep", "test", "true", "false"]
+      - type: "ArtifactExecution"
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
@@ -176,11 +178,13 @@ After completing your evaluation, you MUST call `promotion_record` to persist th
 promotion_record({
   "artifact_ref": "ar.example",
   "role": "sealed_evaluator",
-  "pass": <true if evaluator_pass is true, false otherwise>,
-  "findings": [<your findings array>],
+  "execution_trace_id": "<trace id from artifact_exec / sandbox_exec>",
+  "findings": [<your findings array — advisory>],
   "summary": "Artifact ar.example: <your summary>"
 })
 ```
+
+The gateway derives `pass` from `execution_trace_id` (`exit_code=0` → pass). Do not declare success without a trace.
 
 This records the evaluation to the PromotionStore and causal chain.
 

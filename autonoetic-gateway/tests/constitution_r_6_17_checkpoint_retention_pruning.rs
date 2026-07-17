@@ -6,13 +6,13 @@ use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::runtime::checkpoint::{
     list_checkpoints, prune_checkpoints, save_checkpoint, SessionCheckpoint, YieldReason,
 };
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 
 fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
     SessionCheckpoint {
         history: vec![Message::user(format!("turn-{turn}"))],
         turn_counter: turn,
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 5,
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,
@@ -27,12 +27,15 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
         turn_id: format!("turn-{turn:04}"),
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: None,
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason: YieldReason::Hibernation,
@@ -48,6 +51,9 @@ fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
+            feedback_events: vec![],
     }
 }
 

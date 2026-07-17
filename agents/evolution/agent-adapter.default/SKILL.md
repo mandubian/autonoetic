@@ -18,7 +18,7 @@ metadata:
     llm_preset: agentic
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "sandbox."]
+        allowed: ["knowledge_", "sandbox_"]
       - type: "CodeExecution"
         patterns: ["python3 scripts/*"]
       - type: "AgentSpawn"

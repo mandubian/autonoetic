@@ -16,8 +16,9 @@ use crate::runtime::script_execute::{execute_script_in_sandbox, script_causal_ev
 use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_context::SessionContext;
 use crate::runtime::session_resume::{
-    should_auto_resume_checkpoint_yield_reason,
+    should_auto_resume_checkpoint_yield_reason, verify_trigger_coherence, TriggerIncoherence,
 };
+pub use crate::runtime::session_resume::ResumeTrigger;
 use crate::runtime::session_report::SessionReportWriter;
 use crate::scheduler::gateway_store::default_gateway_host_id;
 use autonoetic_types::agent::{AgentManifest, ExecutionMode, LlmExchangeUsage};
@@ -27,7 +28,7 @@ use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::tagged;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -36,12 +37,64 @@ use tokio::sync::{Mutex, Semaphore};
 /// then append a user message confirming the approval.  This fixes the
 /// LLM-dependent relay bug where the model ignores the text-only hint and
 /// retries without `approval_ref`, causing redundant approval requests.
-fn inject_approval_ref_into_history(history: &mut Vec<Message>, approval_ref: &str) {
+/// Insert `approval_ref` into a tool call's JSON arguments string (#719). Used
+/// when the gateway re-issues an approved call mechanically on resume, so the
+/// promote/gate tool sees the granted approval exactly as if the agent had
+/// passed it. Leaves non-object / non-JSON arguments untouched.
+fn inject_approval_ref_into_args(arguments: &str, approval_ref: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert(
+                    "approval_ref".to_string(),
+                    serde_json::Value::String(approval_ref.to_string()),
+                );
+                return serde_json::to_string(&v).unwrap_or_else(|_| arguments.to_string());
+            }
+            arguments.to_string()
+        }
+        Err(_) => arguments.to_string(),
+    }
+}
+
+/// Human-readable rendering of a trigger/YieldReason incoherence (#741).
+fn render_trigger_incoherence(inc: &TriggerIncoherence) -> String {
+    match inc {
+        TriggerIncoherence::InteractionMismatch { expected, got } => {
+            format!("checkpoint waits on interaction '{expected}', not '{got}'")
+        }
+        TriggerIncoherence::ApprovalMismatch { expected, got } => {
+            format!("checkpoint waits on approval '{expected}', not '{got}'")
+        }
+        TriggerIncoherence::WaitingForApproval { request_id } => {
+            format!("session is waiting for approval '{request_id}'")
+        }
+        TriggerIncoherence::WrongYieldReason { got } => {
+            format!("checkpoint yield reason {got} does not match the trigger")
+        }
+        TriggerIncoherence::EmergencyStop => {
+            "emergency-stopped sessions are never auto-resumed (R-6.14)".to_string()
+        }
+    }
+}
+
+fn inject_approval_ref_into_history(
+    history: &mut Vec<Message>,
+    approval_ref: &str,
+    target_call_id: Option<&str>,
+) {
     // Walk history backwards to find the last assistant message with tool_calls.
     for msg in history.iter_mut().rev() {
         if matches!(msg.role, crate::llm::Role::Assistant) && !msg.tool_calls.is_empty() {
-            // Inject approval_ref into the last tool call's arguments.
-            if let Some(tc) = msg.tool_calls.last_mut() {
+            // When a target call_id is provided (enriched checkpoint), inject
+            // into that specific tool call.  Otherwise fall back to the last
+            // one in the batch (legacy / non-enriched path).
+            let tc = if let Some(id) = target_call_id {
+                msg.tool_calls.iter_mut().find(|tc| tc.id == id)
+            } else {
+                msg.tool_calls.last_mut()
+            };
+            if let Some(tc) = tc {
                 match serde_json::from_str::<serde_json::Value>(&tc.arguments) {
                     Ok(mut args_val) => {
                         if let Some(obj) = args_val.as_object_mut() {
@@ -79,111 +132,44 @@ pub(crate) async fn execute_with_history_close_on_error(
     match runtime.execute_with_history(history).await {
         Ok(o) => Ok(o),
         Err(e) => {
-            let _ = runtime.close_session(SessionCloseReason::SpawnExecuteError.as_str());
+            let _ = runtime.close_session(SessionCloseOutcome::SpawnExecuteError);
             Err(e)
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionCloseReason {
-    SpawnExecuteError,
-    JsonRpcSpawnSuspendedApproval,
-    JsonRpcSpawnSuspendedUserInput,
-    JsonRpcSpawnComplete,
-    JsonRpcSpawnCompleteEmpty,
-    CheckpointRespawnSuspendedApproval,
-    CheckpointRespawnSuspendedUserInput,
-    CheckpointRespawnComplete,
-    CheckpointRespawnCompleteEmpty,
-}
-
-impl SessionCloseReason {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::SpawnExecuteError => "spawn_execute_error",
-            Self::JsonRpcSpawnSuspendedApproval => "jsonrpc_spawn_suspended_approval",
-            Self::JsonRpcSpawnSuspendedUserInput => "jsonrpc_spawn_suspended_user_input",
-            Self::JsonRpcSpawnComplete => "jsonrpc_spawn_complete",
-            Self::JsonRpcSpawnCompleteEmpty => "jsonrpc_spawn_complete_empty",
-            Self::CheckpointRespawnSuspendedApproval => "checkpoint_respawn_suspended",
-            Self::CheckpointRespawnSuspendedUserInput => {
-                "checkpoint_respawn_suspended_user_input"
-            }
-            Self::CheckpointRespawnComplete => "checkpoint_respawn_complete",
-            Self::CheckpointRespawnCompleteEmpty => "checkpoint_respawn_complete_empty",
-        }
-    }
-
-    fn for_jsonrpc_spawn(
-        suspended_for_approval: bool,
-        suspended_for_user_input: bool,
-        has_assistant_reply: bool,
-    ) -> Self {
-        if suspended_for_approval {
-            Self::JsonRpcSpawnSuspendedApproval
-        } else if suspended_for_user_input {
-            Self::JsonRpcSpawnSuspendedUserInput
-        } else if has_assistant_reply {
-            Self::JsonRpcSpawnComplete
-        } else {
-            Self::JsonRpcSpawnCompleteEmpty
-        }
-    }
-
-    fn for_checkpoint_respawn(
-        suspended_for_approval: bool,
-        suspended_for_user_input: bool,
-        has_assistant_reply: bool,
-    ) -> Self {
-        if suspended_for_approval {
-            Self::CheckpointRespawnSuspendedApproval
-        } else if suspended_for_user_input {
-            Self::CheckpointRespawnSuspendedUserInput
-        } else if has_assistant_reply {
-            Self::CheckpointRespawnComplete
-        } else {
-            Self::CheckpointRespawnCompleteEmpty
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CloseOrigin {
-    JsonRpcSpawn,
-    CheckpointRespawn,
-}
-
-impl CloseOrigin {
-    fn make_close_reason(
-        self,
-        suspended_for_approval: bool,
-        suspended_for_user_input: bool,
-        has_assistant_reply: bool,
-    ) -> SessionCloseReason {
-        match self {
-            Self::JsonRpcSpawn => SessionCloseReason::for_jsonrpc_spawn(
-                suspended_for_approval,
-                suspended_for_user_input,
-                has_assistant_reply,
-            ),
-            Self::CheckpointRespawn => SessionCloseReason::for_checkpoint_respawn(
-                suspended_for_approval,
-                suspended_for_user_input,
-                has_assistant_reply,
-            ),
-        }
-    }
-
-    fn should_signal_background(self) -> bool {
-        matches!(self, Self::JsonRpcSpawn)
-    }
-}
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 
 struct SessionCloseFlags {
     assistant_reply: Option<String>,
     suspended_for_approval: Option<String>,
     suspended_for_user_input: bool,
+    suspended_for_child_wait: bool,
+}
+
+impl SessionCloseFlags {
+    fn outcome(&self, jsonrpc_spawn: bool) -> SessionCloseOutcome {
+        let has_reply = self.assistant_reply.is_some();
+        let approval = self.suspended_for_approval.is_some();
+        let user_input = self.suspended_for_user_input;
+        let child_wait = self.suspended_for_child_wait;
+        match (jsonrpc_spawn, has_reply, approval, user_input, child_wait) {
+            (true, true, false, false, false) => SessionCloseOutcome::JsonRpcSpawnComplete,
+            (true, false, false, false, false) => SessionCloseOutcome::JsonRpcSpawnCompleteEmpty,
+            (true, false, true, false, false) => SessionCloseOutcome::JsonRpcSpawnSuspended,
+            (true, false, false, true, false) => SessionCloseOutcome::JsonRpcSpawnSuspendedUserInput,
+            (true, false, false, false, true) => SessionCloseOutcome::JsonRpcSpawnSuspended,
+            (false, true, false, false, false) => SessionCloseOutcome::CheckpointRespawnComplete,
+            (false, true, false, true, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
+            (false, false, true, false, false) => SessionCloseOutcome::CheckpointRespawnSuspended,
+            (false, false, false, true, false) => {
+                SessionCloseOutcome::CheckpointRespawnSuspendedUserInput
+            }
+            (false, false, false, false, true) => SessionCloseOutcome::CheckpointRespawnSuspended,
+            (false, false, false, false, false) => SessionCloseOutcome::CheckpointRespawnCompleteEmpty,
+            _ => SessionCloseOutcome::SpawnExecuteError,
+        }
+    }
 }
 
 fn session_close_flags_from_turn_outcome(
@@ -194,21 +180,31 @@ fn session_close_flags_from_turn_outcome(
             assistant_reply: reply,
             suspended_for_approval: None,
             suspended_for_user_input: false,
+            suspended_for_child_wait: false,
         },
         TurnOutcome::Suspended { approval_request_id, .. } => SessionCloseFlags {
             assistant_reply: None,
             suspended_for_approval: Some(approval_request_id),
             suspended_for_user_input: false,
+            suspended_for_child_wait: false,
         },
         TurnOutcome::SuspendedUserInput { .. } => SessionCloseFlags {
             assistant_reply: None,
             suspended_for_approval: None,
             suspended_for_user_input: true,
+            suspended_for_child_wait: false,
         },
         TurnOutcome::Escalated { .. } => SessionCloseFlags {
             assistant_reply: None,
             suspended_for_approval: None,
             suspended_for_user_input: true,
+            suspended_for_child_wait: false,
+        },
+        TurnOutcome::WaitingForChild => SessionCloseFlags {
+            assistant_reply: None,
+            suspended_for_approval: None,
+            suspended_for_user_input: false,
+            suspended_for_child_wait: true,
         },
     }
 }
@@ -540,6 +536,7 @@ pub struct SpawnResult {
     /// Set when the turn ended suspended for user input or human escalation.
     /// Callers should treat this as non-terminal and avoid completion-only post-processing.
     pub suspended_for_user_input: bool,
+    pub suspended_for_child_wait: bool,
 }
 
 /// Per-root-session wake hint injected by the operator's TUI after plan approval.
@@ -572,6 +569,10 @@ pub struct GatewayExecutionService {
     persona: Option<String>,
     local_model_context_cache: Arc<LocalModelContextCache>,
     wake_hints: Arc<Mutex<HashMap<String, WakeHintState>>>,
+    /// Roots for which the budget circuit breaker is currently firing — an
+    /// atomic in-process claim so concurrent siblings hitting the exhausted
+    /// shared tree budget do not each fire a duplicate cascade (C2).
+    budget_breaker_roots: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl GatewayExecutionService {
@@ -616,6 +617,12 @@ impl GatewayExecutionService {
 
         if let Some(ref store) = gateway_store {
             store.set_policy_hook_executor(&hook_executor);
+            // #722 Stage 2: wire the runtime config into the store so
+            // `create_approval()` / interaction creation apply the standalone
+            // approval and interaction TTLs. Without this the store's config
+            // stays `None`, `enrich_request` sets no `expires_at`, and the
+            // expiry sweep never has anything to mark stale/expired.
+            store.set_config(Arc::new(config.clone()));
         }
 
         let svc = Self {
@@ -633,6 +640,7 @@ impl GatewayExecutionService {
             persona,
             local_model_context_cache: Arc::new(LocalModelContextCache::new()),
             wake_hints: Arc::new(Mutex::new(HashMap::new())),
+            budget_breaker_roots: Arc::new(Mutex::new(std::collections::HashSet::new())),
         };
 
         // Spawn the drain task that turns HookSpawnRequests into actual agent runs.
@@ -1211,7 +1219,7 @@ impl GatewayExecutionService {
         use crate::runtime::checkpoint::{
             load_latest_checkpoint, save_checkpoint, SessionCheckpoint, YieldReason,
         };
-        use crate::runtime::guard::LoopGuardState;
+        use crate::runtime::guard::LoopGuard;
         use crate::scheduler::gateway_store::EmergencyStopRecord;
 
         let store = self
@@ -1414,6 +1422,21 @@ impl GatewayExecutionService {
             )?;
         }
 
+        // Cancel pending escalations for this root session. Without this,
+        // the escalation stays "pending" after the linked approval was
+        // cancelled, and federation_escalate blocks forever ("already exists")
+        // while approval_status returns "not found" — a divergence loop.
+        for esc in store.list_pending_escalations()? {
+            if esc.root_session_id == root_session_id {
+                let _ = store.resolve_escalation(
+                    &esc.escalation_id,
+                    autonoetic_types::escalation::EscalationStatus::Cancelled,
+                    &format!("emergency_stop:{stop_id}"),
+                    Some("Cancelled by emergency stop"),
+                );
+            }
+        }
+
         let cancel_note = format!("emergency_stop:{stop_id} — {reason}");
         for inter in store.get_pending_interactions_for_root_session(root_session_id)? {
             store.cancel_user_interaction(&inter.interaction_id, &cancel_note)?;
@@ -1425,6 +1448,14 @@ impl GatewayExecutionService {
                 root_session_id = %root_session_id,
                 error = %e,
                 "Failed to delete session grants during emergency stop"
+            );
+        }
+        if let Err(e) = store.revoke_session_envelopes_for_root(root_session_id) {
+            tracing::warn!(
+                target: "emergency_stop",
+                root_session_id = %root_session_id,
+                error = %e,
+                "Failed to revoke session envelopes during emergency stop"
             );
         }
         if let Err(e) = store.delete_session_inference_binding(root_session_id) {
@@ -1519,7 +1550,7 @@ impl GatewayExecutionService {
             SessionCheckpoint {
                 history: vec![],
                 turn_counter: 0,
-                loop_guard_state: LoopGuardState {
+                loop_guard_state: LoopGuard {
                     max_loops_without_progress: 32,
                     max_tool_failures: 5,
                     max_consecutive_same_progress: 0,
@@ -1534,12 +1565,15 @@ impl GatewayExecutionService {
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
                 turn_id: format!("emergency-{stop_id}"),
                 workflow_id: workflow_id.clone(),
                 task_id: None,
                 runtime_lock_hash: None,
+                constitution_version: None,
+                constitution_digest: None,
                 llm_config_snapshot: None,
                 tool_registry_version: None,
                 yield_reason: YieldReason::EmergencyStop {
@@ -1557,6 +1591,9 @@ impl GatewayExecutionService {
                 assistant_message: None,
                 pending_action: None,
                 suspended_at: None,
+                suppress_until_turn: 0,
+                trajectory_last_level: None,
+                feedback_events: vec![],
             }
         };
         cp.yield_reason = YieldReason::EmergencyStop {
@@ -1576,6 +1613,20 @@ impl GatewayExecutionService {
             Some(&chrono::Utc::now().to_rfc3339()),
             Some(&details.to_string()),
         )?;
+
+        // GAP-1C: finalize the root session transcript so it doesn't stay
+        // 'active' forever. The orphan reaper checks parent transcript status
+        // and can't reap children if the parent looks alive.
+        let now = chrono::Utc::now().to_rfc3339();
+        if let Err(e) = store.finalize_session_transcript(root_session_id, &now, "failed") {
+            tracing::warn!(
+                target: "execution",
+                root_session_id = %root_session_id,
+                stop_id = %stop_id,
+                error = %e,
+                "Failed to finalize root session transcript during emergency stop"
+            );
+        }
 
         Ok(serde_json::json!({
             "ok": true,
@@ -1605,6 +1656,123 @@ impl GatewayExecutionService {
         .await
     }
 
+    /// Root-session-tree budget circuit breaker (C2 / #616).
+    ///
+    /// When the root-tree budget (P-6.21) is exhausted, the parent's next LLM
+    /// call is blocked — but in-flight descendant sessions keep running and keep
+    /// burning the already-spent tree budget. This fires the *graceful* emergency
+    /// stop cascade exactly once per root to cancel those descendants
+    /// (checkpoints + last-word notice + aborts workflow tasks + kills sandbox
+    /// children + writes an `EmergencyStopRecord`). Siblings that subsequently
+    /// hit the exhausted budget see the existing stop via the pre-flight guard
+    /// (`lifecycle.rs` root-session emergency-stop check) and yield `EmergencyStop`.
+    ///
+    /// **Idempotent:** if a stop already exists for the root, this is a no-op, so
+    /// repeated sibling exhaustion does not create a second cascade.
+    ///
+    /// Only ever called from the root-budget error paths (keyed off
+    /// `runtime.root_budget_exhausted`), never from per-session budget.
+    ///
+    /// `pub` so integration tests can exercise the cascade directly (the
+    /// production call site needs a real LLM-driven turn to reach budget
+    /// exhaustion).
+    pub async fn trigger_root_budget_circuit_breaker(
+        &self,
+        root_session_id: &str,
+        underlying: &anyhow::Error,
+    ) {
+        let Some(store) = self.gateway_store() else {
+            tracing::debug!(
+                target: "root_budget_breaker",
+                root_session_id = %root_session_id,
+                "skip: no gateway store"
+            );
+            return;
+        };
+
+        // Atomic in-process claim: exactly one concurrent sibling per root
+        // proceeds. This closes the check-then-act race on the DB lookup below —
+        // under a shared exhausted tree budget, multiple siblings hit the limit
+        // at once, and without this claim each would observe an empty stop list
+        // and fire a duplicate cascade.
+        {
+            let mut claimed = self.budget_breaker_roots.lock().await;
+            if !claimed.insert(root_session_id.to_string()) {
+                tracing::debug!(
+                    target: "root_budget_breaker",
+                    root_session_id = %root_session_id,
+                    "skip: budget breaker already claimed by a concurrent sibling"
+                );
+                return;
+            }
+        }
+
+        // Run under the claim; release it on every exit (leak-free, and lets a
+        // later sibling retry if the cascade itself failed — a subsequent caller
+        // then finds the recorded stop via the DB check and no-ops).
+        async {
+            // A prior emergency stop — from any source — means the cascade
+            // already ran or is running; cross-restart idempotency too.
+            match store.list_emergency_stops_for_root_session(root_session_id) {
+                Ok(stops) if !stops.is_empty() => {
+                    tracing::debug!(
+                        target: "root_budget_breaker",
+                        root_session_id = %root_session_id,
+                        existing_stop = %stops[0].stop_id,
+                        "skip: root already has an emergency stop (idempotent)"
+                    );
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "root_budget_breaker",
+                        root_session_id = %root_session_id,
+                        error = %e,
+                        "could not check existing emergency stops; not firing budget breaker"
+                    );
+                    return;
+                }
+            }
+
+            let reason = format!(
+                "Root session budget exhausted — cancelling in-flight descendants to \
+                 stop tree-budget burn (P-6.21). {}",
+                underlying
+            );
+            tracing::warn!(
+                target: "root_budget_breaker",
+                root_session_id = %root_session_id,
+                "Firing graceful root budget circuit breaker"
+            );
+            if let Err(e) = self
+                .emergency_stop_root_session_with_options(
+                    root_session_id,
+                    &reason,
+                    "gateway",
+                    "root_budget_circuit_breaker",
+                    "root_budget_exhausted",
+                    None,
+                    true,
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "root_budget_breaker",
+                    root_session_id = %root_session_id,
+                    error = %e,
+                    "root budget circuit breaker failed to cascade"
+                );
+            }
+        }
+        .await;
+
+        self.budget_breaker_roots
+            .lock()
+            .await
+            .remove(root_session_id);
+    }
+
     async fn finalize_session(
         &self,
         runtime: &mut AgentExecutor,
@@ -1612,21 +1780,18 @@ impl GatewayExecutionService {
         agent_id: &str,
         source_agent_id: Option<&str>,
         close_flags: SessionCloseFlags,
-        close_origin: CloseOrigin,
+        jsonrpc_spawn: bool,
         consumed_checkpoint_turn_id: Option<String>,
     ) -> anyhow::Result<SpawnResult> {
+        let close_outcome = close_flags.outcome(jsonrpc_spawn);
+        let is_suspended = close_outcome.is_suspended();
+        let close_reason = close_outcome.as_str();
         let SessionCloseFlags {
             assistant_reply,
             suspended_for_approval,
             suspended_for_user_input,
+            suspended_for_child_wait,
         } = close_flags;
-        let is_suspended = suspended_for_approval.is_some()
-            || suspended_for_user_input;
-        let close_reason = close_origin.make_close_reason(
-            suspended_for_approval.is_some(),
-            suspended_for_user_input,
-            assistant_reply.is_some(),
-        ).as_str();
         let digest_turn_count = runtime.turn_counter;
         let gw_dir = self.config.agents_dir.join(".gateway");
 
@@ -1638,15 +1803,15 @@ impl GatewayExecutionService {
                 agent_id,
             );
         }
-        if close_origin == CloseOrigin::JsonRpcSpawn {
+        if jsonrpc_spawn {
             if let Some(store) = self.gateway_store.as_ref() {
-                if close_reason == "jsonrpc_spawn_complete_empty" {
+                if close_outcome.is_completed_empty() {
                     if let Ok(tool_count) =
                         store.count_execution_traces_for_session(&session_id)
                     {
                         if let Some(draft) =
                             crate::runtime::operator_activity::classify_session_lifecycle(
-                                close_reason,
+                                close_outcome,
                                 tool_count.min(u32::MAX as u64) as u32,
                             )
                         {
@@ -1688,7 +1853,7 @@ impl GatewayExecutionService {
                 }
             }
         }
-        runtime.close_session(close_reason)?;
+        runtime.close_session(close_outcome)?;
         {
             let root_id = crate::runtime::live_digest::base_session_id(&session_id).to_string();
             let ctx = autonoetic_types::hooks::HookContext::for_session_closed(
@@ -1707,7 +1872,7 @@ impl GatewayExecutionService {
                 self.hook_executor.dispatch_async(ctx);
             }
         }
-        if close_origin == CloseOrigin::JsonRpcSpawn && !is_suspended {
+        if jsonrpc_spawn && !is_suspended {
             if let Err(e) = crate::runtime::checkpoint::prune_checkpoints(
                 self.config.as_ref(),
                 &session_id,
@@ -1790,14 +1955,49 @@ impl GatewayExecutionService {
             session_id,
             assistant_reply,
             workflow_note,
-            should_signal_background: close_origin.should_signal_background(),
+            should_signal_background: jsonrpc_spawn,
             artifacts,
             files,
             shared_knowledge,
             llm_usage,
             suspended_for_approval,
             suspended_for_user_input,
+            suspended_for_child_wait,
         })
+    }
+
+    /// Handle a detected checkpoint integrity violation (#606): emit a durable
+    /// `background.checkpoint`/`checkpoint_tampered` causal event, cancel the
+    /// bound approval with reason `integrity_violation`, and surface an
+    /// operator-visible alert.
+    ///
+    /// `approval_request_id` is `Some` when the violation is detected after the
+    /// checkpoint loaded successfully (an action-mismatch / TOCTOU
+    /// substitution). When it is `None` (HMAC tamper — the checkpoint could not
+    /// be read) the bound approval is located by session.
+    fn handle_checkpoint_integrity_violation(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        approval_request_id: Option<&str>,
+        reason: &str,
+    ) {
+        if let Some(store) = self.gateway_store.as_ref() {
+            record_checkpoint_integrity_violation(
+                store,
+                session_id,
+                agent_id,
+                approval_request_id,
+                reason,
+            );
+        } else {
+            tracing::error!(
+                target: "checkpoint",
+                session_id = %session_id,
+                reason = %reason,
+                "checkpoint integrity violation — no GatewayStore available to record it"
+            );
+        }
     }
 
     /// Resume from a loaded checkpoint by dispatching on its `yield_reason`.
@@ -1819,6 +2019,27 @@ impl GatewayExecutionService {
         Option<String>,
     )> {
         use autonoetic_types::background::UserInteractionStatus;
+
+        // Cancel stale divergence-sentinel interactions from before this resume.
+        // The trajectory monitor restarts fresh on resume (sliding windows empty,
+        // last_level restored from checkpoint), so old divergence prompts are
+        // from a different monitoring context and should not block the operator.
+        if let Some(store) = self.gateway_store.as_ref() {
+            let root = crate::runtime::content_store::root_session_id(session_id);
+            if let Ok(pending) = store.get_pending_interactions_for_root_session(&root) {
+                for inter in &pending {
+                    if matches!(
+                        inter.kind,
+                        autonoetic_types::background::UserInteractionKind::DivergenceSentinel,
+                    ) {
+                        let _ = store.cancel_user_interaction(
+                            &inter.interaction_id,
+                            "cancelled on session resume — trajectory monitor restarted",
+                        );
+                    }
+                }
+            }
+        }
 
         if matches!(
             checkpoint.yield_reason,
@@ -1857,7 +2078,21 @@ impl GatewayExecutionService {
                     return Ok((
                         TurnOutcome::Suspended {
                             approval_request_id: rid.clone(),
-                            continuation: None,
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
+                }
+                Some(autonoetic_types::background::ApprovalStatus::Stale) => {
+                    tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        approval_request_id = %rid,
+                        "Approval expired and is stale — re-suspending session until operator resolves"
+                    );
+                    return Ok((
+                        TurnOutcome::Suspended {
+                            approval_request_id: rid.clone(),
                         },
                         checkpoint.initial_user_message(),
                         None,
@@ -1873,6 +2108,25 @@ impl GatewayExecutionService {
                     );
                 }
                 Some(autonoetic_types::background::ApprovalStatus::Approved) => {
+                    // TOCTOU action-equality check: the action stored in the
+                    // checkpoint must structurally match the action in the
+                    // approval row.  This prevents substitution attacks where
+                    // the approval row is swapped between suspend and resume.
+                    if let Some(ref cp_action) = checkpoint.pending_action {
+                        if cp_action != &req.action {
+                            self.handle_checkpoint_integrity_violation(
+                                session_id,
+                                &runtime.manifest.agent.id,
+                                Some(rid),
+                                "checkpoint action mismatch — possible substitution attack",
+                            );
+                            anyhow::bail!(
+                                "checkpoint action mismatch: the action stored in the checkpoint does not match the approved action (session '{}')",
+                                session_id
+                            );
+                        }
+                    }
+
                     tracing::info!(
                         target: "checkpoint",
                         agent_id = %runtime.manifest.agent.id,
@@ -1895,7 +2149,114 @@ impl GatewayExecutionService {
                     }
                     checkpoint.restore_into(runtime);
                     let mut history = checkpoint.history.clone();
-                    inject_approval_ref_into_history(&mut history, rid);
+                    // Extract the specific call_id that was blocked by the
+                    // approval gate, so we can target it precisely.
+                    let target_call_id = checkpoint
+                        .pending_tool_state
+                        .as_ref()
+                        .map(|pts| pts.pending_tool_call.call_id.as_str());
+
+                    // #719: a `RevisionPromote` approval checkpoint is re-executed
+                    // *mechanically* on resume — the gateway issues the approved
+                    // promote itself instead of asking the LLM to re-issue it. The
+                    // legacy inject-and-re-issue path is kept for other tools (e.g.
+                    // sandbox.exec) whose checkpoint already carries the
+                    // `approval_required` response as the tool result.
+                    //
+                    // Key selection off the approved `req.action` (already loaded
+                    // and TOCTOU-checked above) so older checkpoints without
+                    // `pending_action` still work, and guard on `pending_tool_state`
+                    // so a missing tool state degrades to the legacy path instead of
+                    // panicking.
+                    let mechanical = matches!(
+                        &req.action,
+                        ScheduledAction::RevisionPromote { .. }
+                    ) && checkpoint.pending_tool_state.is_some();
+
+                    if mechanical {
+                        let pts = checkpoint
+                            .pending_tool_state
+                            .as_ref()
+                            .expect("mechanical implies pending_tool_state is Some");
+                        // Rebuild the original assistant message with only the
+                        // completed calls (drop the pending + never-run remaining
+                        // calls; the approved pending call is re-issued via the
+                        // synthetic seed message below). Push it only if it still
+                        // carries content or a completed call — an assistant
+                        // message with neither is a degenerate turn.
+                        if let Some(ref am) = checkpoint.assistant_message {
+                            let completed_ids: std::collections::HashSet<&str> = pts
+                                .completed_tool_results
+                                .iter()
+                                .map(|(id, _, _)| id.as_str())
+                                .collect();
+                            let mut m = am.clone();
+                            m.tool_calls
+                                .retain(|tc| completed_ids.contains(tc.id.as_str()));
+                            if !m.tool_calls.is_empty() || !m.content.trim().is_empty() {
+                                history.push(m);
+                            }
+                        }
+                        // Always replay completed tool results, even if the
+                        // assistant message was degenerate/absent — they are
+                        // logically independent of the assistant prefix.
+                        for (call_id, tool_name, result) in &pts.completed_tool_results {
+                            history.push(Message::tool_result(call_id, tool_name, result));
+                        }
+                        // Seed the approved call (with approval_ref injected into
+                        // its arguments) for execution at the top of
+                        // execute_with_history's loop.
+                        let arguments =
+                            inject_approval_ref_into_args(&pts.pending_tool_call.arguments, rid);
+                        let call = crate::llm::ToolCall {
+                            id: pts.pending_tool_call.call_id.clone(),
+                            name: pts.pending_tool_call.tool_name.clone(),
+                            arguments,
+                        };
+                        let mut synth = crate::llm::Message::assistant(String::new());
+                        synth.tool_calls = vec![call.clone()];
+                        runtime.resume_pending_batch = Some((synth, vec![call]));
+                    } else {
+                        // Legacy / precomputed-result path: replay the assistant
+                        // message + any results and nudge the LLM to re-issue.
+                        if let Some(ref am) = checkpoint.assistant_message {
+                            let mut call_ids_with_results: std::collections::HashSet<&str> =
+                                std::collections::HashSet::new();
+                            if let Some(ref pts) = checkpoint.pending_tool_state {
+                                for (call_id, _, _) in &pts.completed_tool_results {
+                                    call_ids_with_results.insert(call_id.as_str());
+                                }
+                                if pts.pending_tool_call.approval_response.is_some() {
+                                    call_ids_with_results
+                                        .insert(&pts.pending_tool_call.call_id);
+                                }
+                            }
+
+                            let mut filtered_am = am.clone();
+                            filtered_am.tool_calls.retain(|tc| {
+                                call_ids_with_results.contains(tc.id.as_str())
+                                    || call_ids_with_results.is_empty()
+                            });
+                            history.push(filtered_am);
+
+                            if let Some(ref pts) = checkpoint.pending_tool_state {
+                                for (call_id, tool_name, result) in &pts.completed_tool_results {
+                                    history.push(Message::tool_result(
+                                        call_id, tool_name, result,
+                                    ));
+                                }
+                                if let Some(ref resp) = pts.pending_tool_call.approval_response {
+                                    history.push(Message::tool_result(
+                                        &pts.pending_tool_call.call_id,
+                                        &pts.pending_tool_call.tool_name,
+                                        resp,
+                                    ));
+                                }
+                            }
+                        }
+                        inject_approval_ref_into_history(&mut history, rid, target_call_id);
+                    }
+
                     let initial_msg = checkpoint.initial_user_message();
                     let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
@@ -2018,7 +2379,21 @@ impl GatewayExecutionService {
                     return Ok((
                         TurnOutcome::Suspended {
                             approval_request_id: esc_rid.clone(),
-                            continuation: None,
+                        },
+                        checkpoint.initial_user_message(),
+                        None,
+                    ));
+                }
+                Some(autonoetic_types::background::ApprovalStatus::Stale) => {
+                    tracing::info!(
+                        target: "checkpoint",
+                        session_id = %session_id,
+                        escalation_request_id = %esc_rid,
+                        "Escalation expired and is stale — re-suspending session until operator resolves"
+                    );
+                    return Ok((
+                        TurnOutcome::Suspended {
+                            approval_request_id: esc_rid.clone(),
                         },
                         checkpoint.initial_user_message(),
                         None,
@@ -2056,6 +2431,11 @@ impl GatewayExecutionService {
                     }
                     checkpoint.restore_into(runtime);
                     let mut history = checkpoint.history.clone();
+                    inject_session_context_after_system_message(
+                        &runtime.agent_dir,
+                        session_id,
+                        &mut history,
+                    );
                     let operator = req.decided_by.as_deref().unwrap_or("operator");
                     let guidance_note = req.decision_reason.as_deref().unwrap_or("");
                     let escalation_msg = if guidance_note.is_empty() {
@@ -2075,6 +2455,22 @@ impl GatewayExecutionService {
                     Ok((outcome, initial_msg, Some(checkpoint.turn_id)))
                 }
             }
+        } else if is_signal_delivered_for_terminal_workflow(
+            &self.config,
+            self.gateway_store.as_deref(),
+            session_id,
+            metadata,
+        )? {
+            tracing::info!(
+                target: "checkpoint",
+                session_id = %session_id,
+                "Suppressing signal-triggered auto-resume: workflow is terminal"
+            );
+            Ok((
+                crate::runtime::lifecycle::TurnOutcome::Completed(None),
+                checkpoint.initial_user_message(),
+                Some(checkpoint.turn_id),
+            ))
         } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
             tracing::info!(
                 target: "checkpoint",
@@ -2087,10 +2483,73 @@ impl GatewayExecutionService {
             checkpoint.restore_into(runtime);
 
             let mut history = checkpoint.history.clone();
-            let (turn_start_messages, resume_message) =
-                gateway_signal_turn_start_context(message, metadata);
-            history.extend(turn_start_messages);
-            history.push(crate::llm::Message::user(resume_message));
+
+            if matches!(
+                checkpoint.yield_reason,
+                crate::runtime::checkpoint::YieldReason::WaitingForChild { .. }
+            ) {
+                if let Some(pts) = checkpoint.pending_tool_state.as_ref() {
+                    if let Some(ref am) = checkpoint.assistant_message {
+                        let completed_ids: HashSet<&str> = pts
+                            .completed_tool_results
+                            .iter()
+                            .map(|(id, _, _)| id.as_str())
+                            .collect();
+                        let mut m = am.clone();
+                        m.tool_calls.retain(|tc| completed_ids.contains(tc.id.as_str()));
+                        if !m.tool_calls.is_empty() || !m.content.trim().is_empty() {
+                            history.push(m);
+                        }
+                    }
+                    for (call_id, tool_name, result) in &pts.completed_tool_results {
+                        history.push(crate::llm::Message::tool_result(
+                            call_id.clone(),
+                            tool_name.clone(),
+                            result.clone(),
+                        ));
+                    }
+                    let call = crate::llm::ToolCall {
+                        id: pts.pending_tool_call.call_id.clone(),
+                        name: pts.pending_tool_call.tool_name.clone(),
+                        arguments: pts.pending_tool_call.arguments.clone(),
+                    };
+                    let mut synth = crate::llm::Message::assistant(String::new());
+                    synth.tool_calls = vec![call.clone()];
+                    runtime.resume_pending_batch = Some((synth, vec![call]));
+                } else {
+                    inject_session_context_after_system_message(
+                        &runtime.agent_dir,
+                        session_id,
+                        &mut history,
+                    );
+                    let (turn_start_messages, resume_message) =
+                        gateway_signal_turn_start_context(
+                            message,
+                            metadata,
+                            Some(&self.config),
+                            self.gateway_store.as_deref(),
+                            &session_id,
+                        );
+                    history.extend(turn_start_messages);
+                    history.push(crate::llm::Message::user(resume_message));
+                }
+            } else {
+                inject_session_context_after_system_message(
+                    &runtime.agent_dir,
+                    session_id,
+                    &mut history,
+                );
+                let (turn_start_messages, resume_message) =
+                    gateway_signal_turn_start_context(
+                        message,
+                        metadata,
+                        Some(&self.config),
+                        self.gateway_store.as_deref(),
+                        &session_id,
+                    );
+                history.extend(turn_start_messages);
+                history.push(crate::llm::Message::user(resume_message));
+            }
             let initial_msg = checkpoint.initial_user_message();
 
             let outcome = execute_with_history_close_on_error(runtime, &mut history).await?;
@@ -2132,9 +2591,45 @@ impl GatewayExecutionService {
         // Spawn-time credential bindings that override runtime.lock resolution.
         credential_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
     ) -> anyhow::Result<SpawnResult> {
+        self.spawn_agent_revision_once(
+            agent_id,
+            None,
+            message,
+            session_id,
+            source_agent_id,
+            is_message,
+            _ingest_event_type,
+            metadata,
+            workflow_id,
+            task_id,
+            artifact_id,
+            credential_bindings,
+        )
+        .await
+    }
+
+    pub async fn spawn_agent_revision_once(
+        &self,
+        agent_id: &str,
+        revision_id: Option<&str>,
+        message: &str,
+        session_id: &str,
+        source_agent_id: Option<&str>,
+        is_message: bool,
+        _ingest_event_type: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+        // Workflow / task context for turn continuation saves on approval suspension.
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+        // Artifact ID whose layers should be auto-mounted in the child's sandbox.
+        artifact_id: Option<&str>,
+        // Spawn-time credential bindings that override runtime.lock resolution.
+        credential_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
+    ) -> anyhow::Result<SpawnResult> {
         let span = tracing::info_span!(
-            "spawn_agent_once",
+            "spawn_agent_revision_once",
             agent_id = agent_id,
+            revision_id = ?revision_id,
             session_id = session_id
         );
         let _enter = span.enter();
@@ -2145,8 +2640,39 @@ impl GatewayExecutionService {
         anyhow::ensure!(!message.trim().is_empty(), "message must not be empty");
 
         let cred_bindings = credential_bindings.to_vec();
+
+        // Pre-resolve the effective agent_id for lock keying.
+        //
+        // When a session already has a binding (e.g. the root session is bound
+        // to planner.collaborative), `resolve_and_pin_session_with_revision`
+        // inside the closure will return the *bound* agent — not the requested
+        // `agent_id`.  If we acquire the per-agent execution lock with the
+        // requested agent_id while actually running a different agent, we
+        // contaminate the lock of an unrelated agent, blocking all its real
+        // executions for the entire turn duration.
+        //
+        // This pre-resolution ensures the lock is keyed by the agent that will
+        // actually execute, preventing cross-agent lock contamination.
+        let lock_agent_id = if let Some(gs) = self.gateway_store.as_ref() {
+            match gs.get_session_agent_binding(session_id) {
+                Ok(Some(binding)) => binding.agent_id,
+                _ => agent_id.to_string(),
+            }
+        } else {
+            agent_id.to_string()
+        };
+        if lock_agent_id != agent_id {
+            tracing::info!(
+                target: "execution",
+                requested_agent_id = %agent_id,
+                resolved_agent_id = %lock_agent_id,
+                session_id = %session_id,
+                "Lock key resolved to bound agent (differs from requested)"
+            );
+        }
+
         let mut result = self
-            .execute_with_reliability_controls(agent_id, || async move {
+            .execute_with_reliability_controls(&lock_agent_id, || async move {
                 let repo = AgentRepository::from_config(&self.config);
 
             if let Some(source_id) = source_agent_id {
@@ -2236,10 +2762,12 @@ impl GatewayExecutionService {
                     agent_id
                 );
             };
-            let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session(
+            let resolve_start = std::time::Instant::now();
+            let (agent_ref, _rev, _binding) = repo.resolve_and_pin_session_with_revision(
                 session_id,
                 session_id, // root_session_id = session_id for single sessions
                 agent_id,
+                revision_id,
                 Some(gs.as_ref()),
                 &default_gateway_host_id(),
             )?;
@@ -2247,6 +2775,7 @@ impl GatewayExecutionService {
                 agent_id = %agent_ref.agent_id,
                 revision_id = %agent_ref.revision_id,
                 session_id = session_id,
+                elapsed_ms = resolve_start.elapsed().as_millis(),
                 "Resolved session to pinned revision"
             );
             let gateway_dir = crate::execution::gateway_root_dir(&self.config);
@@ -2342,8 +2871,13 @@ impl GatewayExecutionService {
                 // session_overview.md and causal_events — the LLM fast path skips the
                 // full SessionTracer, so we wire it up manually here.
                 let gateway_dir = self.config.agents_dir.join(".gateway");
-                let mut report =
-                    SessionReportWriter::open(&gateway_dir, session_id, agent_id).ok();
+                let mut report = SessionReportWriter::open_with_options(
+                    &gateway_dir,
+                    session_id,
+                    agent_id,
+                    self.config.session_report.live_html_on_update,
+                )
+                .ok();
                 if let Some(ref mut r) = report {
                     let _ = r.start_session(message);
                     let _ = r.record_tool_requested(
@@ -2384,6 +2918,13 @@ impl GatewayExecutionService {
                 } else {
                     vec![]
                 };
+                tracing::info!(
+                    target: "script_exec",
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    "Calling execute_script_in_sandbox"
+                );
+                let script_exec_start = std::time::Instant::now();
                 let script_result = execute_script_in_sandbox(
                     &loaded.dir,
                     &script_path,
@@ -2399,6 +2940,14 @@ impl GatewayExecutionService {
                     Some(&gateway_dir),
                 )
                 .await;
+                tracing::info!(
+                    target: "script_exec",
+                    agent_id = %agent_id,
+                    session_id = %session_id,
+                    elapsed_ms = script_exec_start.elapsed().as_millis(),
+                    success = script_result.is_ok(),
+                    "execute_script_in_sandbox returned"
+                );
 
                 // Record completion/failure in session report and causal_events
                 match &script_result {
@@ -2417,7 +2966,7 @@ impl GatewayExecutionService {
                                 None,
                                 None,
                             );
-                            let _ = r.finish_session("script_exec_complete", Some(output));
+                            let _ = r.finish_session(SessionCloseOutcome::ScriptExecComplete, Some(output));
                         }
                         script_causal_event(
                             self.gateway_store.as_deref(),
@@ -2452,6 +3001,18 @@ impl GatewayExecutionService {
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
+                        // Mirror the script's stdout onto the live-digest
+                        // timeline as an `agent.message` so it shows inline in
+                        // the room TUI at the default altitude. Without this,
+                        // script output is captured only in `execution_traces`
+                        // (execution.search) and `causal_events`, neither of
+                        // which the room reads — see issue #644.
+                        crate::runtime::script_execute::emit_script_message_timeline(
+                            self.gateway_store.as_deref(),
+                            agent_id,
+                            session_id,
+                            &output,
+                        );
                         let ended_at = chrono::Utc::now().to_rfc3339();
                         let _ = gs.finalize_session_transcript(session_id, &ended_at, "completed");
                     }
@@ -2464,7 +3025,7 @@ impl GatewayExecutionService {
                                 None,
                                 None,
                             );
-                            let _ = r.finish_session("script_exec_failed", None);
+                            let _ = r.finish_session(SessionCloseOutcome::ScriptExecFailed, None);
                         }
                         script_causal_event(
                             self.gateway_store.as_deref(),
@@ -2539,6 +3100,7 @@ impl GatewayExecutionService {
                     llm_usage: Vec::new(),
                     suspended_for_approval: None,
                     suspended_for_user_input: false,
+                    suspended_for_child_wait: false,
                 });
             }
 
@@ -2593,327 +3155,61 @@ impl GatewayExecutionService {
 
             use crate::runtime::checkpoint::YieldReason;
 
-            // --- Turn continuation / checkpoint resume ---
-            // Priority order:
-            // 1) Turn continuation (approval-unblocked workflow task)
-            // 2) Session checkpoint (hibernation/budget/max-turns/manual/error)
-            // 3) Fresh start
-            let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = if let Some(t_id) = task_id {
-                let load_result = crate::runtime::continuation::load_continuation(&self.config, t_id);
-                if let Err(ref e) = load_result {
-                    if crate::runtime::continuation::is_integrity_error(e) {
-                        tracing::error!(
-                            target: "continuation",
-                            task_id = %t_id,
-                            error = %e,
-                            "Continuation integrity violation — tampering suspected"
-                        );
-                        if let Some(store) = self.gateway_store.as_ref() {
-                            let pending = store.get_pending_approvals().unwrap_or_default();
-                            let matching: Vec<String> = pending
-                                .iter()
-                                .filter(|p| p.task_id.as_deref() == Some(t_id))
-                                .map(|p| p.request_id.clone())
-                                .collect();
-                            if !matching.is_empty() {
-                                let cancelled_at = chrono::Utc::now().to_rfc3339();
-                                for rid in &matching {
-                                    let _ = store.cancel_approval(rid, "gateway", &cancelled_at);
-                                }
-                                let _ = store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
-                                    event_id: uuid::Uuid::new_v4().to_string(),
-                                    agent_id: "gateway".to_string(),
-                                    session_id: String::new(),
-                                    turn_id: None,
-                                    event_seq: 0,
-                                    timestamp: cancelled_at.clone(),
-                                    category: "background".to_string(),
-                                    action: "continuation_tampered".to_string(),
-                                    status: "error".to_string(),
-                                    enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
-                                    target: None,
-                                    payload: Some(serde_json::json!({
-                                        "task_id": t_id,
-                                        "reason": "integrity_violation",
-                                        "approval_request_ids": matching,
-                                    }).to_string()),
-                                    payload_ref: None,
-                                    evidence_ref: None,
-                                    reason: Some("HMAC mismatch on continuation load".to_string()),
-                                });
-                            }
-                        }
-                        anyhow::bail!("{}", e);
-                    } else {
-                        tracing::error!(
-                            target: "continuation",
-                            task_id = %t_id,
-                            error = %e,
-                            "Failed to load continuation"
-                        );
-                        anyhow::bail!("failed to load continuation for task '{}': {}", t_id, e);
-                    }
-                }
-                if let Some(cont) = load_result.unwrap() {
-                    tracing::info!(
-                        target: "continuation",
-                        task_id = %t_id,
-                        approval_request_id = %cont.approval_request_id,
-                        "Resuming turn from continuation after approval resolution"
-                    );
-
-                    // Fetch the approval decision from the gateway store.
-                    let approval_req = self.gateway_store
-                        .as_ref()
-                        .and_then(|store| store.get_approval(&cont.approval_request_id).ok().flatten());
-
-                    // Action-equality check: signed continuations must carry a pending_action
-                    // that structurally equals the action from the approval row.  This prevents
-                    // TOCTOU substitution where the approval row is swapped to a different action
-                    // between suspension and resume.  Legacy unsigned continuations (no
-                    // pending_action) are still accepted.
-                    if let Some(ref req) = approval_req {
-                        match cont.pending_action.as_ref() {
-                            None => {
-                                tracing::warn!(
-                                    target: "continuation",
-                                    task_id = %t_id,
-                                    "Continuation missing pending_action — skipping action-equality check (legacy?)"
-                                );
-                            }
-                            Some(pending) => {
-                                if pending != &req.action {
-                                    tracing::error!(
-                                        target: "continuation",
-                                        task_id = %t_id,
-                                        approval_request_id = %cont.approval_request_id,
-                                        "Action mismatch between continuation and approval row — possible substitution attack"
-                                    );
-                                    let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
-                                    anyhow::bail!(
-                                        "continuation action mismatch: the action stored in the continuation does not match the approved action (task '{}')",
-                                        t_id
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    let approved_result = match approval_req {
-                        Some(ref req) if req.status == Some(autonoetic_types::background::ApprovalStatus::Approved) => {
-                            tracing::info!(
-                                target: "continuation",
-                                request_id = %cont.approval_request_id,
-                                task_id = %t_id,
-                                "Approval found - executing approved action"
-                            );
-                            let decision = autonoetic_types::background::ApprovalDecision {
-                                request_id: req.request_id.clone(),
-                                agent_id: req.agent_id.clone(),
-                                session_id: req.session_id.clone(),
-                                action: req.action.clone(),
-                                status: autonoetic_types::background::ApprovalStatus::Approved,
-                                decided_at: req.decided_at.clone().unwrap_or_default(),
-                                decided_by: req.decided_by.clone().unwrap_or_default(),
-                                reason: req.reason.clone(),
-                                root_session_id: req.root_session_id.clone(),
-                                workflow_id: req.workflow_id.clone(),
-                                task_id: req.task_id.clone(),
-                                approval_level: autonoetic_types::background::ApprovalLevel::Operator,
-                            };
-                            match crate::runtime::continuation::execute_approved_action(
-                                &decision,
-                                &runtime.manifest,
-                                &runtime.agent_dir,
-                                runtime.gateway_dir.as_deref(),
-                                Some(&cont.session_id),
-                                &self.config,
-                                self.gateway_store.clone(),
-                                Some(&cont.pending_tool_call),
-                            ) {
-                                Ok(r) => {
-                                    tracing::info!(
-                                        target: "continuation",
-                                        request_id = %cont.approval_request_id,
-                                        result_preview = %r.chars().take(100).collect::<String>(),
-                                        "Approved action executed successfully"
-                                    );
-                                    let gateway_dir = self.config.agents_dir.join(".gateway");
-                                    if let Ok(mut report) = SessionReportWriter::open(
-                                        &gateway_dir,
-                                        &cont.session_id,
-                                        &runtime.manifest.agent.id,
-                                    ) {
-                                        let summary = format!(
-                                            "Approved action executed: {}",
-                                            r.chars().take(100).collect::<String>()
-                                        );
-                                        let _ = report.record_approval_resolved(
-                                            &cont.approval_request_id,
-                                            "approved",
-                                            &summary,
-                                        );
-                                    }
-                                    r
-                                },
-                                Err(e) => {
-                                    tracing::error!(
-                                        target: "continuation",
-                                        request_id = %cont.approval_request_id,
-                                        error = %e,
-                                        "Failed to execute approved action"
-                                    );
-                                    let gateway_dir = self.config.agents_dir.join(".gateway");
-                                    if let Ok(mut report) = SessionReportWriter::open(
-                                        &gateway_dir,
-                                        &cont.session_id,
-                                        &runtime.manifest.agent.id,
-                                    ) {
-                                        let _ = report.record_approval_resolved(
-                                            &cont.approval_request_id,
-                                            "approved",
-                                            &format!("Approved but execution failed: {}", e),
-                                        );
-                                    }
-                                    serde_json::json!({
-                                        "ok": false,
-                                        "error": e.to_string(),
-                                        "approval_ref": cont.approval_request_id,
-                                    }).to_string()
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            // Rejected
-                            let gateway_dir = self.config.agents_dir.join(".gateway");
-                            if let Ok(mut report) = SessionReportWriter::open(
-                                &gateway_dir,
-                                &cont.session_id,
-                                &runtime.manifest.agent.id,
-                            ) {
-                                let _ = report.record_approval_resolved(
-                                    &cont.approval_request_id,
-                                    "rejected",
-                                    "Approval rejected by operator",
-                                );
-                            }
-                            serde_json::json!({
-                                "ok": false,
-                                "approval_rejected": true,
-                                "request_id": cont.approval_request_id,
-                            }).to_string()
-                        }
-                        None => {
-                            serde_json::json!({
-                                "ok": false,
-                                "error": "approval_decision_not_found",
-                                "request_id": cont.approval_request_id,
-                            }).to_string()
-                        }
-                    };
-
-                    // Restore session state before executing remaining tool calls.
-                    runtime.session_state = cont.session_state;
-
-                    // Execute remaining tool calls from the original batch.
-                    let remaining_results = if !cont.remaining_tool_calls.is_empty() {
-                        let mut mcp_rt = crate::runtime::mcp::McpToolRuntime::from_env().await?;
-                        let registry = crate::runtime::tools::default_registry();
-                        let mut ds = crate::runtime::disclosure::DisclosureState::default();
-                        let mut proc = crate::runtime::tool_call_processor::ToolCallProcessor::new(
-                            &mut mcp_rt,
-                            &registry,
-                            &runtime.manifest,
-                            &mut ds,
-                            None,
-                            Some(&self.config),
-                            self.gateway_store.clone(),
-                            None,
-                        ).with_session_context(
-                            Some(cont.session_id.clone()),
-                            Some(cont.turn_id.clone()),
-                        ).with_session_state(runtime.session_state);
-                        let mut tracer = crate::runtime::session_tracer::SessionTracer::new_with_evidence_mode(
-                            &runtime.agent_dir,
-                            &runtime.manifest.agent.id,
-                            &cont.session_id,
-                            &self.config.evidence_mode,
-                        )?;
-                        let (_, results) = proc
-                            .process_tool_calls(
-                                &cont.remaining_tool_calls,
-                                &runtime.agent_dir,
-                                runtime.gateway_dir.as_deref(),
-                                &mut tracer,
-                            )
-                            .await
-                            .unwrap_or_default();
-                        results
-                    } else {
-                        vec![]
-                    };
-
-                    // Reconstruct conversation history and restore guard state.
-                    let mut history = crate::runtime::continuation::reconstruct_history(
-                        &cont,
-                        approved_result,
-                        remaining_results,
-                    );
-
-                    let initial_msg = cont.history
-                        .iter()
-                        .find(|m| matches!(m.role, crate::llm::Role::User))
-                        .map(|m| m.content.clone())
-                        .unwrap_or_default();
-
-                    runtime.guard = crate::runtime::guard::LoopGuard::restore(cont.loop_guard_state.clone());
-                    runtime.session_id = Some(cont.session_id.clone());
-                    runtime.session_started = true;
-                    runtime.tool_tier_escalated = cont.tool_tier_escalated;
-                    runtime.discovered_tools = cont.discovered_tools.clone();
-                    runtime.turn_counter = cont.turn_id
-                        .trim_start_matches("turn-")
-                        .parse()
-                        .unwrap_or(0);
-
-                    // Delete the continuation file — we are now live.
-                    let _ = crate::runtime::continuation::delete_continuation(&self.config, t_id);
-
-                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
-                    (outcome, initial_msg, None)
-                } else {
-                    // No continuation on disk — optionally resume from latest checkpoint.
-                    let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint(
-                        &self.config,
+            // --- Session checkpoint resume ---
+            // Continuations are fully replaced by enriched checkpoints.  Every
+            // suspension state (approval, budget, hibernation, etc.) is captured
+            // in a single SessionCheckpoint.  The dispatch below:
+            //   1) With task_id — load checkpoint and let resume_from_checkpoint
+            //      handle the approval status (approved / rejected / pending).
+            //   2) Without task_id — same checkpoint / fresh-start logic.
+            // Run the turn-execution dispatch into a Result so a root-session
+            // budget exhaustion (C2 / #616) can fire the one-time graceful root
+            // budget circuit breaker before the error propagates. We intentionally
+            // do NOT use `?` on the dispatch expression directly: on `Err`, the
+            // executor has flagged `runtime.root_budget_exhausted` iff the failing
+            // budget check was the ROOT-tree budget (never per-session budget).
+            let dispatch_result: anyhow::Result<(
+                crate::runtime::lifecycle::TurnOutcome,
+                String,
+                Option<String>,
+            )> = async {
+            Ok(if task_id.is_some() {
+                let checkpoint = crate::runtime::checkpoint::load_latest_checkpoint_strict(
+                    &self.config,
+                    session_id,
+                )?;
+                if let Some(checkpoint) = checkpoint {
+                    self.resume_from_checkpoint(
+                        &mut runtime,
                         session_id,
-                    )?;
-                    if let Some(checkpoint) = checkpoint {
-                        self.resume_from_checkpoint(
-                            &mut runtime,
-                            session_id,
-                            message,
+                        message,
+                        metadata,
+                        checkpoint,
+                    )
+                    .await?
+                } else {
+                    let (turn_start_messages, initial_message) =
+                        gateway_signal_turn_start_context(
+                            &runtime.initial_user_message,
                             metadata,
-                            checkpoint,
-                        )
-                        .await?
-                    } else {
-                        let (turn_start_messages, initial_message) =
-                            gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
-                        let mut history = build_initial_history(
-                            &runtime.agent_dir,
-                            &runtime.instructions,
-                            &initial_message,
+                            Some(&self.config),
+                            self.gateway_store.as_deref(),
                             session_id,
-                            &runtime.manifest,
-                            &turn_start_messages,
                         );
-                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
-                        (outcome, runtime.initial_user_message.clone(), None)
-                    }
+                    let mut history = build_initial_history(
+                        &runtime.agent_dir,
+                        &runtime.instructions,
+                        &initial_message,
+                        session_id,
+                        &runtime.manifest,
+                        &turn_start_messages,
+                    );
+                    let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
+                    (outcome, runtime.initial_user_message.clone(), None)
                 }
             } else {
                 let checkpoint =
-                    crate::runtime::checkpoint::load_latest_checkpoint(&self.config, session_id)?;
+                    crate::runtime::checkpoint::load_latest_checkpoint_strict(&self.config, session_id)?;
                 if let Some(checkpoint) = checkpoint {
                     if matches!(
                         checkpoint.yield_reason,
@@ -2929,13 +3225,21 @@ impl GatewayExecutionService {
                         // state, etc.) but replace the guard with a fresh one so that
                         // accumulated failure budgets don't immediately re-trip.
                         checkpoint.restore_into(&mut runtime);
+
                         runtime.guard = crate::runtime::tool_dispatch::loop_guard_from_config_and_manifest(
                             runtime.config.as_deref(),
                             &runtime.agent_dir,
+                            runtime.loop_guard_declaration.as_ref(),
+                            runtime.manifest.execution_mode,
                         );
                         // If the incoming message is already the last user message in
                         // the checkpoint history, don't duplicate it.
                         let mut history = checkpoint.history.clone();
+                        inject_session_context_after_system_message(
+                            &runtime.agent_dir,
+                            session_id,
+                            &mut history,
+                        );
                         let last_user = history.iter().rev().find(|m| m.role == crate::llm::Role::User);
                         let should_append = match last_user {
                             Some(last) => last.content != message,
@@ -2959,7 +3263,13 @@ impl GatewayExecutionService {
                     }
                 } else {
                     let (turn_start_messages, initial_message) =
-                        gateway_signal_turn_start_context(&runtime.initial_user_message, metadata);
+                        gateway_signal_turn_start_context(
+                            &runtime.initial_user_message,
+                            metadata,
+                            Some(&self.config),
+                            self.gateway_store.as_deref(),
+                            session_id,
+                        );
                     let mut history = build_initial_history(
                         &runtime.agent_dir,
                         &runtime.instructions,
@@ -2971,6 +3281,35 @@ impl GatewayExecutionService {
                     let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
                     (outcome, runtime.initial_user_message.clone(), None)
                 }
+            })
+            }.await;
+
+            let (outcome, resume_initial_message, consumed_checkpoint_turn_id) = match dispatch_result {
+                Ok(triple) => triple,
+                Err(e) => {
+                    // Root-session-tree budget exhausted: fire the graceful root
+                    // budget circuit breaker exactly once (idempotent) to cancel
+                    // in-flight descendants so they stop burning the already-spent
+                    // tree budget (P-6.21). Per-session budget exhaustion never
+                    // sets this flag, so it never cascades.
+                    if runtime.root_budget_exhausted {
+                        let root = crate::runtime::content_store::root_session_id(session_id)
+                            .to_string();
+                        self.trigger_root_budget_circuit_breaker(&root, &e).await;
+                    }
+                    // Checkpoint integrity violation (HMAC tamper) on the
+                    // latest checkpoint: record the audit trail and revoke the
+                    // bound approval before aborting the resume (#606).
+                    if crate::runtime::checkpoint::is_integrity_error(&e) {
+                        self.handle_checkpoint_integrity_violation(
+                            session_id,
+                            agent_id,
+                            None,
+                            "checkpoint HMAC verification failed on resume",
+                        );
+                    }
+                    return Err(e);
+                }
             };
 
             let resolved_session_id = runtime
@@ -2980,11 +3319,14 @@ impl GatewayExecutionService {
 
             let close_flags = session_close_flags_from_turn_outcome(outcome);
 
+            let is_signal = crate::runtime::session_timeline::is_signal_delivered_chat(metadata);
             persist_session_context_turn(
                 &runtime.agent_dir,
+                self.gateway_store.as_deref(),
                 &resolved_session_id,
                 &resume_initial_message,
                 close_flags.assistant_reply.as_deref(),
+                is_signal,
             );
             self.finalize_session(
                 &mut runtime,
@@ -2992,7 +3334,7 @@ impl GatewayExecutionService {
                 agent_id,
                 source_agent_id,
                 close_flags,
-                CloseOrigin::JsonRpcSpawn,
+                true,
                 consumed_checkpoint_turn_id,
             ).await
         })
@@ -3058,6 +3400,7 @@ impl GatewayExecutionService {
 
         if result.suspended_for_approval.is_none()
             && !result.suspended_for_user_input
+            && !result.suspended_for_child_wait
             && (manifest_returns_schema.is_some()
                 || (self.config.response_validation.enabled && manifest_output_policy.is_some()))
         {
@@ -3080,6 +3423,7 @@ impl GatewayExecutionService {
                     workflow_id,
                     task_id,
                     agent_is_spawn_capable,
+                    None,
                 )
                 .await
             {
@@ -3148,7 +3492,134 @@ impl GatewayExecutionService {
     /// Returns a structured error `session_waiting_for_approval:{session}:{id}` when
     /// the latest checkpoint has shifted to `ApprovalRequired` — the scheduler uses
     /// this to defer the resume to the approval path.
+    /// #741: the single resume entrypoint. Verifies the trigger is coherent
+    /// with the session's latest checkpoint (`verify_trigger_coherence`) and
+    /// dispatches to the one reconstruction path (`spawn_agent_once` →
+    /// `resume_from_checkpoint`). Callers stop re-deriving "load checkpoint →
+    /// branch on YieldReason → rebuild" per trigger kind.
+    ///
+    /// Validation-repair respawns stay on [`Self::respawn_from_checkpoint`]
+    /// deliberately: they *replay a completed turn* (Hibernation checkpoint)
+    /// rather than resume a suspended one, with their own repair-budget
+    /// accounting.
+    pub async fn resume_session(
+        &self,
+        trigger: ResumeTrigger,
+        follow_up_message: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        // Match by reference so `trigger` stays borrowable for the coherence
+        // checks inside the arms (the `ref`-binding equivalent, made explicit
+        // after a review misread — #749).
+        match &trigger {
+            ResumeTrigger::InteractionAnswered { interaction_id } => {
+                self.resume_interaction_inner(interaction_id, follow_up_message)
+                    .await
+            }
+            ResumeTrigger::ApprovalResolved { request_id } => {
+                let store = self.gateway_store.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("GatewayStore is required to resume approval-gated sessions")
+                })?;
+                let req = store.get_approval(request_id)?.ok_or_else(|| {
+                    anyhow::anyhow!("Unknown approval request '{}'", request_id)
+                })?;
+                let session_id = req.session_id.clone();
+
+                // Trigger/YieldReason coherence: the latest checkpoint must be
+                // parked on exactly this approval.
+                if let Some(cp) = crate::runtime::checkpoint::load_latest_checkpoint(
+                    self.config.as_ref(),
+                    &session_id,
+                )? {
+                    if let Err(inc) = verify_trigger_coherence(&trigger, &cp.yield_reason) {
+                        anyhow::bail!(
+                            "Cannot resume session '{}' for approval '{}': {}",
+                            session_id,
+                            request_id,
+                            render_trigger_incoherence(&inc)
+                        );
+                    }
+                }
+
+                let binding = store.get_session_agent_binding(&session_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No session binding found for approval resume of session '{}'",
+                        session_id
+                    )
+                })?;
+                self.spawn_agent_once(
+                    &binding.agent_id,
+                    follow_up_message.unwrap_or(
+                        "[gateway] The pending approval was resolved by the operator.",
+                    ),
+                    &session_id,
+                    None,
+                    false,
+                    None,
+                    None,
+                    req.workflow_id.as_deref(),
+                    req.task_id.as_deref(),
+                    None,
+                    &[],
+                )
+                .await
+            }
+            ResumeTrigger::Manual { session_id } => {
+                let store = self.gateway_store.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("GatewayStore is required to resume sessions")
+                })?;
+                if let Some(cp) = crate::runtime::checkpoint::load_latest_checkpoint(
+                    self.config.as_ref(),
+                    session_id,
+                )? {
+                    if let Err(inc) = verify_trigger_coherence(&trigger, &cp.yield_reason) {
+                        anyhow::bail!(
+                            "Cannot resume session '{}': {}",
+                            session_id,
+                            render_trigger_incoherence(&inc)
+                        );
+                    }
+                }
+                let binding = store.get_session_agent_binding(session_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No session binding found for manual resume of session '{}'",
+                        session_id
+                    )
+                })?;
+                self.spawn_agent_once(
+                    &binding.agent_id,
+                    follow_up_message.unwrap_or("[operator] Resume the session."),
+                    session_id,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                )
+                .await
+            }
+        }
+    }
+
+    /// Compatibility wrapper — the typed path is
+    /// [`Self::resume_session`] with [`ResumeTrigger::InteractionAnswered`].
     pub async fn resume_from_user_interaction(
+        &self,
+        interaction_id: &str,
+        follow_up_user_message: Option<&str>,
+    ) -> anyhow::Result<SpawnResult> {
+        self.resume_session(
+            ResumeTrigger::InteractionAnswered {
+                interaction_id: interaction_id.to_string(),
+            },
+            follow_up_user_message,
+        )
+        .await
+    }
+
+    async fn resume_interaction_inner(
         &self,
         interaction_id: &str,
         follow_up_user_message: Option<&str>,
@@ -3169,6 +3640,23 @@ impl GatewayExecutionService {
             );
         }
 
+        // If the interaction is bound to a terminal workflow, do not attempt to
+        // resume — the session cannot make progress and the agent execution may
+        // hang indefinitely.
+        if let Some(ref wf_id) = interaction.workflow_id {
+            if crate::scheduler::workflow_store::is_workflow_terminal(
+                self.config.as_ref(),
+                self.gateway_store.as_deref(),
+                wf_id,
+            )? {
+                anyhow::bail!(
+                    "Cannot resume from interaction {}: workflow {} is already terminal",
+                    interaction_id,
+                    wf_id
+                );
+            }
+        }
+
         // Acquire the resume claim before any spawn attempt. This is the single
         // gate for all resume paths (UserInputRequired, EmergencyStop, etc.) and
         // prevents the scheduler from spawning multiple concurrent executions for
@@ -3180,38 +3668,48 @@ impl GatewayExecutionService {
             );
         }
 
-        // Pre-check: if the latest checkpoint shifted away from UserInputRequired,
-        // return early so the scheduler can defer or report appropriately.
-        use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
+        // Pre-check (#741): trigger/YieldReason coherence via the shared
+        // helper. Error strings are preserved verbatim — the scheduler's
+        // standalone-interaction sweep machine-matches the
+        // `session_waiting_for_approval:<session>:<rid>` prefix.
+        use crate::runtime::checkpoint::load_latest_checkpoint;
         if let Some(cp) = load_latest_checkpoint(self.config.as_ref(), &interaction.session_id)? {
-            match &cp.yield_reason {
-                YieldReason::UserInputRequired { interaction_id: cid } => {
-                    anyhow::ensure!(
-                        cid == &interaction.interaction_id,
-                        "Checkpoint is for interaction '{}', not '{}'",
-                        cid,
-                        interaction.interaction_id
-                    );
+            let trigger = ResumeTrigger::InteractionAnswered {
+                interaction_id: interaction.interaction_id.clone(),
+            };
+            match verify_trigger_coherence(&trigger, &cp.yield_reason) {
+                Ok(()) => {}
+                Err(TriggerIncoherence::InteractionMismatch { expected, got }) => {
+                    anyhow::bail!("Checkpoint is for interaction '{}', not '{}'", expected, got);
                 }
-                YieldReason::ApprovalRequired { approval_request_id } => {
+                Err(TriggerIncoherence::WaitingForApproval { request_id }) => {
                     tracing::debug!(
                         target: "scheduler",
                         interaction_id = %interaction.interaction_id,
                         session_id = %interaction.session_id,
-                        approval_request_id = %approval_request_id,
+                        approval_request_id = %request_id,
                         "Skipping user-interaction resume: session is now waiting for approval"
                     );
                     return Err(anyhow::anyhow!(
                         "session_waiting_for_approval:{}:{}",
                         interaction.session_id,
-                        approval_request_id
+                        request_id
                     ));
                 }
-                other => {
+                Err(TriggerIncoherence::WrongYieldReason { got }) => {
                     anyhow::bail!(
-                        "Latest checkpoint for session '{}' is not UserInputRequired (got {:?})",
+                        "Latest checkpoint for session '{}' is not UserInputRequired (got {})",
                         interaction.session_id,
-                        other
+                        got
+                    );
+                }
+                Err(inc @ (TriggerIncoherence::EmergencyStop
+                | TriggerIncoherence::ApprovalMismatch { .. })) => {
+                    anyhow::bail!(
+                        "Cannot resume session '{}' from interaction '{}': {}",
+                        interaction.session_id,
+                        interaction.interaction_id,
+                        render_trigger_incoherence(&inc)
                     );
                 }
             }
@@ -3271,6 +3769,7 @@ impl GatewayExecutionService {
         source_agent_id: Option<&str>,
         workflow_id: Option<&str>,
         task_id: Option<&str>,
+        initial_feedback: &[autonoetic_types::trajectory::FeedbackEvent],
     ) -> anyhow::Result<SpawnResult> {
         use crate::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
 
@@ -3355,6 +3854,15 @@ impl GatewayExecutionService {
 
         checkpoint.restore_into(&mut runtime);
 
+        // Replay validation/tool feedback into the restored monitor so the
+        // repair turn can be checked for ignored feedback.
+        if !initial_feedback.is_empty() {
+            let turn = runtime.turn_counter;
+            runtime
+                .trajectory_monitor
+                .record_feedback(turn, initial_feedback);
+        }
+
         // Build history from checkpoint, optionally appending an additional message
         let mut history = checkpoint.history.clone();
         if let Some(msg) = additional_message {
@@ -3378,9 +3886,11 @@ impl GatewayExecutionService {
 
         persist_session_context_turn(
             &runtime.agent_dir,
+            self.gateway_store.as_deref(),
             &resolved_session_id,
             &initial_msg,
             close_flags.assistant_reply.as_deref(),
+            false,
         );
         self.finalize_session(
             &mut runtime,
@@ -3388,7 +3898,7 @@ impl GatewayExecutionService {
             agent_id,
             source_agent_id,
             close_flags,
-            CloseOrigin::CheckpointRespawn,
+            false,
             Some(checkpoint.turn_id.clone()),
         ).await
     }
@@ -3740,6 +4250,12 @@ impl GatewayExecutionService {
         F: FnOnce() -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
     {
+        let rel_start = std::time::Instant::now();
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            "Acquiring agent admission semaphore"
+        );
         let agent_admission = self.agent_admission_semaphore(agent_id).await;
         let _admission_permit = agent_admission.try_acquire_owned().map_err(|_| {
             anyhow::anyhow!(
@@ -3747,9 +4263,27 @@ impl GatewayExecutionService {
                 agent_id
             )
         })?;
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            elapsed_ms = rel_start.elapsed().as_millis(),
+            "Acquired agent admission semaphore"
+        );
 
+        let lock_start = std::time::Instant::now();
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            "Acquiring agent execution lock"
+        );
         let agent_lock = self.agent_execution_lock(agent_id).await;
         let _agent_guard = agent_lock.lock().await;
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            elapsed_ms = lock_start.elapsed().as_millis(),
+            "Acquired agent execution lock"
+        );
 
         let _execution_permit = self
             .execution_semaphore
@@ -3762,7 +4296,16 @@ impl GatewayExecutionService {
                 )
             })?;
 
-        operation().await
+        let op_start = std::time::Instant::now();
+        let result = operation().await;
+        tracing::info!(
+            target: "reliability",
+            agent_id = %agent_id,
+            elapsed_ms = op_start.elapsed().as_millis(),
+            success = result.is_ok(),
+            "Reliability-controlled operation completed"
+        );
+        result
     }
 
     pub async fn agent_admission_semaphore(&self, agent_id: &str) -> Arc<Semaphore> {
@@ -3790,8 +4333,118 @@ impl GatewayExecutionService {
     }
 }
 
+/// Process-lifetime cache for the resolved gateway node id (#586). Populated
+/// once at startup via [`init_gateway_node_id`]; falls back to a lazy
+/// `env::var` read on first access for code paths that don't go through the
+/// server `run()` (e.g. in-process tests).
+static GATEWAY_NODE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Cache the resolved node id for the lifetime of the process. Called once at
+/// gateway startup after identity resolution. Idempotent — later calls are
+/// no-ops so the first (authoritative) value wins.
+pub fn init_gateway_node_id(node_id: &str) {
+    let _ = GATEWAY_NODE_ID.set(node_id.to_string());
+}
+
+/// Resolved gateway node id. Cached for the process lifetime so hot-path
+/// timeline/event builders avoid a per-event `std::env::var` syscall (#586).
 pub fn gateway_actor_id() -> String {
-    std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string())
+    GATEWAY_NODE_ID
+        .get_or_init(|| {
+            std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string())
+        })
+        .clone()
+}
+
+/// Record a checkpoint integrity violation (#606) against the given store:
+/// emit a durable `background.checkpoint`/`checkpoint_tampered` causal event,
+/// revoke the bound approval with reason `integrity_violation`, and surface an
+/// operator-visible alert.
+///
+/// `approval_request_id` is `Some` for action-mismatch (checkpoint loaded, but
+/// the bound action differs); `None` for HMAC tamper (checkpoint unreadable),
+/// in which case the bound approval is located by session. Exposed as a free
+/// function so the behaviour is unit-testable without an executor.
+pub fn record_checkpoint_integrity_violation(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    session_id: &str,
+    agent_id: &str,
+    approval_request_id: Option<&str>,
+    reason: &str,
+) {
+    // Resolve the bound approval request id (or locate it by session).
+    let resolved_rid = approval_request_id
+        .map(|s| s.to_string())
+        .or_else(|| {
+            store
+                .find_latest_open_approval_for_session(session_id)
+                .ok()
+                .flatten()
+        });
+
+    // Revoke the approval. Force-cancel so an already-approved row (the
+    // action-mismatch case) is also moved to a terminal state.
+    if let Some(ref rid) = resolved_rid {
+        match store.cancel_approval_for_integrity_violation(rid) {
+            Ok(false) => tracing::warn!(
+                target: "checkpoint",
+                session_id = %session_id,
+                approval_request_id = %rid,
+                "integrity-bound approval was already terminal"
+            ),
+            Err(e) => tracing::warn!(
+                target: "checkpoint",
+                session_id = %session_id,
+                approval_request_id = %rid,
+                error = %e,
+                "failed to cancel integrity-bound approval"
+            ),
+            _ => {}
+        }
+    }
+
+    // Durable audit trail.
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "background.checkpoint".to_string(),
+        action: "checkpoint_tampered".to_string(),
+        status: "integrity_violation".to_string(),
+        enforced_rules: vec![],
+        target: resolved_rid.clone(),
+        payload: Some(
+            serde_json::json!({
+                "session_id": session_id,
+                "approval_request_id": resolved_rid,
+                "reason": reason,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(reason.to_string()),
+    };
+    if let Err(e) = store.create_causal_event(&event) {
+        tracing::error!(
+            target: "checkpoint",
+            session_id = %session_id,
+            approval_request_id = ?resolved_rid,
+            error = %e,
+            "failed to persist checkpoint_tampered causal event — audit trail may be incomplete"
+        );
+    }
+
+    tracing::error!(
+        target: "checkpoint",
+        session_id = %session_id,
+        approval_request_id = ?resolved_rid,
+        reason = %reason,
+        "CHECKPOINT INTEGRITY VIOLATION — bound approval revoked, resume aborted"
+    );
 }
 
 pub fn gateway_root_dir(config: &GatewayConfig) -> std::path::PathBuf {
@@ -3841,6 +4494,41 @@ pub fn sha256_hex(input: &str) -> String {
 }
 
 
+fn inject_session_context_after_system_message(
+    agent_dir: &std::path::Path,
+    session_id: &str,
+    history: &mut Vec<Message>,
+) {
+    let injected: Vec<Message> = match SessionContext::load(agent_dir, session_id).and_then(
+        |context| {
+            Ok(context
+                .render_prompt()
+                .map(Message::system)
+                .into_iter()
+                .collect::<Vec<_>>())
+        },
+    ) {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_id,
+                "Failed to load session context for checkpoint resume"
+            );
+            return;
+        }
+    };
+    if injected.is_empty() {
+        return;
+    }
+    // Match build_initial_history: context sits between the agent's system
+    // instructions (first message) and the conversation transcript.
+    let insert_pos = if history.first().is_some() { 1 } else { 0 };
+    for (offset, msg) in injected.into_iter().enumerate() {
+        history.insert(insert_pos + offset, msg);
+    }
+}
+
 fn build_initial_history(
     agent_dir: &std::path::Path,
     instructions: &str,
@@ -3878,9 +4566,38 @@ fn build_initial_history(
     history
 }
 
+fn is_signal_delivered_for_terminal_workflow(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<bool> {
+    let is_signal_delivery = metadata
+        .and_then(|value| value.get("signal_delivered"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !is_signal_delivery {
+        return Ok(false);
+    }
+    let root = crate::runtime::content_store::root_session_id(session_id);
+    let workflow_id = match store {
+        Some(s) => s.resolve_workflow_id(&root)?,
+        None => crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+            config, &root,
+        )?,
+    };
+    let Some(workflow_id) = workflow_id else {
+        return Ok(false);
+    };
+    crate::scheduler::workflow_store::is_workflow_terminal(config, store, &workflow_id)
+}
+
 fn gateway_signal_turn_start_context(
     user_message: &str,
     metadata: Option<&serde_json::Value>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
 ) -> (Vec<Message>, String) {
     let is_signal_delivery = metadata
         .and_then(|value| value.get("signal_delivered"))
@@ -3890,44 +4607,150 @@ fn gateway_signal_turn_start_context(
         return (Vec::new(), user_message.to_string());
     }
 
+    // Try to inject the workflow summary so the planner doesn't need a
+    // separate `workflow_state` tool call on wake (saves one LLM round).
+    let workflow_summary = config
+        .and_then(|cfg| {
+            crate::scheduler::compact_workflow_summary(cfg, store, session_id)
+                .ok()
+                .flatten()
+        });
+
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(user_message) else {
         return (Vec::new(), user_message.to_string());
     };
-    if parsed.get("type").and_then(|value| value.as_str()) != Some("child_state_notification") {
-        return (Vec::new(), user_message.to_string());
+
+    // Build system messages from the signal payload.
+    let mut system_messages = Vec::new();
+
+    let signal_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    if signal_type == "child_state_notification" {
+        if let Some(notification_value) = parsed.get("notification") {
+            let pretty = serde_json::to_string_pretty(notification_value)
+                .unwrap_or_else(|_| notification_value.to_string());
+            system_messages.push(Message::system(format!(
+                "[gateway child state notification]\n{}",
+                pretty
+            )));
+        }
+    } else if signal_type == "workflow_join_satisfied" {
+        // Include the join payload as a system message so the planner sees
+        // which tasks completed and any child summaries embedded in the signal.
+        let pretty = serde_json::to_string_pretty(&parsed)
+            .unwrap_or_else(|_| parsed.to_string());
+        system_messages.push(Message::system(format!(
+            "[workflow join satisfied]\n{}",
+            pretty
+        )));
     }
 
-    let Some(notification_value) = parsed.get("notification") else {
-        return (Vec::new(), user_message.to_string());
-    };
-    let Ok(notification) =
-        serde_json::from_value::<autonoetic_types::workflow::ChildStateNotification>(
-            notification_value.clone(),
-        )
-    else {
-        return (Vec::new(), user_message.to_string());
+    // Append the workflow status summary (same injection used at hibernate
+    // time in lifecycle.rs) so the planner has the full picture without a
+    // `workflow_state` round-trip.
+    if let Some(ref summary) = workflow_summary {
+        if let Some(last) = system_messages.last_mut() {
+            last.content.push_str("\n\n[workflow status] ");
+            last.content.push_str(summary);
+        } else {
+            system_messages.push(Message::system(format!(
+                "[workflow status] {}",
+                summary
+            )));
+        }
+    }
+
+    let user_prompt = if system_messages.is_empty() {
+        user_message.to_string()
+    } else {
+        match signal_type {
+            "child_state_notification" => "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above.".to_string(),
+            "workflow_join_satisfied" => "Workflow join satisfied. The workflow status above is current — you do not need to call workflow_state. Review the completed tasks and continue planning.".to_string(),
+            _ => user_message.to_string(),
+        }
     };
 
-    let pretty = serde_json::to_string_pretty(&notification)
-        .unwrap_or_else(|_| notification_value.to_string());
-    (
-        vec![Message::system(format!(
-            "[gateway child state notification]\n{}",
-            pretty
-        ))],
-        "Gateway child-state notification delivered. Continue from the current workflow state and use the structured gateway child state above.".to_string(),
-    )
+    if system_messages.is_empty() {
+        (Vec::new(), user_message.to_string())
+    } else {
+        (system_messages, user_prompt)
+    }
+}
+
+/// Extract durable facts about agents promoted in `root_session_id` (or its
+/// child sessions) from the authoritative `promotion_attempts` SQLite table.
+///
+/// Unlike `result_summary` (free-form assistant text), this table is written
+/// structurally on every `agent_revision_promote` outcome and carries the
+/// target `alias_id` + `revision_id` — exactly the antecedent the planner
+/// needs to resolve referents like "it" after an install.
+fn extract_promotion_facts(
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    root_session_id: &str,
+) -> Option<(Vec<crate::runtime::session_context::SessionFact>, Option<String>)> {
+    let store = store?;
+    let promoted = match store.list_promoted_agents_by_root_session(root_session_id) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                target: "execution",
+                error = %error,
+                root_session_id,
+                "Failed to read promotion_attempts for session-context facts"
+            );
+            return None;
+        }
+    };
+    if promoted.is_empty() {
+        return None;
+    }
+
+    let mut facts = Vec::new();
+    // Rows are ordered oldest-first; track the latest as the current topic.
+    let mut latest_topic: Option<String> = None;
+    for agent in &promoted {
+        if agent.agent_id.is_empty() {
+            continue;
+        }
+        facts.push(crate::runtime::session_context::SessionFact {
+            label: "installed_agent".to_string(),
+            value: agent.agent_id.clone(),
+            source: "promotion".to_string(),
+        });
+        latest_topic = Some(format!("{} (installed)", agent.agent_id));
+    }
+
+    if facts.is_empty() {
+        None
+    } else {
+        Some((facts, latest_topic))
+    }
 }
 
 fn persist_session_context_turn(
     agent_dir: &std::path::Path,
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     session_id: &str,
     user_message: &str,
     assistant_reply: Option<&str>,
+    is_signal_delivered: bool,
 ) {
     let result = (|| -> anyhow::Result<()> {
         let mut context = SessionContext::load(agent_dir, session_id)?;
-        context.record_turn(user_message, assistant_reply);
+        context.record_turn(user_message, assistant_reply, is_signal_delivered);
+
+        let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+        if session_id == root_session_id {
+            if let Some((facts, topic)) = extract_promotion_facts(store, session_id) {
+                for fact in facts {
+                    context.add_fact(fact);
+                }
+                if let Some(topic) = topic {
+                    context.set_current_topic(topic);
+                }
+            }
+        }
+
         context.save(agent_dir)?;
         Ok(())
     })();
@@ -4046,7 +4869,7 @@ mod tests {
     fn test_build_initial_history_injects_session_context_before_user_message() {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let mut context = SessionContext::empty("session-1");
-        context.record_turn("remember Atlas", Some("Stored that."));
+        context.record_turn("remember Atlas", Some("Stored that."), false);
         context
             .save(temp.path())
             .expect("session context should save");
@@ -4065,7 +4888,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "Test Agent".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -4081,8 +4905,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
 
@@ -4130,7 +4956,7 @@ mod tests {
         });
 
         let (turn_start_messages, user_message) =
-            gateway_signal_turn_start_context(&message, Some(&metadata));
+            gateway_signal_turn_start_context(&message, Some(&metadata), None, None, "test-session");
 
         assert_eq!(turn_start_messages.len(), 1);
         assert!(matches!(turn_start_messages[0].role, crate::llm::Role::System));
@@ -4140,7 +4966,7 @@ mod tests {
         assert!(turn_start_messages[0].content.contains("\"task_id\": \"task-1\""));
         assert_eq!(
             user_message,
-            "Gateway child-state notification delivered. Continue from the current workflow state and use the structured gateway child state above."
+            "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above."
         );
     }
 
@@ -4150,15 +4976,187 @@ mod tests {
 
         persist_session_context_turn(
             temp.path(),
+            None,
             "session-2",
             "hello there",
             Some("general kenobi"),
+            false,
         );
 
         let path = session_context_path(temp.path(), "session-2");
         let body = std::fs::read_to_string(path).expect("session context file should exist");
         assert!(body.contains("\"last_user_message\": \"hello there\""));
         assert!(body.contains("\"last_assistant_reply\": \"general kenobi\""));
+    }
+
+    #[test]
+    fn test_persist_session_context_turn_skips_signal_user_message() {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+
+        persist_session_context_turn(
+            temp.path(),
+            None,
+            "session-signal",
+            "real user message",
+            Some("reply one"),
+            false,
+        );
+        persist_session_context_turn(
+            temp.path(),
+            None,
+            "session-signal",
+            "gateway signal payload",
+            Some("reply two"),
+            true,
+        );
+
+        let path = session_context_path(temp.path(), "session-signal");
+        let body = std::fs::read_to_string(path).expect("session context file should exist");
+        assert!(body.contains("\"last_user_message\": \"real user message\""));
+        assert!(body.contains("\"last_assistant_reply\": \"reply two\""));
+    }
+
+    #[test]
+    fn test_inject_session_context_into_checkpoint_history_after_system_message() {
+        use crate::runtime::session_context::{SessionContext, SessionFact};
+
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let mut context = SessionContext::empty("session-ctx-inject");
+        context.set_current_topic("fibonacci-next (installed)".to_string());
+        context.add_fact(SessionFact {
+            label: "installed_agent".to_string(),
+            value: "fibonacci-next".to_string(),
+            source: "promotion".to_string(),
+        });
+        context.save(temp.path()).expect("context should save");
+
+        let mut history = vec![
+            Message::system("You are a helpful planner.".to_string()),
+            Message::user("call it 5 times".to_string()),
+        ];
+        inject_session_context_after_system_message(
+            temp.path(),
+            "session-ctx-inject",
+            &mut history,
+        );
+
+        assert_eq!(history.len(), 3);
+        assert!(matches!(history[0].role, crate::llm::Role::System));
+        assert!(history[0].content.contains("You are a helpful planner"));
+        assert!(matches!(history[1].role, crate::llm::Role::System));
+        assert!(history[1].content.contains("Current focus: fibonacci-next (installed)"));
+        assert!(history[1].content.contains("installed_agent: fibonacci-next"));
+        assert!(matches!(history[2].role, crate::llm::Role::User));
+        assert_eq!(history[2].content, "call it 5 times");
+    }
+
+    #[test]
+    fn test_extract_promotion_facts_loads_from_store_for_child_session() {
+        // The promoting session is a child path under the root session
+        // (e.g. "root/specialized_builder.default-xxx"), exactly as written
+        // by agent_revision_promote in production. The prefix match must
+        // surface it when querying by the bare root session id.
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(dir.path())
+            .expect("store should open");
+        let root = "session-12d6d198";
+        store
+            .record_promotion_attempt(
+                "patt-1",
+                "fibonacci-next",
+                "rev-abc",
+                "sha256:deadbeef",
+                "promoted",
+                None,
+                None,
+                Some(&format!("{root}/specialized_builder.default-zzz")),
+                Some("wf-1"),
+            )
+            .unwrap();
+
+        let (facts, topic) = extract_promotion_facts(Some(&store), root)
+            .expect("promotion facts should be present");
+
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].label, "installed_agent");
+        assert_eq!(facts[0].value, "fibonacci-next");
+        assert_eq!(facts[0].source, "promotion");
+        assert_eq!(topic.as_deref(), Some("fibonacci-next (installed)"));
+    }
+
+    #[test]
+    fn test_extract_promotion_facts_ignores_rejected_attempts() {
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(dir.path())
+            .expect("store should open");
+        let root = "session-rejected";
+        store
+            .record_promotion_attempt(
+                "patt-rej",
+                "fibonacci-next",
+                "rev-abc",
+                "sha256:deadbeef",
+                "rejected",
+                Some("promotion_gate"),
+                Some("validation_failed"),
+                Some(root),
+                Some("wf-1"),
+            )
+            .unwrap();
+
+        assert!(extract_promotion_facts(Some(&store), root).is_none());
+    }
+
+    #[test]
+    fn test_extract_promotion_facts_returns_none_without_store() {
+        // No gateway store available (e.g. minimal test config): gracefully
+        // skip fact injection rather than panic.
+        assert!(extract_promotion_facts(None, "session-any").is_none());
+    }
+
+    #[test]
+    fn test_extract_promotion_facts_tracks_latest_topic() {
+        // Multiple promotions in the same root session: the most recent one
+        // (by created_at) becomes the current topic, while all are recorded
+        // as durable facts.
+        let dir = tempfile::tempdir().expect("tempdir should create");
+        let store = crate::scheduler::gateway_store::GatewayStore::open(dir.path())
+            .expect("store should open");
+        let root = "session-multi";
+        store
+            .record_promotion_attempt(
+                "patt-old",
+                "agent-old",
+                "rev-1",
+                "sha256:a",
+                "promoted",
+                None,
+                None,
+                Some(root),
+                Some("wf-1"),
+            )
+            .unwrap();
+        // Sleep briefly so the second attempt has a strictly-later created_at.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store
+            .record_promotion_attempt(
+                "patt-new",
+                "agent-new",
+                "rev-2",
+                "sha256:b",
+                "promoted",
+                None,
+                None,
+                Some(&format!("{root}/builder-1")),
+                Some("wf-1"),
+            )
+            .unwrap();
+
+        let (facts, topic) = extract_promotion_facts(Some(&store), root)
+            .expect("promotion facts should be present");
+        assert_eq!(facts.len(), 2);
+        // Topic reflects the latest promotion.
+        assert_eq!(topic.as_deref(), Some("agent-new (installed)"));
     }
 
     #[test]
@@ -4226,41 +5224,65 @@ mod tests {
     }
 
     #[test]
-    fn session_close_reason_jsonrpc_mapping_is_closed_and_stable() {
+    fn session_close_flags_jsonrpc_mapping_is_closed_and_stable() {
+        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input, suspended_for_child_wait| {
+            SessionCloseFlags {
+                assistant_reply,
+                suspended_for_approval,
+                suspended_for_user_input,
+                suspended_for_child_wait,
+            }
+        };
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(true, false, false).as_str(),
+            flags(None, Some("apr-1".into()), false, false).outcome(true).as_str(),
             "jsonrpc_spawn_suspended_approval"
         );
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(false, true, false).as_str(),
+            flags(None, None, true, false).outcome(true).as_str(),
             "jsonrpc_spawn_suspended_user_input"
         );
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(false, false, true).as_str(),
+            flags(None, None, false, true).outcome(true).as_str(),
+            "jsonrpc_spawn_suspended_approval"
+        );
+        assert_eq!(
+            flags(Some("ok".into()), None, false, false).outcome(true).as_str(),
             "jsonrpc_spawn_complete"
         );
         assert_eq!(
-            SessionCloseReason::for_jsonrpc_spawn(false, false, false).as_str(),
+            flags(None, None, false, false).outcome(true).as_str(),
             "jsonrpc_spawn_complete_empty"
         );
     }
 
     #[test]
-    fn session_close_reason_checkpoint_mapping_is_closed_and_stable() {
+    fn session_close_flags_checkpoint_mapping_is_closed_and_stable() {
+        let flags = |assistant_reply, suspended_for_approval, suspended_for_user_input, suspended_for_child_wait| {
+            SessionCloseFlags {
+                assistant_reply,
+                suspended_for_approval,
+                suspended_for_user_input,
+                suspended_for_child_wait,
+            }
+        };
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(true, false, false).as_str(),
+            flags(None, Some("apr-1".into()), false, false).outcome(false).as_str(),
             "checkpoint_respawn_suspended"
         );
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(false, true, false).as_str(),
+            flags(None, None, true, false).outcome(false).as_str(),
             "checkpoint_respawn_suspended_user_input"
         );
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(false, false, true).as_str(),
+            flags(None, None, false, true).outcome(false).as_str(),
+            "checkpoint_respawn_suspended"
+        );
+        assert_eq!(
+            flags(Some("ok".into()), None, false, false).outcome(false).as_str(),
             "checkpoint_respawn_complete"
         );
         assert_eq!(
-            SessionCloseReason::for_checkpoint_respawn(false, false, false).as_str(),
+            flags(None, None, false, false).outcome(false).as_str(),
             "checkpoint_respawn_complete_empty"
         );
     }
@@ -4285,7 +5307,7 @@ mod tests {
             },
         ];
 
-        inject_approval_ref_into_history(&mut history, "apr-abc123");
+        inject_approval_ref_into_history(&mut history, "apr-abc123", None);
 
         // The assistant message's tool call should now have approval_ref.
         let assistant_msg = &history[1];
@@ -4320,7 +5342,7 @@ mod tests {
             },
         ];
 
-        inject_approval_ref_into_history(&mut history, "apr-new");
+        inject_approval_ref_into_history(&mut history, "apr-new", None);
 
         let tc = &history[0].tool_calls[0];
         let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap();

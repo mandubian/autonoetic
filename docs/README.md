@@ -11,17 +11,18 @@ are in [`archived/`](archived/).
 - [`architecture-summary.md`](./architecture-summary.md) — Short architecture overview.
 - [`gateway-architecture-principles.md`](./gateway-architecture-principles.md) — Gateway design principles.
 - [`MODULES.md`](./MODULES.md) — Module-level map of the codebase.
-- [`AGENTS.md`](./AGENTS.md) — Agent model, SKILL format, lifecycle, capabilities.
+- [`AGENTS.md`](./AGENTS.md) — **Canonical** agent reference: roles, routing, SKILL.md format, capabilities, lifecycle.
 - [`separation-of-powers.md`](./separation-of-powers.md) — Agent vs gateway authority boundary.
-- [`agent-features.md`](./agent-features.md) — Platform feature overview.
-- [`agent_routing_and_roles.md`](./agent_routing_and_roles.md) — Routing rules and roles.
+- [`agent-features.md`](./agent-features.md) — *Partially superseded by `AGENTS.md`*; still has unique detail on middleware / disclosure / background scheduling.
+- [`agent_routing_and_roles.md`](./archived/agent_routing_and_roles.md) — *Archived / deprecated*; describes a removed default-front-door routing model. Use `AGENTS.md` → Routing Rules instead.
+- [`agent-capabilities.md`](./archived/agent-capabilities.md) — *Archived / superseded by `AGENTS.md` → Capabilities System* (kept in sync with `capability.rs`).
 - [`agent-adapter-specialist.md`](./agent-adapter-specialist.md) — Adapter specialist contract.
 
 ## Workflow and Interaction
 
 - [`workflow-orchestration.md`](./workflow-orchestration.md) — Durable workflow/task lifecycle (live reference for mechanical orchestration).
 - [`human-agent-collaboration.md`](./human-agent-collaboration.md) — PlanFrame, workbench projection, reconciliation, semantic summaries, validation waivers, and the `/return` handoff.
-- [`design/human-gate-unification-plan.md`](./design/human-gate-unification-plan.md) — GateService migration tracker (partial).
+- [`archived/human-gate-unification-plan.md`](./archived/human-gate-unification-plan.md) — GateService migration (archived; shipped — residual tool migrations + agent-as-decider deferred).
 - [`design/constitution-gate-amendments.md`](./design/constitution-gate-amendments.md) — Unified gate constitutional rationale.
 - [`approval-notification-delivery.md`](./approval-notification-delivery.md) — Approval delivery paths.
 - [`agent-clarification-protocol.md`](./agent-clarification-protocol.md) — Clarification signal format.
@@ -29,6 +30,7 @@ are in [`archived/`](archived/).
 
 ## Runtime, Storage, and Budgets
 
+- [`gateway-store-schema.md`](./gateway-store-schema.md) — **SQLite schema reference**: every table, column, owner module, relation, and usage status (audited against `migrate.rs`).
 - [`content-store.md`](./content-store.md) — Content addressing and visibility.
 - [`cognitive-capsule.md`](./cognitive-capsule.md) — Portable agent capsule export/import (implemented).
 - [`agent-learning.md`](./agent-learning.md) — Learning and memory retrieval.
@@ -45,7 +47,7 @@ are in [`archived/`](archived/).
 - [`credential-management.md`](./credential-management.md) — Credential vault (live reference for multi-credential).
 - [`code-analysis.md`](./code-analysis.md) — Static analysis model.
 - [`schema-enforcement-hook.md`](./schema-enforcement-hook.md) — Schema enforcement.
-- [`agent-capabilities.md`](./agent-capabilities.md) — Capability catalog.
+- [`agent-capabilities.md`](./archived/agent-capabilities.md) — *Archived / superseded*; use `AGENTS.md` → Capabilities System.
 - [`security-sentinel.md`](./security-sentinel.md) — Divergence sentinel overview.
 - [`gateway-constitution-roadmap.md`](./gateway-constitution-roadmap.md) — Constitutional gap-closure backlog.
 - [`constitution-signing.md`](./constitution-signing.md) — Constitution lock and signing.
@@ -67,20 +69,27 @@ are in [`archived/`](archived/).
 
 ## Active Design (`design/`)
 
-See [`design/README.md`](design/README.md) for the full table. Highlights:
+See [`design/README.md`](design/README.md) for the full, status-annotated
+table — that file is the source of truth and this index intentionally does
+not duplicate it (highlights here go stale). As of the `2026.07.08`
+constitution, items that were recently active and are now largely shipped
+include:
 
-- Gate unification + pending agent-as-decider amendments
-- Constitution restructure (P-x.y / enforcement register)
-- Divergence sentinel P4 validation
-- Self-improvement loop P5–P7
-- Operator approval inspection Phase 2
+- **Constitution restructure** (P-x.y format + enforcement register) — see [`constitution/enforcement-register.md`](./constitution/enforcement-register.md)
+- **Gate unification** — `GateService` is the single pipeline for all `GateKind`s (constitution §2, P-2.18 `ENFORCED`)
+- **Agent-as-decider** — the `GateDecider` capability is `ENFORCED` (P-2.20); the *broader* multi-decider / voting-weight vision remains a draft RFC ([`design/principal-model-and-symmetric-obligations.md`](./design/principal-model-and-symmetric-obligations.md))
+
+Items with genuinely open work (divergence-sentinel P4 validation,
+self-improvement loop P5–P7, operator approval inspection Phase 2,
+post-promotion review Tier 2, and several draft RFCs) are tracked in the
+design table.
 
 ## Archived (`archived/`)
 
 Historical plans, reviews, and superseded architecture notes. Not
 source-of-truth. Notable completed work now archived from `design/`:
 
-- Promotion federation (plan + reviews) — see [`approval-system-hardening-plan.md`](./approval-system-hardening-plan.md)
+- Promotion federation (plan + reviews) — see [`archived/approval-system-hardening-plan.md`](./archived/approval-system-hardening-plan.md)
 - Sealed-network evaluation, recording mode, sealed evaluator replay
 - Progressive UX / auto-learning, context overflow mitigation
 - Cognitive capsule implementation plan (reference: [`cognitive-capsule.md`](./cognitive-capsule.md))

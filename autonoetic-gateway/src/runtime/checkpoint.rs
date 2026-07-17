@@ -4,12 +4,20 @@
 //! that can restore an agent session from hibernation, budget exhaustion, max turns,
 //! crash recovery, and approval suspension.
 //!
+//! # Integrity
+//!
+//! Checkpoint files are HMAC-SHA256 signed using a per-gateway key derived from
+//! `GatewayConfig::continuation_key` (or `node_id` as fallback). On load, the
+//! signature is verified before the payload is deserialized. Tampered files are
+//! rejected with an error.
+//!
 //! Storage: `.gateway/checkpoints/{session_id}/{turn_id}.checkpoint.json`
 
 use crate::llm::Message;
 use crate::runtime::compression::CompressionMetadata;
-use crate::runtime::guard::LoopGuardState;
+use crate::runtime::guard::LoopGuard;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::trajectory::FeedbackEvent;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -124,7 +132,7 @@ pub struct SessionCheckpoint {
     /// Current turn number.
     pub turn_counter: u64,
     /// Loop guard state (failure counts, progress tracking).
-    pub loop_guard_state: LoopGuardState,
+    pub loop_guard_state: LoopGuard,
     /// Session runtime state (Normal or Degraded).
     #[serde(default)]
     pub session_state: autonoetic_types::agent::SessionState,
@@ -134,6 +142,8 @@ pub struct SessionCheckpoint {
     /// Tool names explicitly discovered via `tool_discover`.
     #[serde(default)]
     pub discovered_tools: std::collections::HashSet<String>,
+    #[serde(default)]
+    pub blocked_state_event_emitted: bool,
 
     // --- Session identity ---
     pub agent_id: String,
@@ -146,6 +156,17 @@ pub struct SessionCheckpoint {
     /// SHA-256 of runtime.lock content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_lock_hash: Option<String>,
+    /// Constitution version that admitted this session (#821), pinned at
+    /// session start and updated only when the resume-time drift check
+    /// notices the process constitution has changed. `None` when the
+    /// constitution runtime was never initialized (e.g. many unit tests).
+    /// `#[serde(default)]` so checkpoints predating this field deserialize
+    /// with `None` (backward compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constitution_version: Option<String>,
+    /// Constitution digest paired with `constitution_version` above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constitution_digest: Option<String>,
     /// LLM configuration at session start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_config_snapshot: Option<LlmConfigSnapshot>,
@@ -203,6 +224,25 @@ pub struct SessionCheckpoint {
     /// timeout checker to fail tasks that wait too long for approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<String>,
+
+    /// Sentinel divergence suppression state (sentinel.suppress).
+    /// Without this, suppression is lost on resume and the planner is
+    /// re-notified about divergence it already suppressed.
+    #[serde(default)]
+    pub suppress_until_turn: u64,
+
+    /// Last known trajectory divergence level (e.g. "healthy", "diverging").
+    /// Without this, the monitor resets to None on resume and the first
+    /// post-resume tick always fires level_changed=true, re-detecting
+    /// divergence from the restored LoopGuard state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trajectory_last_level: Option<String>,
+
+    /// Feedback events the gateway issued to the agent before this checkpoint.
+    /// Restored into the trajectory monitor so cross-turn `FeedbackIgnored`
+    /// detection survives respawn, repair, and approval continuation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback_events: Vec<(u64, FeedbackEvent)>,
 }
 
 impl SessionCheckpoint {
@@ -214,10 +254,25 @@ impl SessionCheckpoint {
         runtime.discovered_tools = self.discovered_tools.clone();
         runtime.session_started = true;
         runtime.turn_counter = self.turn_counter;
+        runtime.blocked_state_event_emitted = self.blocked_state_event_emitted;
         runtime.runtime_lock_hash = self.runtime_lock_hash.clone();
+        runtime.constitution_version = self.constitution_version.clone();
+        runtime.constitution_digest = self.constitution_digest.clone();
         if let Some(ref cm) = self.compression_metadata {
             runtime.compression_metadata = cm.clone();
         }
+        // Restore the prior state capsule so the next governor run evolves it
+        // incrementally instead of re-bootstrapping from an empty shell.
+        // `#[serde(default)]` on the field means old checkpoints restore `None`.
+        runtime.capsule_state = self.capsule_state.clone();
+        runtime.suppress_until_turn =
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(self.suppress_until_turn));
+        runtime
+            .trajectory_monitor
+            .restore_last_level(self.trajectory_last_level.as_deref());
+        runtime
+            .trajectory_monitor
+            .restore_feedback(self.feedback_events.clone());
     }
 
     pub fn initial_user_message(&self) -> String {
@@ -227,6 +282,45 @@ impl SessionCheckpoint {
             .map(|m| m.content.clone())
             .unwrap_or_default()
     }
+}
+
+// ---------------------------------------------------------------------------
+// HMAC integrity
+// ---------------------------------------------------------------------------
+
+/// Resolve the HMAC key for checkpoint signing.  Uses the explicit
+/// `continuation_key` config value when set, otherwise derives a key from
+/// `node_id`.  **Warning:** the `node_id`-derived default is not a secret and
+/// only provides detection of accidental corruption, not protection against a
+/// local attacker who can read the config.  Production deployments should set
+/// `continuation_key` to a high-entropy secret.
+pub fn checkpoint_hmac_key(config: &GatewayConfig) -> String {
+    config
+        .continuation_key
+        .clone()
+        .unwrap_or_else(|| format!("autonoetic-checkpoint-{}", config.node_id))
+}
+
+/// Produce a deterministic JSON representation.  `serde_json` with sorted keys
+/// ensures the same struct always serialises to the same bytes.
+pub fn canonical_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
+    let mut buf =
+        serde_json::Serializer::with_formatter(Vec::new(), serde_json::ser::CompactFormatter);
+    serde::Serialize::serialize(value, &mut buf)?;
+    let v: serde_json::Value = serde_json::from_slice(&buf.into_inner())?;
+    let sorted = serde_json::to_string(&v)?;
+    Ok(sorted)
+}
+
+/// HMAC-signed envelope wrapping a serialised `SessionCheckpoint` payload.
+/// All checkpoints are signed — not just approval ones — to provide a uniform
+/// integrity guarantee.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedCheckpoint {
+    /// Canonical-JSON serialised `SessionCheckpoint`.
+    pub payload_json: String,
+    /// HMAC-SHA256 hex digest over `payload_json` bytes using the gateway key.
+    pub hmac_hex: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +338,11 @@ pub fn checkpoints_dir(config: &GatewayConfig) -> PathBuf {
 /// checkpoint by turn number (e.g. `trace fork --at-turn N`, `session.fork`).
 pub fn turn_id_for(turn: u64) -> String {
     format!("turn-{:06}", turn)
+}
+
+/// Parse the numeric turn from a canonical `turn-000003` id.
+pub fn turn_number_from_id(turn_id: &str) -> Option<u64> {
+    turn_id.strip_prefix("turn-").and_then(|n| n.parse::<u64>().ok())
 }
 
 fn checkpoint_path(config: &GatewayConfig, session_id: &str, turn_id: &str) -> PathBuf {
@@ -267,7 +366,8 @@ pub fn sanitize_path_component(s: &str) -> String {
         .collect::<String>()
 }
 
-/// Persist a `SessionCheckpoint` for the given session and turn.
+/// Persist a `SessionCheckpoint` for the given session and turn, wrapped in an
+/// HMAC-signed envelope.
 pub fn save_checkpoint(
     config: &GatewayConfig,
     checkpoint: &SessionCheckpoint,
@@ -275,7 +375,16 @@ pub fn save_checkpoint(
     let dir = checkpoints_dir(config).join(sanitize_path_component(&checkpoint.session_id));
     std::fs::create_dir_all(&dir)?;
     let path = checkpoint_path(config, &checkpoint.session_id, &checkpoint.turn_id);
-    let json = serde_json::to_string_pretty(checkpoint)?;
+
+    let payload_json = canonical_json(checkpoint)?;
+    let key = checkpoint_hmac_key(config);
+    let hmac_hex = crate::server::ofp::hmac_sign(&key, payload_json.as_bytes());
+
+    let envelope = SignedCheckpoint {
+        payload_json,
+        hmac_hex,
+    };
+    let json = serde_json::to_string_pretty(&envelope)?;
     std::fs::write(&path, json)?;
     tracing::debug!(
         target: "checkpoint",
@@ -283,12 +392,40 @@ pub fn save_checkpoint(
         turn_id = %checkpoint.turn_id,
         yield_reason = ?checkpoint.yield_reason,
         path = %path.display(),
-        "Saved session checkpoint"
+        "Saved signed session checkpoint"
     );
     Ok(())
 }
 
-/// Load a specific checkpoint by session and turn ID.
+/// Error returned when a checkpoint file fails HMAC integrity verification.
+/// Used to distinguish tamper-detection errors from ordinary I/O or parse
+/// failures.
+#[derive(Debug)]
+pub struct CheckpointIntegrityError {
+    pub session_id: String,
+    pub turn_id: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for CheckpointIntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "checkpoint integrity violation for session '{}' turn '{}': {}",
+            self.session_id, self.turn_id, self.message
+        )
+    }
+}
+
+impl std::error::Error for CheckpointIntegrityError {}
+
+/// Returns `true` if the error is a `CheckpointIntegrityError` (HMAC
+/// mismatch / tamper detection).
+pub fn is_integrity_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CheckpointIntegrityError>().is_some()
+}
+
+/// Load a specific checkpoint by session and turn ID, verifying HMAC integrity.
 pub fn load_checkpoint(
     config: &GatewayConfig,
     session_id: &str,
@@ -299,8 +436,60 @@ pub fn load_checkpoint(
         return Ok(None);
     }
     let json = std::fs::read_to_string(&path)?;
+
+    // Try signed envelope format first.
+    if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(&json) {
+        let key = checkpoint_hmac_key(config);
+        if !crate::server::ofp::hmac_verify(
+            &key,
+            envelope.payload_json.as_bytes(),
+            &envelope.hmac_hex,
+        ) {
+            return Err(CheckpointIntegrityError {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                message: "HMAC mismatch".to_string(),
+            }
+            .into());
+        }
+        let checkpoint: SessionCheckpoint =
+            serde_json::from_str(&envelope.payload_json)?;
+        return Ok(Some(checkpoint));
+    }
+
+    // Legacy unsigned format — try direct deserialization.
+    // This path exists for cleanup; new checkpoints are always signed.
     let checkpoint: SessionCheckpoint = serde_json::from_str(&json)?;
     Ok(Some(checkpoint))
+}
+
+/// Verify HMAC and deserialize a checkpoint from raw JSON, handling both
+/// the signed envelope format and the legacy unsigned format.
+///
+/// Tampered checkpoints are rejected; `None` is returned for files that
+/// fail both signed and legacy deserialization (e.g. corrupt/truncated).
+fn verify_and_deserialize_checkpoint(
+    config: &GatewayConfig,
+    json: &str,
+) -> Option<SessionCheckpoint> {
+    // Signed envelope format — verify HMAC before trusting payload.
+    if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(json) {
+        let key = checkpoint_hmac_key(config);
+        if !crate::server::ofp::hmac_verify(
+            &key,
+            envelope.payload_json.as_bytes(),
+            &envelope.hmac_hex,
+        ) {
+            tracing::warn!(
+                target: "checkpoint",
+                "HMAC verification failed during scan — skipping tampered checkpoint"
+            );
+            return None;
+        }
+        return serde_json::from_str(&envelope.payload_json).ok();
+    }
+    // Legacy unsigned format
+    serde_json::from_str::<SessionCheckpoint>(json).ok()
 }
 
 /// Load the latest checkpoint for a session (highest turn number).
@@ -322,7 +511,7 @@ pub fn load_latest_checkpoint(
             continue;
         }
         let json = std::fs::read_to_string(entry.path())?;
-        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             let turn = checkpoint.turn_counter;
             match &latest {
                 None => latest = Some((turn, checkpoint)),
@@ -334,6 +523,141 @@ pub fn load_latest_checkpoint(
         }
     }
     Ok(latest.map(|(_, c)| c))
+}
+
+/// Strict variant of [`load_latest_checkpoint`] used on the resume path.
+///
+/// Unlike the tolerant `load_latest_checkpoint` (which silently skips a
+/// tampered checkpoint file and falls back to a fresh start), this surfaces a
+/// [`CheckpointIntegrityError`] when the **highest-turn** checkpoint file on
+/// disk has a broken HMAC signature. Surfacing the tamper at resume is what
+/// lets the gateway record a durable audit trail and cancel the bound approval
+/// (#606) instead of silently abandoning the suspended turn.
+///
+/// Returns `Ok(None)` only when no checkpoint files exist for the session.
+pub fn load_latest_checkpoint_strict(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<Option<SessionCheckpoint>> {
+    let dir = checkpoints_dir(config).join(sanitize_path_component(session_id));
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+
+    // Order by turn parsed from the *filename* (untrusted payloads cannot be
+    // used to order once tampering is in play) so the active/latest checkpoint
+    // is checked first.
+    let mut entries: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name.strip_suffix(".checkpoint.json") else {
+            continue;
+        };
+        let turn = turn_number_from_id(stem).unwrap_or(0);
+        entries.push((turn, entry.path()));
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+
+    for (turn, path) in &entries {
+        let json = match std::fs::read_to_string(path) {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
+        // Signed envelope: detect tamper before trusting the payload.
+        if let Ok(envelope) = serde_json::from_str::<SignedCheckpoint>(&json) {
+            let key = checkpoint_hmac_key(config);
+            if !crate::server::ofp::hmac_verify(
+                &key,
+                envelope.payload_json.as_bytes(),
+                &envelope.hmac_hex,
+            ) {
+                return Err(CheckpointIntegrityError {
+                    session_id: session_id.to_string(),
+                    turn_id: turn_id_for(*turn),
+                    message: "HMAC mismatch on latest checkpoint".to_string(),
+                }
+                .into());
+            }
+            if let Ok(checkpoint) =
+                serde_json::from_str::<SessionCheckpoint>(&envelope.payload_json)
+            {
+                return Ok(Some(checkpoint));
+            }
+            continue;
+        }
+        // Legacy unsigned format.
+        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+            return Ok(Some(checkpoint));
+        }
+    }
+    Ok(None)
+}
+
+/// Mark the latest checkpoint as being inside a response-validation repair
+/// cycle. The next respawn will restore the LoopGuard in repair mode so the
+/// repair iterations do not count against `max_loops_without_progress`.
+pub fn enter_repair_mode_on_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+    max_repair_loops: u32,
+) -> anyhow::Result<()> {
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    cp.loop_guard_state.enter_repair_mode(max_repair_loops);
+    save_checkpoint(config, &cp)
+}
+
+/// Reset the latest checkpoint's LoopGuard after a successful repair:
+/// `current_loops` is cleared and repair mode is exited.
+pub fn reset_after_successful_repair_on_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    cp.loop_guard_state.reset_after_successful_repair();
+    save_checkpoint(config, &cp)
+}
+
+/// Exit repair mode on the latest checkpoint without clearing `current_loops`,
+/// used when repair fails or is exhausted.
+pub fn exit_repair_mode_on_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    cp.loop_guard_state.exit_repair_mode();
+    save_checkpoint(config, &cp)
+}
+
+/// Append feedback events to the latest checkpoint for a session.
+///
+/// Used when feedback is issued outside the agent executor (e.g. response
+/// validation violations) so that a later resume or retry can still detect
+/// ignored feedback. The feedback is recorded against the checkpoint's own
+/// turn counter. Returns `Ok(())` if there is no checkpoint to update.
+pub fn append_feedback_to_latest_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+    events: &[FeedbackEvent],
+) -> anyhow::Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    let Some(mut cp) = load_latest_checkpoint(config, session_id)? else {
+        return Ok(());
+    };
+    let turn_counter = cp.turn_counter;
+    for event in events {
+        cp.feedback_events.push((turn_counter, event.clone()));
+    }
+    save_checkpoint(config, &cp)
 }
 
 /// Delete all checkpoint files for a session.
@@ -384,6 +708,132 @@ pub fn delete_checkpoint(
     Ok(())
 }
 
+/// Delete the checkpoint file(s) for a session whose `yield_reason` binds them
+/// to `approval_id`. Called when an approval is rejected or cancelled so the
+/// suspended turn's signed checkpoint file does not leak on disk (#607).
+/// Returns the number of files deleted.
+pub fn delete_approval_bound_checkpoint(
+    config: &GatewayConfig,
+    session_id: &str,
+    approval_id: &str,
+) -> anyhow::Result<usize> {
+    let dir = checkpoints_dir(config).join(sanitize_path_component(session_id));
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut deleted = 0usize;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(target: "checkpoint", session_id = %session_id, error = %e, "skipping unreadable dir entry during reap");
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if !name.to_string_lossy().ends_with(".checkpoint.json") {
+            continue;
+        }
+        let path = entry.path();
+        let json = match std::fs::read_to_string(&path) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!(target: "checkpoint", path = %path.display(), error = %e, "skipping unreadable checkpoint during reap");
+                continue;
+            }
+        };
+        let bound = verify_and_deserialize_checkpoint(config, &json)
+            .map(|cp| {
+                matches!(
+                    cp.yield_reason,
+                    YieldReason::ApprovalRequired { ref approval_request_id }
+                        if approval_request_id == approval_id
+                )
+            })
+            .unwrap_or(false);
+        if bound && std::fs::remove_file(&path).is_ok() {
+            deleted += 1;
+        }
+    }
+    if deleted > 0 {
+        tracing::debug!(
+            target: "checkpoint",
+            session_id = %session_id,
+            approval_request_id = %approval_id,
+            count = deleted,
+            "Reaped orphan checkpoint(s) after reject/cancel"
+        );
+    }
+    Ok(deleted)
+}
+
+/// Startup reaper: scan every session checkpoint directory and delete
+/// checkpoint files whose bound approval is in a terminal state (rejected /
+/// cancelled) or whose approval row no longer exists. Clears orphans left
+/// behind by a crash or restart during reject/cancel (#607). Tampered or
+/// unrecognizable files are left untouched (those are surfaced separately by
+/// the integrity path). Returns the number of files reaped.
+pub fn reap_orphan_checkpoints(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<usize> {
+    use autonoetic_types::background::ApprovalStatus;
+
+    let root = checkpoints_dir(config);
+    if !root.is_dir() {
+        return Ok(0);
+    }
+    let mut reaped = 0usize;
+    for session_entry in std::fs::read_dir(&root)? {
+        let session_entry = session_entry?;
+        if !session_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = session_entry.path();
+        for cp_entry in std::fs::read_dir(&dir)? {
+            let cp_entry = cp_entry?;
+            let name = cp_entry.file_name();
+            if !name.to_string_lossy().ends_with(".checkpoint.json") {
+                continue;
+            }
+            let path = cp_entry.path();
+            let json = match std::fs::read_to_string(&path) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            let Some(cp) = verify_and_deserialize_checkpoint(config, &json) else {
+                continue;
+            };
+            let YieldReason::ApprovalRequired {
+                approval_request_id,
+            } = cp.yield_reason
+            else {
+                continue;
+            };
+            let orphan = match store.get_approval(&approval_request_id) {
+                Ok(Some(req)) => req
+                    .status
+                    .as_ref()
+                    .map(|s| matches!(s, ApprovalStatus::Rejected | ApprovalStatus::Cancelled))
+                    .unwrap_or(false),
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if orphan && std::fs::remove_file(&path).is_ok() {
+                reaped += 1;
+            }
+        }
+    }
+    if reaped > 0 {
+        tracing::info!(
+            target: "checkpoint",
+            count = reaped,
+            "Startup reaper removed orphan checkpoint files"
+        );
+    }
+    Ok(reaped)
+}
+
 /// Prune old checkpoints for a session, keeping the last N.
 pub fn prune_checkpoints(
     config: &GatewayConfig,
@@ -405,7 +855,7 @@ pub fn prune_checkpoints(
             continue;
         }
         let json = std::fs::read_to_string(&path)?;
-        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             checkpoints.push((checkpoint.turn_counter, path));
         }
     }
@@ -442,7 +892,7 @@ pub fn list_checkpoints(config: &GatewayConfig, session_id: &str) -> anyhow::Res
             continue;
         }
         let json = std::fs::read_to_string(entry.path())?;
-        if let Ok(checkpoint) = serde_json::from_str::<SessionCheckpoint>(&json) {
+        if let Some(checkpoint) = verify_and_deserialize_checkpoint(config, &json) {
             checkpoints.push((checkpoint.turn_counter, checkpoint.turn_id));
         }
     }
@@ -480,6 +930,9 @@ pub struct SessionFork {
     pub history_handle: String,
     /// Initial history for the forked session (including branch message if any).
     pub initial_history: Vec<Message>,
+    /// Agent the source checkpoint was running — the truthful attribution
+    /// fallback when the caller doesn't name an acting agent explicitly.
+    pub agent_id: String,
 }
 
 impl SessionFork {
@@ -544,6 +997,9 @@ impl SessionFork {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
             ..checkpoint.clone()
         };
         save_checkpoint(config, &forked_checkpoint)?;
@@ -554,6 +1010,7 @@ impl SessionFork {
             fork_turn: checkpoint.turn_counter as usize,
             history_handle,
             initial_history: history,
+            agent_id: checkpoint.agent_id.clone(),
         })
     }
 
@@ -582,7 +1039,7 @@ mod tests {
         let checkpoint = SessionCheckpoint {
             history: vec![Message::user("hello")],
             turn_counter: 1,
-            loop_guard_state: LoopGuardState {
+            loop_guard_state: LoopGuard {
                 max_loops_without_progress: 10,
                 max_tool_failures: 5,
                 max_consecutive_same_progress: 0,
@@ -597,12 +1054,15 @@ mod tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
             turn_id: "turn-001".to_string(),
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -618,6 +1078,9 @@ mod tests {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
         };
 
         save_checkpoint(&config, &checkpoint).expect("should save");
@@ -632,6 +1095,85 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_round_trips_capsule_state() {
+        // The capsule must survive save/load so that on resume the governor
+        // evolves it incrementally instead of re-bootstrapping from an empty
+        // shell (regression guard for the prior-capsule-reuse wiring).
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+
+        use crate::runtime::context_governor::capsule::{CapsuleDecision, StateCapsule};
+        let capsule = StateCapsule {
+            version: 4,
+            session_id: "session-123".to_string(),
+            last_update_turn: 9,
+            objective_and_criteria: "Accumulated objective".to_string(),
+            decisions_and_rationale: vec![CapsuleDecision {
+                turn: 2,
+                summary: "decided".into(),
+                rationale: "because".into(),
+                referenced_ids: vec![],
+            }],
+            stable_identifiers: vec![],
+            open_tasks: vec![],
+            prior_decisions_summary: None,
+            previous_version_handle: Some("sha-prev".into()),
+            source_history_handle: Some("sha-self".into()),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: "session-123".to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: Some(capsule),
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+
+        save_checkpoint(&config, &checkpoint).expect("should save");
+        let loaded = load_checkpoint(&config, &checkpoint.session_id, &checkpoint.turn_id)
+            .expect("should load")
+            .expect("should have checkpoint");
+
+        let loaded_capsule = loaded
+            .capsule_state
+            .as_ref()
+            .expect("capsule_state should round-trip");
+        assert_eq!(loaded_capsule.version, 4);
+        assert_eq!(loaded_capsule.objective_and_criteria, "Accumulated objective");
+        assert_eq!(loaded_capsule.previous_version_handle.as_deref(), Some("sha-prev"));
+        assert_eq!(loaded_capsule.source_history_handle.as_deref(), Some("sha-self"));
+    }
+
+    #[test]
     fn test_load_latest_checkpoint() {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let config = test_config(&temp);
@@ -640,7 +1182,7 @@ mod tests {
         let c1 = SessionCheckpoint {
             history: vec![],
             turn_counter: 1,
-            loop_guard_state: LoopGuardState {
+            loop_guard_state: LoopGuard {
                 max_loops_without_progress: 10,
                 max_tool_failures: 5,
                 max_consecutive_same_progress: 0,
@@ -655,12 +1197,15 @@ mod tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: "turn-001".to_string(),
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::Hibernation,
@@ -676,6 +1221,9 @@ mod tests {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
         };
 
         let mut c2 = c1.clone();
@@ -706,7 +1254,7 @@ mod tests {
             let checkpoint = SessionCheckpoint {
                 history: vec![],
                 turn_counter: i,
-                loop_guard_state: LoopGuardState {
+                loop_guard_state: LoopGuard {
                     max_loops_without_progress: 10,
                     max_tool_failures: 5,
                     max_consecutive_same_progress: 0,
@@ -721,12 +1269,15 @@ mod tests {
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),
                 turn_id: format!("turn-{:03}", i),
                 workflow_id: None,
                 task_id: None,
                 runtime_lock_hash: None,
+                constitution_version: None,
+                constitution_digest: None,
                 llm_config_snapshot: None,
                 tool_registry_version: None,
                 yield_reason: YieldReason::Hibernation,
@@ -742,6 +1293,9 @@ mod tests {
                 assistant_message: None,
                 pending_action: None,
                 suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
             };
             save_checkpoint(&config, &checkpoint).unwrap();
         }
@@ -790,5 +1344,340 @@ mod tests {
             let decoded: YieldReason = serde_json::from_str(&json).unwrap();
             assert_eq!(reason, decoded);
         }
+    }
+
+    #[test]
+    fn test_checkpoint_hmac_tamper_rejection() {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+        let session_id = "session-tamper";
+        let turn_id = "turn-001";
+
+        // Build and save a checkpoint.
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        // --- load_checkpoint rejects tampered payload ---
+        let path = checkpoint_path(&config, session_id, turn_id);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: serde_json::Value =
+            serde_json::from_str(&original).expect("saved as signed envelope");
+        // Tamper: replace hmac_hex with garbage so verification fails.
+        envelope["hmac_hex"] = serde_json::json!("deadbeef00".repeat(8));
+        std::fs::write(&path, serde_json::to_string(&envelope).unwrap())
+            .expect("write tampered file");
+
+        let result = load_checkpoint(&config, session_id, turn_id);
+        assert!(
+            result.is_err(),
+            "tampered checkpoint should be rejected by load_checkpoint"
+        );
+        assert!(
+            is_integrity_error(&result.unwrap_err()),
+            "error should be CheckpointIntegrityError"
+        );
+
+        // --- load_latest_checkpoint skips tampered file ---
+        let latest = load_latest_checkpoint(&config, session_id).unwrap();
+        assert!(
+            latest.is_none(),
+            "tampered checkpoint should be skipped by load_latest_checkpoint"
+        );
+
+        // --- load_latest_checkpoint_strict surfaces the tamper (#606) ---
+        let strict_err = load_latest_checkpoint_strict(&config, session_id)
+            .expect_err("strict loader should surface a tampered latest checkpoint");
+        assert!(
+            is_integrity_error(&strict_err),
+            "strict loader error should be a CheckpointIntegrityError: {:?}",
+            strict_err
+        );
+    }
+
+    #[test]
+    fn load_latest_checkpoint_strict_loads_valid_latest() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let session_id = "session-strict-valid";
+
+        // Save two valid checkpoints; the strict loader must return the latest.
+        for turn in [1u64, 2] {
+            let checkpoint = SessionCheckpoint {
+                history: vec![Message::user("hello")],
+                turn_counter: turn,
+                loop_guard_state: LoopGuard::default(),
+                session_state: autonoetic_types::agent::SessionState::Normal,
+                tool_tier_escalated: false,
+                discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
+                agent_id: "test-agent".to_string(),
+                session_id: session_id.to_string(),
+                turn_id: turn_id_for(turn),
+                workflow_id: None,
+                task_id: None,
+                runtime_lock_hash: None,
+                constitution_version: None,
+                constitution_digest: None,
+                llm_config_snapshot: None,
+                tool_registry_version: None,
+                yield_reason: YieldReason::Hibernation,
+                content_store_refs: vec![],
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                pending_tool_state: None,
+                llm_rounds_consumed: 0,
+                tool_invocations_consumed: 0,
+                tokens_consumed: 0,
+                estimated_cost_usd: 0.0,
+                compression_metadata: None,
+                capsule_state: None,
+                assistant_message: None,
+                pending_action: None,
+                suspended_at: None,
+                suppress_until_turn: 0,
+                trajectory_last_level: None,
+                feedback_events: vec![],
+            };
+            save_checkpoint(&config, &checkpoint).unwrap();
+        }
+
+        let latest = load_latest_checkpoint_strict(&config, session_id)
+            .expect("valid checkpoints should load")
+            .expect("a checkpoint should exist");
+        assert_eq!(latest.turn_counter, 2, "strict loader returns the latest turn");
+
+        // No checkpoints at all -> Ok(None).
+        assert!(
+            load_latest_checkpoint_strict(&config, "no-such-session")
+                .unwrap()
+                .is_none(),
+            "strict loader returns Ok(None) when no checkpoint files exist"
+        );
+    }
+
+    #[test]
+    fn append_feedback_to_latest_checkpoint_round_trips() {
+        use autonoetic_types::trajectory::FeedbackEvent;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let session_id = "session-feedback";
+        let turn_id = "turn-002";
+
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 2,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        let events = vec![
+            FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            },
+            FeedbackEvent::Validation {
+                rule: "output_schema".into(),
+                field_path: None,
+            },
+        ];
+        append_feedback_to_latest_checkpoint(&config, session_id, &events)
+            .expect("should append feedback");
+
+        let latest = load_latest_checkpoint(&config, session_id)
+            .expect("should load")
+            .expect("checkpoint should exist");
+        assert_eq!(latest.feedback_events.len(), 2);
+        assert_eq!(latest.feedback_events[0].0, 2);
+        assert_eq!(
+            latest.feedback_events[0].1,
+            FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn repair_mode_checkpoint_helpers_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(&temp);
+        let session_id = "session-repair";
+        let turn_id = "turn-003";
+
+        let mut guard = LoopGuard::new(5);
+        guard.current_loops = 3;
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 3,
+            loop_guard_state: guard,
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(&config, &checkpoint).expect("should save");
+
+        enter_repair_mode_on_latest_checkpoint(&config, session_id, 10).expect("enter repair mode");
+        let latest = load_latest_checkpoint(&config, session_id)
+            .expect("should load")
+            .expect("checkpoint should exist");
+        assert!(latest.loop_guard_state.repair_mode);
+        assert_eq!(latest.loop_guard_state.repair_loops, 0);
+        assert_eq!(latest.loop_guard_state.max_repair_loops, 10);
+        assert_eq!(latest.loop_guard_state.current_loops, 3, "outer loops preserved");
+
+        reset_after_successful_repair_on_latest_checkpoint(&config, session_id)
+            .expect("reset after repair");
+        let latest = load_latest_checkpoint(&config, session_id)
+            .expect("should load")
+            .expect("checkpoint should exist");
+        assert!(!latest.loop_guard_state.repair_mode);
+        assert_eq!(latest.loop_guard_state.current_loops, 0, "outer loops cleared on success");
+    }
+
+    /// #821 backward compat: a checkpoint JSON blob written before
+    /// `constitution_version`/`constitution_digest` existed (simulated here
+    /// by stripping the keys post-serialization) must still deserialize,
+    /// with the new fields defaulting to `None` instead of failing.
+    #[test]
+    fn checkpoint_without_constitution_pin_fields_deserializes_as_none() {
+        let checkpoint = SessionCheckpoint {
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: "session-legacy".to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: Some("2026.06.05".to_string()),
+            constitution_digest: Some("deadbeef".to_string()),
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+
+        let mut json = serde_json::to_value(&checkpoint).expect("serialize");
+        // Simulate a pre-#821 checkpoint on disk: strip the new fields entirely.
+        let obj = json.as_object_mut().expect("checkpoint serializes to an object");
+        obj.remove("constitution_version");
+        obj.remove("constitution_digest");
+
+        let restored: SessionCheckpoint = serde_json::from_value(json)
+            .expect("legacy checkpoint JSON (missing constitution pin fields) should still deserialize");
+        assert_eq!(restored.constitution_version, None);
+        assert_eq!(restored.constitution_digest, None);
+        // Sanity: everything else round-tripped normally.
+        assert_eq!(restored.session_id, "session-legacy");
     }
 }

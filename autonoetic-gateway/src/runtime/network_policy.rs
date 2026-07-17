@@ -1,6 +1,7 @@
 use autonoetic_types::agent::{
-    AgentManifest, RemoteAccessApprovalMode, RemoteAccessDeclaration, RemoteAccessTarget,
+    AgentManifest, RemoteAccessApprovalMode, RemoteAccessDeclaration,
 };
+use autonoetic_types::background::GrantTarget;
 use autonoetic_types::capability::Capability;
 use std::path::Path;
 
@@ -52,52 +53,6 @@ fn normalize_host(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
-fn target_matches(target: &RemoteAccessTarget, request_target: &str) -> bool {
-    match target {
-        RemoteAccessTarget::Any => true,
-        RemoteAccessTarget::ExactHost(host) => request_target.eq_ignore_ascii_case(host),
-        RemoteAccessTarget::HostSuffix(suffix) => {
-            let suffix = suffix.trim_start_matches("*.");
-            let request = request_target.to_ascii_lowercase();
-            let suffix = suffix.to_ascii_lowercase();
-            if request == suffix {
-                return true;
-            }
-            request.ends_with(&format!(".{}", suffix))
-        }
-        RemoteAccessTarget::HostAndPort { host, port } => {
-            let expected = format!("{}:{}", host.to_ascii_lowercase(), port);
-            request_target.eq_ignore_ascii_case(&expected)
-        }
-        RemoteAccessTarget::UrlPrefix(prefix) => {
-            fn lower_authority(url: &str) -> std::borrow::Cow<'_, str> {
-                let scheme_end = url.find("://").map(|p| p + 3).unwrap_or(0);
-                let rest = &url[scheme_end..];
-                if let Some(pos) = rest.find('/') {
-                    let authority = &rest[..pos];
-                    let path = &rest[pos..];
-                    if authority.chars().any(|c| c.is_ascii_uppercase()) {
-                        format!(
-                            "{}{}{}",
-                            &url[..scheme_end].to_ascii_lowercase(),
-                            authority.to_ascii_lowercase(),
-                            path
-                        )
-                        .into()
-                    } else {
-                        std::borrow::Cow::Borrowed(url)
-                    }
-                } else {
-                    url.to_ascii_lowercase().into()
-                }
-            }
-            let norm_req = lower_authority(request_target);
-            let norm_pre = lower_authority(prefix);
-            norm_req.starts_with(&*norm_pre)
-        }
-    }
-}
-
 /// Returns true when the declaration allows the provided host/URL target.
 pub fn declaration_allows_target(
     declaration: &RemoteAccessDeclaration,
@@ -133,7 +88,7 @@ pub fn declaration_allows_target(
     declaration.targets.iter().any(|target| {
         candidates
             .iter()
-            .any(|candidate| target_matches(target, candidate))
+            .any(|candidate| target.matches(candidate))
     })
 }
 
@@ -198,6 +153,21 @@ pub fn enforce_remote_target_policy(
         ));
     }
 
+    if has_network_capability
+        && !crate::runtime::network_host_contract::network_access_allows_host(manifest, host)
+    {
+        return Err(NetworkPolicyViolation::new(
+            "undeclared_network_host",
+            format!(
+                "Outbound target `{}` is not covered by NetworkAccess capability hosts for agent `{}`.",
+                host, manifest.agent.id
+            ),
+            Some(
+                "Add the host to NetworkAccess capability hosts, or declare open_web: true only for genuine open-web agents.".to_string(),
+            ),
+        ));
+    }
+
     Ok(Some(decl))
 }
 
@@ -221,7 +191,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: if network {
                 vec![Capability::NetworkAccess {
                     hosts: vec!["*".to_string()],
@@ -243,8 +214,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -253,7 +226,7 @@ mod tests {
     fn declaration_target_exact_host_matches() {
         let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
-            targets: vec![RemoteAccessTarget::ExactHost("api.example.com".to_string())],
+            targets: vec![GrantTarget::ExactHost("api.example.com".to_string())],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],
@@ -279,7 +252,7 @@ mod tests {
     fn declaration_target_url_prefix_matches() {
         let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
-            targets: vec![RemoteAccessTarget::UrlPrefix(
+            targets: vec![GrantTarget::UrlPrefix(
                 "https://api.example.com/public/".to_string(),
             )],
             enabled_languages: vec![],
@@ -307,7 +280,7 @@ mod tests {
     fn declaration_target_any_matches_anything() {
         let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
-            targets: vec![RemoteAccessTarget::Any],
+            targets: vec![GrantTarget::Any],
             enabled_languages: vec![],
             python_imports: vec![],
             js_imports: vec![],
@@ -369,5 +342,39 @@ metadata:
         )
         .expect("optional declaration should allow transitional path");
         assert!(result.is_none());
+    }
+
+    fn manifest_with_hosts(hosts: Vec<String>) -> AgentManifest {
+        let mut m = manifest(false);
+        m.capabilities = vec![Capability::NetworkAccess { hosts }];
+        m
+    }
+
+    #[test]
+    fn network_access_blocks_host_not_in_capability() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: required
+      targets:
+        - kind: any
+---
+"#,
+        )
+        .expect("skill write");
+
+        let err = enforce_remote_target_policy(
+            &manifest_with_hosts(vec!["api.example.com".to_string()]),
+            tmp.path(),
+            "evil.com",
+            Some("https://evil.com/secret"),
+            DeclarationRequirement::Required,
+        )
+        .expect_err("host outside NetworkAccess should be blocked");
+        assert_eq!(err.error_type, "undeclared_network_host");
     }
 }

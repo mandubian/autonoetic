@@ -26,6 +26,8 @@ fn seed_revision(store: &GatewayStore, agent_id: &str, revision_id: &str) {
             created_at: chrono::Utc::now().to_rfc3339(),
             created_by_type: PrincipalKind::Human.tag().to_string(),
             created_by_id: "test".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
             source_kind: "test".to_string(),
             source_ref: None,
             origin_node_id: "gateway".to_string(),
@@ -33,6 +35,7 @@ fn seed_revision(store: &GatewayStore, agent_id: &str, revision_id: &str) {
             status: AgentRevisionStatus::Ready,
             metadata_json: serde_json::json!({}),
             short_id: String::new(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         })
@@ -49,6 +52,9 @@ fn seed_alias(store: &GatewayStore, agent_id: &str, revision_id: &str) {
             updated_by_type: PrincipalKind::Human.tag().to_string(),
             updated_by_id: "test".to_string(),
             reason: Some("test".to_string()),
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
         })
         .unwrap();
 }
@@ -288,6 +294,8 @@ fn test_session_binding_tags_knowledge_store_write() {
             agent_id: agent_id.to_string(),
             revision_id: revision_id.to_string(),
             runtime_lock_hash: "sha256:test".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
             home_node_id: "gateway".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             requested_target: agent_id.to_string(),

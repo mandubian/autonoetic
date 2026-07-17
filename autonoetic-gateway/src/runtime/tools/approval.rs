@@ -143,7 +143,12 @@ impl NativeTool for ApprovalWithdrawTool {
         manifest
             .capabilities
             .iter()
-            .any(|cap| matches!(cap, Capability::CodeExecution { .. }))
+            .any(|cap| {
+                matches!(
+                    cap,
+                    Capability::CodeExecution { .. } | Capability::ArtifactExecution
+                )
+            })
     }
 
     fn definition(&self) -> ToolDefinition {
@@ -177,7 +182,7 @@ impl NativeTool for ApprovalWithdrawTool {
         _arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -187,6 +192,13 @@ impl NativeTool for ApprovalWithdrawTool {
         let Some(store) = gateway_store else {
             return Ok(autonoetic_types::tool_error::ToolError::fatal(
                 "Gateway store not available",
+                None::<String>,
+            )
+            .to_error_response());
+        };
+        let Some(cfg) = config else {
+            return Ok(autonoetic_types::tool_error::ToolError::fatal(
+                "Gateway config not available",
                 None::<String>,
             )
             .to_error_response());
@@ -222,48 +234,27 @@ impl NativeTool for ApprovalWithdrawTool {
 
                 let reason = args.reason.as_deref().unwrap_or("Withdrawn by agent");
                 let task_id_copy = r.task_id.clone();
-                store.cancel_approval(
+                let decided_by = format!("agent:{}", manifest.agent.id);
+
+                let decision = crate::scheduler::approval::cancel_approval_request(
+                    cfg,
+                    Some(store.as_ref()),
                     &args.request_id,
-                    &format!("agent:{}", manifest.agent.id),
-                    &chrono::Utc::now().to_rfc3339(),
+                    &decided_by,
+                    Some(reason.to_string()),
                 )?;
 
-                if let Some(ref task_id) = task_id_copy {
-                    if let Some(cfg) = _config {
-                        let _ = crate::runtime::continuation::delete_continuation(cfg, task_id);
-                    }
-                }
-
-                if matches!(r.action, autonoetic_types::background::ScheduledAction::WikiProposal { .. }) {
-                    let role = crate::runtime::session_timeline::derive_role(&r.agent_id);
-                    let principal = autonoetic_types::principal::Principal::agent(r.agent_id.clone());
-                    let refs = autonoetic_types::session_timeline::TimelineRefs::default();
-                    let (page_id, title) = match &r.action {
-                        autonoetic_types::background::ScheduledAction::WikiProposal { page_id, title, .. } => (page_id.clone(), title.clone()),
-                        _ => unreachable!(),
-                    };
-                    let payload = serde_json::json!({
-                        "page_id": page_id,
-                        "title": title,
-                        "decided_by": format!("agent:{}", manifest.agent.id),
-                        "cancelled_by": format!("agent:{}", manifest.agent.id),
-                        "reason": reason,
-                    });
-                    let event = crate::runtime::session_timeline::build_timeline_event(
-                        r.root_session_id.clone().unwrap_or_else(|| r.session_id.clone()),
-                        r.session_id.clone(),
-                        None,
-                        &principal,
-                        &role,
-                        "wiki.withdrawn",
-                        None,
-                        Some(payload),
-                        refs,
-                    );
-                    if let Err(e) = store.create_live_digest_event(&event) {
-                        tracing::debug!(target: "session_timeline", error = %e, "wiki.withdrawn timeline emit failed");
-                    }
-                }
+                let context = crate::scheduler::approval::DecisionContext {
+                    wiki_materialized_meta: None,
+                    hook_executor: None,
+                };
+                crate::scheduler::approval::apply_decision(
+                    cfg,
+                    Some(store.as_ref()),
+                    &decision,
+                    &Default::default(),
+                    &context,
+                )?;
 
                 tracing::info!(
                     target: "approval_withdraw",

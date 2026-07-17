@@ -16,9 +16,10 @@ metadata:
       name: "Researcher Default"
       description: "Collects evidence, compares sources, and reports uncertainty explicitly."
     llm_preset: research
+    open_web: true
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "web.", "mcp_"]
+        allowed: ["knowledge_", "web_", "mcp_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "bash -c "]
         commands: ["curl", "wget", "jq", "date", "echo", "cat", "ls", "pwd", "wc",
@@ -32,6 +33,34 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
+    excluded_tools:
+      - "workbench_*"
+      - "planframe_*"
+      - "scheduler_*"
+      - "workflow_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
+      - "session_*"
+      - "federation_*"
+      - "sentinel_*"
+      - "constitution_*"
+      - "agent_spawn"
+      - "agent_discover"
+      - "agent_list"
+      - "agent_message"
+      - "tool_discover"
+      - "self_describe"
+      - "artifact_exec"
+      - "artifact_build"
+      - "artifact_prepare"
     validation: "soft"
     remote_access:
       approval_mode: "preapproved"
@@ -99,8 +128,18 @@ You are a researcher agent. Build evidence-based outputs and cite sources.
 ## Behavior
 - Gather facts and evidence from available tools
 - Use `web_search` to find relevant sources and `web_fetch` selectively to retrieve content from specific URLs
-- Use `sandbox_exec` with `curl` or `python3` when `web_fetch` is insufficient (custom headers, POST requests, API calls, JSON/XML parsing)
-- Use `jq` via `sandbox_exec` for inline JSON processing when available
+- Use `sandbox_exec` with `python3` when `web_fetch` is insufficient (custom headers, POST requests, API calls, JSON/XML parsing)
+- **Avoid shell pipes (`|`) in `sandbox_exec`** — sandboxed execution can emit `permission denied` in stderr when creating pipes, which triggers false-positive sandbox-escape detection. Run fetch and parse logic in a single `python3 -c "..."` process instead of chaining `curl | python3` or `curl | jq`
+- Fetch URLs with `python3` and `urllib.request` (or `requests` if available) rather than `curl`. Example:
+  ```python
+  python3 -c "
+  import urllib.request, json
+  req = urllib.request.Request('https://example.com/api', headers={'Accept': 'application/json'})
+  data = json.loads(urllib.request.urlopen(req).read())
+  print(json.dumps(data, indent=2))
+  "
+  ```
+- Use `python3 -c "import json, sys; ..."` for inline JSON parsing instead of `jq` via a pipe
 - Do not repeat the same search query or refetch the same failing URL unless the query, URL, or extraction strategy materially changed
 - Always cite sources and note uncertainty
 - Prefer a partial, well-cited answer over repeated retries; if some requested fields cannot be verified, mark them unavailable and explain why
@@ -148,7 +187,7 @@ When requesting clarification, output this structure:
   "status": "clarification_needed",
   "clarification_request": {
     "question": "Should I focus on recent API changes or the full API surface?",
-    "context": "Task says 'research the weather API' but scope is ambiguous"
+    "context": "Task says 'research the REST API' but scope is ambiguous"
   }
 }
 ```

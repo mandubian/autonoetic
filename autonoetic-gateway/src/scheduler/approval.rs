@@ -9,9 +9,11 @@
 use crate::execution::{gateway_actor_id, init_gateway_causal_logger};
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
+    ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, GrantScope, GrantTarget,
+    ScheduledAction,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::plan_frame::PlanStatus;
 use std::sync::Arc;
 
 /// Determine the required approval level for a given action based on config.
@@ -104,26 +106,6 @@ pub fn pending_approval_requests_for_root(
         .collect())
 }
 
-/// Pending [`ScheduledAction::SandboxExec`] approvals for an exact `session_id` (e.g. child
-/// delegation path), oldest first. Used to stop repeated `sandbox.exec` calls from minting many
-/// `apr-*` rows while an approval is still open.
-pub fn pending_sandbox_exec_requests_for_session(
-    config: &GatewayConfig,
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    session_id: &str,
-) -> anyhow::Result<Vec<ApprovalRequest>> {
-    if session_id.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut v: Vec<ApprovalRequest> = load_approval_requests(config, gateway_store)?
-        .into_iter()
-        .filter(|r| r.session_id == session_id)
-        .filter(|r| matches!(r.action, ScheduledAction::SandboxExec { .. }))
-        .collect();
-    v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-    Ok(v)
-}
-
 /// Pending approvals of any kind for an exact `session_id`, oldest first.
 /// Used to stop repeated calls from minting many `apr-*` rows while an approval is still open.
 pub fn pending_approval_requests_for_session(
@@ -143,7 +125,7 @@ pub fn pending_approval_requests_for_session(
 }
 
 /// Optional parameters for approving a request with Phase 2 grant options.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ApproveOptions {
     pub grant_scope: Option<autonoetic_types::background::GrantScope>,
     pub grant_targets: Vec<autonoetic_types::background::GrantTarget>,
@@ -156,6 +138,658 @@ pub struct ApproveOptions {
     /// R++4: Confirmation phrase for destructive approval classes. Must match
     /// the `confirm_phrase` stored on the approval request exactly (case-insensitive).
     pub confirm_phrase: Option<String>,
+    /// Session ID of the agent-decider, when the decider is an agent. Used for
+    /// R-10.7 spawn-tree trust-boundary enforcement.
+    pub decider_session_id: Option<String>,
+}
+
+/// Pre-computed metadata from the decision entry point that `apply_decision`
+/// needs to perform its side-effects. Created by each entry point before
+/// calling `apply_decision`.
+pub struct DecisionContext<'a> {
+    /// Wiki materialization metadata — present if the action was WikiProposal
+    /// and was Approved (materialization happens before the decision so files
+    /// are always written first).
+    pub wiki_materialized_meta: Option<serde_json::Value>,
+    /// Hook executor for async hook dispatch after signal write.
+    pub hook_executor: Option<&'a crate::scheduler::hooks::HookExecutor>,
+}
+
+/// Single fan-out for all post-decision side-effects.
+///
+/// Every approval decision entry point (approve/reject/cancel/withdraw/
+/// cancel-for-task) MUST call this function after persisting the decision.
+///
+/// # Policy decisions (explicit, not accidental)
+///
+/// **Agent-initiated withdrawal**: updates `reevaluation_state` and
+/// `background_state` identically to operator cancellation. The §O decider
+/// obligation does NOT apply to agent withdrawals — the agent is not a
+/// principal decider under O-1.
+///
+/// **Cancellation** always updates `reevaluation_state` and
+/// `background_state`, regardless of source (operator, scheduler task,
+/// agent).
+///
+/// **Escalation resolution**: resolved on approve AND reject (not on
+/// cancel/withdraw) because an unresolved escalation pollutes
+/// `pending_escalation_ids`.
+///
+/// **Wiki timeline**: emitted as `wiki.decision` with a
+/// `decision: "approved"|"rejected"|"withdrawn"|"cancelled"` field,
+/// replacing the previous `wiki.promoted` / `wiki.rejected` /
+/// `wiki.withdrawn` split.
+///
+/// **Causal events**: every decision emits a `background.approval` causal
+/// event for auditability.
+///
+/// **Side-effect order** (within this function):
+/// 1. Insert session grants (if Approved)
+/// 2. Resolve linked escalation (approve + reject only)
+/// 3. Update reevaluation_state + background_state (reject/cancel/withdraw)
+/// 4. Write resume signal to GatewayStore for scheduler delivery
+/// 5. Emit normalized wiki timeline event
+/// 6. Emit causal event
+/// 7. Unblock workflow task (if workflow-bound)
+pub fn apply_decision(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    decision: &ApprovalDecision,
+    options: &ApproveOptions,
+    context: &DecisionContext,
+) -> anyhow::Result<()> {
+    // Reap the orphaned checkpoint for rejected/cancelled approvals (#607):
+    // the suspended turn is dead, so its signed checkpoint file would leak on
+    // disk otherwise. (Approved approvals keep their checkpoint — it is
+    // consumed on resume.)
+    if matches!(
+        decision.status,
+        ApprovalStatus::Rejected | ApprovalStatus::Cancelled
+    ) {
+        if let Err(e) = crate::runtime::checkpoint::delete_approval_bound_checkpoint(
+            config,
+            &decision.session_id,
+            &decision.request_id,
+        ) {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                session_id = %decision.session_id,
+                error = %e,
+                "Failed to reap orphan checkpoint after reject/cancel"
+            );
+        }
+    }
+
+    let Some(store) = gateway_store else {
+        return Ok(());
+    };
+
+    // ── 1. Session grants (Approved only) ──────────────────────────────
+    if decision.status == ApprovalStatus::Approved {
+        let hosts = decision.action.detected_hosts();
+        if let Some(hosts) = hosts {
+            if !hosts.is_empty() {
+                if let Some(root_sid) = &decision.root_session_id {
+                    let scope = options
+                        .grant_scope
+                        .clone()
+                        .unwrap_or(GrantScope::RootSession);
+                    let targets = if options.grant_targets.is_empty() {
+                        hosts
+                            .iter()
+                            .map(|h| GrantTarget::ExactHost(h.clone()))
+                            .collect()
+                    } else {
+                        options.grant_targets.clone()
+                    };
+                    let computed_expiry = if options.grant_expires_at.is_none()
+                        && config.default_grant_ttl_secs > 0
+                    {
+                        let ttl_secs =
+                            i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
+                        let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now());
+                        let t = base + chrono::Duration::seconds(ttl_secs);
+                        Some(t.to_rfc3339())
+                    } else {
+                        None
+                    };
+                    let expires_at = options
+                        .grant_expires_at
+                        .as_deref()
+                        .or(computed_expiry.as_deref());
+                    if let Err(e) = store.insert_session_grant(
+                        root_sid,
+                        &decision.session_id,
+                        &decision.agent_id,
+                        &scope,
+                        &targets,
+                        &decision.decided_by,
+                        &decision.decided_at,
+                        Some(&decision.request_id),
+                        expires_at,
+                    ) {
+                        tracing::warn!(
+                            target: "approval",
+                            request_id = %decision.request_id,
+                            error = %e,
+                            "Failed to insert session approval grants"
+                        );
+                    } else {
+                        emit_host_contract_drift_events(
+                            store,
+                            &decision.agent_id,
+                            &decision.session_id,
+                            &hosts,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 1c. Promotion attempt ledger reset (issue #720) ────────────────
+    if decision.status == ApprovalStatus::Approved {
+        if let ScheduledAction::RevisionPromote { agent_id, revision_id, .. } = &decision.action {
+            if let Ok(Some(rev)) = store.get_agent_revision(revision_id) {
+                if let Err(e) = store.reset_promotion_attempts(agent_id, &rev.content_digest) {
+                    tracing::warn!(
+                        target: "approval",
+                        request_id = %decision.request_id,
+                        agent_id = %agent_id,
+                        revision_id = %revision_id,
+                        error = %e,
+                        "Failed to reset promotion attempt ledger after approval"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── 1b. PlanFrame side-effects ─────────────────────────────────────
+    if let ScheduledAction::PlanFrame {
+        plan_id,
+        version,
+        envelope,
+    } = &decision.action
+    {
+        use autonoetic_types::session_timeline::TimelineRefs;
+        let plan_status = match decision.status {
+            ApprovalStatus::Approved => PlanStatus::Approved,
+            _ => PlanStatus::Cancelled,
+        };
+        if let Err(e) = store.update_plan_frame_status(
+            plan_id,
+            *version,
+            plan_status,
+            Some(&decision.decided_by),
+            Some(&decision.decided_at),
+        ) {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                error = %e,
+                "Failed to update plan frame status"
+            );
+        }
+
+        if decision.status == ApprovalStatus::Approved {
+            // Materialize the declared envelope as session approval grants.
+            if let Some(root_sid) = &decision.root_session_id {
+                let _ = crate::runtime::session_envelope::materialize_envelope(
+                    store,
+                    root_sid,
+                    envelope,
+                    &decision.decided_by,
+                    &decision.request_id,
+                );
+
+                // Propose/lock the session envelope (declared or discovered).
+                if let Ok(Some(plan)) = store.load_plan_frame_revision(plan_id, *version) {
+                    let _ = crate::runtime::session_envelope::propose_plan_envelope_on_approval(
+                        store,
+                        &plan,
+                        &decision.decided_by,
+                    );
+                }
+            }
+
+            // Canonical plan-approval timeline event.
+            let (principal, role) =
+                crate::runtime::session_timeline::decider_seat(&decision.decided_by);
+            let refs = TimelineRefs {
+                plan_id: Some(plan_id.clone()),
+                approval_request_id: Some(decision.request_id.clone()),
+                ..Default::default()
+            };
+            let event = crate::runtime::session_timeline::build_timeline_event(
+                decision
+                    .root_session_id
+                    .clone()
+                    .unwrap_or_else(|| decision.session_id.clone()),
+                decision.session_id.clone(),
+                None,
+                &principal,
+                &role,
+                "plan.approved",
+                None,
+                Some(serde_json::json!({
+                    "plan_id": plan_id,
+                    "version": version,
+                    "approved_by": decision.decided_by,
+                })),
+                refs,
+            );
+            if let Err(e) = store.create_live_digest_event(&event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "plan.approved timeline emit failed"
+                );
+            }
+        }
+    }
+
+    // ── 2. Linked escalation resolution (approve + reject) ──────────────
+    if matches!(
+        decision.status,
+        ApprovalStatus::Approved | ApprovalStatus::Rejected
+    ) {
+        // Collect the escalation_id (if any) linked to this approval. Two
+        // shapes carry one:
+        //   - legacy SessionEscalate{PromotionReview}: escalation_id lives in
+        //     the action payload, gated by `is_promotion_review`.
+        //   - merged RevisionPromote with federation_context (#738 single
+        //     decision): escalation_id lives in the payload too. This path
+        //     must also resolve its linked escalation projection or the
+        //     unseeded→seeded lifecycle (escalate-before-install) breaks: the
+        //     operator approves the merged approval, but the projection stays
+        //     Pending and the later real-revision promote cannot find an
+        //     Approved escalation under the artifact-scoped fallbacks.
+        let linked_escalation_id: Option<&str> = match &decision.action {
+            ScheduledAction::SessionEscalate { kind, payload, .. } => {
+                // Backward-compat: approvals created before EscalationKind existed
+                // deserialize with the default kind (GuidanceRequest) but carry the
+                // legacy `payload.type == "promotion_review"` marker. Honor that too
+                // so in-flight approvals still resolve their linked escalation and
+                // don't reintroduce the orphaned-row hazard (#724 Part B review).
+                let is_promotion_review = *kind
+                    == autonoetic_types::background::EscalationKind::PromotionReview
+                    || payload
+                        .as_ref()
+                        .and_then(|p| p.get("type"))
+                        .and_then(|v| v.as_str())
+                        == Some("promotion_review");
+                if is_promotion_review {
+                    payload
+                        .as_ref()
+                        .and_then(|p| p.get("escalation_id"))
+                        .and_then(|v| v.as_str())
+                } else {
+                    None
+                }
+            }
+            ScheduledAction::RevisionPromote {
+                federation_context: Some(_),
+                payload,
+                ..
+            } => payload
+                .as_ref()
+                .and_then(|p| p.get("escalation_id"))
+                .and_then(|v| v.as_str()),
+            _ => None,
+        };
+        if let Some(esc_id) = linked_escalation_id {
+            let esc_status = if decision.status == ApprovalStatus::Approved {
+                autonoetic_types::escalation::EscalationStatus::Approved
+            } else {
+                autonoetic_types::escalation::EscalationStatus::Rejected
+            };
+            if let Err(e) = store.resolve_escalation(
+                esc_id,
+                esc_status,
+                &decision.decided_by,
+                decision.reason.as_deref(),
+            ) {
+                tracing::warn!(
+                    target: "approval",
+                    escalation_id = %esc_id,
+                    error = %e,
+                    "Failed to resolve linked escalation"
+                );
+            }
+        }
+    }
+
+    // ── 3. Reevaluation state + background state (reject/cancel/withdraw) ──
+    if !matches!(decision.status, ApprovalStatus::Approved) {
+        let agent_dir = config.agents_dir.join(&decision.agent_id);
+        let is_agent_withdrawal = decision.decided_by.starts_with("agent:");
+        crate::runtime::reevaluation_state::persist_reevaluation_state(&agent_dir, |state| {
+            state
+                .open_approval_request_ids
+                .retain(|existing| existing != &decision.request_id);
+            state.pending_scheduled_action = None;
+            let outcome_label = match decision.status {
+                ApprovalStatus::Rejected => "approval_rejected",
+                ApprovalStatus::Cancelled if is_agent_withdrawal => "approval_withdrawn",
+                ApprovalStatus::Cancelled => "approval_cancelled",
+                _ => "approval_cancelled",
+            };
+            state.last_outcome = Some(outcome_label.to_string());
+        })?;
+
+        let state_path = crate::scheduler::store::background_state_path(config, &decision.agent_id);
+        if let Ok(mut background_state) = crate::scheduler::store::load_background_state(
+            &state_path,
+            &decision.agent_id,
+            &crate::scheduler::decision::background_session_id(&decision.agent_id),
+        ) {
+            background_state.approval_blocked = false;
+            background_state
+                .pending_approval_request_ids
+                .retain(|existing| existing != &decision.request_id);
+            background_state
+                .processed_approval_request_ids
+                .push(decision.request_id.clone());
+            let _ = crate::scheduler::store::save_background_state(&state_path, &background_state);
+        }
+    }
+
+    // ── 4. Write resume signal to GatewayStore ─────────────────────────
+    notify_session_of_decision(store, decision, context.hook_executor);
+
+    // ── 5. Wiki timeline event (keeps existing event names for consumers) ──
+    emit_wiki_timeline(store, decision);
+
+    // ── 6. Causal event (best-effort — must not block step 7) ──────────
+    if let Ok(causal_logger) = init_gateway_causal_logger(config) {
+        let mut trace_session = TraceSession::create_with_session_id(
+            SessionId::from_string(decision.session_id.clone()),
+            Arc::new(causal_logger),
+            gateway_actor_id(),
+            EventScope::Session,
+        );
+        let _ = trace_session.log_completed(
+            "background.approval",
+            Some(decision.status.as_str()),
+            Some(serde_json::json!({
+                "agent_id": decision.agent_id,
+                "request_id": decision.request_id,
+                "decided_by": decision.decided_by,
+                "action_kind": decision.action.kind()
+            })),
+        );
+    }
+
+    // ── 7. Unblock workflow task ──────────────────────────────────────
+    unblock_task_on_approval(config, Some(store), decision);
+
+    // ── 7b. #723 fan-in: resume sibling waiters that joined this approval ──
+    fan_in_approval_waiters(config, store, decision);
+
+    Ok(())
+}
+
+/// #723: when an approval resolves, apply the same status transition to every
+/// sibling task that joined it as a waiter (root-scoped, identical-action
+/// dedup), then clear the waiter rows. Runs independently of the primary
+/// approval's own task binding.
+fn fan_in_approval_waiters(
+    config: &GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    decision: &ApprovalDecision,
+) {
+    use autonoetic_types::workflow::TaskRunStatus;
+
+    let waiters = match store.list_approval_waiters(&decision.request_id) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                error = %e,
+                "failed to list approval waiters for fan-in (#723)"
+            );
+            return;
+        }
+    };
+    if waiters.is_empty() {
+        return;
+    }
+
+    // The task transition to apply to each waiter. `Stale` carries no task
+    // transition here (it is not an operator decision), but we still fall
+    // through to clear the ledger below so rows never leak.
+    let new_status = match decision.status {
+        ApprovalStatus::Approved => Some(TaskRunStatus::Runnable),
+        ApprovalStatus::Rejected | ApprovalStatus::Cancelled => Some(TaskRunStatus::Failed),
+        ApprovalStatus::Stale => None,
+    };
+
+    if let Some(new_status) = new_status {
+        // Preserve the Cancelled-vs-Rejected distinction in both the resume
+        // payload and the failure summary, matching unblock_task_on_approval.
+        let continuation_payload = serde_json::json!({
+            "approval_resolved": true,
+            "request_id": decision.request_id,
+            "status": decision.status.as_str(),
+            "joined_waiter": true,
+        });
+        let summary_prefix = match decision.status {
+            ApprovalStatus::Cancelled => "approval_cancelled",
+            _ => "approval_rejected",
+        };
+        for w in &waiters {
+            let (Some(w_wf), Some(w_task)) = (w.workflow_id.as_deref(), w.task_id.as_deref())
+            else {
+                continue;
+            };
+            // Idempotency: don't overwrite a waiter task that already reached a
+            // terminal state (e.g. its own timeout marked it Failed).
+            // `Stale` is intentionally NOT terminal here — it is resumable
+            // via late approval (see #722 Stage 2 / P-2.11).
+            if let Ok(Some(existing)) =
+                super::workflow_store::load_task_run(config, Some(store), w_wf, w_task)
+            {
+                if existing.status.is_terminal() {
+                    continue;
+                }
+            }
+            let summary = match (new_status, &decision.reason) {
+                (TaskRunStatus::Failed, Some(r)) => Some(format!("{}: {}", summary_prefix, r)),
+                _ => None,
+            };
+            if let Err(e) = super::workflow_store::update_task_run_status(
+                config,
+                Some(store),
+                w_wf,
+                w_task,
+                new_status,
+                summary,
+                None,
+                None,
+            ) {
+                tracing::warn!(
+                    target: "approval",
+                    request_id = %decision.request_id,
+                    workflow_id = %w_wf,
+                    task_id = %w_task,
+                    error = %e,
+                    "failed to fan-in approval waiter (#723)"
+                );
+                continue;
+            }
+            let _ = super::workflow_store::checkpoint_task(
+                config,
+                Some(store),
+                w_wf,
+                w_task,
+                "approval_resolved".to_string(),
+                continuation_payload.clone(),
+            );
+        }
+    }
+
+    // Always clear the ledger — including on Stale — so waiter rows never leak.
+    if let Err(e) = store.clear_approval_waiters(&decision.request_id) {
+        tracing::debug!(
+            target: "approval",
+            request_id = %decision.request_id,
+            error = %e,
+            "failed to clear approval waiters after fan-in (#723)"
+        );
+    }
+}
+
+/// Write approval resolution signal to the GatewayStore for scheduler delivery.
+/// Under the Lawful Gate model, this merely notifies the waiting session —
+/// the agent retries with an `approval_ref`.
+fn notify_session_of_decision(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    decision: &ApprovalDecision,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
+) {
+    let resume = should_resume_waiting_session(decision);
+    if !resume {
+        tracing::info!(
+            target: "approval",
+            request_id = %decision.request_id,
+            workflow_id = ?decision.workflow_id,
+            task_id = ?decision.task_id,
+            "Skipping direct session notification; workflow-bound task will continue via task dispatch"
+        );
+        return;
+    }
+
+    let session_id = &decision.session_id;
+    if session_id.is_empty() {
+        return;
+    }
+
+    let status_str = decision.status.as_str();
+    let signal = super::signal::Signal::ApprovalResolved {
+        request_id: decision.request_id.clone(),
+        agent_id: decision.agent_id.clone(),
+        status: status_str.to_string(),
+        install_completed: false,
+        message: format!("approval_{}:{}", status_str, decision.request_id),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+
+    if let Err(e) =
+        super::signal::write_signal(Some(store), session_id, &decision.request_id, &signal)
+    {
+        tracing::warn!(
+            target: "approval",
+            request_id = %decision.request_id,
+            error = %e,
+            "Failed to write approval signal"
+        );
+    }
+
+    // Notify parent session if this is a child session
+    if should_notify_parent_session(decision) {
+        let parent_sid = decision.root_session_id.as_deref().unwrap_or(session_id);
+        let parent_signal = super::signal::Signal::ApprovalResolved {
+            request_id: decision.request_id.clone(),
+            agent_id: decision.agent_id.clone(),
+            status: status_str.to_string(),
+            install_completed: false,
+            message: format!("approval_{}:{}", status_str, decision.request_id),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = super::signal::write_signal(
+            Some(store),
+            parent_sid,
+            &decision.request_id,
+            &parent_signal,
+        ) {
+            tracing::warn!(
+                target: "approval",
+                request_id = %decision.request_id,
+                error = %e,
+                "Failed to write approval signal to parent session"
+            );
+        }
+    }
+
+    if let Some(executor) = hook_executor {
+        let root_id = decision
+            .root_session_id
+            .as_deref()
+            .unwrap_or(&decision.session_id);
+        let ctx = autonoetic_types::hooks::HookContext::for_approval_resolved(
+            root_id,
+            &decision.session_id,
+            &decision.agent_id,
+            &decision.request_id,
+            status_str,
+        );
+        executor.dispatch_async(ctx);
+    }
+}
+
+/// Emit a wiki timeline event for WikiProposal actions. Keeps the existing
+/// event names (`wiki.promoted` / `wiki.rejected` / `wiki.withdrawn`) that
+/// consumers in `session_timeline.rs` and `cli/room/render.rs` already handle.
+fn emit_wiki_timeline(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    decision: &ApprovalDecision,
+) {
+    let ScheduledAction::WikiProposal {
+        ref page_id,
+        ref title,
+        ..
+    } = decision.action
+    else {
+        return;
+    };
+
+    let is_agent_withdrawal = decision.decided_by.starts_with("agent:");
+    let event_type = match decision.status {
+        ApprovalStatus::Approved => "wiki.promoted",
+        ApprovalStatus::Rejected => "wiki.rejected",
+        ApprovalStatus::Cancelled if is_agent_withdrawal => "wiki.withdrawn",
+        ApprovalStatus::Cancelled => "wiki.rejected",
+        ApprovalStatus::Stale => return,
+    };
+    let role = crate::runtime::session_timeline::derive_role(&decision.agent_id);
+    let principal = autonoetic_types::principal::Principal::agent(decision.agent_id.clone());
+    let refs = autonoetic_types::session_timeline::TimelineRefs::default();
+    let mut payload = serde_json::json!({
+        "page_id": page_id,
+        "title": title,
+        "decided_by": decision.decided_by,
+        "reason": decision.reason,
+    });
+    if is_agent_withdrawal {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "cancelled_by".into(),
+                serde_json::json!(decision.decided_by),
+            );
+        }
+    }
+    let event = crate::runtime::session_timeline::build_timeline_event(
+        decision
+            .root_session_id
+            .clone()
+            .unwrap_or_else(|| decision.session_id.clone()),
+        decision.session_id.clone(),
+        None,
+        &principal,
+        &role,
+        event_type,
+        None,
+        Some(payload),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(target: "session_timeline", error = %e, "{} timeline emit failed", event_type);
+    }
 }
 
 pub fn approve_request(
@@ -433,12 +1067,23 @@ pub fn approve_request_with_options(
         let index_path = wiki_dir.join("index.toml");
         let mut index: Vec<toml::Value> = if index_path.exists() {
             let index_content = std::fs::read_to_string(&index_path).map_err(|e| {
-                anyhow::anyhow!("Failed to read wiki index '{}': {}", index_path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to read wiki index '{}': {}",
+                    index_path.display(),
+                    e
+                )
             })?;
             let parsed: toml::Value = index_content.parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse wiki index '{}': {}", index_path.display(), e)
+                anyhow::anyhow!(
+                    "Failed to parse wiki index '{}': {}",
+                    index_path.display(),
+                    e
+                )
             })?;
-            parsed.get("pages").and_then(|p| p.as_array().cloned()).unwrap_or_default()
+            parsed
+                .get("pages")
+                .and_then(|p| p.as_array().cloned())
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -446,15 +1091,24 @@ pub fn approve_request_with_options(
             let mut m = toml::map::Map::new();
             m.insert("id".to_string(), toml::Value::String(page_id.clone()));
             m.insert("title".to_string(), toml::Value::String(title.clone()));
-            m.insert("file".to_string(), toml::Value::String(format!("{}.md", page_id)));
-            m.insert("tags".to_string(), toml::Value::Array(
-                tags.iter().map(|t| toml::Value::String(t.clone())).collect()
-            ));
+            m.insert(
+                "file".to_string(),
+                toml::Value::String(format!("{}.md", page_id)),
+            );
+            m.insert(
+                "tags".to_string(),
+                toml::Value::Array(
+                    tags.iter()
+                        .map(|t| toml::Value::String(t.clone()))
+                        .collect(),
+                ),
+            );
             m
         });
-        if let Some(pos) = index.iter().position(|e| {
-            e.get("id").and_then(|v| v.as_str()) == Some(page_id.as_str())
-        }) {
+        if let Some(pos) = index
+            .iter()
+            .position(|e| e.get("id").and_then(|v| v.as_str()) == Some(page_id.as_str()))
+        {
             index[pos] = entry;
         } else {
             index.push(entry);
@@ -464,7 +1118,7 @@ pub fn approve_request_with_options(
             m.insert("pages".to_string(), toml::Value::Array(index));
             m
         });
-        let toml_str = index_content.to_string();
+        let toml_str = toml::to_string(&index_content)?;
         let tmp_index = wiki_dir.join("index.toml.tmp");
         std::fs::write(&tmp_index, &toml_str)?;
         if let Err(e) = std::fs::rename(&tmp_index, &index_path) {
@@ -495,89 +1149,14 @@ pub fn approve_request_with_options(
         decided_by,
         reason.clone(),
         ApprovalStatus::Approved,
-        options,
+        options.clone(),
     )?;
 
-    if let ScheduledAction::SessionEscalate { payload, .. } = &decision.action {
-        if let Some(payload) = payload {
-            if payload.get("type").and_then(|v| v.as_str()) == Some("promotion_review") {
-                if let Some(esc_id) = payload.get("escalation_id").and_then(|v| v.as_str()) {
-                    if let Some(store) = gateway_store {
-                        if let Err(e) = store.resolve_escalation(
-                            esc_id,
-                            autonoetic_types::escalation::EscalationStatus::Approved,
-                            decided_by,
-                            reason.as_deref(),
-                        ) {
-                            tracing::warn!(
-                                target: "approval",
-                                escalation_id = %esc_id,
-                                error = %e,
-                                "Failed to resolve linked escalation on approval"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Emit timeline + causal events after the decision is recorded.
-    if let Some(meta) = wiki_materialized {
-        if matches!(decision.status, ApprovalStatus::Approved) {
-            // Session timeline event
-            emit_wiki_timeline_event(gateway_store, &decision, "wiki.promoted", None);
-
-            // Causal event for observability
-            let causal_logger = crate::execution::init_gateway_causal_logger(config)?;
-            let mut trace_session = crate::tracing::TraceSession::create_with_session_id(
-                crate::tracing::SessionId::from_string(decision.session_id.clone()),
-                std::sync::Arc::new(causal_logger),
-                crate::execution::gateway_actor_id(),
-                crate::tracing::EventScope::Session,
-            );
-            let _ = trace_session.log_completed(
-                "wiki.promoted",
-                None,
-                Some(serde_json::json!({
-                    "page_id": meta["page_id"],
-                    "title": meta["title"],
-                    "content_sha256": meta["content_sha256"],
-                    "proposed_by_agent": meta["proposed_by_agent"],
-                    "proposed_by_session": meta["proposed_by_session"],
-                    "approved_by": decision.decided_by,
-                })),
-            );
-        } else {
-            tracing::info!(
-                target: "approval",
-                "Wiki proposal rejected or cancelled; files written beforehand discarded"
-            );
-        }
-    }
-
-    // Lawful Gate model: notify the waiting session, do not auto-execute.
-    if should_resume_waiting_session(&decision) {
-        if let Err(e) =
-            resume_session_after_approval(config, gateway_store, &decision, hook_executor)
-        {
-            tracing::warn!(
-                target: "approval",
-                request_id = %decision.request_id,
-                error = %e,
-                "Failed to send session resume notification"
-            );
-        }
-    } else {
-        tracing::info!(
-            target: "approval",
-            request_id = %decision.request_id,
-            action = ?decision.action,
-            "No waiting session to resume"
-        );
-    }
-
-    unblock_task_on_approval(config, gateway_store, &decision);
+    let context = DecisionContext {
+        wiki_materialized_meta: wiki_materialized.clone(),
+        hook_executor,
+    };
+    apply_decision(config, gateway_store, &decision, &options, &context)?;
 
     Ok(decision)
 }
@@ -590,38 +1169,41 @@ pub fn reject_request(
     reason: Option<String>,
     hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
 ) -> anyhow::Result<ApprovalDecision> {
-    let decision = decide_request(
+    reject_request_with_options(
+        config,
+        gateway_store,
+        request_id,
+        decided_by,
+        reason,
+        hook_executor,
+        ApproveOptions::default(),
+    )
+}
+
+pub fn reject_request_with_options(
+    config: &GatewayConfig,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request_id: &str,
+    decided_by: &str,
+    reason: Option<String>,
+    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
+    options: ApproveOptions,
+) -> anyhow::Result<ApprovalDecision> {
+    let decision = decide_request_with_options(
         config,
         gateway_store,
         request_id,
         decided_by,
         reason,
         ApprovalStatus::Rejected,
+        options.clone(),
     )?;
 
-    // Workflow-bound tasks surface rejection through task failure + workflow
-    // resume. Non-workflow callers still need a direct notification.
-    if should_resume_waiting_session(&decision) {
-        resume_session_after_approval(config, gateway_store, &decision, hook_executor)?;
-    } else {
-        tracing::info!(
-            target: "approval",
-            request_id = %decision.request_id,
-            workflow_id = ?decision.workflow_id,
-            task_id = ?decision.task_id,
-            "Skipping direct rejection resume; workflow-bound task will continue via workflow failure"
-        );
-    }
-
-    // Unblock the task in the workflow (marks as Failed)
-    unblock_task_on_approval(config, gateway_store, &decision);
-
-    if let Some(ref task_id) = decision.task_id {
-        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
-    }
-
-    // Emit wiki.rejected timeline event for wiki proposals.
-    emit_wiki_timeline_event(gateway_store, &decision, "wiki.rejected", Some(&decision.decided_by));
+    let context = DecisionContext {
+        wiki_materialized_meta: None,
+        hook_executor,
+    };
+    apply_decision(config, gateway_store, &decision, &options, &context)?;
 
     Ok(decision)
 }
@@ -637,26 +1219,24 @@ pub fn cancel_request(
     let decision =
         cancel_approval_request(config, gateway_store, request_id, cancelled_by, reason)?;
 
-    // Notify waiting session of cancellation
-    if should_resume_waiting_session(&decision) {
-        resume_session_after_approval(config, gateway_store, &decision, hook_executor)?;
-    }
-
-    // Unblock workflow task if bound
-    unblock_task_on_approval(config, gateway_store, &decision);
-
-    if let Some(ref task_id) = decision.task_id {
-        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
-    }
-
-    // Emit wiki.rejected timeline event for cancelled wiki proposals.
-    emit_wiki_timeline_event(gateway_store, &decision, "wiki.rejected", Some(cancelled_by));
+    let context = DecisionContext {
+        wiki_materialized_meta: None,
+        hook_executor,
+    };
+    apply_decision(
+        config,
+        gateway_store,
+        &decision,
+        &ApproveOptions::default(),
+        &context,
+    )?;
 
     Ok(decision)
 }
 
 /// Withdraw a still-pending approval bound to a workflow task (e.g. task cancelled).
 pub fn cancel_pending_approval_for_workflow_task(
+    config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     task_id: &str,
     cancelled_by: &str,
@@ -668,32 +1248,30 @@ pub fn cancel_pending_approval_for_workflow_task(
     let Some(request_id) = store.get_pending_approval_request_id_for_task(task_id)? else {
         return Ok(None);
     };
-    let cancelled_at = chrono::Utc::now().to_rfc3339();
-    match store.cancel_approval(&request_id, cancelled_by, &cancelled_at) {
-        Ok(()) => {
-            tracing::info!(
-                target: "approval",
-                request_id = %request_id,
-                task_id = %task_id,
-                reason = %reason,
-                "Cancelled pending approval for workflow task"
-            );
-            Ok(Some(request_id))
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "approval",
-                request_id = %request_id,
-                task_id = %task_id,
-                error = %error,
-                "Failed to cancel pending approval for workflow task"
-            );
-            Ok(None)
-        }
-    }
+    let decision = cancel_approval_request(
+        config,
+        gateway_store,
+        &request_id,
+        cancelled_by,
+        Some(reason.to_string()),
+    )?;
+
+    let context = DecisionContext {
+        wiki_materialized_meta: None,
+        hook_executor: None,
+    };
+    apply_decision(
+        config,
+        gateway_store,
+        &decision,
+        &ApproveOptions::default(),
+        &context,
+    )?;
+
+    Ok(Some(request_id))
 }
 
-fn cancel_approval_request(
+pub(crate) fn cancel_approval_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     request_id: &str,
@@ -741,339 +1319,7 @@ fn cancel_approval_request(
         approval_level: request.approval_level,
     };
 
-    // Clean up reevaluation state
-    let agent_dir = config.agents_dir.join(&decision.agent_id);
-    let _ = crate::runtime::reevaluation_state::persist_reevaluation_state(&agent_dir, |state| {
-        state
-            .open_approval_request_ids
-            .retain(|existing| existing != &decision.request_id);
-        state.pending_scheduled_action = None;
-        state.last_outcome = Some("approval_cancelled".to_string());
-    });
-
-    let state_path = crate::scheduler::store::background_state_path(config, &decision.agent_id);
-    if let Ok(mut background_state) = crate::scheduler::store::load_background_state(
-        &state_path,
-        &decision.agent_id,
-        &crate::scheduler::decision::background_session_id(&decision.agent_id),
-    ) {
-        background_state.approval_blocked = false;
-        background_state
-            .pending_approval_request_ids
-            .retain(|existing| existing != &decision.request_id);
-        background_state
-            .processed_approval_request_ids
-            .push(decision.request_id.clone());
-        let _ = crate::scheduler::store::save_background_state(&state_path, &background_state);
-    }
-
-    // Log to gateway causal chain
-    let causal_logger = init_gateway_causal_logger(config)?;
-    let mut trace_session = TraceSession::create_with_session_id(
-        SessionId::from_string(decision.session_id.clone()),
-        Arc::new(causal_logger),
-        gateway_actor_id(),
-        EventScope::Session,
-    );
-    let _ = trace_session.log_completed(
-        "background.approval",
-        Some("cancelled"),
-        Some(serde_json::json!({
-            "agent_id": decision.agent_id,
-            "request_id": decision.request_id,
-            "cancelled_by": decision.decided_by,
-            "action_kind": decision.action.kind()
-        })),
-    );
-
     Ok(decision)
-}
-
-/// Queue durable session notifications after approval/rejection.
-///
-/// This function persists approval-resolution signals that are consumed by
-/// gateway-owned delivery loops and/or channel clients (for example, the TUI
-/// chat client resuming on its own connection).
-///
-/// Under the "Lawful Gate" model, the gateway never auto-executes tool calls.
-/// It merely notifies the agent that approval was granted, and the agent
-/// retries the tool call with an approval_ref.
-fn resume_session_after_approval(
-    _config: &GatewayConfig,
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    decision: &ApprovalDecision,
-    hook_executor: Option<&crate::scheduler::hooks::HookExecutor>,
-) -> anyhow::Result<()> {
-    // Resume for actions that have a suspended session waiting at an ApprovalRequired checkpoint.
-    let is_supported_action = matches!(
-        &decision.action,
-        autonoetic_types::background::ScheduledAction::AgentInstall { .. }
-            | autonoetic_types::background::ScheduledAction::SandboxExec { .. }
-            | autonoetic_types::background::ScheduledAction::SessionEscalate { .. }
-            | autonoetic_types::background::ScheduledAction::SessionContinue { .. }
-            | autonoetic_types::background::ScheduledAction::CredentialRequest { .. }
-            | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. }
-            | autonoetic_types::background::ScheduledAction::WebFetch { .. }
-            | autonoetic_types::background::ScheduledAction::WebCall { .. }
-            | autonoetic_types::background::ScheduledAction::WebSearch { .. }
-            | autonoetic_types::background::ScheduledAction::RevisionPromote { .. }
-    );
-
-    if !is_supported_action {
-        tracing::debug!(
-            target: "approval",
-            request_id = %decision.request_id,
-            action = ?decision.action.kind(),
-            "No auto-resume needed for this action type"
-        );
-        return Ok(());
-    }
-
-    let session_id = &decision.session_id;
-    if session_id.is_empty() {
-        return Ok(());
-    }
-
-    tracing::info!(
-        target: "approval",
-        request_id = %decision.request_id,
-        session_id = %session_id,
-        status = ?decision.status,
-        "Resuming session after approval resolution"
-    );
-
-    // Build a synthetic message that the gateway will route to the waiting agent
-    let status_str = decision.status.as_str();
-
-    // Extract agent_id and build status message based on action type
-    let (agent_id, status_message) = match &decision.action {
-        autonoetic_types::background::ScheduledAction::AgentInstall { agent_id, .. } => {
-            let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "approval_resumed:install:{}:{}",
-                    decision.request_id, agent_id
-                ),
-                ApprovalStatus::Rejected => format!(
-                    "approval_rejected:install:{}:{}",
-                    decision.request_id, agent_id
-                ),
-                ApprovalStatus::Cancelled => format!(
-                    "approval_cancelled:install:{}:{}",
-                    decision.request_id, agent_id
-                ),
-            };
-            (agent_id.clone(), msg)
-        }
-        autonoetic_types::background::ScheduledAction::SandboxExec { .. } => {
-            let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "approval_resumed:sandbox_exec:{}:approved",
-                    decision.request_id
-                ),
-                ApprovalStatus::Rejected => format!(
-                    "approval_rejected:sandbox_exec:{}:rejected",
-                    decision.request_id
-                ),
-                ApprovalStatus::Cancelled => format!(
-                    "approval_cancelled:sandbox_exec:{}:cancelled",
-                    decision.request_id
-                ),
-            };
-            (decision.agent_id.clone(), msg)
-        }
-        autonoetic_types::background::ScheduledAction::SessionEscalate { .. } => {
-            let guidance = decision.reason.as_deref().unwrap_or("");
-            let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "escalation_resumed:{}:approved{}",
-                    decision.request_id,
-                    if guidance.is_empty() {
-                        String::new()
-                    } else {
-                        format!(":guidance={}", guidance)
-                    }
-                ),
-                ApprovalStatus::Rejected => {
-                    format!("escalation_rejected:{}:rejected", decision.request_id)
-                }
-                ApprovalStatus::Cancelled => {
-                    format!("escalation_cancelled:{}:cancelled", decision.request_id)
-                }
-            };
-            (decision.agent_id.clone(), msg)
-        }
-        autonoetic_types::background::ScheduledAction::SessionContinue { .. } => {
-            let msg = match decision.status {
-                ApprovalStatus::Approved => {
-                    format!("session_continue_approved:{}:approved", decision.request_id)
-                }
-                ApprovalStatus::Rejected => {
-                    format!("session_continue_rejected:{}:rejected", decision.request_id)
-                }
-                ApprovalStatus::Cancelled => format!(
-                    "session_continue_cancelled:{}:cancelled",
-                    decision.request_id
-                ),
-            };
-            (decision.agent_id.clone(), msg)
-        }
-        autonoetic_types::background::ScheduledAction::CredentialRequest { .. }
-        | autonoetic_types::background::ScheduledAction::CredentialPrompt { .. } => {
-            let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "approval_resumed:credential:{}:approved",
-                    decision.request_id
-                ),
-                ApprovalStatus::Rejected => format!(
-                    "approval_rejected:credential:{}:rejected",
-                    decision.request_id
-                ),
-                ApprovalStatus::Cancelled => format!(
-                    "approval_cancelled:credential:{}:cancelled",
-                    decision.request_id
-                ),
-            };
-            (decision.agent_id.clone(), msg)
-        }
-        autonoetic_types::background::ScheduledAction::WebFetch { .. }
-        | autonoetic_types::background::ScheduledAction::WebCall { .. }
-        | autonoetic_types::background::ScheduledAction::WebSearch { .. } => {
-            let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "approval_resumed:web:{}:approved",
-                    decision.request_id
-                ),
-                ApprovalStatus::Rejected => format!(
-                    "approval_rejected:web:{}:rejected",
-                    decision.request_id
-                ),
-                ApprovalStatus::Cancelled => format!(
-                    "approval_cancelled:web:{}:cancelled",
-                    decision.request_id
-                ),
-            };
-            (decision.agent_id.clone(), msg)
-        }
-        autonoetic_types::background::ScheduledAction::RevisionPromote { .. } => {
-            let msg = match decision.status {
-                ApprovalStatus::Approved => format!(
-                    "approval_resumed:revision_promote:{}:approved",
-                    decision.request_id
-                ),
-                ApprovalStatus::Rejected => format!(
-                    "approval_rejected:revision_promote:{}:rejected",
-                    decision.request_id
-                ),
-                ApprovalStatus::Cancelled => format!(
-                    "approval_cancelled:revision_promote:{}:cancelled",
-                    decision.request_id
-                ),
-            };
-            (decision.agent_id.clone(), msg)
-        }
-        _ => (
-            "unknown".to_string(),
-            format!("approval_{}:unknown:{}", status_str, decision.request_id),
-        ),
-    };
-
-    // Write approval resolution signal to GatewayStore for scheduler delivery (enables auto-resume).
-    let signal = super::signal::Signal::ApprovalResolved {
-        request_id: decision.request_id.clone(),
-        agent_id: agent_id.clone(),
-        status: status_str.to_string(),
-        install_completed: false,
-        message: status_message.clone(),
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    };
-
-    // Write signal to the child session (the original waiting runtime).
-    // write_signal persists the record to GatewayStore for durable scheduler delivery.
-    if let Err(e) = super::signal::write_signal(
-        gateway_store.as_deref(),
-        session_id,
-        &decision.request_id,
-        &signal,
-    ) {
-        tracing::warn!(
-            target: "approval",
-            request_id = %decision.request_id,
-            error = %e,
-            "Failed to write approval signal to store"
-        );
-    }
-
-    // Use root_session_id from the task graph to determine the parent,
-    // rather than string-parsing the session ID.
-    let notify_parent = should_notify_parent_session(decision);
-    let parent_session_id = decision.root_session_id.as_deref().unwrap_or(session_id);
-
-    if notify_parent {
-        tracing::info!(
-            target: "approval",
-            parent_session = %parent_session_id,
-            "Also notifying parent session of approval resolution"
-        );
-
-        // Write signal to parent session too
-        let parent_signal = super::signal::Signal::ApprovalResolved {
-            request_id: decision.request_id.clone(),
-            agent_id: agent_id.clone(),
-            status: status_str.to_string(),
-            install_completed: false,
-            message: status_message.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        };
-
-        // write_signal persists the record to GatewayStore for durable scheduler delivery.
-        if let Err(e) = super::signal::write_signal(
-            gateway_store.as_deref(),
-            parent_session_id,
-            &decision.request_id,
-            &parent_signal,
-        ) {
-            tracing::warn!(
-                target: "approval",
-                request_id = %decision.request_id,
-                parent_session = %parent_session_id,
-                error = %e,
-                "Failed to write approval signal to parent session store"
-            );
-        }
-    }
-
-    // Delivery ownership is gateway-side and durable:
-    // this function only persists signals. Gateway pollers and channel-specific
-    // consumers (such as the chat TUI on its own socket) perform delivery + ack.
-    let target_session = if notify_parent {
-        format!("{},{}", session_id, parent_session_id)
-    } else {
-        session_id.to_string()
-    };
-    tracing::info!(
-        target: "approval",
-        request_id = %decision.request_id,
-        target_session = %target_session,
-        "Approval notification queued for gateway-owned delivery"
-    );
-
-    if let Some(executor) = hook_executor {
-        let status_str = decision.status.as_str();
-        let root_id = decision
-            .root_session_id
-            .as_deref()
-            .unwrap_or(&decision.session_id);
-        let ctx = autonoetic_types::hooks::HookContext::for_approval_resolved(
-            root_id,
-            &decision.session_id,
-            &decision.agent_id,
-            &decision.request_id,
-            status_str,
-        );
-        executor.dispatch_async(ctx);
-    }
-
-    Ok(())
 }
 
 /// Determines whether the parent (root) session should be notified of an
@@ -1089,6 +1335,9 @@ fn should_notify_parent_session(decision: &ApprovalDecision) -> bool {
 }
 
 fn should_resume_waiting_session(decision: &ApprovalDecision) -> bool {
+    if matches!(decision.action, ScheduledAction::PlanFrame { .. }) {
+        return false;
+    }
     !(decision.workflow_id.is_some() && decision.task_id.is_some())
 }
 
@@ -1101,6 +1350,26 @@ fn unblock_task_on_approval(
     let (Some(wf_id), Some(t_id)) = (&decision.workflow_id, &decision.task_id) else {
         return;
     };
+
+    // Idempotency guard: if the task is already in a terminal state (e.g.
+    // cancel_pending_approval_for_workflow_task is called after the task was
+    // already marked Cancelled), don't overwrite it.
+    if let Ok(Some(existing)) =
+        super::workflow_store::load_task_run(config, gateway_store, wf_id, t_id)
+    {
+        use autonoetic_types::workflow::TaskRunStatus;
+        if existing.status.is_terminal() {
+            tracing::debug!(
+                target: "approval",
+                workflow_id = %wf_id,
+                task_id = %t_id,
+                current_status = ?existing.status,
+                "Task already in terminal state, skipping unblock"
+            );
+            return;
+        }
+    }
+
     let (new_status, approval_event_type) = match decision.status {
         ApprovalStatus::Approved => (
             autonoetic_types::workflow::TaskRunStatus::Runnable,
@@ -1114,6 +1383,7 @@ fn unblock_task_on_approval(
             autonoetic_types::workflow::TaskRunStatus::Failed,
             "task.cancelled",
         ),
+        ApprovalStatus::Stale => return,
     };
 
     // Emit the approval decision event before updating status so chat CLI sees it.
@@ -1135,9 +1405,13 @@ fn unblock_task_on_approval(
     );
 
     let result_summary = match (new_status, &decision.reason) {
-        (autonoetic_types::workflow::TaskRunStatus::Failed, Some(r)) => {
-            Some(format!("approval_{}: {}", approval_event_type.strip_prefix("task.").unwrap_or("rejected"), r))
-        }
+        (autonoetic_types::workflow::TaskRunStatus::Failed, Some(r)) => Some(format!(
+            "approval_{}: {}",
+            approval_event_type
+                .strip_prefix("task.")
+                .unwrap_or("rejected"),
+            r
+        )),
         _ => None,
     };
     if let Err(e) = super::workflow_store::update_task_run_status(
@@ -1227,49 +1501,6 @@ fn unblock_task_on_approval(
     }
 }
 
-/// Emit a session timeline event (`wiki.rejected`) for wiki proposals.
-/// Silently skips non-WikiProposal actions.
-fn emit_wiki_timeline_event(
-    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    decision: &ApprovalDecision,
-    event_type: &str,
-    cancelled_by: Option<&str>,
-) {
-    let ScheduledAction::WikiProposal { ref page_id, ref title, .. } = decision.action else {
-        return;
-    };
-    let Some(store) = gateway_store else { return };
-
-    let role = crate::runtime::session_timeline::derive_role(&decision.agent_id);
-    let principal = autonoetic_types::principal::Principal::agent(decision.agent_id.clone());
-    let refs = autonoetic_types::session_timeline::TimelineRefs::default();
-    let mut payload = serde_json::json!({
-        "page_id": page_id,
-        "title": title,
-        "decided_by": decision.decided_by,
-        "reason": decision.reason,
-    });
-    if let Some(d) = cancelled_by {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("cancelled_by".into(), serde_json::json!(d));
-        }
-    }
-    let event = crate::runtime::session_timeline::build_timeline_event(
-        decision.root_session_id.clone().unwrap_or_else(|| decision.session_id.clone()),
-        decision.session_id.clone(),
-        None,
-        &principal,
-        &role,
-        event_type,
-        None,
-        Some(payload),
-        refs,
-    );
-    if let Err(e) = store.create_live_digest_event(&event) {
-        tracing::debug!(target: "session_timeline", error = %e, "{event_type} timeline emit failed");
-    }
-}
-
 /// Whether an approval's action introduces an external effect or is hard to
 /// undo — used by the §O classifier to make a principal's *approval* of such an
 /// action BLOCKING (must carry a reason). Non-exhaustive: unknown/new actions
@@ -1311,21 +1542,34 @@ fn decision_is_blocking(
             request.approval_level != ApprovalLevel::Operator
                 || action_is_external_or_irreversible(&request.action)
         }
+        ApprovalStatus::Stale => false,
     }
 }
 
 /// Enforce the §O decider obligation: refuse a BLOCKING-tier decision with no
 /// motivation. Presence-only check (never judges the reason's quality —
 /// Lawful Executor). Disabled via `decider_obligations.enabled = false`.
+/// Outcome of the §O (O-1) decider-motivation check. `Refused` is conveyed as
+/// the `Err` of [`enforce_decider_motivation`]; the `Ok` variants distinguish a
+/// BLOCKING decision that satisfied its duty from one the obligation doesn't
+/// apply to (so the caller only emits a `satisfied` event for the former).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeciderObligationOutcome {
+    /// Not a BLOCKING-tier decision (or obligations disabled) — no duty owed.
+    NotApplicable,
+    /// BLOCKING decision that carried the required motivation.
+    Satisfied,
+}
+
 fn enforce_decider_motivation(
     config: &GatewayConfig,
     request: &ApprovalRequest,
     decided_by: &str,
     status: &ApprovalStatus,
     reason: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DeciderObligationOutcome> {
     if !config.decider_obligations.enabled {
-        return Ok(());
+        return Ok(DeciderObligationOutcome::NotApplicable);
     }
     if decision_is_blocking(request, decided_by, status) {
         let has_reason = reason.map(|r| !r.trim().is_empty()).unwrap_or(false);
@@ -1338,8 +1582,119 @@ fn enforce_decider_motivation(
                 status.as_str()
             );
         }
+        return Ok(DeciderObligationOutcome::Satisfied);
     }
-    Ok(())
+    Ok(DeciderObligationOutcome::NotApplicable)
+}
+
+/// Best-effort drift signal when an approved grant host is outside the
+/// gateway-persisted install-time host contract (NULL contract = unconstrained).
+fn emit_host_contract_drift_events(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    session_id: &str,
+    hosts: &[String],
+) {
+    let revision = resolve_revision_for_host_contract(store, agent_id, session_id);
+    let Some(revision) = revision else {
+        return;
+    };
+    let contract = revision.detected_network_hosts.as_deref();
+    for host in hosts {
+        if !crate::runtime::network_host_contract::host_outside_revision_contract(contract, host) {
+            continue;
+        }
+        let now = chrono::Utc::now();
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: now.timestamp_millis().max(0) as u64,
+            timestamp: now.to_rfc3339(),
+            category: "host_contract".to_string(),
+            action: "host_outside_revision_contract".to_string(),
+            status: "warning".to_string(),
+            enforced_rules: vec![],
+            target: Some(host.clone()),
+            payload: Some(
+                serde_json::json!({
+                    "host": host,
+                    "revision_id": revision.revision_id,
+                    "detected_network_hosts": revision.detected_network_hosts,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some(format!(
+                "Approved grant host `{host}` is outside revision install-time detected_network_hosts contract"
+            )),
+        };
+        let _ = store.create_causal_event(&event);
+    }
+}
+
+fn resolve_revision_for_host_contract(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    session_id: &str,
+) -> Option<autonoetic_types::agent_revision::AgentRevisionRecord> {
+    if let Ok(Some(binding)) = store.get_session_agent_binding(session_id) {
+        if let Ok(Some(revision)) = store.get_agent_revision(&binding.revision_id) {
+            return Some(revision);
+        }
+    }
+    let alias = store.resolve_alias(agent_id).ok().flatten()?;
+    store.get_agent_revision(&alias.revision_id).ok().flatten()
+}
+
+/// Emit an `O-1`-tagged causal event recording the §O motivation-obligation
+/// outcome (`decider_obligation.refused` / `…satisfied`), so contract-health
+/// (`enforcement_register::contract_health`) attributes it to clause O-1.
+/// Best-effort: a store/emit failure must not change the decision outcome.
+fn emit_decider_obligation_event(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    request: &ApprovalRequest,
+    decided_by: &str,
+    status: &ApprovalStatus,
+    action: &str,
+) {
+    let Some(store) = gateway_store else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: request.agent_id.clone(),
+        session_id: request.session_id.clone(),
+        turn_id: None,
+        event_seq: now.timestamp_millis().max(0) as u64,
+        timestamp: now.to_rfc3339(),
+        category: "decider_obligation".to_string(),
+        action: action.to_string(),
+        status: if action == "refused" {
+            "error"
+        } else {
+            "success"
+        }
+        .to_string(),
+        enforced_rules: vec!["O-1".to_string()],
+        target: Some(request.request_id.clone()),
+        payload: Some(
+            serde_json::json!({
+                "request_id": request.request_id,
+                "approval_level": request.approval_level.to_config(),
+                "status": status.as_str(),
+                "decided_by": decided_by,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(format!("§O (O-1) decider motivation {action}")),
+    };
+    let _ = store.create_causal_event(&event);
 }
 
 fn decide_request(
@@ -1389,10 +1744,101 @@ fn decide_request_with_options(
         );
     }
 
+    // P-2.20 / R-10.7: agent-decider capability and spawn-tree boundary check.
+    // Human operators (decided_by not matching a loaded agent manifest) bypass this.
+    if let Some(store) = gateway_store {
+        if let Some(agent_id) = parse_agent_decider_id(decided_by) {
+            let gateway_dir = crate::execution::gateway_root_dir(config);
+            let repo = crate::agent::repository::AgentRepository::from_config(config);
+            match repo.get_sync_from_store(agent_id, &gateway_dir, Some(store)) {
+                Ok(loaded) => {
+                    let policy = crate::policy::PolicyEngine::new(loaded.manifest.clone());
+                    let kind_label =
+                        if matches!(request.action, ScheduledAction::SessionEscalate { .. }) {
+                            "escalation"
+                        } else {
+                            "approval"
+                        };
+                    if !policy.can_decide_gate(kind_label).is_allowed() {
+                        anyhow::bail!(
+                            "Agent '{}' lacks GateDecider capability for {} gates (P-2.20)",
+                            agent_id,
+                            kind_label
+                        );
+                    }
+
+                    // R-10.7: authenticate the caller-supplied decider session
+                    // against the recorded owner, then ensure it is not in the
+                    // spawn tree of the gate's session.
+                    let decider_sid = options.decider_session_id.as_deref().unwrap_or("");
+                    crate::runtime::human_gate::verify_decider_session_binding(
+                        decider_sid,
+                        &loaded.manifest.agent.id,
+                        &request.session_id,
+                        store,
+                    )?;
+
+                    // Emit P-2.20 causal event for the verified agent-decider decision.
+                    let event = autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: uuid::Uuid::new_v4().to_string(),
+                        agent_id: loaded.manifest.agent.id.clone(),
+                        session_id: request.session_id.clone(),
+                        turn_id: None,
+                        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "background.approval".to_string(),
+                        action: format!("agent_decider.{}_gate", kind_label),
+                        status: status.as_str().to_string(),
+                        enforced_rules: vec!["P-2.20".to_string()],
+                        target: Some(request.request_id.clone()),
+                        payload: Some(
+                            serde_json::json!({
+                                "request_id": request.request_id,
+                                "decided_by": decided_by,
+                                "agent_id": loaded.manifest.agent.id,
+                                "gate_kind": kind_label,
+                            })
+                            .to_string(),
+                        ),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: reason.clone(),
+                    };
+                    let _ = store.create_causal_event(&event);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        target: "approval",
+                        decided_by = %decided_by,
+                        error = %e,
+                        "Decided_by does not resolve to a loaded agent; treating as human operator"
+                    );
+                }
+            }
+        }
+    }
+
     // §O symmetric obligation (#359 / #395): a principal decider owes a
     // motivation for a BLOCKING-tier decision (reject/abort, or approval of an
     // elevated-authority / external-irreversible action). Checked before commit.
-    enforce_decider_motivation(config, &request, decided_by, &status, reason.as_deref())?;
+    // Either outcome is recorded as an O-1-tagged causal event (#399) so
+    // contract-health can attribute it.
+    match enforce_decider_motivation(config, &request, decided_by, &status, reason.as_deref()) {
+        Ok(DeciderObligationOutcome::Satisfied) => {
+            emit_decider_obligation_event(
+                gateway_store,
+                &request,
+                decided_by,
+                &status,
+                "satisfied",
+            );
+        }
+        Ok(DeciderObligationOutcome::NotApplicable) => {}
+        Err(e) => {
+            emit_decider_obligation_event(gateway_store, &request, decided_by, &status, "refused");
+            return Err(e);
+        }
+    }
 
     let decision = ApprovalDecision {
         request_id: request.request_id,
@@ -1427,142 +1873,42 @@ fn decide_request_with_options(
             })?;
     }
 
-    if matches!(status, ApprovalStatus::Approved) {
-        let hosts = decision.action.detected_hosts();
+    Ok(decision)
+}
 
-        if let Some(hosts) = hosts {
-            if !hosts.is_empty() {
-                if let Some(root_sid) = &decision.root_session_id {
-                    if let Some(store) = gateway_store {
-                        let scope = options
-                            .grant_scope
-                            .clone()
-                            .unwrap_or(autonoetic_types::background::GrantScope::RootSession);
-                        let targets = if options.grant_targets.is_empty() {
-                            hosts
-                                .iter()
-                                .map(|h| {
-                                    autonoetic_types::background::GrantTarget::ExactHost(h.clone())
-                                })
-                                .collect()
-                        } else {
-                            options.grant_targets.clone()
-                        };
-                        let session_id = decision.session_id.as_str();
-                        let computed_expiry = if options.grant_expires_at.is_none()
-                            && config.default_grant_ttl_secs > 0
-                        {
-                            let ttl_secs =
-                                i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
-                            let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
-                                .map(|dt| dt.with_timezone(&chrono::Utc))
-                                .unwrap_or_else(|_| chrono::Utc::now());
-                            let t = base + chrono::Duration::seconds(ttl_secs);
-                            Some(t.to_rfc3339())
-                        } else {
-                            None
-                        };
-                        let expires_at = options
-                            .grant_expires_at
-                            .as_deref()
-                            .or(computed_expiry.as_deref());
-                        if let Err(e) = store.insert_session_grant(
-                            root_sid,
-                            session_id,
-                            &decision.agent_id,
-                            &scope,
-                            &targets,
-                            &decision.decided_by,
-                            &decision.decided_at,
-                            Some(&decision.request_id),
-                            expires_at,
-                        ) {
-                            tracing::warn!(
-                                target: "approval",
-                                request_id = %decision.request_id,
-                                error = %e,
-                                "Failed to insert session approval grants — session grant auto-approval will not be available for this session"
-                            );
-                        } else {
-                            tracing::info!(
-                                target: "approval",
-                                request_id = %decision.request_id,
-                                agent_id = %decision.agent_id,
-                                root_session_id = %root_sid,
-                                scope = %scope.as_str(),
-                                targets = ?targets,
-                                "Inserted session approval grants for approved network action"
-                            );
-                        }
-                    }
-                }
-            }
+/// Parse a `decided_by` string into an agent ID when the decider is an agent.
+///
+/// Only the canonical `agent:<agent_id>` form is recognized; anything else is
+/// treated as a human operator. The resolved `agent_id` is then used to load a
+/// manifest for the `GateDecider` capability check (P-2.20).
+fn parse_agent_decider_id(decided_by: &str) -> Option<&str> {
+    let trimmed = decided_by.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(id) = trimmed.strip_prefix("agent:") {
+        let id = id.trim();
+        if !id.is_empty() {
+            return Some(id);
         }
     }
-
-    let background_session_id = super::decision::background_session_id;
-    let load_background_state = super::store::load_background_state;
-    let save_background_state = super::store::save_background_state;
-
-    if matches!(status, ApprovalStatus::Rejected) {
-        let agent_dir = config.agents_dir.join(&decision.agent_id);
-        crate::runtime::reevaluation_state::persist_reevaluation_state(&agent_dir, |state| {
-            state
-                .open_approval_request_ids
-                .retain(|existing| existing != &decision.request_id);
-            state.pending_scheduled_action = None;
-            state.last_outcome = Some("approval_rejected".to_string());
-        })?;
-        let state_path = super::store::background_state_path(config, &decision.agent_id);
-        let mut background_state = load_background_state(
-            &state_path,
-            &decision.agent_id,
-            &background_session_id(&decision.agent_id),
-        )?;
-        background_state.approval_blocked = false;
-        background_state
-            .pending_approval_request_ids
-            .retain(|existing| existing != &decision.request_id);
-        background_state
-            .processed_approval_request_ids
-            .push(decision.request_id.clone());
-        save_background_state(&state_path, &background_state)?;
-    }
-
-    let causal_logger = init_gateway_causal_logger(config)?;
-    let mut trace_session = TraceSession::create_with_session_id(
-        SessionId::from_string(decision.session_id.clone()),
-        Arc::new(causal_logger),
-        gateway_actor_id(),
-        EventScope::Session,
-    );
-    let action = match status {
-        ApprovalStatus::Approved => "background.approval",
-        ApprovalStatus::Rejected => "background.approval",
-        ApprovalStatus::Cancelled => "background.approval",
-    };
-    let status_str = status.as_str();
-    let _ = trace_session.log_completed(
-        action,
-        Some(status_str),
-        Some(serde_json::json!({
-            "agent_id": decision.agent_id,
-            "request_id": decision.request_id,
-            "decided_by": decision.decided_by,
-            "action_kind": decision.action.kind()
-        })),
-    );
-    Ok(decision)
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{should_notify_parent_session, should_resume_waiting_session};
-    use crate::scheduler::workflow_store::{ensure_workflow_for_root_session, save_task_run};
+    use super::{
+        approve_request_with_options, should_notify_parent_session, should_resume_waiting_session,
+        ApproveOptions,
+    };
+    use crate::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, load_task_run, save_task_run,
+    };
     use autonoetic_types::background::{
         ApprovalDecision, ApprovalLevel, ApprovalRequest, ApprovalStatus, ScheduledAction,
     };
     use autonoetic_types::config::GatewayConfig;
+    use autonoetic_types::notification::NotificationType;
     use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
     use tempfile::tempdir;
 
@@ -1588,6 +1934,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
@@ -1600,12 +1947,12 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut req).unwrap();
 
@@ -1634,12 +1981,12 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: level,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         let sandbox = || ScheduledAction::SandboxExec {
             command: "x".to_string(),
@@ -1647,6 +1994,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         };
         let install = || ScheduledAction::AgentInstall {
             agent_id: "a".to_string(),
@@ -1659,29 +2007,158 @@ mod tests {
         let local = mk(ApprovalLevel::Operator, sandbox());
 
         // Operator rejection without a reason → blocked (mirror of Ri-0.3).
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, None).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            None
+        )
+        .is_err());
         // …with a reason → allowed.
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, Some("out of scope")).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            Some("out of scope")
+        )
+        .is_ok());
         // Whitespace-only reason doesn't count.
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Rejected, Some("   ")).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            Some("   ")
+        )
+        .is_err());
         // Approving a reversible, operator-level action without a reason → allowed (DEFERRED).
-        assert!(super::enforce_decider_motivation(&cfg, &local, "operator", &ApprovalStatus::Approved, None).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "operator",
+            &ApprovalStatus::Approved,
+            None
+        )
+        .is_ok());
         // Mechanical decider (no principal) is exempt even on rejection.
-        assert!(super::enforce_decider_motivation(&cfg, &local, "gateway", &ApprovalStatus::Rejected, None).is_ok());
-        assert!(super::enforce_decider_motivation(&cfg, &local, "emergency_stop:estop-1", &ApprovalStatus::Cancelled, None).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "gateway",
+            &ApprovalStatus::Rejected,
+            None
+        )
+        .is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &local,
+            "emergency_stop:estop-1",
+            &ApprovalStatus::Cancelled,
+            None
+        )
+        .is_ok());
         // Approving an external/irreversible action without a reason → blocked.
         let ext = mk(ApprovalLevel::Operator, install());
-        assert!(super::enforce_decider_motivation(&cfg, &ext, "operator", &ApprovalStatus::Approved, None).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &ext,
+            "operator",
+            &ApprovalStatus::Approved,
+            None
+        )
+        .is_err());
         // Approving an elevated-authority gate without a reason → blocked.
         let elevated = mk(ApprovalLevel::Admin, sandbox());
-        assert!(super::enforce_decider_motivation(&cfg, &elevated, "operator", &ApprovalStatus::Approved, None).is_err());
+        assert!(super::enforce_decider_motivation(
+            &cfg,
+            &elevated,
+            "operator",
+            &ApprovalStatus::Approved,
+            None
+        )
+        .is_err());
 
         // Disabled config → no enforcement at all.
         let cfg_off = GatewayConfig {
-            decider_obligations: autonoetic_types::config::DeciderObligationsConfig { enabled: false },
+            decider_obligations: autonoetic_types::config::DeciderObligationsConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
-        assert!(super::enforce_decider_motivation(&cfg_off, &local, "operator", &ApprovalStatus::Rejected, None).is_ok());
+        assert!(super::enforce_decider_motivation(
+            &cfg_off,
+            &local,
+            "operator",
+            &ApprovalStatus::Rejected,
+            None
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn decider_obligation_emits_tagged_o1_event() {
+        use crate::enforcement_register::contract_health;
+        use crate::scheduler::gateway_store::GatewayStore;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(tmp.path()).unwrap();
+
+        let request = ApprovalRequest {
+            request_id: "apr-o1".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-o1".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "x".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+                intent: None,
+            },
+            created_at: "2026-06-18T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("sess-o1".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+
+            expires_at: None,
+        };
+
+        super::emit_decider_obligation_event(
+            Some(&store),
+            &request,
+            "operator",
+            &ApprovalStatus::Rejected,
+            "refused",
+        );
+
+        let events = store
+            .search_causal_events(Some("sess-o1"), None, 10)
+            .unwrap();
+        let ev = events
+            .iter()
+            .find(|e| e.category == "decider_obligation")
+            .expect("a decider_obligation event was emitted");
+        assert_eq!(ev.action, "refused");
+        assert_eq!(ev.enforced_rules, vec!["O-1".to_string()]);
+
+        // …and contract-health attributes it to clause O-1 (not unattributed).
+        let health = contract_health(ev.enforced_rules.iter());
+        assert_eq!(health.unattributed, 0);
+        assert!(health.by_clause.contains(&("O-1".to_string(), 1)));
     }
 
     #[test]
@@ -1706,6 +2183,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             approval_level: ApprovalLevel::Operator,
             created_at: "2020-01-01T00:00:00Z".to_string(),
@@ -1718,12 +2196,12 @@ mod tests {
             decided_at: None,
             decided_by: None,
             decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store
             .create_approval(&mut req("apr-a", "root-a/coder-1"))
@@ -1736,96 +2214,6 @@ mod tests {
             super::pending_approval_requests_for_root(&cfg, Some(&store), "root-a").unwrap();
         assert_eq!(for_a.len(), 1);
         assert_eq!(for_a[0].request_id, "apr-a");
-    }
-
-    #[test]
-    fn pending_sandbox_exec_requests_for_session_filters_and_sorts() {
-        let dir = tempdir().unwrap();
-        let agents_dir = dir.path().join("agents");
-        let gateway_dir = agents_dir.join(".gateway");
-        std::fs::create_dir_all(&gateway_dir).unwrap();
-        let cfg = GatewayConfig {
-            agents_dir: agents_dir.clone(),
-            ..Default::default()
-        };
-        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-
-        let req = |id: &str, created: &str| ApprovalRequest {
-            request_id: id.to_string(),
-            agent_id: "evaluator.default".to_string(),
-            session_id: "sess/evaluator-1".to_string(),
-            action: ScheduledAction::SandboxExec {
-                command: "python3 x".to_string(),
-                dependencies: None,
-                requires_approval: true,
-                evidence_ref: None,
-                detected_hosts: None,
-            },
-            approval_level: ApprovalLevel::Operator,
-            created_at: created.to_string(),
-            reason: None,
-            evidence_ref: None,
-            workflow_id: None,
-            task_id: None,
-            root_session_id: None,
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            decision_reason: None,
-            similar_to_request_id: None,
-            similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-        };
-        store
-            .create_approval(&mut req("apr-second", "2020-01-02T00:00:00Z"))
-            .unwrap();
-        store
-            .create_approval(&mut req("apr-first", "2020-01-01T00:00:00Z"))
-            .unwrap();
-        // Install-style request same session — must not appear in sandbox-only list
-        let mut install = ApprovalRequest {
-            request_id: "apr-install".to_string(),
-            agent_id: "b".to_string(),
-            session_id: "sess/evaluator-1".to_string(),
-            action: ScheduledAction::AgentInstall {
-                agent_id: "x".to_string(),
-                summary: "s".to_string(),
-                requested_by_agent_id: "y".to_string(),
-                install_fingerprint: "fp".to_string(),
-                payload: None,
-            },
-            created_at: "2019-01-01T00:00:00Z".to_string(),
-            reason: None,
-            evidence_ref: None,
-            workflow_id: None,
-            task_id: None,
-            root_session_id: None,
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            decision_reason: None,
-            approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-        };
-        store.create_approval(&mut install).unwrap();
-
-        let list = super::pending_sandbox_exec_requests_for_session(
-            &cfg,
-            Some(&store),
-            "sess/evaluator-1",
-        )
-        .unwrap();
-        assert_eq!(list.len(), 2);
-        assert_eq!(list[0].request_id, "apr-first");
-        assert_eq!(list[1].request_id, "apr-second");
     }
 
     #[test]
@@ -1865,6 +2253,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1890,6 +2279,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1915,6 +2305,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1940,6 +2331,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -1966,6 +2358,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -2039,12 +2432,12 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -2062,9 +2455,113 @@ mod tests {
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(
-            pending.is_empty(),
+            !pending
+                .iter()
+                .any(|n| n.notification_type == NotificationType::ApprovalResolved),
             "workflow-bound approvals should continue through workflow re-queue only"
         );
+    }
+
+    #[test]
+    fn revision_promote_workflow_bound_approval_unblocks_task_without_direct_notify() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        let agent_dir = agents_dir.join("specialized_builder.default");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf =
+            ensure_workflow_for_root_session(&cfg, Some(&store), "demo-session", None).unwrap();
+
+        let task = TaskRun {
+            task_id: "task-promote".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: "demo-session/specialized_builder.default-abc".to_string(),
+            parent_session_id: "demo-session".to_string(),
+            status: TaskRunStatus::AwaitingApproval,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: Some("Promote after approval".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+
+        let mut request = ApprovalRequest {
+            request_id: "apr-promote-wf".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: task.session_id.clone(),
+            action: ScheduledAction::RevisionPromote {
+                agent_id: "weather-lookup".to_string(),
+                revision_id: "rev_sha256:test".to_string(),
+                outgoing_revision_id: String::new(),
+                added_capabilities: vec!["NetworkAccess".to_string()],
+                broadened_capabilities: vec![],
+                payload: None,
+                federation_context: None,
+            },
+            created_at: (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: Some(wf.workflow_id.clone()),
+            task_id: Some(task.task_id.clone()),
+            root_session_id: Some("demo-session".to_string()),
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+
+            expires_at: None,
+        };
+        store.create_approval(&mut request).unwrap();
+
+        super::approve_request_with_options(
+            &cfg,
+            Some(&store),
+            &request.request_id,
+            "operator",
+            Some("operator approved for test".to_string()),
+            None,
+            None,
+            None,
+            ApproveOptions {
+                confirm_phrase: Some("promote weather-lookup rev_sha256:test".to_string()),
+                acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let pending = store.list_pending_notifications().unwrap();
+        assert!(
+            !pending
+                .iter()
+                .any(|n| n.notification_type == NotificationType::ApprovalResolved),
+            "revision_promote workflow-bound approvals should not direct-notify the waiting session"
+        );
+
+        let loaded = load_task_run(&cfg, Some(&store), &wf.workflow_id, &task.task_id)
+            .unwrap()
+            .expect("task run should exist after approval");
+        assert_eq!(loaded.status, TaskRunStatus::Runnable);
     }
 
     #[test]
@@ -2092,6 +2589,7 @@ mod tests {
                 added_capabilities: vec!["NetworkAccess".to_string()],
                 broadened_capabilities: vec![],
                 payload: None,
+                federation_context: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -2103,14 +2601,24 @@ mod tests {
             approval_level: ApprovalLevel::Operator,
         };
 
-        super::resume_session_after_approval(&cfg, Some(store.as_ref()), &decision, None).unwrap();
+        super::apply_decision(
+            &cfg,
+            Some(store.as_ref()),
+            &decision,
+            &Default::default(),
+            &super::DecisionContext {
+                wiki_materialized_meta: None,
+                hook_executor: None,
+            },
+        )
+        .unwrap();
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
         let payload = &pending[0].payload;
         assert_eq!(
             payload.get("message").and_then(|v| v.as_str()),
-            Some("approval_resumed:revision_promote:apr-promote01:approved")
+            Some("approval_approved:apr-promote01")
         );
     }
 
@@ -2138,6 +2646,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             status: ApprovalStatus::Approved,
             decided_at: chrono::Utc::now().to_rfc3339(),
@@ -2150,7 +2659,17 @@ mod tests {
         };
 
         // SandboxExec is no longer auto-executed; agent retries with approval_ref.
-        super::resume_session_after_approval(&cfg, Some(store.as_ref()), &decision, None).unwrap();
+        super::apply_decision(
+            &cfg,
+            Some(store.as_ref()),
+            &decision,
+            &Default::default(),
+            &super::DecisionContext {
+                wiki_materialized_meta: None,
+                hook_executor: None,
+            },
+        )
+        .unwrap();
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
@@ -2169,6 +2688,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         };
         let level = super::resolve_approval_level(&cfg, &action);
         assert_eq!(level, ApprovalLevel::Operator);
@@ -2196,6 +2716,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
@@ -2208,12 +2729,12 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Admin,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 
@@ -2269,6 +2790,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
@@ -2281,12 +2803,12 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut request).unwrap();
 

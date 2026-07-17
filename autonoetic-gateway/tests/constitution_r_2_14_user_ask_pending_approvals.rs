@@ -24,6 +24,7 @@ fn no_capability_manifest() -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -40,8 +41,10 @@ fn no_capability_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+        open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -76,12 +79,12 @@ fn r_2_14_user_ask_refused_when_pending_approval_exists() -> anyhow::Result<()> 
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     };
     store.create_approval(&mut pending)?;
 

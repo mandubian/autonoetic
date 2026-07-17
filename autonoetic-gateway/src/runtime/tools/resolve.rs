@@ -49,14 +49,15 @@ impl NativeTool for ResolveTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list), or 'content' (inline the bytes; for an artifact pass `file` to choose which file inside it). To RUN an artifact use artifact_exec; to SEE one use resolve."
-                .to_string(),
+            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list), or 'content' (inline the bytes; for an artifact pass `file` to choose which file inside it). To RUN an artifact use artifact_exec; to SEE one use resolve. IMPORTANT for include=content: the gateway truncates large tool results to a character budget (default 4000). The `content` field in the response may be shortened, but the JSON structure and metadata (`offset`, `next_offset`, `total_bytes`, `truncated`) are always preserved — use `next_offset` to page through the rest. Do NOT keep calling with the same `limit` expecting more; pass `offset=next_offset` to advance.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "ref": { "type": "string", "description": "Any handle: art_<id>, ar.<ref>, cnt_<alias>, 8-char alias, content name, or sha256:…" },
                     "include": { "type": "string", "enum": ["metadata", "files", "content"], "description": "Depth: metadata (default), files (artifact file list), content (inline bytes)" },
-                    "file": { "type": "string", "description": "For include=content on an artifact: which file inside it to read (the file name from include=files)" }
+                    "file": { "type": "string", "description": "For include=content on an artifact: which file inside it to read (the file name from include=files)" },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Byte offset to start reading from. On each call, check `next_offset` in the response and pass it here to page through the rest. Do not re-read from 0 if next_offset is set." },
+                    "limit": { "type": "integer", "minimum": 0, "description": "Maximum bytes of content to return. The gateway separately truncates the total tool result to a character budget (~4000 chars), so the JSON wrapper + this field compete for that budget. If `truncated` is true in the response, use `next_offset` to continue — do not retry with a smaller limit." }
                 },
                 "required": ["ref"],
                 "additionalProperties": false
@@ -83,6 +84,8 @@ impl NativeTool for ResolveTool {
             reference: String,
             include: Option<String>,
             file: Option<String>,
+            offset: Option<usize>,
+            limit: Option<usize>,
         }
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -94,6 +97,8 @@ impl NativeTool for ResolveTool {
             matches!(include, "metadata" | "files" | "content"),
             "include must be one of: metadata, files, content"
         );
+        let offset = args.offset;
+        let limit = args.limit;
 
         let Some(gw_dir) = gateway_dir else {
             return Ok(ToolError::resource(
@@ -122,10 +127,12 @@ impl NativeTool for ResolveTool {
                 reference,
                 include,
                 args.file,
+                offset,
+                limit,
             );
         }
 
-        self.resolve_content(gw_dir, sid, reference, include)
+        self.resolve_content(gw_dir, sid, reference, include, offset, limit)
     }
 }
 
@@ -138,6 +145,8 @@ impl ResolveTool {
         artifact_ref: &str,
         include: &str,
         file: Option<String>,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> anyhow::Result<String> {
         let Some(gs) = gateway_store else {
             return Ok(ToolError::resource(
@@ -166,12 +175,20 @@ impl ResolveTool {
                 Ok(bytes) => {
                     let content = String::from_utf8(bytes)
                         .map_err(|e| anyhow::anyhow!("file is not valid UTF-8: {e}"))?;
+                    let (paginated, actual_offset, actual_limit, next_offset) =
+                        paginate_text(&content, offset, limit);
+                    let total = content.len();
                     Ok(json!({
                         "ok": true,
                         "kind": "artifact_file",
                         "ref": artifact_ref,
                         "file": file,
-                        "content": content,
+                        "content": paginated,
+                        "offset": actual_offset,
+                        "limit": actual_limit,
+                        "next_offset": next_offset,
+                        "total_bytes": total,
+                        "truncated": next_offset.is_some()
                     })
                     .to_string())
                 }
@@ -259,6 +276,8 @@ impl ResolveTool {
         sid: &str,
         reference: &str,
         include: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
     ) -> anyhow::Result<String> {
         let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;
 
@@ -267,8 +286,21 @@ impl ResolveTool {
                 Ok(bytes) => {
                     let content = String::from_utf8(bytes)
                         .map_err(|e| anyhow::anyhow!("content is not valid UTF-8: {e}"))?;
-                    Ok(json!({ "ok": true, "kind": "content", "ref": reference, "content": content })
-                        .to_string())
+                    let (paginated, actual_offset, actual_limit, next_offset) =
+                        paginate_text(&content, offset, limit);
+                    let total = content.len();
+                    Ok(json!({
+                        "ok": true,
+                        "kind": "content",
+                        "ref": reference,
+                        "content": paginated,
+                        "offset": actual_offset,
+                        "limit": actual_limit,
+                        "next_offset": next_offset,
+                        "total_bytes": total,
+                        "truncated": next_offset.is_some()
+                    })
+                    .to_string())
                 }
                 Err(e) => Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string())),
             };
@@ -330,3 +362,99 @@ impl ResolveTool {
         .to_error_response()
     }
 }
+
+/// Adjust a byte index to the nearest lower char boundary.
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Adjust a byte index to the nearest higher char boundary.
+fn ceil_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
+}
+
+/// Slice a UTF-8 text string by optional byte offset/limit, returning the
+/// paginated text along with the actual offset, limit, and next offset (None
+/// when the slice reaches the end of the input).
+fn paginate_text(
+    text: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> (String, usize, usize, Option<usize>) {
+    let total = text.len();
+    let offset = offset.unwrap_or(0).min(total);
+    let offset = floor_char_boundary(text, offset);
+    let limit = limit.unwrap_or(total);
+    let end = (offset + limit).min(total);
+    let end = ceil_char_boundary(text, end);
+    let slice = &text[offset..end];
+    let next_offset = if end < total { Some(end) } else { None };
+    (slice.to_string(), offset, end - offset, next_offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paginate_text_full_when_unset() {
+        let (text, off, lim, next) = paginate_text("hello world", None, None);
+        assert_eq!(text, "hello world");
+        assert_eq!(off, 0);
+        assert_eq!(lim, 11);
+        assert_eq!(next, None);
+    }
+
+    #[test]
+    fn paginate_text_pages_and_next_offset() {
+        let (text, off, lim, next) = paginate_text("hello world", Some(0), Some(5));
+        assert_eq!(text, "hello");
+        assert_eq!(off, 0);
+        assert_eq!(lim, 5);
+        assert_eq!(next, Some(5));
+
+        let (text2, off2, lim2, next2) = paginate_text("hello world", next, Some(5));
+        assert_eq!(text2, " worl");
+        assert_eq!(off2, 5);
+        assert_eq!(lim2, 5);
+        assert_eq!(next2, Some(10));
+
+        let (text3, _off3, _lim3, next3) = paginate_text("hello world", next2, Some(5));
+        assert_eq!(text3, "d");
+        assert_eq!(next3, None);
+    }
+
+    #[test]
+    fn paginate_text_respects_utf8_boundaries() {
+        // "héllo" is 6 bytes: h(1) é(2) l(1) l(1) o(1)
+        let (text, off, lim, next) = paginate_text("héllo", Some(2), Some(2));
+        // offset 2 splits the é; should floor to 1. end 3 is a char boundary (first l).
+        // The slice contains the é (2 bytes).
+        assert_eq!(text, "é");
+        assert_eq!(off, 1);
+        assert_eq!(lim, 2);
+        assert_eq!(next, Some(3));
+    }
+
+    #[test]
+    fn paginate_text_offset_beyond_end() {
+        let (text, off, lim, next) = paginate_text("hi", Some(100), Some(5));
+        assert_eq!(text, "");
+        assert_eq!(off, 2);
+        assert_eq!(lim, 0);
+        assert_eq!(next, None);
+    }
+}
+

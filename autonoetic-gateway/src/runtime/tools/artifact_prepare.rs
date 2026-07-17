@@ -51,13 +51,13 @@ impl NativeTool for ArtifactPrepareTool {
         manifest
             .capabilities
             .iter()
-            .any(|cap| matches!(cap, Capability::CodeExecution { .. }))
+            .any(|cap| matches!(cap, Capability::ArtifactExecution))
     }
 
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "One-pass preflight check for artifact execution. Analyzes artifact source for remote access, resolves credentials from the vault, and creates a single approval covering all domains + credential injection. Returns a deployment_ticket that artifact.exec can use to execute without further approvals or credential setup.".to_string(),
+            description: "One-pass preflight check for artifact execution. Analyzes artifact source for remote access, resolves credentials from the vault, and creates a single approval covering all domains + credential injection. Returns a deployment_ticket that artifact_exec can use to execute without further approvals or credential setup.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -110,7 +110,7 @@ impl NativeTool for ArtifactPrepareTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<Arc<GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: ArtifactPrepareArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -124,13 +124,12 @@ impl NativeTool for ArtifactPrepareTool {
         let sid =
             session_id.ok_or_else(|| anyhow::anyhow!("artifact.prepare requires a session_id"))?;
 
-        let resolved =
-            crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
-                &args.artifact_ref,
-                sid,
-                &store,
-                gw_dir,
-            )?;
+        let resolved = crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+            &args.artifact_ref,
+            sid,
+            &store,
+            gw_dir,
+        )?;
         let artifact_id = resolved.artifact_id;
 
         let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
@@ -186,7 +185,8 @@ impl NativeTool for ArtifactPrepareTool {
                     return Ok(ToolError::resource(
                         "required_credentials: secret for referenced credential not found in vault",
                         None::<String>,
-                    ).to_error_response());
+                    )
+                    .to_error_response());
                 }
                 tracing::info!(
                     target: "artifact_prepare",
@@ -238,125 +238,20 @@ impl NativeTool for ArtifactPrepareTool {
 
         let root_sid = crate::runtime::content_store::root_session_id(sid);
 
+        let mut pre_validated = false;
+        let mut fingerprint_for_backfill: Option<String> = None;
         if let crate::runtime::remote_access::NetworkCoverage::Concrete { targets } = &coverage {
             let fingerprint = compute_fingerprint(
                 &manifest.agent.id,
                 targets,
                 &artifact_code,
                 Some(&bundle.artifact_canonical_digest),
+                &manifest.capabilities,
             );
-
+            fingerprint_for_backfill = Some(fingerprint.clone());
             if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
                 if cache.find(&fingerprint).is_some() {
-                    let ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
-                    store_deployment_ticket(
-                        &store,
-                        &ticket_id,
-                        &artifact_id,
-                        &args.entrypoint,
-                        &resolved_credential_env,
-                        targets,
-                    )?;
-                    return Ok(serde_json::json!({
-                        "ok": true,
-                        "deployment_ticket": ticket_id,
-                        "artifact_ref": args.artifact_ref,
-                        "entrypoint": args.entrypoint,
-                        "remote_access": {
-                            "detected": true,
-                            "auto_approved": true,
-                            "reason": "exec_cache_hit",
-                            "domains": targets,
-                        },
-                        "credentials_resolved": resolved_credential_env.len(),
-                        "message": "Artifact is ready to execute (previously approved). Use deployment_ticket with artifact.exec."
-                    }).to_string());
-                }
-            }
-
-            if !targets.is_empty() {
-                if let Ok(approved) = store.get_approved_approvals_for_root(root_sid) {
-                    if crate::runtime::tools::sandbox::approved_requests_cover_targets(
-                        &approved,
-                        targets,
-                        _agent_dir,
-                        gateway_dir,
-                    ) {
-                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                            if cache.find(&fingerprint).is_none() {
-                                let entry =
-                                    crate::runtime::approved_exec_cache::ApprovedExecEntry {
-                                        fingerprint: fingerprint.clone(),
-                                        agent_id: manifest.agent.id.clone(),
-                                        remote_targets: targets.clone(),
-                                        code_content: artifact_code.clone(),
-                                        approval_request_id: approved
-                                            .iter()
-                                            .find(|r| {
-                                                matches!(
-                                                    r.action,
-                                                    ScheduledAction::SandboxExec { .. }
-                                                )
-                                            })
-                                            .map(|r| r.request_id.clone())
-                                            .unwrap_or_default(),
-                                        approved_at: chrono::Utc::now().to_rfc3339(),
-                                        approved_by: "operator".to_string(),
-                                        last_used_at: chrono::Utc::now().to_rfc3339(),
-                                    };
-                                let _ = cache.record(entry);
-                            }
-                        }
-                        let ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
-                        store_deployment_ticket(
-                            &store,
-                            &ticket_id,
-                            &artifact_id,
-                            &args.entrypoint,
-                            &resolved_credential_env,
-                            targets,
-                        )?;
-                        return Ok(serde_json::json!({
-                            "ok": true,
-                            "deployment_ticket": ticket_id,
-                            "artifact_ref": args.artifact_ref,
-                            "entrypoint": args.entrypoint,
-                            "remote_access": {
-                                "detected": true,
-                                "auto_approved": true,
-                                "reason": "session_approval_grant",
-                                "domains": targets,
-                            },
-                            "credentials_resolved": resolved_credential_env.len(),
-                            "message": "Artifact is ready to execute (session grant covers targets). Use deployment_ticket with artifact.exec."
-                        }).to_string());
-                    }
-                }
-
-                if store.session_grants_cover_targets(&root_sid, targets) {
-                    let ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
-                    store_deployment_ticket(
-                        &store,
-                        &ticket_id,
-                        &artifact_id,
-                        &args.entrypoint,
-                        &resolved_credential_env,
-                        targets,
-                    )?;
-                    return Ok(serde_json::json!({
-                        "ok": true,
-                        "deployment_ticket": ticket_id,
-                        "artifact_ref": args.artifact_ref,
-                        "entrypoint": args.entrypoint,
-                        "remote_access": {
-                            "detected": true,
-                            "auto_approved": true,
-                            "reason": "session_grant",
-                            "domains": targets,
-                        },
-                        "credentials_resolved": resolved_credential_env.len(),
-                        "message": "Artifact is ready to execute (session grant covers targets). Use deployment_ticket with artifact.exec."
-                    }).to_string());
+                    pre_validated = true;
                 }
             }
         }
@@ -383,109 +278,252 @@ impl NativeTool for ArtifactPrepareTool {
             )
         };
 
-        let request_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let action = ScheduledAction::SandboxExec {
             command,
             dependencies: None,
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(targets.clone()),
+            intent: None,
         };
 
-        let approval_workflow_id =
-            crate::scheduler::resolve_workflow_id_for_root_session(cfg, &root_sid)
-                .ok()
-                .flatten();
-
-        let mut request = ApprovalRequest {
-            request_id: request_id.clone(),
-            agent_id: manifest.agent.id.clone(),
-            session_id: sid.to_string(),
-            root_session_id: Some(root_sid.to_string()),
-            action: action.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            status: None,
-            decided_at: None,
-            decided_by: None,
-            reason: Some(summary.clone()),
-            evidence_ref: None,
-            workflow_id: approval_workflow_id.clone(),
-            decision_reason: None,
-            approval_level: crate::scheduler::approval::resolve_approval_level(cfg, &action),
-            task_id: match (&approval_workflow_id, session_id) {
-                (Some(wf_id), Some(s)) => {
-                    crate::scheduler::resolve_task_id_for_session(cfg, None, wf_id, s)
-                        .ok()
-                        .flatten()
-                }
-                _ => None,
+        let gate = crate::runtime::human_gate::GateService::new(store.clone());
+        let gate_result = gate.check(
+            crate::runtime::human_gate::GateRequest {
+                kind: crate::runtime::human_gate::GateKind::Approval {
+                    action: action.clone(),
+                    targets: targets.clone(),
+                    match_strategy: crate::runtime::human_gate::MatchStrategy::HostLevel,
+                },
+                manifest,
+                session_id: Some(sid),
+                run_context,
+                config: Some(cfg),
+                context: crate::runtime::human_gate::DecisionContext::tier2(
+                    format!("prepare + exec artifact {} ({})", artifact_id, args.entrypoint),
+                    if targets.is_empty() {
+                        "preparing a stored artifact for execution requires operator approval".to_string()
+                    } else {
+                        format!(
+                            "artifact execution reaching host(s) [{}] not covered by an approved network grant",
+                            targets.join(", ")
+                        )
+                    },
+                    if resolved_credential_env.is_empty() {
+                        format!("runs artifact {} in the sandbox; effects depend on the entrypoint", artifact_id)
+                    } else {
+                        format!(
+                            "runs artifact {} in the sandbox with {} credential(s) injected as env vars; the credentials are exposed to the executed code",
+                            artifact_id,
+                            resolved_credential_env.len()
+                        )
+                    },
+                    "Approve if the artifact, entrypoint, network targets, and any injected credentials are expected for this agent's task; reject or escalate if any are unexpected",
+                )
+                .with_analysis(summary.clone()),
+                summary: summary.clone(),
+                approval_ref: None,
+                pre_validated,
+                cache_backfill: None,
+                request_id: None,
+                turn_id: None,
             },
-            similar_to_request_id: None,
-            similarity_score: None,
-            min_dwell_ms: None,
-            confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
-        };
-
-        // Populate code excerpts + risk summary for operator inspection.
-        request.code_excerpts =
-            crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
-        let artifact_store_ref = crate::ArtifactStore::new(gw_dir).ok();
-        request.risk_summary =
-            crate::runtime::code_excerpts::build_risk_summary(
-                Some(&targets),
-                None,
-                &artifact_id,
-                artifact_store_ref.as_ref(),
-            );
-
-        store.create_approval(&mut request)?;
-
-        let approval = build_approval_details(
-            &request,
-            "artifact_prepare",
-            summary.clone(),
-            "approval_ref",
-            serde_json::json!({
-                "artifact_ref": args.artifact_ref,
-                "entrypoint": args.entrypoint,
-                "remote_access_detected": true,
-                "detected_patterns": detected_patterns,
-                "normalized_targets": targets,
-                "credentials": credential_summary,
-            }),
-        );
-
-        let pending_ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
-        store_deployment_ticket(
-            &store,
-            &pending_ticket_id,
-            &artifact_id,
-            &args.entrypoint,
-            &resolved_credential_env,
-            &targets,
         )?;
 
-        Ok(serde_json::json!({
-            "ok": false,
-            "deployment_ticket": pending_ticket_id,
-            "artifact_ref": args.artifact_ref,
-            "entrypoint": args.entrypoint,
-            "remote_access": {
-                "detected": true,
-                "auto_approved": false,
-                "domains": targets,
-            },
-            "credentials_resolved": resolved_credential_env.len(),
-            "approval_required": true,
-            "request_id": request_id,
-            "suspended": true,
-            "message": format!("Approval required for {} domain(s) + {} credential(s). Approve {}, then use deployment_ticket with artifact.exec.",
-                targets.len(), resolved_credential_env.len(), request_id),
-            "approval": approval
-        })
-        .to_string())
+        match gate_result {
+            crate::runtime::human_gate::GateResult::Cleared { source, .. } => {
+                if source == crate::runtime::human_gate::ClearanceSource::SessionGrant {
+                    if let Some(fp) = fingerprint_for_backfill {
+                        if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
+                            if cache.find(&fp).is_none() {
+                                let entry =
+                                    crate::runtime::approved_exec_cache::ApprovedExecEntry {
+                                        fingerprint: fp,
+                                        agent_id: manifest.agent.id.clone(),
+                                        remote_targets: targets.clone(),
+                                        code_content: artifact_code.clone(),
+                                        approval_request_id: String::new(),
+                                        approved_at: chrono::Utc::now().to_rfc3339(),
+                                        approved_by: "operator".to_string(),
+                                        last_used_at: chrono::Utc::now().to_rfc3339(),
+                                    };
+                                let _ = cache.record(entry);
+                            }
+                        }
+                    }
+                }
+                let ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
+                store_deployment_ticket(
+                    &store,
+                    &ticket_id,
+                    &artifact_id,
+                    &args.entrypoint,
+                    &resolved_credential_env,
+                    &targets,
+                )?;
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "deployment_ticket": ticket_id,
+                    "artifact_ref": args.artifact_ref,
+                    "entrypoint": args.entrypoint,
+                    "remote_access": {
+                        "detected": true,
+                        "auto_approved": true,
+                        "reason": if source == crate::runtime::human_gate::ClearanceSource::SessionGrant {
+                            "session_grant"
+                        } else {
+                            "cached"
+                        },
+                        "domains": targets,
+                    },
+                    "credentials_resolved": resolved_credential_env.len(),
+                    "message": "Artifact is ready to execute. Use deployment_ticket with artifact.exec."
+                })
+                .to_string())
+            }
+            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                let pending = store
+                    .get_approval(&gate_id)?
+                    .unwrap_or_else(|| ApprovalRequest {
+                        request_id: gate_id.clone(),
+                        agent_id: manifest.agent.id.clone(),
+                        session_id: sid.to_string(),
+                        root_session_id: None,
+                        workflow_id: None,
+                        task_id: None,
+                        action: action.clone(),
+                        created_at: String::new(),
+                        status: None,
+                        decided_at: None,
+                        decided_by: None,
+                        reason: Some(summary.clone()),
+                        evidence_ref: None,
+                        decision_reason: None,
+                        approval_level: crate::scheduler::approval::resolve_approval_level(
+                            cfg, &action,
+                        ),
+                        min_dwell_ms: None,
+                        confirm_phrase: None,
+                        code_excerpts: None,
+                        risk_summary: None,
+
+                        expires_at: None,
+                    });
+                let approval = build_approval_details(
+                    &pending,
+                    "artifact_prepare",
+                    summary.clone(),
+                    "approval_ref",
+                    serde_json::json!({
+                        "artifact_ref": args.artifact_ref,
+                        "entrypoint": args.entrypoint,
+                        "approval_already_pending": true,
+                    }),
+                );
+                Ok(serde_json::json!({
+                    "ok": false,
+                    "artifact_ref": args.artifact_ref,
+                    "entrypoint": args.entrypoint,
+                    "approval_required": true,
+                    "approval_already_pending": true,
+                    "suspended": true,
+                    "message": format!("Approval {} is already pending.", gate_id),
+                    "approval": approval
+                })
+                .to_string())
+            }
+            crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                // Populate code excerpts + risk summary for operator inspection.
+                let excerpts =
+                    crate::runtime::code_excerpts::build_code_excerpts(&artifact_id, gw_dir);
+                let _ = store.set_approval_code_excerpts(&gate_id, excerpts.as_deref(), None);
+                let artifact_store_ref = crate::ArtifactStore::new(gw_dir).ok();
+                let risk_summary = crate::runtime::code_excerpts::build_risk_summary(
+                    Some(&targets),
+                    None,
+                    &artifact_id,
+                    artifact_store_ref.as_ref(),
+                );
+                if let Some(rs) = risk_summary {
+                    let _ = store.set_approval_code_excerpts(&gate_id, None, Some(&rs));
+                }
+
+                let approval = build_approval_details(
+                    &ApprovalRequest {
+                        request_id: gate_id.clone(),
+                        agent_id: manifest.agent.id.clone(),
+                        session_id: sid.to_string(),
+                        root_session_id: None,
+                        workflow_id: None,
+                        task_id: None,
+                        action: action.clone(),
+                        created_at: String::new(),
+                        status: None,
+                        decided_at: None,
+                        decided_by: None,
+                        reason: Some(summary.clone()),
+                        evidence_ref: None,
+                        decision_reason: None,
+                        approval_level: crate::scheduler::approval::resolve_approval_level(
+                            cfg, &action,
+                        ),
+                        min_dwell_ms: None,
+                        confirm_phrase: None,
+                        code_excerpts: None,
+                        risk_summary: None,
+
+                        expires_at: None,
+                    },
+                    "artifact_prepare",
+                    summary.clone(),
+                    "approval_ref",
+                    serde_json::json!({
+                        "artifact_ref": args.artifact_ref,
+                        "entrypoint": args.entrypoint,
+                        "remote_access_detected": true,
+                        "detected_patterns": detected_patterns,
+                        "normalized_targets": targets,
+                        "credentials": credential_summary,
+                    }),
+                );
+
+                let pending_ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
+                store_deployment_ticket(
+                    &store,
+                    &pending_ticket_id,
+                    &artifact_id,
+                    &args.entrypoint,
+                    &resolved_credential_env,
+                    &targets,
+                )?;
+
+                Ok(serde_json::json!({
+                    "ok": false,
+                    "deployment_ticket": pending_ticket_id,
+                    "artifact_ref": args.artifact_ref,
+                    "entrypoint": args.entrypoint,
+                    "remote_access": {
+                        "detected": true,
+                        "auto_approved": false,
+                        "domains": targets,
+                    },
+                    "credentials_resolved": resolved_credential_env.len(),
+                    "approval_required": true,
+                    "request_id": gate_id,
+                    "suspended": true,
+                    "message": format!("Approval required for {} domain(s) + {} credential(s). Approve {}, then use deployment_ticket with artifact.exec.",
+                        targets.len(), resolved_credential_env.len(), gate_id),
+                    "approval": approval
+                })
+                .to_string())
+            }
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Unexpected gate result for artifact.prepare: {:?}",
+                    other
+                ));
+            }
+        }
     }
 }
 

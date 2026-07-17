@@ -80,7 +80,7 @@ impl NativeTool for EvalSuitePublishTool {
                                     "properties": {
                                         "case_id": { "type": "string", "description": "Stable case identifier within the suite" },
                                         "message": { "type": "string", "description": "Input message to send to the agent" },
-                                        "assertions": { "type": "object", "description": "Assertion object with keys like reply_max_chars, reply_contains_all, etc." }
+                                        "assertions": { "type": "object", "description": "Assertion object. Reply/artifact keys: reply_contains_all, reply_contains_any, reply_contains_none, reply_max_chars, artifacts_min, artifacts_max. Gateway-state keys: session_events_min / session_events_max — arrays of {category, action?, count} matched against the causal events recorded by the eval case's session (behavioral evidence: what the agent DID, e.g. {\"category\": \"anomaly_flag\", \"action\": \"filed\", \"count\": 1})." }
                                     },
                                     "required": ["case_id", "message", "assertions"]
                                 }
@@ -361,10 +361,13 @@ pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
 
         let valid_keys = [
             "reply_contains_all",
+            "reply_contains_any",
             "reply_contains_none",
             "reply_max_chars",
             "artifacts_min",
             "artifacts_max",
+            "session_events_min",
+            "session_events_max",
         ];
         let mut has_assertion = false;
         for key in obj.keys() {
@@ -396,6 +399,19 @@ pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
                 case.case_id
             );
         }
+        if let Some(v) = obj.get("reply_contains_any") {
+            let arr: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| {
+                anyhow::anyhow!(
+                    "case '{}' reply_contains_any must be an array of strings",
+                    case.case_id
+                )
+            })?;
+            anyhow::ensure!(
+                !arr.is_empty(),
+                "case '{}' reply_contains_any must have at least one substring",
+                case.case_id
+            );
+        }
         if let Some(v) = obj.get("reply_contains_none") {
             let arr: Vec<String> = serde_json::from_value(v.clone()).map_err(|_| {
                 anyhow::anyhow!(
@@ -423,6 +439,57 @@ pub fn validate_suite_spec(spec: &EvalSuiteSpec) -> anyhow::Result<()> {
             let _: u64 = serde_json::from_value(v.clone()).map_err(|_| {
                 anyhow::anyhow!("case '{}' artifacts_max must be a number", case.case_id)
             })?;
+        }
+        // Gateway-state assertions (#772 E.1): arrays of
+        // {category, action?, count} matched against the causal events the
+        // eval case's session records.
+        for key in ["session_events_min", "session_events_max"] {
+            if let Some(v) = obj.get(key) {
+                let arr: Vec<serde_json::Value> = serde_json::from_value(v.clone()).map_err(|_| {
+                    anyhow::anyhow!(
+                        "case '{}' {} must be an array of {{category, action?, count}} objects",
+                        case.case_id,
+                        key
+                    )
+                })?;
+                anyhow::ensure!(
+                    !arr.is_empty(),
+                    "case '{}' {} must have at least one entry",
+                    case.case_id,
+                    key
+                );
+                for entry in &arr {
+                    let category = entry.get("category").and_then(|c| c.as_str()).unwrap_or("");
+                    anyhow::ensure!(
+                        !category.trim().is_empty(),
+                        "case '{}' {} entries require a non-empty 'category' string",
+                        case.case_id,
+                        key
+                    );
+                    if let Some(action) = entry.get("action") {
+                        anyhow::ensure!(
+                            action.is_string(),
+                            "case '{}' {} 'action' must be a string when present",
+                            case.case_id,
+                            key
+                        );
+                    }
+                    let count = entry.get("count").and_then(|c| c.as_u64());
+                    anyhow::ensure!(
+                        count.is_some(),
+                        "case '{}' {} entries require a 'count' number",
+                        case.case_id,
+                        key
+                    );
+                    if key == "session_events_min" {
+                        anyhow::ensure!(
+                            count.unwrap_or(0) >= 1,
+                            "case '{}' session_events_min 'count' must be >= 1",
+                            case.case_id
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -795,9 +862,21 @@ impl NativeTool for EvalCompareTool {
             match eval_stats::compare(&baseline_samples, &candidate_samples, &config) {
                 Ok(rec) => match serde_json::to_value(rec) {
                     Ok(val) => Some(val),
-                    Err(e) => Some(serde_json::json!({"error": format!("serialization failure: {}", e)})),
+                    Err(e) => Some(serde_json::json!({
+                        "ok": false,
+                        "error_type": "execution",
+                        "error": "eval_serialization_failed",
+                        "message": format!("serialization failure: {}", e),
+                        "repair_hint": "Check the evaluation data and retry."
+                    })),
                 },
-                Err(e) => Some(serde_json::json!({"error": e})),
+                Err(e) => Some(serde_json::json!({
+                    "ok": false,
+                    "error_type": "execution",
+                    "error": "eval_comparison_failed",
+                    "message": format!("{}", e),
+                    "repair_hint": "Check the evaluation data and retry."
+                })),
             }
         });
 

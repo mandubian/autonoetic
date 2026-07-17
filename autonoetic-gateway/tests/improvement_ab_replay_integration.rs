@@ -27,6 +27,7 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             id: "improvement-orchestrator".to_string(),
             name: "improvement-orchestrator".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,
@@ -43,8 +44,10 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }
@@ -66,6 +69,8 @@ fn seed_revision(
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "improvement_ab_replay_test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -73,6 +78,7 @@ fn seed_revision(
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -89,6 +95,9 @@ fn seed_alias(store: &GatewayStore, agent_id: &str, revision_id: &str) -> anyhow
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "improvement_ab_replay_test".to_string(),
         reason: Some("test seed".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(())

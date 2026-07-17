@@ -178,6 +178,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             created_at: "2020-01-01T00:00:00Z".to_string(),
             reason: None,
@@ -190,12 +191,12 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut req).unwrap();
 

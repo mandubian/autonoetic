@@ -60,6 +60,7 @@ fn manifest_for(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "Test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -78,8 +79,10 @@ fn manifest_for(agent_id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -107,11 +110,13 @@ layers: []
 "#;
 
     let main_py = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'status': 'ok'}))\n";
+    let test_py = "#!/usr/bin/env python3\nimport unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n";
 
     for (path, content) in [
         ("SKILL.md", skill_md.as_bytes()),
         ("runtime.lock", runtime_lock.as_bytes()),
         ("main.py", main_py.as_bytes()),
+        ("test_main.py", test_py.as_bytes()),
     ] {
         let handle = content_store.write(content).unwrap();
         content_store
@@ -125,6 +130,7 @@ layers: []
                 "SKILL.md".to_string(),
                 "runtime.lock".to_string(),
                 "main.py".to_string(),
+                "test_main.py".to_string(),
             ],
             Some(&["main.py".to_string()]),
             None,
@@ -142,18 +148,19 @@ fn record_promotion(
     builder_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
     session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} check — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -165,7 +172,7 @@ fn record_promotion(
             Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion.record should succeed");
@@ -251,6 +258,17 @@ fn try_promote(
     }
 }
 
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the failure assertions below read naturally; a genuine success stays `Ok`.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 #[test]
 fn promotion_blocked_when_unit_test_runner_failed() {
     let agent_id = "p226.test.agent";
@@ -294,6 +312,7 @@ fn promotion_blocked_when_unit_test_runner_failed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
@@ -310,6 +329,7 @@ fn promotion_blocked_when_unit_test_runner_failed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "unit_test_runner",
         false,
@@ -326,6 +346,7 @@ fn promotion_blocked_when_unit_test_runner_failed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "auditor",
         true,
@@ -345,8 +366,8 @@ fn promotion_blocked_when_unit_test_runner_failed() {
         &revision_id,
     );
 
-    assert!(result.is_err(), "promotion should be blocked when unit_test_runner failed");
-    let err = result.unwrap_err();
+    assert!(as_outcome(result.clone()).is_err(), "promotion should be blocked when unit_test_runner failed");
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("P-2.26") || err.contains("unit_test_runner"),
         "error message should mention P-2.26 or unit_test_runner, got: {err}"
@@ -395,6 +416,7 @@ fn promotion_succeeds_when_no_unit_test_runner_ran() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
@@ -412,6 +434,7 @@ fn promotion_succeeds_when_no_unit_test_runner_ran() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "auditor",
         true,

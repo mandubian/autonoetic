@@ -97,14 +97,14 @@ fn prepare_runtime_lock_layer_mounts(
     agent_dir: &Path,
     runtime_lock_rel_path: &str,
     gateway_dir: Option<&Path>,
-) -> anyhow::Result<(Vec<crate::sandbox::SandboxMount>, Vec<String>)> {
+) -> anyhow::Result<(Vec<crate::sandbox::SandboxMount>, Vec<String>, Vec<String>)> {
     let Some(gw_dir) = gateway_dir else {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     };
 
     let lock_path = agent_dir.join(runtime_lock_rel_path);
     if !lock_path.exists() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let parsed_lock = match crate::runtime_lock::resolve_runtime_lock(&lock_path) {
@@ -116,12 +116,12 @@ fn prepare_runtime_lock_layer_mounts(
                 error = %error,
                 "Failed to parse runtime.lock; skipping layer mounting for script execution"
             );
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
     };
 
     if parsed_lock.layers.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let lock_layers: Vec<crate::runtime::tools::sandbox::LayerMount> = parsed_lock
@@ -134,15 +134,17 @@ fn prepare_runtime_lock_layer_mounts(
         .collect();
     let mut mounts = Vec::new();
     let mut python_paths = Vec::new();
+    let mut node_paths = Vec::new();
     crate::runtime::tools::sandbox::extract_and_mount_layers(
         &lock_layers,
         gw_dir,
         "runtime.lock",
         &mut mounts,
         &mut python_paths,
+        &mut node_paths,
     )?;
 
-    Ok((mounts, python_paths))
+    Ok((mounts, python_paths, node_paths))
 }
 
 /// Execute a script agent directly in sandbox, bypassing the LLM.
@@ -229,10 +231,13 @@ pub(crate) async fn execute_script_in_sandbox(
         autonoetic_env.push((k.clone(), v.clone()));
     }
 
-    let (runtime_lock_mounts, layer_python_paths) =
+    let (runtime_lock_mounts, layer_python_paths, layer_node_paths) =
         prepare_runtime_lock_layer_mounts(agent_dir, runtime_lock_rel_path, gateway_dir)?;
     if !layer_python_paths.is_empty() {
         autonoetic_env.push(("PYTHONPATH".to_string(), layer_python_paths.join(":")));
+    }
+    if !layer_node_paths.is_empty() {
+        autonoetic_env.push(("NODE_PATH".to_string(), layer_node_paths.join(":")));
     }
 
     // WASM tier runs in-process, not via the POSIX spawn path: route it through
@@ -377,6 +382,76 @@ pub(crate) fn script_causal_event(
         evidence_ref: None,
         reason: None,
     });
+}
+
+/// Emit an `agent.message` live-digest timeline row carrying a script agent's
+/// stdout, so the room TUI shows script output inline at the default (`Normal`)
+/// altitude — the same way a reasoning agent's narrative reaches the operator.
+///
+/// Why `agent.message` and not `tool.completed`: the room TUI reads
+/// `live_digest_events` (not `causal_events`) and its default floor is
+/// `Normal`; `tool.completed` is `Detail` (hidden at the default floor), so
+/// surfacing the run as `tool.completed` would leave it invisible without the
+/// operator dialing the floor down. A script's stdout *is* its reply — the
+/// direct analog of a reasoning agent's end-turn text, which `log_llm_completion`
+/// mirrors onto the timeline as `agent.message` (`session_tracer.rs:698`). We
+/// reuse that event so a `print("toto")` reads as a conversational line.
+///
+/// The row is built with the shared [`build_timeline_event`] so its shape
+/// (attribution, node id, payload serialization, refs) stays identical to every
+/// other timeline producer. The stdout is redacted (`redact_embedded_secrets`,
+/// matching `agent.message`) and capped at the shared narrative cap. Empty
+/// output is skipped, mirroring the reasoning path.
+pub(crate) fn emit_script_message_timeline(
+    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    agent_id: &str,
+    session_id: &str,
+    stdout: &str,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    let message = stdout.trim();
+    if message.is_empty() {
+        return;
+    }
+    let role = crate::runtime::session_timeline::derive_role(agent_id);
+    let principal = autonoetic_types::principal::Principal::agent(agent_id.to_string());
+    let capped = cap_chars(
+        &autonoetic_types::redaction::redact_embedded_secrets(message),
+        crate::runtime::session_tracer::TIMELINE_AGENT_NARRATIVE_MAX_CHARS,
+    );
+    let row = crate::runtime::session_timeline::build_timeline_event(
+        crate::runtime::live_digest::base_session_id(session_id).to_string(),
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "agent.message",
+        None, // altitude derived from (event_type, role) -> Normal for agent.message
+        Some(serde_json::json!({ "message": capped })),
+        autonoetic_types::session_timeline::TimelineRefs::default(),
+    );
+    if let Err(e) = store.create_live_digest_event(&row) {
+        tracing::debug!(
+            target: "live_digest",
+            error = %e,
+            "script agent.message timeline emit failed"
+        );
+    }
+}
+
+/// Truncate to `max` visible chars, appending an ellipsis (which counts toward
+/// the cap) when truncation occurs — matches the timeline preview cap style.
+fn cap_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let truncated: String = s.chars().take(max - 1).collect();
+    format!("{truncated}…")
 }
 
 /// Resolve credential env vars from a runtime.lock's `credentials` section.
@@ -628,13 +703,14 @@ mod tests {
             std::fs::write(agent_dir.join("runtime.lock"), runtime_lock_yaml)
                 .expect("runtime lock should write");
 
-            let (mounts, python_paths) =
+            let (mounts, python_paths, node_paths) =
                 prepare_runtime_lock_layer_mounts(&agent_dir, "runtime.lock", Some(&gateway_dir))
                     .expect("runtime lock layers should resolve");
 
             assert_eq!(mounts.len(), 1);
             assert_eq!(mounts[0].dest, "/tmp/venv");
             assert!(python_paths.contains(&"/tmp/venv".to_string()));
+            assert!(node_paths.is_empty());
         }
 
         #[test]
@@ -675,13 +751,14 @@ mod tests {
             std::fs::write(agent_dir.join("runtime.lock"), runtime_lock_yaml)
                 .expect("runtime lock should write");
 
-            let (mounts, python_paths) =
+            let (mounts, python_paths, node_paths) =
                 prepare_runtime_lock_layer_mounts(&agent_dir, "runtime.lock", Some(&gateway_dir))
                     .expect("runtime lock layers should resolve");
 
             assert_eq!(mounts.len(), 1);
             assert!(python_paths.contains(&"/tmp/venv/lib/python3.13/site-packages".to_string()));
             assert!(python_paths.contains(&"/tmp/venv".to_string()));
+            assert!(node_paths.is_empty());
         }
     }
 
@@ -699,6 +776,109 @@ mod tests {
         assert_eq!(
             normalize_script_input_payload(&kickoff, Some(&metadata)),
             task
+        );
+    }
+
+    #[test]
+    fn script_stdout_surfaces_as_agent_message_on_timeline() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use autonoetic_types::session_timeline::Altitude;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        // A child script session under root "root-1": base_session_id splits on
+        // '/', so the row lands under the root the room TUI renders.
+        emit_script_message_timeline(
+            Some(&store),
+            "weather.default",
+            "root-1/weather.default-abc",
+            "toto\n",
+        );
+
+        let page = store
+            .list_session_timeline("root-1", None, 10, None, None)
+            .unwrap();
+        assert_eq!(page.entries.len(), 1, "stdout should emit one timeline row");
+        let row = &page.entries[0];
+        assert_eq!(row.event_type, "agent.message");
+        assert_eq!(row.altitude, Altitude::Normal, "must show at the default floor");
+        assert_eq!(row.source_session_id, "root-1/weather.default-abc");
+        let payload: serde_json::Value =
+            serde_json::from_str(row.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["message"], "toto", "trailing newline is trimmed");
+    }
+
+    #[test]
+    fn script_empty_stdout_emits_no_timeline_row() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        emit_script_message_timeline(Some(&store), "a.default", "root-2/a", "   \n  ");
+        let page = store
+            .list_session_timeline("root-2", None, 10, None, None)
+            .unwrap();
+        assert!(
+            page.entries.is_empty(),
+            "empty/whitespace-only stdout should not emit a row"
+        );
+    }
+
+    #[test]
+    fn script_stdout_timeline_row_is_capped() {
+        use crate::runtime::session_tracer::TIMELINE_AGENT_NARRATIVE_MAX_CHARS;
+        use crate::scheduler::gateway_store::GatewayStore;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        let big = "x".repeat(TIMELINE_AGENT_NARRATIVE_MAX_CHARS + 5_000);
+        emit_script_message_timeline(Some(&store), "a.default", "root-3/a", &big);
+
+        let page = store
+            .list_session_timeline("root-3", None, 10, None, None)
+            .unwrap();
+        let row = &page.entries[0];
+        let payload: serde_json::Value =
+            serde_json::from_str(row.payload.as_deref().unwrap()).unwrap();
+        let msg = payload["message"].as_str().unwrap();
+        assert_eq!(
+            msg.chars().count(),
+            TIMELINE_AGENT_NARRATIVE_MAX_CHARS,
+            "timeline mirrors a capped preview; full stdout lives in execution_traces"
+        );
+        assert!(msg.ends_with('…'));
+    }
+
+    #[test]
+    fn script_stdout_timeline_row_redacts_embedded_secrets() {
+        use crate::scheduler::gateway_store::GatewayStore;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        // A Bearer token in the script output must be masked before it reaches
+        // the timeline surface (`redact_embedded_secrets`, same as agent.message).
+        let stdout = "downloaded using Authorization: Bearer sk-live-abc123secret then exited";
+        emit_script_message_timeline(Some(&store), "a.default", "root-4/a", stdout);
+
+        let page = store
+            .list_session_timeline("root-4", None, 10, None, None)
+            .unwrap();
+        let row = &page.entries[0];
+        let payload: serde_json::Value =
+            serde_json::from_str(row.payload.as_deref().unwrap()).unwrap();
+        let msg = payload["message"].as_str().unwrap();
+        assert!(
+            !msg.contains("sk-live-abc123secret"),
+            "raw secret must not reach the timeline; got: {msg}"
+        );
+        assert!(
+            msg.contains("***REDACTED***"),
+            "bearer token must be masked; got: {msg}"
         );
     }
 }

@@ -15,16 +15,46 @@ metadata:
       id: "architect.default"
       name: "Architect Default"
       description: "Defines structure, interfaces, trade-offs, and decomposes tasks into implementable sub-tasks."
+      singleton: true
     llm_preset: coding
     llm_overrides:
       temperature: 0.2
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge."]
+        allowed: ["knowledge_"]
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
+    excluded_tools:
+      - "workbench_*"
+      - "planframe_*"
+      - "scheduler_*"
+      - "workflow_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "web_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
+      - "session_*"
+      - "federation_*"
+      - "sentinel_*"
+      - "constitution_*"
+      - "sandbox_exec"
+      - "agent_spawn"
+      - "agent_discover"
+      - "agent_list"
+      - "agent_message"
+      - "tool_discover"
+      - "self_describe"
+      - "artifact_exec"
+      - "artifact_build"
     validation: "soft"
     io:
       returns:
@@ -61,6 +91,8 @@ metadata:
 # Architect
 
 You are an architect agent. Define structure, interfaces, data flow, and trade-offs. Decompose complex goals into ordered sub-tasks with clear inputs/outputs.
+
+**Start working immediately on turn 1. Do not spend a turn acknowledging the task — reply with your first design analysis or tool call directly.**
 
 ## Behavior
 
@@ -125,9 +157,13 @@ Your job is to **design and decompose**, not to **implement**.
 - Keep sub-tasks small and focused — one concern per task
 - Include file paths for expected outputs
 
+## Script-mode persistence (design handoff)
+
+When the design requires state across cron invocations, reference APIs from the foundation **SDK Reference** layer (injected with your prompt) — do not invent method names in the design doc. Delegate to `coder.default` with an explicit sub-task to include `tests/test_*.py` (mocked `autonoetic_sdk.init()`) when the entry script uses SDK persistence.
+
 ## Content System
 
-Save design notes and specifications with `content_write` (e.g. `name: weather_agent_design.md`).
+Save design notes and specifications with `content_write` (e.g. `name: agent_design.md`). To update an existing note, edit it with `content_patch`; use `content_write` only for new notes.
 
 Within the same root session, prefer names for collaboration. For agent-creation tasks, include artifact handoff in the design: coder writes files, then builds an artifact for evaluator/auditor.
 

@@ -5,8 +5,22 @@ use cli::common::{dirs_or_default, mcp_registry_path, Cli, Commands};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The default tokio worker stack (2 MB) is insufficient for this
+    // codebase. The scheduler → notification-pump → router dispatch →
+    // spawn_agent_once → execute_with_history chain is very deep, and the
+    // synchronous C-library calls at the bottom (SQLite query preparation,
+    // libyaml scanning) need headroom. In debug builds the unoptimised
+    // async state-machine poll frames are wide enough that the 2 MB guard
+    // page is hit, producing SIGSEGVs misreported as "stack overflow".
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let log_level = cli.log_level.as_deref().unwrap_or("info");
@@ -135,6 +149,9 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Stop => {
                 cli::gateway::handle_gateway_stop();
             }
+            cli::common::GatewayCommands::Reset { yes, json } => {
+                cli::gateway::handle_gateway_reset(&config_path, *yes, *json).await?;
+            }
             cli::common::GatewayCommands::Preflight { json } => {
                 cli::gateway::handle_gateway_preflight(*json)?;
             }
@@ -147,8 +164,17 @@ async fn main() -> anyhow::Result<()> {
             cli::common::GatewayCommands::Grants { command } => {
                 cli::gateway::handle_gateway_grants(&config_path, command).await?;
             }
+            cli::common::GatewayCommands::ExecCache { command } => {
+                cli::gateway::handle_gateway_exec_cache(&config_path, command).await?;
+            }
             cli::common::GatewayCommands::Interactions { command } => {
                 cli::gateway::handle_gateway_interactions(&config_path, command).await?;
+            }
+            cli::common::GatewayCommands::Pending {
+                root_session,
+                json,
+            } => {
+                cli::gateway::handle_gateway_pending(&config_path, root_session, *json).await?;
             }
             cli::common::GatewayCommands::SystemAgents { command } => {
                 cli::gateway::handle_gateway_system_agents(&config_path, command).await?;
@@ -161,6 +187,12 @@ async fn main() -> anyhow::Result<()> {
             }
             cli::common::GatewayCommands::Wiki { command } => {
                 cli::gateway::handle_gateway_wiki(&config_path, command).await?;
+            }
+            cli::common::GatewayCommands::Escalations { command } => {
+                cli::gateway::handle_gateway_escalations(&config_path, command).await?;
+            }
+            cli::common::GatewayCommands::Workflow { command } => {
+                cli::gateway::handle_gateway_workflow(&config_path, command).await?;
             }
         },
 
@@ -385,6 +417,12 @@ async fn main() -> anyhow::Result<()> {
                     since.as_deref(),
                     *json,
                 )?;
+            }
+            cli::common::TraceCommands::CivicHealth { since, json } => {
+                cli::trace::handle_trace_civic_health(&config_path, since.as_deref(), *json)?;
+            }
+            cli::common::TraceCommands::ForkTree { session_id, json } => {
+                cli::trace::handle_trace_fork_tree(&config_path, session_id, *json)?;
             }
         },
 

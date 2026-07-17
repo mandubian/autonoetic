@@ -95,6 +95,7 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 | `agent.message` | session tracer (LLM completion text) | Normal |
 | `agent.reasoning` | session tracer (extended thinking) | Detail |
 | `operator.message` | router (`event.ingest` chat path) | Normal |
+| `operator.comment` | router (`content.comment`) — operator comment anchored to a live content file | Attention |
 | `user.ask.pending` | `user_ask` tool | Attention |
 | `approval.pending` | human gate | Attention |
 | `approval.{approved,rejected,cancelled}` | approvals store (decision chokepoint) | Normal |
@@ -187,6 +188,18 @@ agents and the gateway, applied to presentation surfaces.
 - **`event.ingest`** (`event_type: "chat"`) — send a free-form message into the
   session; the gateway also writes the `operator.message` timeline row, so both
   sides of the conversation appear.
+- **`content.list`** / **`content.read`** — list the live session content drafts
+  (name → handle + visibility) and read one version's bytes (the content tree
+  pane).
+- **`content.project_live`** — materialize the session's current drafts into a
+  real directory (`sessions/<id>/live/`) the operator can open in an external
+  editor. Read-only snapshot, rebuilt on each call; never feeds back into the
+  store (the live workbench, Tier 1).
+- **`content.comment`** — attach an operator comment to a live content file
+  (anchored to the viewed version handle, optional line hint); writes an
+  `operator.comment` timeline row and delivers the framed comment to the owning
+  agent at its next turn via the `event.ingest` path (comment-only, never mutates
+  agent state). See [operator live file comments](design/operator-live-comments.md).
 
 ### The render core and the `Channel` trait
 

@@ -40,7 +40,7 @@ impl NativeTool for ExecutionSearchTool {
                     },
                     "error_type": {
                         "type": "string",
-                        "enum": ["compilation", "runtime", "permission", "timeout", "validation", "resource", "conflict", "quota_exceeded", "not_found"],
+                        "enum": ["compilation", "runtime", "permission", "timeout", "validation", "resource", "conflict", "quota_exceeded", "not_found", "sandbox_unavailable"],
                         "description": "Filter by error type. Optional."
                     },
                     "command_pattern": {

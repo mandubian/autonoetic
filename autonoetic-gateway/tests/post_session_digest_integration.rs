@@ -31,6 +31,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "digest query test reader".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess { scopes: vec![] }],
         llm_overrides: None,
@@ -60,8 +61,10 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -95,12 +98,15 @@ impl LlmDriver for FixedJsonDigestDriver {
 async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<()> {
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
-    std::fs::create_dir_all(agents_dir.join("digest"))?;
+    std::fs::create_dir_all(agents_dir.join("autonoetic.digest"))?;
     std::fs::write(
-        agents_dir.join("digest/SKILL.md"),
-        include_str!("../../agents/digest/SKILL.md"),
+        agents_dir.join("autonoetic.digest/SKILL.md"),
+        include_str!("../../agents/autonoetic.digest/SKILL.md"),
     )?;
-    std::fs::write(agents_dir.join("digest/runtime.lock"), "dependencies: []\n")?;
+    std::fs::write(
+        agents_dir.join("autonoetic.digest/runtime.lock"),
+        "dependencies: []\n",
+    )?;
 
     let gateway_dir = agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
@@ -183,6 +189,11 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         .memory_get_unrestricted(&ids[0])?
         .expect("memory must exist");
     assert!(m.content.contains("Always test digest"));
+    assert!(
+        m.tags.contains(&"agent:digest.agent".to_string()),
+        "digest memory must be tagged with its source agent: {:?}",
+        m.tags
+    );
     Ok(())
 }
 

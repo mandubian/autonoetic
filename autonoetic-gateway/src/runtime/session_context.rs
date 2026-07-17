@@ -27,6 +27,8 @@ pub struct SessionContext {
     pub last_user_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_assistant_reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_topic: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_facts: Vec<SessionFact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -40,6 +42,7 @@ impl SessionContext {
             updated_at: Utc::now().to_rfc3339(),
             last_user_message: None,
             last_assistant_reply: None,
+            current_topic: None,
             known_facts: Vec::new(),
             open_threads: Vec::new(),
         }
@@ -68,16 +71,42 @@ impl SessionContext {
         Ok(())
     }
 
-    pub fn record_turn(&mut self, user_message: &str, assistant_reply: Option<&str>) {
-        self.last_user_message = normalize_optional(user_message, MAX_MESSAGE_CHARS);
+    pub fn record_turn(
+        &mut self,
+        user_message: &str,
+        assistant_reply: Option<&str>,
+        is_signal_delivered: bool,
+    ) {
+        if !is_signal_delivered {
+            self.last_user_message = normalize_optional(user_message, MAX_MESSAGE_CHARS);
+        }
         self.last_assistant_reply =
             assistant_reply.and_then(|value| normalize_optional(value, MAX_MESSAGE_CHARS));
         self.prune();
     }
 
+    pub fn add_fact(&mut self, fact: SessionFact) {
+        if self
+            .known_facts
+            .iter()
+            .any(|existing| existing.label == fact.label && existing.value == fact.value)
+        {
+            return;
+        }
+        self.known_facts.push(fact);
+        self.prune();
+    }
+
+    pub fn set_current_topic(&mut self, topic: impl Into<String>) {
+        self.current_topic = normalize_optional(topic.into().as_str(), MAX_THREAD_CHARS);
+    }
+
     pub fn render_prompt(&self) -> Option<String> {
         let mut lines = vec!["Session context from prior turns:".to_string()];
 
+        if let Some(current_topic) = &self.current_topic {
+            lines.push(format!("- Current focus: {}", current_topic));
+        }
         if let Some(last_user_message) = &self.last_user_message {
             lines.push(format!("- Last user message: {}", last_user_message));
         }
@@ -120,6 +149,10 @@ impl SessionContext {
             .last_assistant_reply
             .as_deref()
             .and_then(|value| normalize_optional(value, MAX_MESSAGE_CHARS));
+        self.current_topic = self
+            .current_topic
+            .as_deref()
+            .and_then(|value| normalize_optional(value, MAX_THREAD_CHARS));
 
         for fact in &mut self.known_facts {
             fact.label = truncate_chars(&fact.label, MAX_FACT_LABEL_CHARS);
@@ -193,10 +226,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_session_context_signal_skips_user_message() {
+        let mut context = SessionContext::empty("session-1");
+        context.record_turn("real user message", Some("reply one"), false);
+        context.record_turn("gateway signal", Some("reply two"), true);
+
+        assert_eq!(
+            context.last_user_message.as_deref(),
+            Some("real user message")
+        );
+        assert_eq!(context.last_assistant_reply.as_deref(), Some("reply two"));
+    }
+
+    #[test]
+    fn test_session_context_add_fact_dedups_and_caps() {
+        let mut context = SessionContext::empty("session-1");
+        for i in 0..10 {
+            context.add_fact(SessionFact {
+                label: "installed_agent".to_string(),
+                value: format!("agent-{}", i),
+                source: "workflow".to_string(),
+            });
+        }
+        context.add_fact(SessionFact {
+            label: "installed_agent".to_string(),
+            value: "agent-0".to_string(),
+            source: "workflow".to_string(),
+        });
+
+        assert_eq!(context.known_facts.len(), 6);
+        assert_eq!(context.known_facts[0].value, "agent-0");
+        assert!(!context
+            .known_facts
+            .iter()
+            .enumerate()
+            .any(|(idx, f)| idx > 0 && f.value == "agent-0"));
+    }
+
+    #[test]
     fn test_session_context_round_trip() {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let mut context = SessionContext::empty("terminal/session");
-        context.record_turn("hello", Some("hi there"));
+        context.record_turn("hello", Some("hi there"), false);
         context.known_facts.push(SessionFact {
             label: "project".to_string(),
             value: "Atlas".to_string(),
@@ -219,10 +290,12 @@ mod tests {
         assert!(empty.render_prompt().is_none());
 
         let mut populated = SessionContext::empty("session-1");
-        populated.record_turn("remember this", Some("stored"));
+        populated.record_turn("remember this", Some("stored"), false);
+        populated.set_current_topic("fibonacci-next".to_string());
         let prompt = populated
             .render_prompt()
             .expect("prompt should render once context exists");
+        assert!(prompt.contains("Current focus: fibonacci-next"));
         assert!(prompt.contains("Last user message: remember this"));
         assert!(prompt.contains("Last assistant reply: stored"));
     }

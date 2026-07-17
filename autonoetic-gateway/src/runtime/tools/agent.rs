@@ -18,6 +18,19 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+fn target_agent_is_singleton(agents_dir: &Path, agent_id: &str) -> bool {
+    let path = agents_dir.join(agent_id).join("SKILL.md");
+    if !path.exists() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    crate::runtime::parser::SkillParser::parse(&raw)
+        .map(|(m, _)| m.agent.singleton)
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
     agent_id: String,
@@ -53,6 +66,11 @@ struct SpawnAgentArgs {
     /// specific credential_id, overriding runtime.lock resolution for the child.
     #[serde(default)]
     credential_bindings: Vec<autonoetic_types::runtime_lock::LockedCredentialMount>,
+    /// Optional specific revision_id to execute. When provided, the child runs
+    /// from that revision directory directly, bypassing alias resolution.
+    /// Used for smoke-testing Candidate revisions before promotion.
+    #[serde(default)]
+    revision_id: Option<String>,
 }
 
 /// Keeps a workflow task's `updated_at` fresh while synchronous `agent.spawn` blocks.
@@ -178,7 +196,8 @@ the single join already does that."
                             "required": ["service", "credential_id"]
                         },
                         "description": "Bind specific credentials to the child agent. Overrides runtime.lock service-level resolution."
-                    }
+                    },
+                    "revision_id": { "type": "string", "description": "Optional specific revision_id to execute. Bypasses alias resolution and runs the candidate revision directly. Used for smoke-testing before promotion." }
                 },
                 "required": ["agent_id", "message"],
                 "additionalProperties": false
@@ -194,7 +213,7 @@ the single join already does that."
         gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
@@ -392,6 +411,58 @@ the single join already does that."
         )?;
         let workflow_id = workflow.workflow_id.clone();
 
+        // Phase 0 completion guard: do not enqueue new work once the workflow is terminal.
+        // The root planner session is allowed to reactivate a *Completed* workflow so it
+        // can perform follow-up work (e.g. installing and invoking a newly built agent).
+        // Reactivation persists the workflow as Resumable; normal workflow spawn rules
+        // then apply, and try_complete_workflow will re-close it when the root session ends.
+        // NOTE: This check is not atomic with the subsequent save_task_run/enqueue_task.
+        // A narrow TOCTOU window exists if the workflow transitions to terminal between
+        // this check and task enqueue. The impact is bounded: the enqueued task will be
+        // orphaned but the notification pump suppresses its completion signal for the
+        // terminal workflow, so it cannot wake the root session. A fully atomic
+        // check-and-enqueue inside a workflow-store transaction is tracked as a
+        // follow-up (see RFC §4.3).
+        let mut run = crate::scheduler::workflow_store::load_workflow_run(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )?.ok_or_else(|| {
+            anyhow::anyhow!("Workflow '{}' vanished after terminal check", workflow_id)
+        })?;
+        match run.status {
+            autonoetic_types::workflow::WorkflowRunStatus::Completed
+                if resolved_session_id == root =>
+            {
+                tracing::info!(
+                    target: "agent_spawn",
+                    workflow_id = %workflow_id,
+                    root_session_id = %root,
+                    agent_id = %args.agent_id,
+                    "Reactivating completed workflow for root-planner spawn"
+                );
+                run.status = autonoetic_types::workflow::WorkflowRunStatus::Resumable;
+                run.reactivated_for_root_spawn = true;
+                run.updated_at = Utc::now().to_rfc3339();
+                crate::scheduler::workflow_store::save_workflow_run(
+                    gw_config,
+                    gateway_store.as_deref(),
+                    &run,
+                )?;
+            }
+            autonoetic_types::workflow::WorkflowRunStatus::Completed
+            | autonoetic_types::workflow::WorkflowRunStatus::Failed
+            | autonoetic_types::workflow::WorkflowRunStatus::Cancelled
+            | autonoetic_types::workflow::WorkflowRunStatus::EmergencyStopped => {
+                return Err(anyhow::anyhow!(
+                    "Cannot delegate (agent.spawn): workflow {} is already terminal ({}). No new tasks can be spawned.",
+                    workflow_id,
+                    run.status.as_str()
+                ));
+            }
+            _ => {}
+        }
+
         if let Some(gate) = crate::scheduler::workflow_approval_gate_active(
             gw_config,
             gateway_store.as_deref(),
@@ -408,6 +479,46 @@ the single join already does that."
                 gate.awaiting_task_ids.join(", "),
                 approval_ids,
             ));
+        }
+
+        // Mechanical guard: block install spawns while federation gate tasks
+        // are still Running. Prevents the planner from racing ahead to install
+        // before unit_test_runner / sealed_evaluator / auditor finish.
+        let is_install_agent = args.agent_id.contains("agent-factory")
+            || args.agent_id.contains("specialized_builder");
+        if is_install_agent {
+            if let Some(gs) = gateway_store.as_ref() {
+                if let Ok(tasks) = crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                    gw_config,
+                    Some(gs),
+                    &workflow_id,
+                ) {
+                    let federation_agents = [
+                        "unit_test_runner",
+                        "sealed_evaluator",
+                        "static_evaluator",
+                        "auditor",
+                    ];
+                    let active_federation: Vec<&str> = tasks
+                        .iter()
+                        .filter(|t| {
+                            use autonoetic_types::workflow::TaskRunStatus as TRS;
+                            matches!(
+                                t.status,
+                                TRS::Running | TRS::Pending | TRS::Runnable
+                            ) && federation_agents.iter().any(|fa| t.agent_id.contains(fa))
+                        })
+                        .map(|t| t.agent_id.as_str())
+                        .collect();
+                    if !active_federation.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "Cannot spawn '{}' while federation gate tasks are still running: [{}]. Wait for them to complete (workflow_wait) before starting install.",
+                            args.agent_id,
+                            active_federation.join(", ")
+                        ));
+                    }
+                }
+            }
         }
 
         let task_id = crate::scheduler::new_task_id();
@@ -467,6 +578,71 @@ the single join already does that."
             }
         }
 
+        let is_singleton = target_agent_is_singleton(agents_dir, &target_agent_id);
+        let mut acquired_singleton_slot = false;
+        let mut existing_singleton_task_id: Option<String> = None;
+        if is_singleton {
+            if let Some(gs) = gateway_store.as_ref() {
+                match gs.acquire_singleton_slot(
+                    &workflow_id,
+                    &target_agent_id,
+                    args.revision_id.as_deref(),
+                    &task_id,
+                ) {
+                    Ok(Some(existing)) => {
+                        existing_singleton_task_id = Some(existing);
+                    }
+                    Ok(None) => {
+                        acquired_singleton_slot = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "singleton_dedup",
+                            workflow_id = %workflow_id,
+                            agent_id = %target_agent_id,
+                            error = %e,
+                            "failed to acquire singleton slot; proceeding without dedup"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(existing_task_id) = existing_singleton_task_id {
+            crate::scheduler::append_workflow_event(
+                gw_config,
+                gateway_store.as_deref(),
+                &WorkflowEventRecord {
+                    event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    workflow_id: workflow_id.clone(),
+                    task_id: Some(existing_task_id.clone()),
+                    event_type: "workflow.singleton.deduplicated".to_string(),
+                    agent_id: Some(target_agent_id.clone()),
+                    payload: serde_json::json!({
+                        "status": "deduplicated",
+                        "requested_task_id": task_id,
+                        "existing_task_id": existing_task_id,
+                        "agent_id": target_agent_id,
+                        "revision_id": args.revision_id,
+                    }),
+                    occurred_at: Utc::now().to_rfc3339(),
+                },
+            )?;
+
+            return serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "accepted": true,
+                "status": "deduplicated",
+                "singleton": true,
+                "deduplicated": true,
+                "workflow_id": workflow_id,
+                "task_id": existing_task_id,
+                "agent_id": target_agent_id,
+                "message": "Singleton agent already has an active task in this workflow. Returning the existing task."
+            }))
+            .map_err(Into::into);
+        }
+
         let execution_config = GatewayConfig {
             agents_dir: agents_dir.to_path_buf(),
             ..GatewayConfig::default()
@@ -500,9 +676,33 @@ the single join already does that."
             &uuid::Uuid::new_v4().to_string()[..8]
         );
 
+        let spawned_at_turn = turn_id.and_then(crate::runtime::checkpoint::turn_number_from_id);
+
         let ts = Utc::now().to_rfc3339();
         let spawn_reason_preview: String = kickoff_message.chars().take(200).collect();
         let persist_result: anyhow::Result<String> = (|| {
+            // Build a single metadata value that is persisted on the TaskRun and
+            // forwarded to the queued task. This ensures the smoke-test gate can
+            // verify the task after it completes, even when the caller supplied
+            // no metadata or non-object metadata.
+            let mut spawn_metadata = match args.metadata.clone() {
+                Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+                Some(other) => {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("_original_metadata".to_string(), other);
+                    serde_json::Value::Object(obj)
+                }
+                None => serde_json::Value::Object(serde_json::Map::new()),
+            };
+            if let Some(ref rev_id) = args.revision_id {
+                spawn_metadata["_autonoetic_spawn_revision_id"] = serde_json::json!(rev_id);
+            }
+            // Persist the RAW spawn message (before [Context]/[Metadata] framing
+            // is added for the child) so the smoke-test gate can compare the
+            // operator's `smoke_test_input` against what was actually sent,
+            // independent of the presentation-layer wrapping (issue #648).
+            spawn_metadata["_autonoetic_spawn_message"] = serde_json::json!(args.message);
+
             let task = TaskRun {
                 task_id: task_id.clone(),
                 workflow_id: workflow_id.clone(),
@@ -511,17 +711,18 @@ the single join already does that."
                 parent_session_id: resolved_session_id.clone(),
                 status: TaskRunStatus::Running,
                 created_at: ts.clone(),
-                updated_at: ts,
+                updated_at: ts.clone(),
                 source_agent_id: Some(source_agent_id.clone()),
                 result_summary: None,
                 join_group: None,
                 message: Some(kickoff_message.clone()),
-                metadata: args.metadata.clone(),
+                metadata: Some(spawn_metadata.clone()),
                 retry_count: 0,
                 last_failure_class: None,
                 retry_policy: crate::scheduler::workflow_store::retry_policy_from_metadata(
                     args.metadata.as_ref(),
-                ),
+                )
+                .or_else(crate::scheduler::workflow_store::default_child_retry_policy),
                 side_effect_state: None,
                 dedupe_key: durable_operation.as_ref().map(|spec| spec.dedupe_key.clone()),
             };
@@ -539,6 +740,7 @@ the single join already does that."
                         "target_agent_id": target_agent_id,
                         "child_session_id": child_delegation_path,
                         "parent_session_id": resolved_session_id,
+                        "spawned_at_turn": spawned_at_turn,
                         "spawn_reason": spawn_reason_preview,
                         "spawn_reason_full": kickoff_message,
                     }),
@@ -558,6 +760,7 @@ the single join already does that."
                     "child_session_id": child_delegation_path,
                     "parent_session_id": resolved_session_id,
                     "source_agent_id": source_agent_id,
+                    "spawned_at_turn": spawned_at_turn,
                 }),
             );
 
@@ -584,6 +787,25 @@ the single join already does that."
                 }
             }
 
+            if let (Some(gs), Some(turn)) = (gateway_store.as_deref(), spawned_at_turn) {
+                if let Err(e) = gs.upsert_session_spawn_lineage(
+                    &child_delegation_path,
+                    &resolved_session_id,
+                    root,
+                    turn,
+                    &target_agent_id,
+                    &ts,
+                ) {
+                    tracing::warn!(
+                        target: "session_spawn_lineage",
+                        error = %e,
+                        child_session_id = %child_delegation_path,
+                        spawned_at_turn = turn,
+                        "Failed to record spawn lineage for child session"
+                    );
+                }
+            }
+
             // --- Always queue the task (async execution by the scheduler) ---
             // The sync `block_in_place` path was removed because it deadlocks the
             // tokio runtime when called from within an already-running agent context.
@@ -597,7 +819,7 @@ the single join already does that."
                 child_session_id: child_delegation_path.clone(),
                 parent_session_id: resolved_session_id.clone(),
                 source_agent_id: source_agent_id.clone(),
-                metadata: args.metadata.clone(),
+                metadata: Some(spawn_metadata),
                 join_group: args.join_group,
                 blocks_planner: true,
                 enqueued_at: Utc::now().to_rfc3339(),
@@ -616,7 +838,7 @@ the single join already does that."
                 None,
             );
 
-            serde_json::to_string(&serde_json::json!({
+            let mut resp = serde_json::json!({
                 "ok": true,
                 "accepted": true,
                 "status": "queued",
@@ -625,7 +847,12 @@ the single join already does that."
                 "agent_id": target_agent_id,
                 "session_id": child_delegation_path,
                 "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
-            }))
+            });
+            if let Some(rev_id) = args.revision_id {
+                resp["revision_id"] = serde_json::json!(rev_id);
+                resp["smoke_test"] = serde_json::json!(true);
+            }
+            serde_json::to_string(&resp)
             .map_err(Into::into)
         })();
 
@@ -636,6 +863,11 @@ the single join already does that."
                     &workflow_id,
                     &spec.dedupe_key,
                 );
+            }
+            if acquired_singleton_slot {
+                if let Some(gs) = gateway_store.as_ref() {
+                    let _ = gs.release_singleton_slot_by_task_id(&workflow_id, &task_id);
+                }
             }
         }
         return persist_result;
@@ -1142,10 +1374,47 @@ impl NativeTool for AgentMessageTool {
             .any(|cap| matches!(cap, Capability::AgentMessage { .. }))
     }
 
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        vec![
+            GuidanceBlock {
+                id: "agent_message.send",
+                when: GuidanceCondition::Capability("agent_message"),
+                priority: 7,
+                prose: "**Inter-agent messaging (`agent_message`):** Use `agent_message` for \
+asynchronous fire-and-forget communication — progress updates, findings, divergence reports, or \
+notifications that don't need a synchronous reply. Unlike `agent_spawn`, this does NOT create a \
+child session or expect a completed-task wake-up; the receiver finds the message as a \
+`[Direct Message from Agent '<sender>' (Session: <sender_session>)]` user-text block at the \
+start of their next turn.\n\n\
+Choose `target_agent_id` to broadcast to all active sessions of that role, or \
+`target_session_id` to reach a specific session. After sending, validate the result: success only \
+when `ok == true`, `status == \"delivered\"`, and `recipients_count > 0`. A status of \
+`no_live_recipients` means the target agent has no active sessions — the message was NOT sent; a \
+status of `target_agent_not_found` means no agent with that id is installed."
+                    .to_string(),
+            },
+            GuidanceBlock {
+                id: "agent_message.receive",
+                when: GuidanceCondition::Capability("agent_message"),
+                priority: 6,
+                prose: "**Receiving agent messages:** Messages from other agents arrive at the \
+start of your turn as a user-text block: \
+`[Direct Message from Agent '<sender>' (Session: <sender_session>)]` followed by the message \
+content on a new line.\n\n\
+Treat these as asynchronous input from a peer agent. Process the content and correlate it with \
+your active goals or workflow state. If a response is needed, use `agent_message` back to the \
+sender's `agent_id` or `session_id`. Do not ignore or discard incoming messages — they carry \
+important signals (progress reports, divergence findings, status updates from spawned agents)."
+                    .to_string(),
+            },
+        ]
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Send a direct asynchronous message to another active agent session or broadcast to all sessions of a specific agent role.".to_string(),
+            description: "Send a direct asynchronous message to another active agent session or broadcast to all sessions of a specific agent role. At least one of target_session_id or target_agent_id must be provided; the gateway validates this at execution time.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1153,11 +1422,7 @@ impl NativeTool for AgentMessageTool {
                     "target_agent_id": { "type": "string", "description": "Agent role to message. Broadcasts to all active sessions for this role if target_session_id is absent." },
                     "message": { "type": "string", "description": "The message to send." }
                 },
-                "required": ["message"],
-                "anyOf": [
-                    { "required": ["target_session_id"] },
-                    { "required": ["target_agent_id"] }
-                ]
+                "required": ["message"]
             }),
         }
     }

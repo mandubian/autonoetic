@@ -56,7 +56,16 @@ Gateway (High Privilege)
 | **Researcher** | Gathers evidence, cites sources |
 | **Architect** | Defines structure, interfaces, trade-offs |
 | **Executor** | Runs quick deterministic tasks |
-| **Evaluator** | Validates behavior in sealed sandbox |
+| **Static Evaluator** | Static code review, credential flow, behavioral contracts |
+| **Unit Test Runner** | Runs artifact test suites in no-network sandbox |
+| **Sealed Evaluator** | Validates behavior in sealed sandbox |
 | **Auditor** | Checks security, governance, reproducibility |
 | **Debugger** | Isolates root causes, proposes fixes |
 | **Packager** | Resolves and packages dependencies |
+| **Registrar** | Onboards services via `credential_setup` |
+| **Discovery** | Finds installed non-foundational agents matching a task intent |
+| **specialized_builder** | Installs new durable agents |
+| **agent-factory** | Builds new agents end-to-end |
+| **agent-adapter** | Generates wrapper agents for I/O gaps |
+| **memory-curator** | Distills durable learnings |
+| **evolution-steward** | Decides skill promotion |

@@ -248,6 +248,27 @@ pub trait NativeTool: Send + Sync {
     }
 }
 
+/// Check if a tool name matches any exclusion pattern from the agent manifest.
+/// Patterns support glob wildcards (`*` and `?`) via simple prefix/suffix matching.
+pub(crate) fn is_tool_excluded_public(tool_name: &str, manifest: &AgentManifest) -> bool {
+    is_tool_excluded(tool_name, manifest)
+}
+
+fn is_tool_excluded(tool_name: &str, manifest: &AgentManifest) -> bool {
+    if manifest.excluded_tools.is_empty() {
+        return false;
+    }
+    manifest.excluded_tools.iter().any(|pattern| {
+        if pattern == tool_name {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return tool_name.starts_with(prefix);
+        }
+        false
+    })
+}
+
 pub struct NativeToolRegistry {
     tools: Vec<Box<dyn NativeTool>>,
 }
@@ -265,12 +286,29 @@ impl NativeToolRegistry {
         self.tools
             .iter()
             .filter(|t| t.is_available(manifest))
+            .filter(|t| !is_tool_excluded(t.name(), manifest))
             .map(|t| with_intent_schema(t.definition()))
             .collect()
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)
+    }
+
+    pub fn registered_tool_names(&self) -> std::collections::HashSet<String> {
+        self.tools.iter().map(|tool| tool.name().to_string()).collect()
+    }
+
+    pub fn available_tool_names(
+        &self,
+        manifest: &AgentManifest,
+    ) -> std::collections::HashSet<String> {
+        self.tools
+            .iter()
+            .filter(|tool| tool.is_available(manifest))
+            .filter(|tool| !is_tool_excluded(tool.name(), manifest))
+            .map(|tool| tool.name().to_string())
+            .collect()
     }
 
     /// Collect tool definitions with tier-based filtering based on workflow context.
@@ -283,6 +321,7 @@ impl NativeToolRegistry {
         self.tools
             .iter()
             .filter(|t| t.is_available(manifest))
+            .filter(|t| !is_tool_excluded(t.name(), manifest))
             .filter(|t| {
                 filter
                     .map(|f| f.allows_tool(t.name(), t.tier()))
@@ -304,7 +343,10 @@ impl NativeToolRegistry {
     ) -> Vec<crate::runtime::guidance::GuidanceBlock> {
         let mut blocks = Vec::new();
         for tool in &self.tools {
-            if tool.is_available(manifest) && filter.allows_tool(tool.name(), tool.tier()) {
+            if tool.is_available(manifest)
+                && !is_tool_excluded(tool.name(), manifest)
+                && filter.allows_tool(tool.name(), tool.tier())
+            {
                 blocks.extend(tool.guidance());
             }
         }
@@ -374,6 +416,12 @@ fn with_intent_schema(mut definition: ToolDefinition) -> ToolDefinition {
         return definition;
     };
 
+    // Tool parameter schemas must declare `type: object`. Some providers
+    // (Moonshot/Kimi Code) reject requests where this is missing.
+    if !schema.contains_key("type") {
+        schema.insert("type".to_string(), json!("object"));
+    }
+
     let properties = schema.entry("properties").or_insert_with(|| json!({}));
     let Some(properties_map) = properties.as_object_mut() else {
         return definition;
@@ -422,6 +470,13 @@ pub(crate) fn validate_agent_id(agent_id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !agent_id.starts_with('.') && !agent_id.ends_with('.') && !agent_id.contains(".."),
         "agent_id must not start or end with '.', or contain '..'"
+    );
+    // Reserved for synthetic gateway identities (e.g. the scheduler's
+    // `gateway.auto-learning` cron owner, which is treated as gateway-initiated
+    // at spawn time). An installed agent with this prefix could impersonate them.
+    anyhow::ensure!(
+        !agent_id.starts_with("gateway."),
+        "the 'gateway.' agent_id namespace is reserved for the gateway itself"
     );
     anyhow::ensure!(
         agent_id
@@ -621,6 +676,7 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage".to_string(),
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
         Capability::CodeExecution { .. } => "CodeExecution".to_string(),
+        Capability::ArtifactExecution => "ArtifactExecution".to_string(),
         Capability::EmergencyStop => "EmergencyStop".to_string(),
         Capability::AgentRevision { .. } => "AgentRevision".to_string(),
         Capability::Evaluation { .. } => "Evaluation".to_string(),
@@ -638,8 +694,11 @@ pub(crate) fn capability_type_name(cap: &Capability) -> String {
         Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
         Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
         Capability::CapsuleExport => "CapsuleExport".to_string(),
+        Capability::SelfCapsuleExport => "SelfCapsuleExport".to_string(),
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
         Capability::WikiContribute => "WikiContribute".to_string(),
+        Capability::PromoteWith { .. } => "PromoteWith".to_string(),
+        Capability::GateDecider { .. } => "GateDecider".to_string(),
     }
 }
 
@@ -775,7 +834,16 @@ where
     match value {
         serde_json::Value::String(s) => Ok(s),
         serde_json::Value::Null => Err(Error::custom("expected string, got null")),
-        other => Ok(other.to_string()),
+        other => {
+            // Tolerance is observable, never silent (M1 doctrine, #619): a model
+            // passed a non-string JSON scalar where a string was expected and we
+            // coerced it. Route through the shared chokepoint.
+            crate::runtime::tool_call_processor::note_llm_normalization(
+                "lenient_string_coercion",
+                "coerced non-string JSON scalar to string",
+            );
+            Ok(other.to_string())
+        }
     }
 }
 
@@ -789,7 +857,15 @@ where
     Ok(match value {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s),
-        other => Some(other.to_string()),
+        other => {
+            // Observable tolerance (M1 doctrine, #619): coerced a non-string JSON
+            // scalar to its string form rather than silently accepting the quirk.
+            crate::runtime::tool_call_processor::note_llm_normalization(
+                "lenient_string_coercion",
+                "coerced non-string JSON scalar to string",
+            );
+            Some(other.to_string())
+        }
     })
 }
 
@@ -1017,6 +1093,7 @@ pub(crate) fn dependency_plan_from_lock(
 pub mod admin_proposal;
 
 pub mod agent;
+pub mod anomaly_flag;
 pub mod agent_revision;
 pub mod approval;
 pub mod artifact;
@@ -1090,7 +1167,6 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::artifact_exec::register_tools(&mut registry);
     crate::runtime::tools::artifact_prepare::register_tools(&mut registry);
     crate::runtime::tools::knowledge::register_tools(&mut registry);
-    crate::runtime::tools::agent::register_tools(&mut registry);
     crate::runtime::tools::sandbox::register_tools(&mut registry);
     crate::runtime::tools::workflow::register_tools(&mut registry);
     crate::runtime::tools::user_interaction::register_tools(&mut registry);
@@ -1109,6 +1185,7 @@ pub fn default_registry() -> NativeToolRegistry {
     crate::runtime::tools::capsule::register_tools(&mut registry);
     crate::runtime::tools::self_describe::register_tools(&mut registry);
     crate::runtime::tools::constitution::register_tools(&mut registry);
+    crate::runtime::tools::anomaly_flag::register_tools(&mut registry);
     crate::runtime::tools::security_redteam::register_tools(&mut registry);
     crate::runtime::tools::sentinel::register_tools(&mut registry);
     crate::runtime::tools::tool_discover::register_tools(&mut registry);
@@ -1197,6 +1274,239 @@ mod tests {
         assert!(!filter.allows("agent_spawn"));
     }
 
+    fn manifest_with_capabilities(
+        agent_id: &str,
+        capabilities: Vec<Capability>,
+    ) -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: agent_id.to_string(),
+                name: agent_id.to_string(),
+                description: "test".to_string(),
+            singleton: false,
+        },
+            capabilities,
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn execution_capabilities_expose_disjoint_native_tools() {
+        let registry = default_registry();
+        let shell_manifest = manifest_with_capabilities(
+            "shell-only",
+            vec![Capability::CodeExecution {
+                patterns: vec!["python3 ".to_string()],
+                commands: vec![],
+            }],
+        );
+        let artifact_manifest = manifest_with_capabilities(
+            "artifact-only",
+            vec![Capability::ArtifactExecution],
+        );
+
+        let shell_names = registry.available_tool_names(&shell_manifest);
+        assert!(shell_names.contains("sandbox_exec"));
+        assert!(!shell_names.contains("artifact_exec"));
+        assert!(!shell_names.contains("artifact_prepare"));
+
+        let artifact_names = registry.available_tool_names(&artifact_manifest);
+        assert!(!artifact_names.contains("sandbox_exec"));
+        assert!(artifact_names.contains("artifact_exec"));
+        assert!(artifact_names.contains("artifact_prepare"));
+    }
+
+    #[test]
+    fn test_planner_collaborative_sees_install_tools() {
+        use autonoetic_types::capability::Capability;
+        use crate::llm::openai::sanitize_schema_for_strict_anyof;
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "planner.collaborative",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "agent_".to_string(), "credential_".to_string()],
+                },
+                Capability::AgentSpawn { max_children: 10, max_spawn_depth: 0 },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+            ],
+        );
+        let defs = registry.available_definitions(&manifest);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        // Planner delegates creation/promotion to agent-factory/specialized_builder,
+        // so it only needs spawn and schema/artifact tools.
+        assert!(names.contains(&"agent_spawn"), "planner must see agent_spawn; got {:?}", names);
+        assert!(names.contains(&"agent_revision_schema"), "planner must see agent_revision_schema; got {:?}", names);
+        assert!(names.contains(&"artifact_build"), "planner must see artifact_build; got {:?}", names);
+
+        for def in &defs {
+            let sanitized = sanitize_schema_for_strict_anyof(&def.input_schema);
+            let obj = sanitized.as_object().expect("schema must be an object");
+            assert!(
+                obj.contains_key("type"),
+                "schema for {} must have a top-level type after Kimi sanitization",
+                def.name
+            );
+            assert_eq!(
+                obj["type"], "object",
+                "schema for {} must have type: object after Kimi sanitization",
+                def.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_static_evaluator_sees_promotion_record_and_schemas_are_valid() {
+        use autonoetic_types::capability::Capability;
+        use crate::llm::openai::sanitize_schema_for_strict_anyof;
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "static_evaluator.default",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string()],
+                },
+            ],
+        );
+        let defs = registry.available_definitions(&manifest);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"promotion_record"),
+            "static_evaluator must see promotion_record; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"resolve"),
+            "static_evaluator must see resolve; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"artifact_inspect"),
+            "static_evaluator must see artifact_inspect; got {:?}",
+            names
+        );
+
+        // Every parameters schema must declare type: object (Kimi Code rejects
+        // schemas missing the top-level type), and must remain valid after the
+        // Moonshot/Kimi Code anyOf/oneOf sanitizer runs.
+        for def in &defs {
+            let sanitized = sanitize_schema_for_strict_anyof(&def.input_schema);
+            let obj = sanitized.as_object().expect("schema must be an object");
+            assert!(
+                obj.contains_key("type"),
+                "schema for {} must have a top-level type after Kimi sanitization",
+                def.name
+            );
+            assert_eq!(
+                obj["type"], "object",
+                "schema for {} must have type: object after Kimi sanitization",
+                def.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_specialized_builder_sees_revision_tools_and_network_access_capability() {
+        use autonoetic_types::capability::Capability;
+        use crate::llm::openai::sanitize_schema_for_strict_anyof;
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities(
+            "specialized_builder.default",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "agent_".to_string()],
+                },
+                Capability::AgentRevision { patterns: vec![] },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string(), "agents/*".to_string()],
+                },
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string(), "skills/*".to_string(), "agents/*".to_string()],
+                },
+            ],
+        );
+        let defs = registry.available_definitions(&manifest);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"agent_revision_create_from_intent"),
+            "specialized_builder must see agent_revision_create_from_intent; got {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"agent_revision_promote"),
+            "specialized_builder must see agent_revision_promote; got {:?}",
+            names
+        );
+
+        // Verify the install tool's capability schema still advertises NetworkAccess
+        // after the Kimi/Moonshot sanitizer runs, so the model knows it can (and must)
+        // declare NetworkAccess for agents that contact remote hosts.
+        let create_def = defs
+            .iter()
+            .find(|d| d.name == "agent_revision_create_from_intent")
+            .expect("create_from_intent definition found");
+        let sanitized = sanitize_schema_for_strict_anyof(&create_def.input_schema);
+        let defs_node = &sanitized["$defs"]["Capability"];
+        let branches = defs_node["oneOf"]
+            .as_array()
+            .or_else(|| defs_node["anyOf"].as_array())
+            .expect("Capability schema must use oneOf/anyOf branches after sanitization");
+        let has_network_access = branches.iter().any(|b| {
+            b["properties"]["type"]["const"]
+                .as_str()
+                .map(|t| t == "NetworkAccess")
+                .unwrap_or(false)
+        });
+        assert!(
+            has_network_access,
+            "agent_revision_create_from_intent capability schema must advertise NetworkAccess after Kimi sanitization"
+        );
+
+        // The schema must remain a valid object-schema at the top level.
+        assert_eq!(
+            sanitized["type"], "object",
+            "create_from_intent schema must keep type: object after Kimi sanitization"
+        );
+    }
+
     #[test]
     fn test_available_definitions_filtered_no_filter_equals_all() {
         let registry = default_registry();
@@ -1214,7 +1524,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -1230,8 +1541,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let unfiltered = registry.available_definitions(&manifest);
@@ -1256,7 +1569,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -1272,8 +1586,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let filter = ToolTierFilter::core_only();
@@ -1387,7 +1703,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -1403,8 +1720,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1435,7 +1754,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -1451,8 +1771,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         };
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1502,6 +1824,24 @@ mod tests {
         }
         let args: Args = serde_json::from_str(r#"{"message": 42}"#).unwrap();
         assert_eq!(args.message, "42");
+    }
+
+    #[test]
+    fn test_deserialize_opt_string_lenient_coerces_and_preserves() {
+        #[derive(Deserialize)]
+        struct Args {
+            #[serde(default, deserialize_with = "deserialize_opt_string_lenient")]
+            note: Option<String>,
+        }
+        // Non-string scalar is coerced (instrumented through note_llm_normalization).
+        let coerced: Args = serde_json::from_str(r#"{"note": true}"#).unwrap();
+        assert_eq!(coerced.note.as_deref(), Some("true"));
+        // Plain string is preserved verbatim (no coercion).
+        let plain: Args = serde_json::from_str(r#"{"note": "hi"}"#).unwrap();
+        assert_eq!(plain.note.as_deref(), Some("hi"));
+        // Null maps to None.
+        let null: Args = serde_json::from_str(r#"{"note": null}"#).unwrap();
+        assert_eq!(null.note, None);
     }
 
     #[test]

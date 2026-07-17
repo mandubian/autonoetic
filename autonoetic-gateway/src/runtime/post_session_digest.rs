@@ -18,6 +18,9 @@ pub const POST_SESSION_NARRATIVE_CONTENT_NAME: &str = "post_session_narrative.md
 /// Writer agent id for provenance on extracted memories.
 pub const DIGEST_AGENT_ID: &str = "autonoetic.digest";
 
+/// Bundled prompt for the gateway-internal digest LLM (see `agents/autonoetic.digest/SKILL.md`).
+const EMBEDDED_DIGEST_SKILL: &str = include_str!("../../../agents/autonoetic.digest/SKILL.md");
+
 #[derive(Debug, Deserialize)]
 struct DigestMemoryItem {
     #[serde(rename = "type")]
@@ -37,10 +40,72 @@ struct DigestLlmOutput {
 }
 
 pub fn load_digest_skill_body(agents_dir: &Path) -> anyhow::Result<String> {
-    let path = agents_dir.join("digest").join("SKILL.md");
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("post-session digest requires {}: {}", path.display(), e))?;
+    let path = agents_dir.join("autonoetic.digest").join("SKILL.md");
+    let raw = if path.is_file() {
+        std::fs::read_to_string(&path).map_err(|e| {
+            anyhow::anyhow!("post-session digest could not read {}: {}", path.display(), e)
+        })?
+    } else {
+        EMBEDDED_DIGEST_SKILL.to_string()
+    };
     Ok(strip_markdown_frontmatter(&raw))
+}
+
+/// Parse digest JSON with a lenient fallback for common LLM output issues
+/// (unescaped newlines/control characters in string values).
+fn parse_digest_json(json_slice: &str) -> anyhow::Result<DigestLlmOutput> {
+    serde_json::from_str::<DigestLlmOutput>(json_slice)
+        .or_else(|_| serde_json::from_str(&repair_json_string_control_chars(json_slice)))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Escape raw control characters that appear inside JSON string values.
+///
+/// LLMs frequently emit literal newlines/tabs/control characters inside
+/// quoted strings instead of the JSON-required `\n`, `\t`, etc. This walks
+/// the text, tracks whether it is inside a string, and escapes only the
+/// control characters that are bare inside string values, leaving already
+/// escaped sequences and structural whitespace untouched.
+fn repair_json_string_control_chars(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for c in json.chars() {
+        if !in_string {
+            out.push(c);
+            if c == '"' {
+                in_string = true;
+            }
+            continue;
+        }
+
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+
+        match c {
+            '\\' => {
+                escaped = true;
+                out.push(c);
+            }
+            '"' => {
+                in_string = false;
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            _ => out.push(c),
+        }
+    }
+
+    out
 }
 
 fn strip_markdown_frontmatter(raw: &str) -> String {
@@ -193,6 +258,9 @@ async fn apply_digest_output(
         let mut tags = m.tags.clone();
         tags.push("source:post_session_digest".to_string());
         tags.push(format!("session:{base}"));
+        // Without this, agent-scoped recall queries (context.rs) can only find
+        // this agent's own digests via the global fallback, not the scoped tag.
+        tags.push(format!("agent:{source_agent_id}"));
 
         let memory_id = digest_memory_id(base, session_id, idx, &m.content);
         let mut obj = MemoryObject::new(
@@ -351,7 +419,15 @@ async fn run_post_session_digest_inner(
         anyhow::bail!("digest LLM must return JSON text only, not tool calls");
     }
     let json_slice = extract_json_object_slice(&resp.text)?;
-    let output: DigestLlmOutput = serde_json::from_str(json_slice)?;
+    let output: DigestLlmOutput = parse_digest_json(json_slice)
+        .map_err(|e| {
+            let preview: String = json_slice.chars().take(500).collect();
+            anyhow::anyhow!(
+                "digest LLM JSON parse error: {} (preview: {}...)",
+                e,
+                preview
+            )
+        })?;
     let sqlite_store = crate::runtime::memory::SqliteMemoryStore::new(store.clone());
     apply_digest_output(
         gateway_dir,
@@ -473,5 +549,64 @@ mod tests {
     fn strip_frontmatter_basic() {
         let raw = "---\na: b\n---\n\nHello **body**";
         assert_eq!(strip_markdown_frontmatter(raw), "Hello **body**");
+    }
+
+    #[test]
+    fn load_digest_skill_body_falls_back_to_embedded_prompt() {
+        let body = load_digest_skill_body(Path::new("/nonexistent/agents")).unwrap();
+        assert!(
+            body.contains("post-session digest"),
+            "expected embedded digest prompt, got: {body}"
+        );
+    }
+
+    #[test]
+    fn parse_digest_json_accepts_clean_json() {
+        let json = r#"{"narrative": "hello", "memories": []}"#;
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "hello");
+        assert!(out.memories.is_empty());
+    }
+
+    #[test]
+    fn parse_digest_json_repairs_unescaped_newline_in_string() {
+        let json = "{\"narrative\": \"line1\nline2\", \"memories\": []}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "line1\nline2");
+    }
+
+    #[test]
+    fn parse_digest_json_repairs_unescaped_tab_and_return_in_string() {
+        let json = "{\"narrative\": \"a\tb\rc\", \"memories\": []}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "a\tb\rc");
+    }
+
+    #[test]
+    fn parse_digest_json_preserves_already_escaped_sequences() {
+        let json = r#"{"narrative": "escaped \\n and \"quoted\"", "memories": []}"#;
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "escaped \\n and \"quoted\"");
+    }
+
+    #[test]
+    fn parse_digest_json_preserves_structural_whitespace_outside_strings() {
+        let json = "{\n  \"narrative\": \"ok\",\n  \"memories\": []\n}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "ok");
+    }
+
+    #[test]
+    fn parse_digest_json_repairs_other_control_chars_in_string() {
+        // ASCII 0x07 (BELL) inside a string value.
+        let json = "{\"narrative\": \"beep\u{0007}done\", \"memories\": []}";
+        let out = parse_digest_json(json).unwrap();
+        assert_eq!(out.narrative, "beep\u{0007}done");
+    }
+
+    #[test]
+    fn parse_digest_json_returns_error_for_truly_broken_input() {
+        let json = "{\"narrative\": \"unclosed string, \"memories\": []}";
+        assert!(parse_digest_json(json).is_err());
     }
 }

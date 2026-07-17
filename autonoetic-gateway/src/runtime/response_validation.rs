@@ -6,6 +6,7 @@
 use autonoetic_types::agent::{IoReturnsEnforcement, OutputPolicy};
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::trajectory::FeedbackEvent;
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::path::Path;
@@ -32,6 +33,255 @@ impl std::fmt::Display for ValidationViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.rule, self.message)
     }
+}
+
+/// Order-independent fingerprint of a violation set (`(rule, message)` pairs,
+/// sorted). Two repair attempts that produce the same fingerprint made no
+/// progress — the same content failed the same way — so retrying is wasteful.
+fn violation_fingerprint(violations: &[ValidationViolation]) -> Vec<(String, String)> {
+    let mut fp: Vec<(String, String)> = violations
+        .iter()
+        .map(|v| (v.rule.clone(), v.message.clone()))
+        .collect();
+    fp.sort();
+    fp
+}
+
+/// Convert validation violations into feedback events for the trajectory monitor.
+pub fn violations_to_feedback_events(violations: &[ValidationViolation]) -> Vec<FeedbackEvent> {
+    violations
+        .iter()
+        .map(|v| FeedbackEvent::Validation {
+            rule: v.rule.clone(),
+            field_path: None,
+        })
+        .collect()
+}
+
+/// Kinds of self-report claims an agent reply can make. Each variant maps to a
+/// deterministic verifier that reconciles the claim against observable gateway
+/// state. New fabrication modes become one enum variant instead of a new
+/// hand-written guard (Change A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimKind {
+    /// `status == "delegated"` asserts a child TaskRun was spawned.
+    Delegated,
+    /// `plan_id` mentioned anywhere in the reply asserts a PlanFrame exists.
+    PlanId,
+    /// `promotion_record` claim asserts a matching evaluator/auditor trace exists.
+    PromotionVerdict,
+    /// `artifact_ref` cited in the reply asserts the artifact store contains it.
+    ArtifactBuilt,
+    /// Declared capability envelope (e.g. NetworkAccess hosts) must match
+    /// detected authority-op patterns.
+    CapabilityEnvelope,
+}
+
+/// Result of reconciling one claim kind against gateway state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimVerdict {
+    /// Claim is present and checks out against observable state.
+    Ok,
+    /// Claim is absent from the reply or the gateway cannot verify it right now.
+    Unverified,
+    /// Claim is present and demonstrably false.
+    Fabricated(String),
+}
+
+/// Context needed to verify any claim kind.
+pub struct ClaimCtx<'a> {
+    pub assistant_reply: Option<&'a str>,
+    pub workflow_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub gateway_store: Option<&'a crate::scheduler::gateway_store::GatewayStore>,
+    pub config: Option<&'a GatewayConfig>,
+    pub agent_id: &'a str,
+    pub session_id: &'a str,
+    pub gateway_dir: &'a Path,
+    pub agent_is_spawn_capable: bool,
+}
+
+impl ClaimKind {
+    /// All claim kinds the validator walks over. Keeping this list closed makes
+    /// "every claimable field has a verifier" statically checkable.
+    pub fn all() -> &'static [ClaimKind] {
+        &[
+            ClaimKind::Delegated,
+            ClaimKind::PlanId,
+            ClaimKind::PromotionVerdict,
+            ClaimKind::ArtifactBuilt,
+            ClaimKind::CapabilityEnvelope,
+        ]
+    }
+
+    /// Human-readable path to the claim in the reply.
+    pub fn field_path(&self) -> &'static str {
+        match self {
+            ClaimKind::Delegated => "status",
+            ClaimKind::PlanId => "plan_id",
+            ClaimKind::PromotionVerdict => "promotion_record",
+            ClaimKind::ArtifactBuilt => "artifact_ref",
+            ClaimKind::CapabilityEnvelope => "capability_envelope",
+        }
+    }
+
+    /// Reconcile this claim kind against the provided context.
+    pub fn verify(&self, ctx: &ClaimCtx) -> ClaimVerdict {
+        match self {
+            ClaimKind::Delegated => verify_delegated_claim(ctx),
+            ClaimKind::PlanId => verify_plan_id_claim(ctx),
+            // Remaining variants are future scope; their fields are not yet
+            // mechanically reconciled here, so report Unverified rather than
+            // Fabricated.
+            ClaimKind::PromotionVerdict => ClaimVerdict::Unverified,
+            ClaimKind::ArtifactBuilt => ClaimVerdict::Unverified,
+            ClaimKind::CapabilityEnvelope => ClaimVerdict::Unverified,
+        }
+    }
+}
+
+/// Convert a fabricated verdict into the corresponding validation violation.
+fn claim_verdict_to_violation(kind: ClaimKind, verdict: ClaimVerdict) -> Option<ValidationViolation> {
+    match (kind, verdict) {
+        (_, ClaimVerdict::Ok | ClaimVerdict::Unverified) => None,
+        (ClaimKind::Delegated, ClaimVerdict::Fabricated(_)) => {
+            Some(delegated_without_spawn_violation())
+        }
+        (ClaimKind::PlanId, ClaimVerdict::Fabricated(plan_id)) => {
+            Some(fabricated_plan_id_violation(&plan_id))
+        }
+        // Future claim kinds: map to their violation constructors here.
+        (kind, ClaimVerdict::Fabricated(detail)) => Some(ValidationViolation {
+            rule: format!("{:?}", kind).to_lowercase(),
+            message: detail,
+            repair_hint: "Reconcile this claim against observable state.".into(),
+        }),
+    }
+}
+
+fn verify_delegated_claim(ctx: &ClaimCtx) -> ClaimVerdict {
+    if !ctx.agent_is_spawn_capable || !reply_is_delegated(ctx.assistant_reply) {
+        return ClaimVerdict::Unverified;
+    }
+    let spawned = match ctx.workflow_id {
+        None => Some(false),
+        Some(wid) => match ctx.config {
+            None => None,
+            Some(cfg) => match crate::scheduler::workflow_store::list_task_runs_for_workflow(
+                cfg,
+                ctx.gateway_store,
+                wid,
+            ) {
+                Ok(tasks) => Some(tasks.iter().any(|t| Some(t.task_id.as_str()) != ctx.task_id)),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "response_validation",
+                        workflow_id = %wid,
+                        error = %e,
+                        "delegated-spawn claim: task listing failed; treating as unverified"
+                    );
+                    None
+                }
+            },
+        },
+    };
+    match spawned {
+        Some(true) => ClaimVerdict::Ok,
+        Some(false) => ClaimVerdict::Fabricated(
+            "reported status \"delegated\" but no child agent was spawned this turn".into(),
+        ),
+        None => ClaimVerdict::Unverified,
+    }
+}
+
+fn verify_plan_id_claim(ctx: &ClaimCtx) -> ClaimVerdict {
+    let Some(claimed) = reply_claimed_plan_id(ctx.assistant_reply) else {
+        return ClaimVerdict::Unverified;
+    };
+    let Some(store) = ctx.gateway_store else {
+        return ClaimVerdict::Unverified;
+    };
+    match store.load_plan_frame(&claimed) {
+        Ok(Some(_)) => ClaimVerdict::Ok,
+        Ok(None) => ClaimVerdict::Fabricated(claimed),
+        Err(e) => {
+            tracing::warn!(
+                target: "response_validation",
+                plan_id = %claimed,
+                error = %e,
+                "plan-id claim: load failed; treating as unverified"
+            );
+            ClaimVerdict::Unverified
+        }
+    }
+}
+
+/// Reconcile all claims found in a reply and return any violations.
+pub fn reconcile_claims(ctx: &ClaimCtx) -> Vec<ValidationViolation> {
+    let mut violations = Vec::new();
+    for &kind in ClaimKind::all() {
+        if let Some(v) = claim_verdict_to_violation(kind, kind.verify(ctx)) {
+            violations.push(v);
+        }
+    }
+    violations
+}
+
+/// RFC C — advisory claim reconciliation on the child→parent result path.
+///
+/// The child's full `SpawnResult` is already validated against `io.returns`
+/// before the task is marked complete. This pass is an additional, advisory
+/// reconciliation of the *result summary* that crosses back to the parent via
+/// `workflow.state` / `workflow.wait` / child-state notifications. Mismatches
+/// are logged but never block — the goal is to surface upstream fabrication
+/// early for the classifier while the corpus test (§5.3) measures the false-
+/// positive rate.
+pub fn advisory_reconcile_child_result_summary(
+    result_summary: Option<&str>,
+    child_session_id: &str,
+    parent_session_id: &str,
+    child_agent_id: &str,
+    gateway_dir: &Path,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    config: Option<&GatewayConfig>,
+) -> Vec<ValidationViolation> {
+    let Some(summary) = result_summary else {
+        return Vec::new();
+    };
+    // Fabricated claims can only be detected when the summary carries
+    // structured references. Empty or trivial summaries are unverifiable.
+    if summary.trim().is_empty() || summary.len() < 8 {
+        return Vec::new();
+    }
+
+    let ctx = ClaimCtx {
+        assistant_reply: Some(summary),
+        workflow_id: None,
+        task_id: None,
+        gateway_store,
+        config,
+        agent_id: child_agent_id,
+        session_id: child_session_id,
+        gateway_dir,
+        // Advisory path: we do not have the child task's workflow_id/task_id,
+        // so delegated-spawn verification cannot be performed accurately. Leave
+        // it disabled to avoid false positives; `io.returns` validation already
+        // ran on the full child reply before the task was marked complete.
+        agent_is_spawn_capable: false,
+    };
+    let violations = reconcile_claims(&ctx);
+    if !violations.is_empty() {
+        let rules: Vec<_> = violations.iter().map(|v| v.rule.as_str()).collect();
+        tracing::warn!(
+            target: "response_validation",
+            child_session_id = %child_session_id,
+            parent_session_id = %parent_session_id,
+            child_agent_id = %child_agent_id,
+            rules = ?rules,
+            "response.validation.advisory: child→parent result summary contains fabricated claim(s)"
+        );
+    }
+    violations
 }
 
 /// Parse an `OutputPolicy` from metadata.
@@ -187,13 +437,17 @@ pub fn validate_spawn_response(
                 });
             }
             Some(reply) => {
-                // First try: raw reply as-is (may be valid JSON that happens to
-                // contain ``` inside a string value — stripping would destroy it).
-                let json = serde_json::from_str::<serde_json::Value>(reply.trim())
+                // Strip <think> reasoning blocks first (minimax-m3, DeepSeek),
+                // then try parsing as-is.
+                let reply_clean = strip_think_blocks(reply);
+                // First try: reply after stripping <think> blocks (may be valid
+                // JSON that happens to contain ``` inside a string value —
+                // stripping markdown fences would destroy it, so we try raw first).
+                let json = serde_json::from_str::<serde_json::Value>(reply_clean.trim())
                     .ok()
                     .or_else(|| {
                         // Fallback: strip markdown code fences and retry.
-                        let stripped = strip_markdown_code_fences(reply);
+                        let stripped = strip_markdown_code_fences(&reply_clean);
                         serde_json::from_str(&stripped).ok()
                     });
                 match json {
@@ -256,9 +510,31 @@ fn compute_total_output_size_bytes(
 /// task listing only happens for actual delegation claims.
 fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
     assistant_reply
-        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+        .and_then(|r| {
+            let clean = strip_think_blocks(r);
+            let stripped = strip_markdown_code_fences(&clean);
+            serde_json::from_str::<serde_json::Value>(stripped.trim()).ok()
+        })
         .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "delegated"))
         .unwrap_or(false)
+}
+
+/// A `plan_id` the reply claims (top-level or under `result`), if any non-empty
+/// one is present. Used to catch a fabricated reference, NOT to require plans —
+/// agents that never mention a `plan_id` (e.g. `planner.default`) are unaffected.
+fn reply_claimed_plan_id(assistant_reply: Option<&str>) -> Option<String> {
+    // Strip <think> blocks and markdown code fences first — models often wrap
+    // their reasoning or JSON reply in these, and a fenced reply must not slip
+    // the fabricated-plan_id guard.
+    let cleaned = strip_think_blocks(assistant_reply?);
+    let stripped = strip_markdown_code_fences(&cleaned);
+    let v: serde_json::Value = serde_json::from_str(stripped.trim()).ok()?;
+    v.get("plan_id")
+        .or_else(|| v.get("result").and_then(|r| r.get("plan_id")))
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// The violation for a spawn-less `delegated` self-report.
@@ -276,6 +552,27 @@ fn delegated_without_spawn_violation() -> ValidationViolation {
         repair_hint: "To delegate you must actually call `agent_spawn` (async=true), then report \
 `delegated`. If you are not delegating, report a truthful status (`ok`, `partial`, \
 `clarification_needed`, or `failed`)."
+            .into(),
+    }
+}
+
+/// The violation for a reply that references a non-existent `plan_id`.
+///
+/// PlanFrames are optional (e.g. `planner.default` never uses them), so this is
+/// NOT a "you must propose a plan" check — it only fires when a reply explicitly
+/// names a `plan_id` that does not exist. A weak model may fabricate one (e.g.
+/// `plan-a1b2c3d4`) and report `awaiting_approval` without ever calling
+/// `planframe_propose`, leaving nothing to approve and stalling the flow.
+/// Deterministic truthfulness check against observable state; feeds the bounded
+/// repair loop.
+fn fabricated_plan_id_violation(plan_id: &str) -> ValidationViolation {
+    ValidationViolation {
+        rule: "unknown_plan_id".into(),
+        message: format!(
+            "reply references plan_id \"{plan_id}\" but no such PlanFrame exists"
+        ),
+        repair_hint: "Do not invent a plan_id. If you proposed a plan, use the exact plan_id \
+returned by `planframe_propose`; otherwise omit `plan_id` and report a truthful status."
             .into(),
     }
 }
@@ -484,7 +781,7 @@ WHAT TO DO:\n\
 For each violation above:\n\
 • Understand why it failed (the \"Why\" explanation)\n\
 • Apply the fix (the \"Fix\" hint)\n\
-• Use your normal tools: artifact.build(), content.write(), etc.\n\
+• Use your normal tools: artifact.build() for bundles, content.write() to create a new file, content.patch() to edit an existing file, etc.\n\
 • Re-run your workflow to regenerate the output\n\n\
 EXAMPLES OF CORRECT OUTPUT:\n\
 ───────────────────────────────────────────────────────────────────────\n\
@@ -514,8 +811,8 @@ fn build_repair_examples(violations: &[ValidationViolation]) -> String {
             "required_artifacts" => {
                 examples.push(
                     "Required Artifact:\n  \
-                     Use artifact.build({\"name\": \"filename.ext\", ...}) or \n  \
-                     content.write(\"path/to/file\", contents) to create the file."
+                     If the file already exists in the session, edit it with content.patch({\"name\": \"filename.ext\", \"old_string\": \"...\", \"new_string\": \"...\"}).\n  \
+                     If it does not exist yet, create it with content.write(\"path/to/file\", contents) or artifact.build({\"inputs\": [...]})."
                         .to_string(),
                 );
             }
@@ -616,6 +913,35 @@ pub fn violations_to_final_error(
     }
 }
 
+/// Strip `<think>…</think>` reasoning blocks that some models (minimax-m3,
+/// DeepSeek, Qwen) emit inline in the assistant reply text. Unlike Anthropic's
+/// native thinking channel, these are part of the reply payload and leak into
+/// validation, history, and display. Stripping them early ensures downstream
+/// JSON parsing, schema validation, and chat rendering see clean content.
+///
+/// Handles both closed (`<think>…</think>`) and unclosed (`<think>…` to end)
+/// blocks. Returns the text with all think blocks removed and leading/trailing
+/// whitespace trimmed.
+pub fn strip_think_blocks(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains("<think>") {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 7..];
+        if let Some(end) = after_open.find("</think>") {
+            rest = &after_open[end + 8..];
+        } else {
+            // Unclosed think block — discard everything after `<think>`.
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out.trim().to_string())
+}
+
 /// Strip markdown code fences wrapping a JSON payload.
 ///
 /// LLMs (especially DeepSeek) often return JSON wrapped in
@@ -628,6 +954,15 @@ fn strip_markdown_code_fences(s: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(s);
     }
     if let Some(extracted) = extract_first_fenced_json(trimmed) {
+        // Observable tolerance (M1 doctrine, #619): emitted only when we actually
+        // changed the input by unwrapping markdown fences. Both call sites
+        // (output_schema validation and the fabricated-plan_id guard) go through
+        // this single helper, so instrumenting here covers both. `detail` is a
+        // redacted summary — never the reply body.
+        crate::runtime::tool_call_processor::note_llm_normalization(
+            "markdown_code_fence",
+            "stripped markdown code fences wrapping a JSON reply",
+        );
         return std::borrow::Cow::Owned(extracted);
     }
     std::borrow::Cow::Borrowed(s)
@@ -895,6 +1230,69 @@ impl GatewayExecutionService {
     pub(crate) async fn validate_and_maybe_repair(
         &self,
         agent_id: &str,
+        result: SpawnResult,
+        output_schema: Option<&serde_json::Value>,
+        output_policy: &autonoetic_types::agent::OutputPolicy,
+        returns_enforcement: IoReturnsEnforcement,
+        source_agent_id: Option<&str>,
+        workflow_id: Option<&str>,
+        task_id: Option<&str>,
+        agent_is_spawn_capable: bool,
+        feedback_out: Option<&mut Vec<FeedbackEvent>>,
+    ) -> anyhow::Result<SpawnResult> {
+        // #771 D.3: response validation is a leak region — the gateway may
+        // normalize the agent's reply (markdown-fence stripping) and may
+        // drive a repair loop on the agent's behalf (P-5.8). Install the
+        // ambient LeakScope so both are recorded in the register with this
+        // session's attribution, not just traced.
+        let leak_scope = self.gateway_store().map(|store| {
+            crate::runtime::discretion_leak::LeakScope::new(
+                store,
+                agent_id.to_string(),
+                result.session_id.clone(),
+                None,
+            )
+        });
+        match leak_scope {
+            Some(scope) => {
+                crate::runtime::discretion_leak::with_leak_scope(scope, async move {
+                    self.validate_and_maybe_repair_inner(
+                        agent_id,
+                        result,
+                        output_schema,
+                        output_policy,
+                        returns_enforcement,
+                        source_agent_id,
+                        workflow_id,
+                        task_id,
+                        agent_is_spawn_capable,
+                        feedback_out,
+                    )
+                    .await
+                })
+                .await
+            }
+            None => {
+                self.validate_and_maybe_repair_inner(
+                    agent_id,
+                    result,
+                    output_schema,
+                    output_policy,
+                    returns_enforcement,
+                    source_agent_id,
+                    workflow_id,
+                    task_id,
+                    agent_is_spawn_capable,
+                    feedback_out,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn validate_and_maybe_repair_inner(
+        &self,
+        agent_id: &str,
         mut result: SpawnResult,
         output_schema: Option<&serde_json::Value>,
         output_policy: &autonoetic_types::agent::OutputPolicy,
@@ -903,6 +1301,7 @@ impl GatewayExecutionService {
         workflow_id: Option<&str>,
         task_id: Option<&str>,
         agent_is_spawn_capable: bool,
+        mut feedback_out: Option<&mut Vec<FeedbackEvent>>,
     ) -> anyhow::Result<SpawnResult> {
         let max_duration_ms = output_policy.validation_max_duration_ms;
         let deadline =
@@ -930,30 +1329,31 @@ impl GatewayExecutionService {
         // task-listing on the cheap status check so it only runs for actual
         // delegation claims; if listing fails, skip the guard rather than risk a
         // false positive from a transient/operational error.
-        if agent_is_spawn_capable && reply_is_delegated(result.assistant_reply.as_deref()) {
-            let spawned_child: Option<bool> = match workflow_id {
-                None => Some(false), // no workflow at all → nothing was spawned
-                Some(wid) => match crate::scheduler::workflow_store::list_task_runs_for_workflow(
-                    self.config().as_ref(),
-                    self.gateway_store().as_deref(),
-                    wid,
-                ) {
-                    Ok(tasks) => Some(tasks.iter().any(|t| Some(t.task_id.as_str()) != task_id)),
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "response_validation",
-                            workflow_id = %wid,
-                            error = %e,
-                            "delegated-spawn guard: task listing failed; skipping guard"
-                        );
-                        None
-                    }
-                },
-            };
-            if spawned_child == Some(false) {
-                violations.push(delegated_without_spawn_violation());
-            }
-        }
+        //
+        // Fabricated-plan-id guard: PlanFrames are optional, so this does NOT
+        // require a plan — it only fires when a reply explicitly names a `plan_id`
+        // that doesn't exist (a weak model inventing one, e.g. `plan-a1b2c3d4`,
+        // and claiming `awaiting_approval` without calling `planframe_propose`).
+        // Gate the DB lookup on the cheap reply check; skip on lookup error to
+        // avoid a false positive.
+        //
+        // Both guards are implemented as typed `ClaimKind` verifiers so new
+        // self-report fabrications become one enum variant instead of a new
+        // hand-written guard (Change A).
+        let config = self.config();
+        let gateway_store = self.gateway_store();
+        let claim_ctx = ClaimCtx {
+            assistant_reply: result.assistant_reply.as_deref(),
+            workflow_id,
+            task_id,
+            gateway_store: gateway_store.as_deref(),
+            config: Some(config.as_ref()),
+            agent_id,
+            session_id: &result.session_id,
+            gateway_dir: &gateway_dir,
+            agent_is_spawn_capable,
+        };
+        violations.extend(reconcile_claims(&claim_ctx));
         if violations.is_empty() {
             tracing::debug!(
                 target: "response_validation",
@@ -962,43 +1362,14 @@ impl GatewayExecutionService {
                 "response.validation.pass"
             );
 
-            // Issue #30: if the reply carries a `decision_journal` array
-            // (curator-style output), persist one `curator.decision` causal
-            // event per entry so operators can query by target.
-            if let (Some(store), Some(reply)) =
-                (self.gateway_store(), result.assistant_reply.as_deref())
-            {
-                let revision_id = store
-                    .get_session_agent_binding(&result.session_id)
-                    .ok()
-                    .flatten()
-                    .map(|b| b.revision_id)
-                    .filter(|s| !s.is_empty());
-                match crate::runtime::curator_journal::extract_and_persist(
-                    store.as_ref(),
-                    "curator",
-                    agent_id,
-                    &result.session_id,
-                    revision_id.as_deref(),
-                    reply,
-                ) {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(
-                        target: "curator_journal",
-                        agent_id = %agent_id,
-                        session_id = %result.session_id,
-                        entry_count = n,
-                        "decision_journal persisted"
-                    ),
-                    Err(e) => tracing::warn!(
-                        target: "curator_journal",
-                        agent_id = %agent_id,
-                        session_id = %result.session_id,
-                        error = %e,
-                        "decision_journal persistence failed"
-                    ),
-                }
+            if let Some(out) = feedback_out {
+                out.extend(violations_to_feedback_events(&violations));
             }
+
+            // Issue #30 / #752: persist any `decision_journal` entries as
+            // `curator.decision` events. Independent of io.returns schema
+            // validation — see `persist_curator_decision_journal`.
+            self.persist_curator_decision_journal(&result, agent_id);
 
             return Ok(result);
         }
@@ -1007,7 +1378,7 @@ impl GatewayExecutionService {
         // Non-schema violations (prohibited_text_pattern, required_artifacts, etc.)
         // are still enforced.
         if returns_enforcement == IoReturnsEnforcement::Advisory {
-            let (schema_violations, policy_violations): (Vec<_>, Vec<_>) = violations
+            let (schema_violations, mut policy_violations): (Vec<_>, Vec<_>) = violations
                 .iter()
                 .partition(|v| v.rule == "output_schema");
 
@@ -1025,6 +1396,21 @@ impl GatewayExecutionService {
                     violations = %summary,
                     "response.validation.advisory: io.returns schema violations ignored (advisory mode)"
                 );
+                // Greppable marker for future civic-health tallies (#772): flag
+                // when the gateway-injected `anomalies` witness field (RFC C.2)
+                // is the (or a) missing-required violation.
+                let anomalies_missing = schema_violations
+                    .iter()
+                    .any(|v| v.message.contains("'anomalies'"));
+                let mut payload = serde_json::json!({
+                    "contract": "io.returns",
+                    "enforcement": "advisory",
+                    "result": "advisory_skip",
+                    "violations": schema_violations.iter().map(|v| &v.message).collect::<Vec<_>>(),
+                });
+                if anomalies_missing {
+                    payload["anomalies_missing"] = serde_json::json!(true);
+                }
                 log_contract_enforcement_event_to_gateway(
                     self.gateway_store().as_deref(),
                     agent_id,
@@ -1032,17 +1418,20 @@ impl GatewayExecutionService {
                     "io.returns.advisory",
                     EntryStatus::Success,
                     source_agent_id,
-                    serde_json::json!({
-                        "contract": "io.returns",
-                        "enforcement": "advisory",
-                        "result": "advisory_skip",
-                        "violations": schema_violations.iter().map(|v| &v.message).collect::<Vec<_>>(),
-                    }),
+                    payload,
                 );
             }
 
             if policy_violations.is_empty() {
+                // Issue #752: journal extraction is independent of io.returns
+                // schema validation — persist before the Advisory early return.
+                self.persist_curator_decision_journal(&result, agent_id);
                 return Ok(result);
+            }
+
+            if let Some(out) = feedback_out.as_deref_mut() {
+                let pv_owned: Vec<ValidationViolation> = policy_violations.iter().map(|v| (*v).clone()).collect();
+                out.extend(violations_to_feedback_events(&pv_owned));
             }
 
             // Continue enforcement with only non-schema violations.
@@ -1057,7 +1446,18 @@ impl GatewayExecutionService {
             "response.validation.fail"
         );
 
+        if let Some(out) = feedback_out.as_deref_mut() {
+            out.extend(violations_to_feedback_events(&violations));
+        }
+
         if !repair_enabled || max_repair_rounds == 0 {
+            // Persist validation feedback to the latest checkpoint so a later
+            // retry/resume can detect ignored feedback even when repair is
+            // disabled or exhausted.
+            self.persist_validation_feedback(
+                &result.session_id,
+                &violations,
+            );
             return Err(violations_to_final_error(
                 &violations,
                 &result.session_id,
@@ -1066,65 +1466,28 @@ impl GatewayExecutionService {
             ));
         }
 
-        for attempt in 1..=max_repair_rounds {
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached"
-                );
-                return Err(violations_to_final_error(
-                    &violations,
-                    &result.session_id,
-                    true,
-                    result.assistant_reply.as_deref(),
-                ));
-            }
+        // RFC D.4: enter repair-loop-aware accounting before cycling. Repair
+        // iterations count against their own budget, not
+        // `max_loops_without_progress`.
+        let repair_session_id = result.session_id.clone();
+        let _ = crate::runtime::checkpoint::enter_repair_mode_on_latest_checkpoint(
+            self.config().as_ref(),
+            &repair_session_id,
+            max_repair_rounds as u32 + 2,
+        );
 
-            let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
-
-            tracing::info!(
-                target: "response_validation",
-                agent_id = %agent_id,
-                session_id = %result.session_id,
-                attempt = attempt,
-                max_repair_rounds = max_repair_rounds,
-                "response.repair.start"
-            );
-
-            let base = base_session_id(&result.session_id);
-            let violation_summary = violations
-                .iter()
-                .map(|v| v.rule.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            append_repair_attempt_best_effort(
-                &gateway_dir,
-                base,
-                attempt,
-                max_repair_rounds,
-                &format!("{} ({})", violation_summary, violations.len()),
-            );
-
-            let repaired = match self
-                .respawn_from_checkpoint(
-                    agent_id,
-                    &result.session_id,
-                    Some(&repair_msg),
-                    source_agent_id,
-                    workflow_id,
-                    task_id,
-                )
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
+        let repair_outcome: anyhow::Result<SpawnResult> = async move {
+            for attempt in 1..=max_repair_rounds {
+                if std::time::Instant::now() >= deadline {
                     tracing::warn!(
                         target: "response_validation",
                         agent_id = %agent_id,
-                        error = %e,
-                        "response.repair.error: respawn failed"
+                        attempt = attempt,
+                        "response.repair.exhausted: deadline reached"
+                    );
+                    self.persist_validation_feedback(
+                        &result.session_id,
+                        &violations,
                     );
                     return Err(violations_to_final_error(
                         &violations,
@@ -1133,105 +1496,303 @@ impl GatewayExecutionService {
                         result.assistant_reply.as_deref(),
                     ));
                 }
-            };
 
-            if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    "response.repair.aborted: session suspended during repair"
-                );
-                return Err(anyhow::anyhow!(
-                    "repair aborted: agent suspended during repair; session: {}",
-                    result.session_id
-                ));
-            }
+                let repair_msg = build_repair_prompt(&violations, attempt, max_repair_rounds);
 
-            if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
-                &self.config(),
-                &repaired.session_id,
-            ) {
-                if matches!(
-                    cp.yield_reason,
-                    crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
-                ) {
-                    tracing::warn!(
-                        target: "response_validation",
-                        agent_id = %agent_id,
-                        session_id = %repaired.session_id,
-                        "response.repair.aborted: session suspended for user interaction during repair"
-                    );
-                    return Err(anyhow::anyhow!(
-                        "repair aborted: agent suspended for user interaction during repair; session: {}",
-                        result.session_id
-                    ));
-                }
-            }
-
-            violations = validate_spawn_response(
-                &repaired,
-                output_schema,
-                output_policy,
-                Some(&gateway_dir),
-            );
-            violations.extend(validate_session_evidence(
-                self.gateway_store().as_deref(),
-                &repaired.session_id,
-                output_policy,
-            ));
-            result = repaired;
-
-            if violations.is_empty() {
                 tracing::info!(
                     target: "response_validation",
                     agent_id = %agent_id,
                     session_id = %result.session_id,
                     attempt = attempt,
-                    "response.repair.pass"
+                    max_repair_rounds = max_repair_rounds,
+                    "response.repair.start"
                 );
-                append_repair_passed_best_effort(
+
+                // #771 D.3 (P-5.8, named DISCRETION LEAK): the gateway
+                // authors the repair prompt and drives the correction of
+                // the agent's output — an intervention the constitution
+                // names as the enforcer's own debt. Record it in the
+                // register (durable inside the ambient LeakScope installed
+                // by `validate_and_maybe_repair`). `detail` carries only
+                // rule names, never the reply body.
+                crate::runtime::discretion_leak::record_discretion_leak(
+                    "gateway_authored_repair",
+                    &format!(
+                        "authored repair prompt (attempt {attempt}/{max_repair_rounds}) for violations: {}",
+                        violations.iter().map(|v| v.rule.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                    &["P-5.8"],
+                );
+
+                let base = base_session_id(&result.session_id);
+                let violation_summary = violations
+                    .iter()
+                    .map(|v| v.rule.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                append_repair_attempt_best_effort(
                     &gateway_dir,
-                    base_session_id(&result.session_id),
+                    base,
                     attempt,
+                    max_repair_rounds,
+                    &format!("{} ({})", violation_summary, violations.len()),
                 );
-                return Ok(result);
+
+                // Fingerprint of the violation set we're asking the agent to
+                // fix this attempt, to detect a no-progress respawn below.
+                let pre_repair_fingerprint = violation_fingerprint(&violations);
+
+                let repaired = match self
+                    .respawn_from_checkpoint(
+                        agent_id,
+                        &result.session_id,
+                        Some(&repair_msg),
+                        source_agent_id,
+                        workflow_id,
+                        task_id,
+                        &violations_to_feedback_events(&violations),
+                    )
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "response_validation",
+                            agent_id = %agent_id,
+                            error = %e,
+                            "response.repair.error: respawn failed"
+                        );
+                        return Err(violations_to_final_error(
+                            &violations,
+                            &result.session_id,
+                            true,
+                            result.assistant_reply.as_deref(),
+                        ));
+                    }
+                };
+
+                if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        "response.repair.aborted: session suspended during repair"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "repair aborted: agent suspended during repair; session: {}",
+                        result.session_id
+                    ));
+                }
+
+                if let Ok(Some(cp)) = crate::runtime::checkpoint::load_latest_checkpoint(
+                    &self.config(),
+                    &repaired.session_id,
+                ) {
+                    if matches!(
+                        cp.yield_reason,
+                        crate::runtime::checkpoint::YieldReason::UserInputRequired { .. }
+                    ) {
+                        tracing::warn!(
+                            target: "response_validation",
+                            agent_id = %agent_id,
+                            session_id = %repaired.session_id,
+                            "response.repair.aborted: session suspended for user interaction during repair"
+                        );
+                        return Err(anyhow::anyhow!(
+                            "repair aborted: agent suspended for user interaction during repair; session: {}",
+                            result.session_id
+                        ));
+                    }
+                }
+
+                violations = validate_spawn_response(
+                    &repaired,
+                    output_schema,
+                    output_policy,
+                    Some(&gateway_dir),
+                );
+                violations.extend(validate_session_evidence(
+                    self.gateway_store().as_deref(),
+                    &repaired.session_id,
+                    output_policy,
+                ));
+                result = repaired;
+
+                if let Some(out) = feedback_out.as_deref_mut() {
+                    out.extend(violations_to_feedback_events(&violations));
+                }
+
+                if violations.is_empty() {
+                    tracing::info!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        session_id = %result.session_id,
+                        attempt = attempt,
+                        "response.repair.pass"
+                    );
+                    append_repair_passed_best_effort(
+                        &gateway_dir,
+                        base_session_id(&result.session_id),
+                        attempt,
+                    );
+                    return Ok(result);
+                }
+
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    attempt = attempt,
+                    violation_count = violations.len(),
+                    "response.repair.fail"
+                );
+
+                // No-progress short-circuit: the respawn reproduced the exact
+                // same violation set it was asked to fix. Another full-context
+                // respawn is unlikely to differ, so stop instead of burning the
+                // remaining repair budget (same "mechanical, not reactive"
+                // principle as the LoopGuard no-progress trip).
+                if violation_fingerprint(&violations) == pre_repair_fingerprint {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        attempt = attempt,
+                        violation_count = violations.len(),
+                        "response.repair.no_progress: identical violations after respawn, stopping early"
+                    );
+                    self.persist_validation_feedback(&result.session_id, &violations);
+                    return Err(violations_to_final_error(
+                        &violations,
+                        &result.session_id,
+                        true,
+                        result.assistant_reply.as_deref(),
+                    ));
+                }
+
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        target: "response_validation",
+                        agent_id = %agent_id,
+                        attempt = attempt,
+                        "response.repair.exhausted: deadline reached after respawn"
+                    );
+                    self.persist_validation_feedback(
+                        &result.session_id,
+                        &violations,
+                    );
+                    return Err(violations_to_final_error(
+                        &violations,
+                        &result.session_id,
+                        true,
+                        result.assistant_reply.as_deref(),
+                    ));
+                }
             }
 
             tracing::warn!(
                 target: "response_validation",
                 agent_id = %agent_id,
-                attempt = attempt,
-                violation_count = violations.len(),
-                "response.repair.fail"
+                "response.repair.exhausted: max_loops reached"
             );
+            self.persist_validation_feedback(
+                &result.session_id,
+                &violations,
+            );
+            Err(violations_to_final_error(
+                &violations,
+                &result.session_id,
+                true,
+                result.assistant_reply.as_deref(),
+            ))
+        }.await;
 
-            if std::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    target: "response_validation",
-                    agent_id = %agent_id,
-                    attempt = attempt,
-                    "response.repair.exhausted: deadline reached after respawn"
-                );
-                return Err(violations_to_final_error(
-                    &violations,
+        match repair_outcome {
+            Ok(result) => {
+                let _ = crate::runtime::checkpoint::reset_after_successful_repair_on_latest_checkpoint(
+                    self.config().as_ref(),
                     &result.session_id,
-                    true,
-                    result.assistant_reply.as_deref(),
-                ));
+                );
+                // Issue #752: a successfully repaired reply may still carry a
+                // `decision_journal`; persist it like any other Ok path.
+                self.persist_curator_decision_journal(&result, agent_id);
+                Ok(result)
+            }
+            Err(e) => {
+                let _ = crate::runtime::checkpoint::exit_repair_mode_on_latest_checkpoint(
+                    self.config().as_ref(),
+                    &repair_session_id,
+                );
+                Err(e)
             }
         }
+    }
 
-        tracing::warn!(
-            target: "response_validation",
-            agent_id = %agent_id,
-            "response.repair.exhausted: max_loops reached"
-        );
-        Err(violations_to_final_error(
-            &violations,
+    /// Persist any `decision_journal` entries the reply carries as one
+    /// `curator.decision` causal event per entry (Issue #30).
+    ///
+    /// This is deliberately independent of io.returns schema validation
+    /// (Issue #752): even when the reply is incomplete or was admitted under
+    /// Advisory enforcement — or only passed after a repair round — the
+    /// journal entries that *are* present must still be recorded so the
+    /// causal-chain audit trail is never silently dropped. Call this at every
+    /// `Ok` exit of [`validate_and_maybe_repair`].
+    fn persist_curator_decision_journal(&self, result: &SpawnResult, agent_id: &str) {
+        let (Some(store), Some(reply)) =
+            (self.gateway_store(), result.assistant_reply.as_deref())
+        else {
+            return;
+        };
+        let revision_id = store
+            .get_session_agent_binding(&result.session_id)
+            .ok()
+            .flatten()
+            .map(|b| b.revision_id)
+            .filter(|s| !s.is_empty());
+        match crate::runtime::curator_journal::extract_and_persist(
+            store.as_ref(),
+            "curator",
+            agent_id,
             &result.session_id,
-            true,
-            result.assistant_reply.as_deref(),
-        ))
+            revision_id.as_deref(),
+            reply,
+        ) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                target: "curator_journal",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                entry_count = n,
+                "decision_journal persisted"
+            ),
+            Err(e) => tracing::warn!(
+                target: "curator_journal",
+                agent_id = %agent_id,
+                session_id = %result.session_id,
+                error = %e,
+                "decision_journal persistence failed"
+            ),
+        }
+    }
+
+    fn persist_validation_feedback(
+        &self,
+        session_id: &str,
+        violations: &[ValidationViolation],
+    ) {
+        let events = violations_to_feedback_events(violations);
+        if events.is_empty() {
+            return;
+        }
+        if let Err(e) = crate::runtime::checkpoint::append_feedback_to_latest_checkpoint(
+            self.config().as_ref(),
+            session_id,
+            &events,
+        ) {
+            tracing::warn!(
+                target: "response_validation",
+                session_id = %session_id,
+                error = %e,
+                "failed to persist validation feedback to checkpoint"
+            );
+        }
     }
 
     fn resolve_artifact_ref_to_id(
@@ -1338,6 +1899,7 @@ impl GatewayExecutionService {
                             source_agent_id,
                             workflow_id,
                             task_id,
+                            &[],
                         )
                         .await
                     {
@@ -1412,6 +1974,32 @@ mod tests {
     use super::*;
     use crate::execution::{ArtifactMetadata, ContentFile};
 
+    fn violation(rule: &str, msg: &str) -> ValidationViolation {
+        ValidationViolation {
+            rule: rule.into(),
+            message: msg.into(),
+            repair_hint: String::new(),
+        }
+    }
+
+    #[test]
+    fn violation_fingerprint_is_order_independent() {
+        let a = vec![violation("schema", "missing field x"), violation("evidence", "no trace")];
+        let b = vec![violation("evidence", "no trace"), violation("schema", "missing field x")];
+        assert_eq!(violation_fingerprint(&a), violation_fingerprint(&b));
+    }
+
+    #[test]
+    fn violation_fingerprint_distinguishes_progress() {
+        // Same rule, different message (partial progress) => different fingerprint.
+        let before = vec![violation("schema", "missing x and y")];
+        let after = vec![violation("schema", "missing y")];
+        assert_ne!(violation_fingerprint(&before), violation_fingerprint(&after));
+        // A resolved violation (fewer) => different fingerprint.
+        let none: Vec<ValidationViolation> = vec![];
+        assert_ne!(violation_fingerprint(&before), violation_fingerprint(&none));
+    }
+
     fn make_result(
         artifacts: Vec<ArtifactMetadata>,
         files: Vec<ContentFile>,
@@ -1429,6 +2017,7 @@ mod tests {
             llm_usage: vec![],
             suspended_for_approval: None,
             suspended_for_user_input: false,
+            suspended_for_child_wait: false,
         }
     }
 
@@ -1441,6 +2030,40 @@ mod tests {
             entry_point: None,
             io: None,
         }
+    }
+
+    #[test]
+    fn violations_to_feedback_events_maps_rules() {
+        let violations = vec![
+            ValidationViolation {
+                rule: "required_artifacts".into(),
+                message: "missing foo".into(),
+                repair_hint: "create foo".into(),
+            },
+            ValidationViolation {
+                rule: "output_schema".into(),
+                message: "bad json".into(),
+                repair_hint: "fix json".into(),
+            },
+        ];
+        let events = violations_to_feedback_events(&violations);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            }
+        );
+        assert_eq!(
+            events[1].signature_key(),
+            "validation:output_schema:*"
+        );
+    }
+
+    #[test]
+    fn empty_violations_yield_empty_feedback_events() {
+        assert!(violations_to_feedback_events(&[]).is_empty());
     }
 
     #[test]
@@ -1670,6 +2293,7 @@ mod tests {
                 true,
                 vec![],
                 Some("all good".to_string()),
+                None,
             )
             .unwrap();
 
@@ -1695,6 +2319,7 @@ mod tests {
                     description: "tests failed".to_string(),
                     evidence: None,
                 }],
+                None,
                 None,
             )
             .unwrap();
@@ -1724,6 +2349,7 @@ mod tests {
                     description: "security risk".to_string(),
                     evidence: Some("found network access".to_string()),
                 }],
+                None,
                 None,
             )
             .unwrap();
@@ -1854,7 +2480,297 @@ mod tests {
     }
 
     #[test]
+    fn reply_claimed_plan_id_detection() {
+        // top-level plan_id
+        assert_eq!(
+            reply_claimed_plan_id(Some(r#"{"status":"awaiting_approval","plan_id":"plan-a1b2c3d4"}"#)).as_deref(),
+            Some("plan-a1b2c3d4")
+        );
+        // nested under result
+        assert_eq!(
+            reply_claimed_plan_id(Some(r#"{"status":"ok","result":{"plan_id":"plan-xyz"}}"#)).as_deref(),
+            Some("plan-xyz")
+        );
+        // JSON wrapped in a markdown code fence is still detected
+        assert_eq!(
+            reply_claimed_plan_id(Some("```json\n{\"status\":\"awaiting_approval\",\"plan_id\":\"plan-fenced\"}\n```")).as_deref(),
+            Some("plan-fenced")
+        );
+        // no plan_id (e.g. planner.default) → None, guard never fires
+        assert_eq!(reply_claimed_plan_id(Some(r#"{"status":"ok","summary":"done"}"#)), None);
+        // empty / prose / none
+        assert_eq!(reply_claimed_plan_id(Some(r#"{"plan_id":"  "}"#)), None);
+        assert_eq!(reply_claimed_plan_id(Some("just prose")), None);
+        assert_eq!(reply_claimed_plan_id(None), None);
+    }
+
+    #[test]
+    fn fabricated_plan_id_violation_shape() {
+        let v = fabricated_plan_id_violation("plan-a1b2c3d4");
+        assert_eq!(v.rule, "unknown_plan_id");
+        assert!(v.message.contains("plan-a1b2c3d4"));
+        assert!(v.repair_hint.contains("planframe_propose"));
+    }
+
+    #[test]
     fn delegated_without_spawn_violation_shape() {
         assert_eq!(delegated_without_spawn_violation().rule, "delegated_without_spawn");
+    }
+
+    #[test]
+    fn claim_delegated_unverified_when_not_spawn_capable() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"delegated"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::Delegated.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn claim_delegated_unverified_when_no_delegated_status() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"ok"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: true,
+        };
+        assert_eq!(ClaimKind::Delegated.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn claim_delegated_fabricated_when_no_workflow() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"delegated"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: true,
+        };
+        assert!(
+            matches!(ClaimKind::Delegated.verify(&ctx), ClaimVerdict::Fabricated(_)),
+            "delegated status with no workflow should be fabricated"
+        );
+    }
+
+    #[test]
+    fn claim_plan_id_unverified_when_no_plan_id() {
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"ok"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: None,
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: std::path::Path::new("/tmp"),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::PlanId.verify(&ctx), ClaimVerdict::Unverified);
+    }
+
+    #[test]
+    fn claim_plan_id_fabricated_when_plan_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"awaiting_approval","plan_id":"plan-missing"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(
+            ClaimKind::PlanId.verify(&ctx),
+            ClaimVerdict::Fabricated("plan-missing".into())
+        );
+    }
+
+    #[test]
+    fn claim_plan_id_ok_when_plan_exists() {
+        use autonoetic_types::plan_frame::{PlanFrame, PlanStatus};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let plan = PlanFrame {
+            plan_id: "plan-real".into(),
+            version: 1,
+            parent_version: None,
+            workflow_id: "wf-1".into(),
+            root_session_id: "root".into(),
+            title: "t".into(),
+            objective: "o".into(),
+            status: PlanStatus::AwaitingApproval,
+            steps: vec![],
+            validation_policy: Default::default(),
+            capability_envelope: vec![],
+            approved_by: None,
+            approved_at: None,
+            created_by_agent_id: "agent".into(),
+            reason: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+        };
+        store.save_plan_frame(&plan).unwrap();
+
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"awaiting_approval","plan_id":"plan-real"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        assert_eq!(ClaimKind::PlanId.verify(&ctx), ClaimVerdict::Ok);
+    }
+
+    #[test]
+    fn reconcile_claims_returns_fabricated_plan_id_violation() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let ctx = ClaimCtx {
+            assistant_reply: Some(r#"{"status":"awaiting_approval","plan_id":"plan-fake"}"#),
+            workflow_id: None,
+            task_id: None,
+            gateway_store: Some(&store),
+            config: None,
+            agent_id: "agent",
+            session_id: "sess",
+            gateway_dir: temp.path(),
+            agent_is_spawn_capable: false,
+        };
+        let violations = reconcile_claims(&ctx);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "unknown_plan_id");
+        assert!(violations[0].message.contains("plan-fake"));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // RFC C — advisory child→parent result claim reconciliation
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn advisory_child_result_summary_empty_is_unverified() {
+        let temp = tempfile::tempdir().unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            None,
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            None,
+            None,
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn advisory_child_result_summary_short_is_unverified() {
+        let temp = tempfile::tempdir().unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            Some("ok"),
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            None,
+            None,
+        );
+        assert!(violations.is_empty(), "trivial summaries should not be flagged");
+    }
+
+    #[test]
+    fn advisory_child_result_summary_finds_fabricated_plan_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            Some(r#"{"status":"awaiting_approval","plan_id":"plan-fake"}"#),
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            Some(&store),
+            None,
+        );
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "unknown_plan_id");
+    }
+
+    #[test]
+    fn advisory_child_result_summary_delegated_not_flagged() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let violations = advisory_reconcile_child_result_summary(
+            Some(r#"{"status":"delegated","summary":"handed off"}"#),
+            "child-sess",
+            "parent-sess",
+            "agent",
+            temp.path(),
+            Some(&store),
+            None,
+        );
+        assert!(violations.is_empty(), "advisory path must not flag delegated claims; got: {violations:?}");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // strip_think_blocks
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_think_blocks_removes_closed_block() {
+        let input = "<think>reasoning here</think>{\"status\":\"ok\"}";
+        assert_eq!(strip_think_blocks(input).as_ref(), "{\"status\":\"ok\"}");
+    }
+
+    #[test]
+    fn strip_think_blocks_removes_unclosed_block() {
+        let input = "hello<think>still thinking...";
+        assert_eq!(strip_think_blocks(input).as_ref(), "hello");
+    }
+
+    #[test]
+    fn strip_think_blocks_preserves_text_without_think_tags() {
+        let input = "{\"status\":\"ok\",\"summary\":\"hello\"}";
+        assert_eq!(strip_think_blocks(input).as_ref(), input);
+    }
+
+    #[test]
+    fn strip_think_blocks_handles_multiple_blocks() {
+        let input = "<think>part 1</think>hello<think>part 2</think> world";
+        assert_eq!(strip_think_blocks(input).as_ref(), "hello world");
+    }
+
+    #[test]
+    fn strip_think_blocks_reply_is_delegated_works_with_think_prefix() {
+        let reply = "<think>let me delegate</think>{\"status\":\"delegated\"}";
+        assert!(reply_is_delegated(Some(reply)));
+    }
+
+    #[test]
+    fn strip_think_blocks_reply_claimed_plan_id_works_with_think_prefix() {
+        let reply = "<think>planning</think>{\"status\":\"ok\",\"plan_id\":\"plan-abc\"}";
+        assert_eq!(reply_claimed_plan_id(Some(reply)).as_deref(), Some("plan-abc"));
     }
 }

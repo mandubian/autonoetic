@@ -21,22 +21,25 @@ node_name: "gateway"
 
 # ── Constitution ──────────────────────────────────────────────────────
 # Active constitution artifacts enforced by this gateway instance.
-# To switch constitutional release, point both paths to the same version dir.
-# Gateway startup and `agent bootstrap` also materialize a local snapshot under:
+# The active version is centralized in code as `ACTIVE_CONSTITUTION_VERSION`
+# (autonoetic-types/src/config.rs); `source_path`/`lock_path` are intentionally
+# omitted here so a version bump needs no template edit — they default to the
+# active version. Override only to pin a different version, e.g.:
+#   source_path: "docs/constitution/versions/<VERSION>/constitution.md"
+#   lock_path:   "docs/constitution/versions/<VERSION>/gateway-constitution.lock.json"
+# Gateway startup and `agent bootstrap` also materialize a local snapshot under
 #   <agents_dir>/.gateway/constitution/
-# You can point source_path/lock_path there for fully runtime-local enforcement.
-constitution:
-  source_path: "docs/constitution/versions/2026.06.08/constitution.md"
-  lock_path: "docs/constitution/versions/2026.06.08/gateway-constitution.lock.json"
-  require_signature: true
-  trusted_signers:
-    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
+# which you can point at for fully runtime-local enforcement:
 # constitution:
-#   source_path: ".gateway/constitution/versions/2026.06.08/constitution.md"
-#   lock_path: ".gateway/constitution/versions/2026.06.08/gateway-constitution.lock.json"
+#   source_path: ".gateway/constitution/versions/<VERSION>/constitution.md"
+#   lock_path:   ".gateway/constitution/versions/<VERSION>/gateway-constitution.lock.json"
 #   require_signature: true
 #   trusted_signers:
 #     autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
+constitution:
+  require_signature: true
+  trusted_signers:
+    autonoetic:constitution:v1: "lNxT1b/jWa6LqM2Thd7rW1IppvlH3rlEnAOPV81Igzk="
 
 # ── Sandbox ───────────────────────────────────────────────────────────
 # Bubblewrap isolation overrides.
@@ -87,6 +90,7 @@ max_background_due_per_tick: 32
 #   flapping_lookback: 4            # How many recent promotions to scan
 #   eval_regression_streak: 3       # Adjacent increases needed to halt
 #   eval_regression_lookback: 6     # How many recent promotions to scan
+#   max_promotion_attempts_per_revision: 3  # Rejected attempts per digest before operator ack
 
 # ── Response Validation & Repair ──────────────────────────────────────
 # When enabled, the gateway validates agent outputs against declared constraints.
@@ -97,22 +101,39 @@ response_validation:
   repair_enabled: true
   max_repair_attempts_ceiling: 2
 
+# ── Validation Waivers ────────────────────────────────────────────────
+# Optional operator workflow to skip advisory artifact validations
+# (unit tests, style review, etc.) with recorded audit provenance.
+# Disabled by default. When enabled, `/waive` is available in the Chat TUI
+# and the picklist can be auto-proposed after `workbench reconcile`.
+validation_waivers:
+  enabled: false
+  auto_propose_after_reconcile: false
+
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
 approval_timeout_secs: 3600
 # Maximum concurrent pending approvals per root session (R+5). Default: 50.
 # Excess requests are rejected immediately with approval_flood.
 # max_pending_approvals_per_root: 50
+# Maximum concurrent un-adjudicated anomaly flags (pending/under_review) per
+# reporter agent — the Ri-0.18 spam triage bound (#770). Default: 50.
+# Filings beyond the cap are rejected loudly with anomaly_flag_flood (never
+# silently dropped); terminal adjudications free capacity.
+# max_pending_anomaly_flags_per_reporter: 50
 # Optional: heartbeat interval for Running workflow tasks (seconds).
 # Keeps task updated_at fresh during long-running child execution/finalization.
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.
 # workflow_task_heartbeat_secs: 2
-# Optional: max seconds a Running task without progress before the sweeper
-# force-completes it. Resolution is ALWAYS `Succeeded` (not `Failed`); the
-# sweeper attaches whatever exit evidence it can find (manifest, digest,
-# implicit artifacts), and a no-evidence force-completion still resolves as
-# `Succeeded` so the parent workflow can proceed. Default: 600. Set to 0 to disable.
+# Optional: max seconds a Running task without progress before the stuck-task
+# sweeper resolves it. Tasks with a fresh claim heartbeat are never swept. When
+# the child session has completion evidence (manifest, digest, checkpoint, or
+# implicit artifact), the sweeper force-completes it as `Succeeded`. With no
+# evidence, `stuck_task_no_evidence_action` controls the outcome: `fail`
+# (default) resolves as `Failed` and emits a `task.stuck` anomaly event;
+# `succeed` preserves legacy behavior. Default: 600. Set to 0 to disable.
 # stuck_task_timeout_secs: 600
+# stuck_task_no_evidence_action: fail
 # Multiplier applied to approval dwell times (R++4). Default: 1.0. Set to 0 to disable (tests).
 # approval_dwell_multiplier: 1.0
 
@@ -128,6 +149,14 @@ approval_timeout_secs: 3600
 # state or this deadline elapses. Set to 0 to restore legacy immediate-return.
 # Default: 30.
 # default_workflow_wait_secs: 30
+# Server-side total wall-clock budget for a single workflow.wait call (#702).
+# When a timeout_secs chunk elapses with tasks still running, the gateway
+# re-issues the wait internally — WITHOUT a full LLM round — up to this total,
+# returning as soon as all watched task_ids reach a terminal state. Eliminates
+# the wasteful wait→timeout→LLM-round→wait churn. Callers may lower it per-call
+# via max_wait_secs. Set equal to default_workflow_wait_secs (or 0) to disable
+# auto-extension. Default: 300.
+# workflow_wait_max_total_secs: 300
 
 # ── Hooks ──────────────────────────────────────────────────────────────
 # Reactive bindings from gateway events to actions.
@@ -223,6 +252,22 @@ operator_activity:
 # is present, never its quality. Default: enabled.
 decider_obligations:
   enabled: true
+  # SLA (secs) before an un-adjudicated constitutional proposal (O-6) or
+  # anomaly flag (O-7) is flagged as an adjudication SLA breach. The item's
+  # status is unchanged — the decision is still owed. 0 disables the check.
+  # Default: 604800 (7 days).
+  adjudication_sla_secs: 604800
+
+# ── Amendment Invitations (citizenship RFC #771 D.2) ────────────────
+# When a rule is denied to the same agent alias at least `threshold` times
+# within `window_secs`, the gateway issues a durable invitation to draft an
+# amendment (Ri-0.8). The gateway never judges the rule; it executes a
+# pre-committed threshold. An invitation is not an amendment and carries no
+# authority. Default: enabled, threshold 3, window 7 days.
+amendment_invitations:
+  enabled: true
+  threshold: 3
+  window_secs: 604800
 
 # ── Approval Levels ───────────────────────────────────────────────────
 # Escalation: require higher authority for sensitive actions.
@@ -303,6 +348,7 @@ code_analysis:
   require_approval_for:
     - NetworkAccess
     - CodeExecution
+    - ArtifactExecution
 
 # ── Capability Delta Gate ──────────────────────────────────────────────
 # Controls how capability broadening during revision promotion is gated.
@@ -322,6 +368,11 @@ code_analysis:
 #     for zero-capability agents.
 # require_operator_approval_for_new_agents: true
 # allow_zero_capability_direct_promote: true
+#
+#   agent_install_smoke_test (deprecated #578): ignored — smoke tests are now
+#     required unconditionally for capability-bearing agents. Retained for YAML
+#     compatibility only.
+# agent_install_smoke_test: ask
 
 # ── Session Budget (optional per-session resource limits) ─────────────
 # Uncomment to cap LLM rounds, tool calls, tokens, or wall-clock time.
@@ -372,12 +423,23 @@ retention:
 #  stale_job_max_age_days: 60
 
 # ── Post-Session Digest ───────────────────────────────────────────────
-# LLM summarization + memory extraction after sessions complete.
+# Gateway-internal post-session LLM step (`autonoetic.digest`). Requires
+# `auto_learning.enabled` — not invoked by other agent bundles directly.
 # Uncomment to enable.
 # digest_agent:
 #   enabled: true
 #   min_turns: 2
 #   llm_preset: agentic
+
+# ── Session Report ────────────────────────────────────────────────────
+# Structured live views under `.gateway/sessions/<id>/`.
+# `live_html_on_update: false` (default) writes HTML only on session close.
+#session_report:
+#  live_html_on_update: false
+
+# ── Evidence mode ─────────────────────────────────────────────────────
+# `full` (default) | `errors` | `off` — controls per-tool evidence files.
+#evidence_mode: errors
 
 # ── Max Session Turns ─────────────────────────────────────────────────
 # Circuit breaker: max turns per session before forced suspension.
@@ -407,6 +469,31 @@ max_session_turns: 25
 #     because re-listing never returns new data. The corrective trip message
 #     tells the agent to spawn directly with a free-text message or end the
 #     turn. Set to 0 to disable the fast path.
+#   child_failure_loop_penalty: loops added to the no-progress counter on each
+#     child task failure (issue #704). A queued agent_spawn returns ok and
+#     resets progress, but a child that later fails means that spawn made no
+#     net progress — so each failure advances (does not reset) current_loops by
+#     this amount. Combined with read-only tools no longer resetting progress
+#     (#701), a spawn→probe→spawn death spiral reaches max_loops_without_progress
+#     instead of never. Set to 0 to disable (legacy behavior).
+#   recurring_error_window / recurring_error_distinct_tools: recurring-error
+#     detector (issue #703). Each error tool-result is fingerprinted (volatile
+#     ids/timestamps/numbers stripped) and tracked in a sliding window of the
+#     last `recurring_error_window` errors. When the same fingerprint surfaces
+#     from `recurring_error_distinct_tools` or more distinct tool names, the
+#     guard trips — catching an agent rotating through different tools that all
+#     hit one unrecoverable root cause (which per-tool budgets miss). Set the
+#     window to 0 to disable.
+#   max_irrecoverable_repeats: repeated-irrecoverable-rejection trip threshold
+#     (issue #718). Permission / quota / sandbox-unavailable rejections are
+#     excluded from max_tool_failures (retrying can't fix them), so the first
+#     occurrences are free — the agent legitimately ends its turn to await an
+#     operator. But re-issuing the SAME call for the SAME deterministic
+#     rejection (e.g. agent_revision_promote against a standing
+#     capability_delta_requires_approval) is a no-progress loop (P-7.7). When
+#     the same (tool, normalized-error) rejection recurs this many times the
+#     guard trips. Distinct rejections never accumulate together. Set to 0 to
+#     disable.
 #loop_guard:
 #  max_loops_without_progress: 10
 #  max_tool_failures: 8
@@ -415,6 +502,10 @@ max_session_turns: 25
 #  rotation_window_size: 16
 #  rotation_distinct_floor: 6
 #  roster_repeat_floor: 3
+#  child_failure_loop_penalty: 2
+#  recurring_error_window: 10
+#  recurring_error_distinct_tools: 3
+#  max_irrecoverable_repeats: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
@@ -424,13 +515,55 @@ prompt_budget:
   tool_definitions_max_tokens: 0
   warn_at_pct: 75.0
   margin_tokens: 4096
-  compress_tool_schemas_after_turn_0: true
+  # DEPRECATED (no-op). Tool schemas are never compressed; stripping them to
+  # {"type": "object"} corrupted tool-calling on turn 1+. Tool tokens are now
+  # saved losslessly via provider tool-array caching (prompt_cache_enabled).
+  compress_tool_schemas_after_turn_0: false
   # Maximum number of tool definitions sent per turn (0 = unlimited).
   # Excess tools are dropped from lowest tier first (Specialized → Workflow → Core).
   max_tool_definitions: 40
   # Root sessions start with Core + Workflow tools only (~40 for planner.default).
   # After the first Specialized tool call, all tiers unlock (~10 more; total ~50).
   progressive_tool_disclosure: true
+  # Soft token budget that triggers the context governor proactively, before
+  # the hard context-window limit is reached. Useful for large context-window
+  # models (e.g. 200K tokens) where waiting for the hard limit wastes tokens
+  # on every round. Set to 30000-50000 for such models; leave unset to disable.
+  # soft_budget_tokens: 40000
+  # Strip reasoning_content / reasoning_details from assistant messages before
+  # sending them to the LLM. The model does not need to re-read its own
+  # chain-of-thought, and checkpoints/exports/timeline keep the full reasoning
+  # for audit. Disabled by default because many thinking/reasoning models
+  # (DeepSeek, OpenRouter reasoning models, etc.) require reasoning replay.
+  # Enable only when you are sure your model does not need it.
+  # strip_reasoning_from_request: false
+  # Maximum characters to allow in a tool-result message content before it is
+  # truncated for the LLM request. JSON results have their large string *values*
+  # shortened in-place — structure + metadata (offset, next_offset, total_bytes,
+  # error_type, etc.) survive so agents can paginate. Non-JSON results get a
+  # head+tail ellipsis. The full result is always stored regardless.
+  # Default is 4000. Set to 0 to disable truncation.
+  # max_tool_result_chars: 4000
+  # Collapse duplicate tool-result messages into a short marker
+  # ("duplicate result — see above"). Re-reading artifacts or polling status
+  # tools often produces identical output across turns; this saves tokens while
+  # keeping the full results in storage. Enabled by default.
+  # dedup_tool_results: true
+  # Collapse *recurring errors* (issue #705). Unlike dedup_tool_results
+  # (byte-identical, consecutive), this fingerprints the error text (volatile
+  # ids/timestamps/numbers stripped) so the same root-cause failure surfacing
+  # non-consecutively — the hallmark of an install/spawn death spiral — is
+  # collapsed to a marker on all but its most recent occurrence. Full results
+  # remain in storage. Enabled by default.
+  # collapse_repeated_errors: true
+  # Mark the stable leading portion of the system prompt (foundation doctrine +
+  # SKILL instructions + guidance + output contract) as a provider prompt-cache
+  # prefix. Cache-capable drivers attach cache_control:{type:ephemeral} there —
+  # Anthropic (otherwise sends NO cache markers → caching was off) and OpenRouter
+  # when routing Claude/Gemini. The volatile per-turn tail (state attestation,
+  # degradation notice) sits after the breakpoint and is never cached. OpenAI and
+  # llama.cpp reuse a stable prefix automatically. Enabled by default.
+  # prompt_cache_enabled: true
   # Chars-per-token ratio used by the prompt-budget estimator. The default
   # (3.0) is conservative — it matches Qwen3 / Llama3 / GPT-4o on code/JSON
   # content, which is typically 2.2–3.5 chars/token. The previous default
@@ -520,6 +653,8 @@ llm_presets:
         skip_threshold: 0.95                  # 0.0–1.0
       hybrid:
         ambiguity_threshold: 0.5              # 0.0–1.0
+    thinking:
+      effort: medium
 
   budget:
     routing:
@@ -535,6 +670,8 @@ llm_presets:
     provider: "openrouter"
     model: "minimax/minimax-m2.7"
     temperature: 0.2
+    thinking:
+      effort: medium
 
   coding:
     provider: "openrouter"
@@ -632,6 +769,10 @@ context_compression:
 #   - agent_id: evolution-orchestrator.default
 #     schedule: "0 */4 * * *"
 #     message: "Run evolution analysis cycle"
+#     enabled: true
+#   - agent_id: ombudsman.default
+#     schedule: "0 */2 * * *"
+#     message: "Ombudsman sweep: review anomaly-flag queue"
 #     enabled: true
 
 # ── Protected Agents (issue #21) ───────────────────────────────────────

@@ -39,6 +39,7 @@ pub fn classify_approval_risk(action: &ScheduledAction) -> ApprovalRisk {
         ScheduledAction::ProfileShare { .. } => ApprovalRisk::Standard,
         ScheduledAction::WriteFile { .. } => ApprovalRisk::Standard,
         ScheduledAction::WikiProposal { .. } => ApprovalRisk::Standard,
+        ScheduledAction::PlanFrame { .. } => ApprovalRisk::Standard,
     }
 }
 
@@ -59,7 +60,10 @@ pub fn hardening_for_action(action: &ScheduledAction) -> ApprovalHardening {
     }
 }
 
-pub fn enrich_request(request: &mut ApprovalRequest) {
+pub fn enrich_request(
+    request: &mut ApprovalRequest,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+) {
     let h = hardening_for_action(&request.action);
     request.min_dwell_ms = if h.min_dwell_ms > 0 {
         Some(h.min_dwell_ms)
@@ -67,6 +71,25 @@ pub fn enrich_request(request: &mut ApprovalRequest) {
         None
     };
     request.confirm_phrase = h.confirm_phrase;
+
+    // Standalone (non-workflow) approvals get a configurable TTL so they do not
+    // sit pending forever in chat-spawned sessions. Workflow-bound approvals rely
+    // on the task-level approval_timeout_secs instead.
+    if request.workflow_id.is_none() && request.task_id.is_none() && request.expires_at.is_none() {
+        if let Some(cfg) = config {
+            let ttl = cfg.standalone_approval_timeout_secs;
+            if ttl > 0 {
+                // Base the TTL on the request's own creation time so the stored
+                // expiry is consistent with `created_at` (callers, including
+                // tests, may set it explicitly). Fall back to now if unset.
+                let base = chrono::DateTime::parse_from_rfc3339(&request.created_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                request.expires_at =
+                    Some((base + chrono::Duration::seconds(ttl as i64)).to_rfc3339());
+            }
+        }
+    }
 }
 
 fn confirm_phrase_for(action: &ScheduledAction) -> String {
@@ -105,6 +128,7 @@ mod tests {
             added_capabilities: vec!["NetworkAccess".to_string()],
             broadened_capabilities: vec![],
             payload: None,
+            federation_context: None,
         };
         assert_eq!(classify_approval_risk(&action), ApprovalRisk::Critical);
         let h = hardening_for_action(&action);
@@ -121,6 +145,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["example.com".to_string()]),
+            intent: None,
         };
         assert_eq!(classify_approval_risk(&action), ApprovalRisk::High);
     }
@@ -133,6 +158,7 @@ mod tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         };
         assert_eq!(classify_approval_risk(&action), ApprovalRisk::Standard);
     }
@@ -167,14 +193,14 @@ mod tests {
             decided_by: None,
             decision_reason: None,
             approval_level: Default::default(),
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
-        enrich_request(&mut req);
+        enrich_request(&mut req, None);
         assert!(req.min_dwell_ms.unwrap() > 0);
         assert!(req.confirm_phrase.is_some());
     }

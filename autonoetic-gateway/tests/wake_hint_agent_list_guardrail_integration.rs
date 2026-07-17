@@ -37,6 +37,7 @@ fn make_manifest() -> AgentManifest {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
             description: "Test collaborative planner".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::AgentSpawn {
@@ -62,7 +63,9 @@ fn make_manifest() -> AgentManifest {
         middleware: None,
         agentskills_import: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -90,6 +93,7 @@ fn make_run_context(root_session_id: &str, wake_hint: Option<WakeHintState>) -> 
         artifact_id: None,
         sentinel_suppress_target: None,
         discovered_tools: None,
+        tool_discovery_catalog: None,
         wake_hint,
         wake_hints_map: Some(wake_hints_map),
     }

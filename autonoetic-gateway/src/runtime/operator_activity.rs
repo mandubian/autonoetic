@@ -158,10 +158,10 @@ pub fn classify_tool_activity(
 }
 
 pub fn classify_session_lifecycle(
-    close_reason: &str,
+    outcome: autonoetic_types::session_outcome::SessionCloseOutcome,
     tool_steps_in_ingest: u32,
 ) -> Option<OperatorActivityDraft> {
-    if close_reason != "jsonrpc_spawn_complete_empty" || tool_steps_in_ingest == 0 {
+    if !outcome.is_completed_empty() || !outcome.is_jsonrpc_spawn() || tool_steps_in_ingest == 0 {
         return None;
     }
     Some(OperatorActivityDraft {
@@ -190,6 +190,60 @@ pub fn classify_workflow_event(event_type: &str) -> Option<OperatorActivityDraft
             refs: OperatorActivityRefs::default(),
         }),
         _ => None,
+    }
+}
+
+/// Build a passive operator-activity advisory for a Sentinel divergence verdict.
+/// This replaces the pushed DivergenceSentinel UserInteraction popup (Phase 2 D.7a).
+pub fn classify_sentinel_notice(
+    level: &str,
+    agent_id: &str,
+    turn: u64,
+    signals: &[crate::runtime::trajectory_health::DivergenceSignal],
+) -> OperatorActivityDraft {
+    use crate::runtime::trajectory_health::{DivergenceSignalKind, SignalSeverity};
+    let severity = if level == "critical"
+        || signals.iter().any(|s| s.severity == SignalSeverity::Critical)
+    {
+        OperatorActivitySeverity::Error
+    } else {
+        OperatorActivitySeverity::Attention
+    };
+
+    let signal_summary = if signals.is_empty() {
+        "no detailed signals".to_string()
+    } else {
+        let parts: Vec<String> = signals
+            .iter()
+            .map(|s| {
+                let base = format!("{}={:.2}", s.kind.as_str(), s.current);
+                match &s.evidence {
+                    Some(e) if !e.is_empty() => format!("{} ({})", base, truncate_chars(e, 80)),
+                    _ => base,
+                }
+            })
+            .collect();
+        parts.join(", ")
+    };
+
+    let summary = format!(
+        "Sentinel [{}] for {} at turn {} — {}",
+        level, agent_id, turn, signal_summary
+    );
+
+    let refs = OperatorActivityRefs::default();
+    // Keep repetition-entropy / feedback-incorporated notices advisory-only in kind metadata.
+    let has_only_advisory_signals = !signals.is_empty()
+        && signals
+            .iter()
+            .all(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated || s.kind == DivergenceSignalKind::RepetitionEntropy);
+    let _ = has_only_advisory_signals; // reserved for future filtering; severity already encodes urgency
+
+    OperatorActivityDraft {
+        kind: OperatorActivityKind::SentinelNotice,
+        severity,
+        summary: truncate_chars(&summary, SUMMARY_MAX_CHARS),
+        refs,
     }
 }
 
@@ -723,5 +777,26 @@ mod tests {
         assert!(text.contains("ReadAccess"));
         assert!(text.contains("Core, Standard"));
         assert!(text.contains("skill promotion"));
+    }
+
+    #[test]
+    fn classify_sentinel_notice_is_passive_advisory() {
+        use crate::runtime::trajectory_health::{
+            DivergenceSignal, DivergenceSignalKind, SignalSeverity,
+        };
+        let signals = vec![DivergenceSignal::new(
+            DivergenceSignalKind::FeedbackIgnored,
+            SignalSeverity::Critical,
+            3.0,
+            1.0,
+        )
+        .with_evidence("repeated output_schema violation")];
+        let draft = classify_sentinel_notice("critical", "planner.default", 7, &signals);
+        assert_eq!(draft.kind, OperatorActivityKind::SentinelNotice);
+        assert_eq!(draft.severity, OperatorActivitySeverity::Error);
+        assert!(draft.summary.contains("Sentinel [critical]"));
+        assert!(draft.summary.contains("planner.default"));
+        assert!(draft.summary.contains("turn 7"));
+        assert!(draft.summary.contains("feedback_ignored"));
     }
 }

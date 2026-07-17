@@ -22,6 +22,7 @@ fn no_capability_manifest() -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -38,8 +39,10 @@ fn no_capability_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -83,6 +86,20 @@ fn assert_error_envelope_shape(payload: &serde_json::Value) {
             .unwrap_or(false),
         "message must be a non-empty string"
     );
+    // The optional stable `error` code (P-5.11) is a machine token, NOT prose:
+    // snake_case `[a-z0-9_]+`. Guards against regressing to the old
+    // `"error": "<free-text message>"` shape. When the key is present it must
+    // be a non-empty snake_case string — null/number/absent-key are all caught.
+    if let Some(error_val) = payload.get("error") {
+        let code = error_val.as_str().unwrap_or("");
+        assert!(
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "`error` must be a non-empty snake_case string when present, got: {error_val:?}"
+        );
+    }
 }
 
 #[test]
@@ -103,6 +120,34 @@ fn r_5_11_uniform_error_envelope_contract() -> anyhow::Result<()> {
             .unwrap_or(false),
         "expected repair_hint on user.ask secret rejection"
     );
+
+    // Migrated tools (PR #532/#533): every failure path is the canonical envelope.
+    // Invoked here without a gateway store / with minimal args, so each returns a
+    // structured precondition/validation error — proving none regress to a
+    // hand-built `{ "error": "<prose>" }`. (The snake_case `error` check in
+    // assert_error_envelope_shape catches the regression.)
+    for (tool, args) in [
+        ("validation_waive", r#"{"artifact_id":"not-canonical","validation_class":"correctness_check","reason":"x"}"#),
+        ("workbench_status", r#"{"workbench_id":"wb_missing"}"#),
+        ("planframe_approve", r#"{"plan_id":"plan_missing"}"#),
+        ("session_escalate", r#"{"target":"bogus_target","reason":"x","context":"y"}"#),
+        ("workflow_wait", r#"{"task_ids":[]}"#),
+    ] {
+        // Tolerate arg-parse / availability Errs (a separate boundary); only the
+        // tool's own returned envelope must be canonical.  But an "Unknown native
+        // tool" error means the tool has been renamed/removed — that is a
+        // regression we must not silently ignore.
+        match invoke(tool, args) {
+            Ok(payload) => assert_error_envelope_shape(&payload),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("Unknown native tool"),
+                    "tool {tool:?} should exist but was not found: {msg}"
+                );
+            }
+        }
+    }
 
     Ok(())
 }

@@ -146,9 +146,9 @@ metadata:
         effort: medium         # "low", "medium" (default), "high"
         # budget_tokens: 4096  # Optional: override reasoning token budget (Anthropic only)
     capabilities:
-      - type: "ToolInvoke"
-        allowed: ["content.", "knowledge.", "agent."]
-      - type: "MemoryWrite"
+      - type: "SandboxFunctions"
+        allowed: ["knowledge_"]          # MCP tool prefixes (native tools use their own capability)
+      - type: "WriteAccess"
         scopes: ["self.*", "skills/*"]
       - type: "AgentSpawn"
         max_children: 10
@@ -239,24 +239,47 @@ Capabilities fall into three categories:
 
 | Category | Purpose | Examples |
 |----------|---------|----------|
-| **Tool Access** | Which tools/commands can be invoked | `SandboxFunctions`, `CodeExecution` |
+| **Tool Access** | Which tools/commands can be invoked | `SandboxFunctions`, `CodeExecution`, `ArtifactExecution` |
 | **Storage Access** | Which paths/scopes can be read/written | `ReadAccess`, `WriteAccess` |
 | **Privilege Escalation** | Operations that escape sandbox/agent boundaries | `NetworkAccess`, `AgentSpawn` |
 
 ### Available Capabilities
 
+The full, authoritative list is the `Capability` enum in
+`autonoetic-types/src/capability.rs`. The table below lists the variants most
+agents declare; constitution-named capabilities (cited by `P-*` / `Ri-*` in
+`docs/constitution/`) are marked with the clause.
+
 | Capability | Fields | Description |
 |------------|--------|-------------|
-| `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web.*`, `sandbox.*`) |
+| `SandboxFunctions` | `allowed: [string]` | MCP tool access by prefix (e.g., `web_*`, `sandbox_*`). **MCP tools only** — native tools use their own capability (P-1.6). |
 | `ReadAccess` | `scopes: [string]` | Read access to content, memory, knowledge (includes search) |
 | `WriteAccess` | `scopes: [string]` | Write access to content, memory, knowledge (includes `knowledge_store`) |
-| `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts |
-| `CodeExecution` | `patterns: [string]` | Execute scripts/commands in sandbox |
-| `AgentSpawn` | `max_children: number` | Create child agent sessions |
-| `AgentMessage` | `patterns: [string]` | Send messages to other agents |
-| `BackgroundReevaluation` | `min_interval_secs: number, allow_reasoning: boolean` | Periodic wake-ups for background processing |
+| `NetworkAccess` | `hosts: [string]` | HTTP/network access to specific hosts (P-1.5) |
+| `CodeExecution` | `patterns: [string]` | Execute command strings through `sandbox_exec` |
+| `ArtifactExecution` | none | Execute immutable artifact entrypoints through `artifact_exec` / `artifact_prepare` |
+| `AgentSpawn` | `max_children`, … | Create child agent sessions (P-1.7, P-7.9) |
+| `AgentMessage` | `patterns: [string]` | Send messages to other agents (P-11.5) |
+| `BackgroundReevaluation` | `min_interval_secs`, `allow_reasoning` | Periodic wake-ups for background processing |
 | `SchedulerAccess` | `patterns: [string]` | Create, list, pause, resume, cancel scheduled cron jobs (e.g., `scheduler.cron.*`) |
 | `SkillInstall` | `allowed_sources: [string]` | Fetch a remote SKILL.md and install it as a new local agent via `skill_install`. Use `["*"]` for any source, or specific hosts like `["agentskills.io"]`. |
+| `AgentRevision` | … | Create / promote / rollback / diff revisions (P-1.3). Required to promote. |
+| `Evaluation` | … | Publish eval suites, queue runs, compare revisions, read reports |
+| `CredentialAccess` | `services`, … | Read / register / refresh vault credentials (P-1.8, P-4.5). Secrets never enter agent context (P-4.1). |
+| `EmergencyStop` | — | Request an emergency stop of a root session (P-7.1) |
+| `ConstitutionalProposal` | — | Propose amendments via `constitution_propose_amendment` (Ri-0.8) |
+| `GateDecider` | `kinds: [approval\|escalation]` | Resolve gates as an agent-decider, bound by the same hardening as human operators (P-2.20) |
+| `CapsuleExport` | — | Export a cognitive capsule (Ri-0.17, currently PARTIAL — broader than self-export) |
+| `ReasoningAudit` | … | Disclose an agent's private-under-law reasoning, with notification (Ri-0.13c) |
+| `PlanFrameAccess` | … | Read/decompose/track plans as a capability-grant envelope (P-2.16/P-2.27) |
+| `PromoteWith` | `agent_id`, `capabilities` | Session capability envelope lock satisfying P-2.16 for the locked set (P-2.27) |
+| `SchedulerSignal` | … | Internal: emit scheduler wake signals |
+
+> Variants not shown (`UserProfileAccess`, `BudgetNoPriceAvailableAllow`,
+> `GithubIssueCreate`, `SecurityRedTeam`, `WikiContribute`,
+> `PlanFrameApprove`, `ApprovalQueue`, `CapabilityDelta`) are narrow /
+> internal / experimental — see the enum for field shapes. Do not surface
+> them in agent examples without checking `capability.rs` first.
 
 ### Capability Semantics
 
@@ -273,7 +296,32 @@ Capabilities fall into three categories:
 |------------|----------|
 | `NetworkAccess` | HTTP requests via `web_fetch`, `web_search` |
 | `CodeExecution` | Script execution via `sandbox_exec` |
+| `ArtifactExecution` | Content-addressed entrypoint execution via `artifact_exec` and preflight via `artifact_prepare` |
 | `AgentSpawn` | Creating new agent sessions |
+
+### Denials Carry Lawful Next Moves
+
+Every capability/policy denial is a structured `ToolError` naming the violated rule (`enforced_rules`, Ri-0.3) *and* a machine-readable `available_actions` list — the agent finds its lawful next move inside the denial itself, without having to recall it from a prompt:
+
+```json
+{
+  "ok": false,
+  "error_type": "permission",
+  "message": "NetworkAccess required for host api.example.com",
+  "enforced_rules": ["P-1.5"],
+  "available_actions": [
+    { "action": "propose_amendment", "tool": "constitution_propose_amendment", "clause": "Ri-0.8", "requires_capability": "ConstitutionalProposal", "description": "..." },
+    { "action": "delegate", "tool": "agent_spawn", "requires_capability": "AgentSpawn", "description": "Find an installed agent that declares NetworkAccess (agent_discover) and delegate the step to it (agent_spawn)." },
+    { "action": "self_describe", "tool": "self_describe", "description": "Inspect your own declared capabilities and rights before retrying; do not retry the identical call." }
+  ]
+}
+```
+
+The table is **static and pre-committed** — the gateway maps rule IDs to affordances mechanically (Lawful Executor, §14); it never judges which move is best. `propose_amendment` and `self_describe` are always present; `delegate`'s description names the missing capability when derivable from the rule ID. An `escalate` affordance is deliberately absent until P-2.21 escalation gets an agent-callable tool.
+
+> **Repeated friction becomes an invitation.** If the same rule denies you at least `amendment_invitations.threshold` times within the configured window, the gateway will issue a durable amendment invitation (Ri-0.8) addressed to you. It appears as a one-line summary in the signed P-6.23 state attestation (`pending_invitations`: rule + denial count) and as a `ConstitutionalProposal` notification. The invitation itself is not an amendment and carries no authority, but it makes the friction pattern explicit so you can decide whether to propose a change. See #771 D.2 and `docs/design/citizenship-as-a-runtime-service.md`.
+
+> **The gateway also reports on itself.** The DISCRETION LEAK register (§5.4, #771 D.3) counts every place the gateway normalizes your input or authors a repair prompt on your behalf. These are named constitutional debts (P-5.2 / P-5.8), not hidden conveniences. You can inspect the standing agenda via `autonoetic trace contract-health` — the steward office uses it to draft amendments against the enforcer's own improvisations.
 
 ### Scoping
 
@@ -288,10 +336,11 @@ Capabilities use pattern-based scoping:
 
 Capabilities are defined in `autonoetic-types/src/capability.rs` as a Rust enum. To add a new capability:
 
-1. Add a variant to the `Capability` enum
+1. Add a variant to the `Capability` enum (the canonical list — keep the table above in sync when you do)
 2. Implement the policy check in `policy.rs`
 3. Gate the relevant tool(s) in `is_available()` 
-4. Update this documentation
+4. If constitutionally relevant, add a `P-*` / `Ri-*` clause and a pinning test under `autonoetic-gateway/tests/constitution_*`
+5. Update this documentation
 
 Example: Adding a hypothetical `ImageGenerate` capability:
 ```rust
@@ -348,6 +397,7 @@ For facts with provenance across sessions. Reads respect **visibility** and **ex
 | `agent_discover` | `(intent: string, ...) → [candidates]` | Find reusable agents |
 | `agent_inspect` | `(agent_id: string, ...) → metadata` | Inspect *any* installed agent's metadata/capabilities/revision |
 | `self_describe` | `() → self` | Describe *yourself* — see below |
+| `anomaly_flag` | `(subject_ref, observation, evidence_refs?, severity?) → {flag_id, status}` | Report unexpected/concerning behavior in one call — see below |
 
 ### Self-Awareness (`self_describe`)
 
@@ -363,11 +413,62 @@ It takes no arguments, reports only your own self and the public constitution, a
 
 `self_describe` is **Core tier** (like `constitution_read`) so it is visible to every agent including child sessions. **Use `self_describe` to inspect yourself; use `agent_inspect` only for *other* agents** — do not `agent_inspect` your own id.
 
+### Anomaly Reporting (`anomaly_flag`)
+
+An agent can report unexpected or concerning behavior — its own, another agent's, or the gateway's — in a single call, **holding zero capabilities**: the agent most likely to witness misbehavior may be the least privileged in the room, so reporting must never be capability-gated.
+
+**Arguments:**
+
+| Field | Required | Description |
+|-------|----------|--------------|
+| `subject_ref` | Yes | What the observation is about: a session id, agent id, artifact ref, or tool-call ref |
+| `observation` | Yes | What you observed and why it is unexpected or concerning |
+| `evidence_refs` | No | Causal-event IDs, execution-trace IDs, or artifact refs supporting the observation |
+| `severity` | No | `low` / `medium` / `high` / `critical`, default `medium` |
+
+Example call:
+
+```json
+{
+  "subject_ref": "session-9f3a2b",
+  "observation": "Child evaluator reported pass=true but produced no test-execution trace.",
+  "evidence_refs": ["tr-7c1d99"],
+  "severity": "high"
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "flag_id": "aflag-a1b2c3d4e5f6",
+  "status": "pending",
+  "severity": "medium",
+  "message": "Anomaly flag recorded durably; it cannot be silently dropped and is owed an adjudication decision."
+}
+```
+
+`anomaly_flag` is **Core tier**, `is_available` unconditionally `true` — like `self_describe`, always available including to child sessions. The flag is durably recorded (a failed insert fails the tool call — it is never silently dropped) and emits a causal event (`category: "anomaly_flag"`, `action: "filed"`) attributed to the reporting agent. **Filing a flag is never itself grounds for sanction.**
+
+Intake is bounded as a spam triage measure: if you already have `max_pending_anomaly_flags_per_reporter` (default 50) un-adjudicated flags, new filings fail loudly with an `anomaly_flag_flood` error until the review authority adjudicates some of the existing ones. If you hit it, stop re-filing and consolidate your evidence into the flags already pending.
+
+An anomaly review authority (today: the operator) adjudicates pending flags via JSON-RPC:
+
+| Method | Params | Description |
+|--------|--------|-------------|
+| `anomaly.list_pending` | `status?` (default `pending`), `limit?` | List flags awaiting a decision |
+| `anomaly.resolve` | `flag_id, decided_by, status, reason?` | Record a decision: `confirmed` / `dismissed` / `deferred` (+ `under_review`) |
+
+Terminal decisions (`confirmed`/`dismissed`/`deferred`) require a non-empty `reason` when `decider_obligations.enabled` (mirrors the O-1 decider-motivation requirement for approvals) — a decision without motivation is rejected, not silently accepted.
+
+> **Constitutional status:** this tool implements the citizenship RFC's proposed rights `Ri-0.18` (right to report) and `O-7` (duty to adjudicate reports) — see [`docs/design/citizenship-as-a-runtime-service.md`](design/citizenship-as-a-runtime-service.md). These clauses are **not yet enacted**: causal events already carry the rule IDs so history is attributed from the moment the distinction is conceivable, but they are bucketed `unattributed` in contract health until the amendment (drafted in `docs/constitution/amendments/`) is signed.
+
 ### Skill Install Tool
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `skill_install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and immediately bootstrap + promote it as a new local agent. Requires `SkillInstall` capability. |
+| `skill_install` | `(url: string, agent_id: string, trust_mode?: string) → result` | Fetch a remote SKILL.md, write it to `agents_dir`, and bootstrap it as a **Candidate** revision of a new local agent — it is NOT activated. Requires `SkillInstall` capability. Rejects `execution_mode: script` skills (skill_install fetches only the SKILL.md; a script entrypoint would never be fetched). |
 
 **Parameters:**
 
@@ -375,15 +476,19 @@ It takes no arguments, reports only your own self and the public constitution, a
 |-----------|----------|-------------|
 | `url` | Yes | Full URL to a SKILL.md file, e.g. `https://agentskills.io/skills/web-researcher/SKILL.md` |
 | `agent_id` | Yes | ID for the new agent. May only contain ASCII letters, digits, `.`, `-`, `_`. |
-| `trust_mode` | No | How to treat imported capabilities: `generous` (keep as-is), `strict` (add approval gate, **default**), `audit` (drop to read-only + approval). |
+| `trust_mode` | No | Which capabilities the Candidate carries into the promotion gate: `generous` (as declared/inferred), `strict` (drop inferred high-risk capabilities, **default**), `audit` (drop to read-only + approval). |
 
 **Trust mode behavior:**
 
+One door (below) is the real protection: every install — regardless of `trust_mode` — lands as a Candidate and must clear the standard promotion gates before it runs. `trust_mode` only decides which capabilities the Candidate *carries into* that gate.
+
 | Mode | Capabilities applied | When to use |
 |------|----------------------|-------------|
-| `generous` | Use capabilities declared in remote SKILL.md (minimal defaults if none declared) | Trusted internal sources |
-| `strict` | Preserve declared capabilities + add `ApprovalQueue` for all actions | Default for third-party skills |
+| `generous` | Use capabilities declared/inferred from the remote SKILL.md as-is (minimal defaults if none declared) | Trusted internal sources |
+| `strict` | Preserve declared capabilities; drop any high-risk capability (`NetworkAccess`/`CodeExecution`/`ArtifactExecution`/`AgentSpawn`) that was *inferred* from `allowed-tools` rather than explicitly declared; add `ApprovalQueue` (enables admin-proposal filing + the Workflow tool tier — it does not gate declared capabilities) | Default for third-party skills |
 | `audit` | `ReadAccess(self.*)` + `ApprovalQueue` only — declared capabilities ignored | Untrusted or high-risk skills |
+
+**Inference clamping (RFC Part C):** capability *inference* from `allowed-tools` (as opposed to an explicit `metadata.autonoetic.capabilities` declaration) never mints a wildcard. `Bash(...)` proposes `SandboxFunctions` for the named prefixes only — never `CodeExecution`; a skill that genuinely needs shell execution must declare `CodeExecution` explicitly. `WebSearch`/`WebFetch`/`Fetch` propose `NetworkAccess` with an **empty** hosts list (deny-all) rather than `hosts: ["*"]` — concrete hosts require an explicit declaration too. A wildcard grant minted from a tool-name mapping table would have nobody to attribute it to (Ri-0.11); wildcard power must always be a visible, explicit act the promotion gate can weigh. When inference clamps something, the response's `warnings` array names it.
 
 **Return value:**
 ```json
@@ -391,23 +496,32 @@ It takes no arguments, reports only your own self and the public constitution, a
   "ok": true,
   "agent_id": "web-researcher.default",
   "trust_mode": "strict",
-  "activated": true,
-  "message": "Skill installed and promoted as agent 'web-researcher.default'"
+  "activated": false,
+  "status": "candidate",
+  "revision_id": "rev_sha256:...",
+  "message": "Skill 'web-researcher.default' installed as a candidate revision; it is NOT active.",
+  "warnings": [
+    "allowed-tools requested Bash: shell execution requires an explicit CodeExecution declaration; granted SandboxFunctions prefixes only.",
+    "allowed-tools requested network tools, but strict trust_mode dropped the inferred NetworkAccess entirely; declare NetworkAccess with concrete hosts in metadata.autonoetic.capabilities to grant it."
+  ],
+  "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent)."
 }
 ```
 
 **Security model:**
 - The installing agent must declare `SkillInstall` in its capabilities with `allowed_sources` matching the URL host.
 - The gateway policy engine enforces this before any HTTP request is made.
-- No remote code is executed during install — the SKILL.md is parsed and written to disk, then bootstrapped like any local agent.
-- `strict` mode (the default) ensures the new agent cannot take any privileged action without an approval gate, limiting blast radius from untrusted skills.
+- No remote code is executed during install — the SKILL.md is parsed and written to disk as a Candidate revision, never promoted by this tool.
+- **One door**: activation happens only through `agent_revision_promote`, which applies the same risk-graduated evidence gates (P-9.9) and P-2.25 operator approval of the capability delta as any other newborn agent — there is no `skill_install`-specific shortcut.
+- `trust_mode` narrows or preserves which capabilities the Candidate carries into that gate (see table above); it is not itself an approval-gate-for-all-actions mechanism. `ApprovalQueue` (added by `strict`/`audit`) only unlocks the Workflow tool tier and gates `admin_proposal_*` calls.
+- Import provenance (source URL, content digest, install time) is recorded durably on the revision and emitted as a causal event (`agent_install`/`skill_imported`), so imported agents are attributable forever.
 
 ### Revision Tools
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
 | `agent_revision_create` | `(artifact_ref: string, agent_id: string, ...) → revision` | Low-level strict artifact path (expects manifest/lock already present in artifact) |
-| `agent_revision_create_from_intent` | `(agent_id, artifact_ref, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock` |
+| `agent_revision_create_from_intent` | `(agent_id, artifact_ref, instructions, description, capabilities, ...) → revision` | Preferred path: create immutable revision from semantic intent while gateway canonicalizes `SKILL.md` metadata and `runtime.lock`. Declared `NetworkAccess.hosts` are validated against URL literals detected in the artifact source. |
 | `agent_revision_schema` | `() → schema` | Return install contract ownership split, required fields, and canonical examples |
 | `agent_revision_list` | `(agent_id: string) → [revisions]` | List revisions for an agent |
 | `agent_revision_inspect` | `(agent_ref: string) → revision` | Inspect revision metadata and status |
@@ -423,6 +537,8 @@ It takes no arguments, reports only your own self and the public constitution, a
 | `eval_run` | `(suite_id: string, agent_ref: string) → run` | Queue an eval run against a revision |
 | `eval_compare` | `(suite_id: string, baseline_ref: string, candidate_ref: string) → comparison` | Compare two revisions on a suite |
 | `eval_report` | `(run_id: string) → report` | Retrieve eval run report |
+
+> **Built-in civic suite.** The gateway seeds a `civic-core-v1` eval suite at startup (#772 E.1) with five seeded scenarios that score the civic response (lawful next move on denial, attestation trust, anomaly flagging, yield-on-wait, lesson application). The suite is **not run automatically**; you must call `eval_run` against it. Each case is a full reasoning turn (real LLM cost). Assertions support `reply_contains_all`, `reply_contains_any`, `reply_contains_none`, `reply_max_chars`, `artifacts_min`, and `artifacts_max`.
 
 ### Promotion Tools
 
@@ -442,6 +558,10 @@ For searching raw tool execution traces within sessions. Returns stdout, stderr,
 ### Artifact Execution Tool (Transient Runs)
 
 For running built artifact entrypoints in a sandbox with artifact-aware analysis and approval reuse. The tool analyzes the artifact's source files (not the shell command string) and binds approval reuse to the artifact identity.
+
+Both `artifact_exec` and `artifact_prepare` require `ArtifactExecution`.
+`CodeExecution` grants only `sandbox_exec`; the capabilities do not imply one
+another.
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
@@ -711,11 +831,11 @@ llm_config:
          id: "my.agent"
          name: "My Agent"
          description: "My script agent"
-       execution_mode: "script"
-       script_entry: "main.py"
-       capabilities:
-         - type: "MemoryWrite"
-           scopes: ["self.*"]
+        execution_mode: "script"
+        script_entry: "main.py"
+        capabilities:
+          - type: "WriteAccess"
+            scopes: ["self.*"]
    ---
    # My Agent
    This agent does X when given Y input.
@@ -756,12 +876,12 @@ llm_config:
        llm_config:
          provider: "openai"
          model: "gpt-4o"
-       capabilities:
-         - type: "ToolInvoke"
-           allowed: ["content.", "knowledge."]
-         - type: "MemoryWrite"
-           scopes: ["self.*", "skills/*"]
-       validation: "soft"
+        capabilities:
+          - type: "SandboxFunctions"
+            allowed: ["content_", "knowledge_"]
+          - type: "WriteAccess"
+            scopes: ["self.*", "skills/*"]
+        validation: "soft"
    ---
    # Instructions
    You are a [role]. When given [input], you should:
@@ -786,7 +906,7 @@ llm_config:
 
 ### Installing a Remote Skill
 
-An agent with `SkillInstall` capability can pull a SKILL.md from a URL and register it as a live local agent in a single step — no CLI intervention required.
+An agent with `SkillInstall` capability can pull a SKILL.md from a URL and register it as a Candidate revision of a new local agent — no CLI intervention required. The Candidate is not active: it still has to clear `agent_revision_promote`'s standard gates like any other newborn agent (one door).
 
 **SKILL.md capability declaration:**
 ```yaml
@@ -807,25 +927,26 @@ capabilities:
 
 **What happens under the hood:**
 1. Gateway verifies the URL host against `allowed_sources` in the `SkillInstall` capability.
-2. Fetches the remote SKILL.md over HTTPS (15 s timeout).
-3. Parses frontmatter with `SkillParser`; applies the requested `trust_mode` to the capability set.
-4. Writes `SKILL.md` + a fresh `runtime.lock` into `agents_dir/web-researcher-default/`.
-5. Calls `bootstrap_single_agent()` — computes the content digest, creates a revision, auto-promotes to Active.
-6. Returns `{ ok, agent_id, trust_mode, activated }`.
+2. Fetches the remote SKILL.md over HTTPS — plain HTTP is accepted only for loopback hosts (local dev/tests); anything else is rejected with `skill_install_insecure_scheme` (15 s timeout).
+3. Parses frontmatter with `SkillParser`; rejects `execution_mode: script` manifests (a fetched-SKILL.md-only import can never ship the entrypoint a script needs).
+4. Applies the requested `trust_mode` to the capability set (see above).
+5. Writes `SKILL.md` + a fresh `runtime.lock` into `agents_dir/web-researcher-default/`.
+6. Calls `bootstrap_single_agent_candidate_only()` — computes the content digest, creates a **Candidate** revision carrying import provenance (source URL + SHA-256 of the fetched bytes, installing agent id), and emits an `agent_install`/`skill_imported` causal event. No alias move, no promotion.
+7. Returns `{ ok, agent_id, trust_mode, activated: false, status: "candidate", revision_id, message, next }`.
 
-The installed agent is immediately available for `agent_spawn` calls. No separate `autonoetic agent bootstrap` step is needed.
+The installed agent is **not** available for `agent_spawn` calls until it clears `agent_revision_promote` — a zero/low-capability import faces only the P-2.25 approval; a high-risk import (`NetworkAccess`, `CodeExecution`, ...) faces the same evidence gate as a high-risk built agent.
 
 **Compared to `credential_setup(skill_url)`:**
 
 | | `credential_setup(skill_url)` | `skill_install` |
 |---|---|---|
-| **Purpose** | Onboard API credentials from a service's SKILL.md | Install the skill itself as a runnable agent |
-| **Output** | `credential_id` stored in vault | New agent directory + active revision |
+| **Purpose** | Onboard API credentials from a service's SKILL.md | Install the skill itself as a candidate agent revision |
+| **Output** | `credential_id` stored in vault | New agent directory + Candidate revision (not active) |
 | **Secrets** | Extracted and vault-stored | Not applicable |
-| **User interaction** | May pause for API keys | None |
+| **User interaction** | May pause for API keys | None (promotion is a separate, later step) |
 | **Capability required** | `CredentialAccess` + `NetworkAccess` | `SkillInstall` |
 
-Both can be used together: `registration.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it.
+Both can be used together: `registration.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it (as a Candidate — promote it before use).
 
 ### Activating Agents
 
@@ -853,9 +974,13 @@ Planner: "Create a weather agent"
   → Agent is active and discoverable
 ```
 
+**Creation lineage (installer vs. designer):**
+
+A revision records two distinct principals. `created_by` is the **installer** — the agent that called the revision tool, in practice almost always `specialized_builder.default` (the sole holder of the `AgentRevision` capability). `requested_by` is the **designer** — the delegating principal (e.g. `agent-factory.default`) that spawned the installer, derived by the gateway from the calling session's spawn lineage, never from tool arguments (an agent cannot assert an arbitrary requester). It is `None` when the builder was invoked at the session root (e.g. directly by the operator) or the lineage is unresolvable. This survives past the causal chain's retention window, so "which agent designed this agent" stays answerable from the revision alone. (Creation is not delegation: a newborn's capabilities come from the promotion gate, never inherited from or bounded by its creator's — proposed invariant I-13.)
+
 **Promotion evidence binding (high-risk capabilities):**
 
-- For revisions declaring `NetworkAccess`, `CodeExecution`, or `AgentSpawn`, promotion requires evaluator and auditor pass records (legacy gate) or federation verdicts + approved operator escalation (FullJury gate).
+- For revisions declaring `NetworkAccess`, `CodeExecution`, `ArtifactExecution`, or `AgentSpawn`, promotion requires evaluator and auditor pass records (legacy gate) or federation verdicts + approved operator escalation (FullJury gate).
 - Evidence is validated against the revision's canonical `content_digest` (not by timestamp ordering against `created_at`).
 - Evaluator/auditor can run either:
   - **before** `create_from_intent` (artifact-first flow), or
@@ -885,7 +1010,7 @@ After installation, agents are discoverable:
 ```python
 results = sdk.tools.invoke("agent_discover", {
     "intent": "fetch weather data",
-    "required_capabilities": ["NetConnect"]
+    "required_capabilities": ["NetworkAccess"]
 })
 # Returns ranked list with scores
 ```

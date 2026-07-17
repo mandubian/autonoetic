@@ -497,6 +497,11 @@ pub fn handle_trace_contract_health(
     let gateway_dir = config.agents_dir.join(".gateway");
     let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
     let health = store.contract_health(since)?;
+    let dead = autonoetic_gateway::enforcement_register::dead_clauses(&health);
+    let registered_count = autonoetic_gateway::enforcement_register::principles().len()
+        + autonoetic_gateway::enforcement_register::rights().len()
+        + autonoetic_gateway::enforcement_register::obligations().len();
+    let leak_summary = store.discretion_leak_summary(since)?;
 
     if json_output {
         let body = serde_json::json!({
@@ -511,6 +516,15 @@ pub fn handle_trace_contract_health(
                 })
             }).collect::<Vec<_>>(),
             "unattributed": health.unattributed,
+            "dead_clauses": dead,
+            "registered_clause_count": registered_count,
+            "discretion_leaks": leak_summary.iter().map(|t| {
+                serde_json::json!({
+                    "rule_id": t.rule_id,
+                    "kind": t.kind,
+                    "count": t.count,
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
@@ -574,6 +588,168 @@ pub fn handle_trace_contract_health(
             color::RESET
         );
     }
+
+    println!();
+    if dead.is_empty() {
+        println!(
+            "{}Every registered clause ({}) fired at least once in this window.{}",
+            color::DIM,
+            registered_count,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}Never enforced in window{} ({} of {} registered clauses):",
+            color::BOLD,
+            color::RESET,
+            dead.len(),
+            registered_count
+        );
+        for clause in &dead {
+            let title = autonoetic_gateway::enforcement_register::clause_title(clause)
+                .unwrap_or("<unknown>");
+            println!("  {}{:<10}{} {}", color::BRIGHT_CYAN, clause, color::RESET, title);
+        }
+        println!(
+            "{}Scoped to clauses migrated into the structured enforcement register — not the full constitution.{}",
+            color::DIM,
+            color::RESET
+        );
+    }
+
+    // #771 D.3: "Top leaks this window" — the standing agenda the steward
+    // office drafts amendments against.
+    println!();
+    if leak_summary.is_empty() {
+        println!(
+            "{}No discretion leaks recorded (the gateway did not exercise judgment reserved to the agent).{}",
+            color::DIM,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}Top discretion leaks{} {} — gateway judgment reserved to the agent or pre-committed law:",
+            color::BOLD,
+            color::RESET,
+            match since {
+                Some(ts) => color::dim(&format!("(since {ts})")),
+                None => color::dim("(all retained events)"),
+            }
+        );
+        println!(
+            "{}{:<10} {:<30} {:<8}{}{}",
+            color::DIM,
+            color::BOLD,
+            "RULE",
+            "KIND",
+            "COUNT",
+            color::RESET,
+        );
+        println!("{}", color::separator(72));
+        for t in &leak_summary {
+            println!(
+                "{}{:<10}{} {:<30} {}{:<8}{}",
+                color::BRIGHT_YELLOW,
+                t.rule_id,
+                color::RESET,
+                t.kind,
+                color::BRIGHT_YELLOW,
+                t.count,
+                color::RESET,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `autonoetic trace civic-health` — the standing civic-health view (#772
+/// E.2). The dual of contract-health: contract-health measures whether the
+/// *gateway* honors the law, civic-health measures whether *agents* use it.
+/// Tallies each agent's constitutional proposals and anomaly flags, filed vs
+/// still-pending, so both that agents exercise voice/witnessing and whether
+/// those are being answered are visible in one view.
+pub fn handle_trace_civic_health(
+    config_path: &Path,
+    since: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+    let health = store.civic_health(since)?;
+
+    if json_output {
+        let body = serde_json::json!({
+            "since": since,
+            "by_agent": health.by_agent.iter().map(|e| {
+                serde_json::json!({
+                    "agent_id": e.agent_id.as_str(),
+                    "proposals_filed": e.proposals_filed,
+                    "proposals_pending": e.proposals_pending,
+                    "flags_filed": e.flags_filed,
+                    "flags_pending": e.flags_pending,
+                    "invitations_issued": e.invitations_issued,
+                    "invitations_open": e.invitations_open,
+                    "invitations_answered": e.invitations_answered,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    println!(
+        "{}Civic health{} {}",
+        color::BOLD,
+        color::RESET,
+        match since {
+            Some(ts) => color::dim(&format!("(since {ts})")),
+            None => color::dim("(all retained items)"),
+        }
+    );
+    println!();
+
+    if health.by_agent.is_empty() {
+        println!(
+            "{}No civic activity recorded (no constitutional proposals or anomaly flags filed).{}",
+            color::DIM,
+            color::RESET
+        );
+    } else {
+        println!(
+            "{}{}{:<28} {:<20} {:<20} {}{}",
+            color::DIM,
+            color::BOLD,
+            "AGENT",
+            "PROPOSALS(pending)",
+            "FLAGS(pending)",
+            "INVITATIONS(open/answered)",
+            color::RESET
+        );
+        println!("{}", color::separator(72));
+        for e in &health.by_agent {
+            println!(
+                "{}{:<28}{} {} ({} pending)   {} ({} pending)   {} ({} / {} answered)",
+                color::BRIGHT_CYAN,
+                e.agent_id,
+                color::RESET,
+                e.proposals_filed,
+                e.proposals_pending,
+                e.flags_filed,
+                e.flags_pending,
+                e.invitations_issued,
+                e.invitations_open,
+                e.invitations_answered,
+            );
+        }
+    }
+
+    println!();
+    println!(
+        "{}Precision-of-adjudication metrics are not yet tracked here (RFC E.1/E.3).{}",
+        color::DIM,
+        color::RESET
+    );
     Ok(())
 }
 
@@ -1519,16 +1695,18 @@ pub async fn handle_trace_fork(
         )?
     };
 
-    // Mirror the source timeline into the fork (best effort) so the Session Room
-    // shows the inherited history immediately rather than an empty timeline.
+    // Record every fork side effect (timeline mirror, lineage row, both
+    // causal events) through the same choke point `session.fork` (RPC) uses,
+    // so a CLI fork is indistinguishable from an RPC fork: its parent
+    // artifact refs resolve and it shows up in `trace fork-tree` (#814). Best
+    // effort — the fork itself already succeeded (checkpoint written).
     let gateway_dir = config.agents_dir.join(".gateway");
     if let Ok(store) = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir) {
-        if let Err(e) = store.clone_timeline_for_fork(
-            &fork.source_session_id,
-            &fork.new_session_id,
-            fork.fork_turn as u64,
-        ) {
-            eprintln!("warning: could not mirror source timeline into fork: {e}");
+        // Attribution fallback: the agent the source checkpoint was running
+        // (a session id is not an agent, so never fall back to that).
+        let fork_agent_id = agent_id.unwrap_or(&fork.agent_id);
+        if let Err(e) = store.record_session_fork(&fork, branch_message, fork_agent_id) {
+            eprintln!("warning: could not record session fork lineage: {e}");
         }
     }
 
@@ -1591,6 +1769,171 @@ pub async fn handle_trace_fork(
                 "at_turn": at_turn,
             }))?
         );
+    }
+
+    Ok(())
+}
+
+/// A descendant fork, together with the sessions forked FROM it, recursively.
+struct ForkTreeNode {
+    record: autonoetic_gateway::scheduler::gateway_store::ForkLineageRecord,
+    children: Vec<ForkTreeNode>,
+}
+
+/// Recursively collect the sessions forked FROM `session_id`. Mirrors the
+/// guards `fork_ancestor_roots` uses internally for the ancestor walk: a
+/// max depth of 16 and a visited set, so a cyclical or malformed lineage
+/// table can't hang the CLI.
+fn collect_fork_descendants(
+    store: &autonoetic_gateway::scheduler::GatewayStore,
+    session_id: &str,
+    depth: usize,
+    visited: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<ForkTreeNode>> {
+    if depth >= 16 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for record in store.list_fork_children(session_id)? {
+        if !visited.insert(record.forked_session_id.clone()) {
+            continue; // cycle guard
+        }
+        let children = collect_fork_descendants(store, &record.forked_session_id, depth + 1, visited)?;
+        out.push(ForkTreeNode { record, children });
+    }
+    Ok(out)
+}
+
+fn fork_lineage_record_json(
+    r: &autonoetic_gateway::scheduler::gateway_store::ForkLineageRecord,
+) -> serde_json::Value {
+    serde_json::json!({
+        "forked_session_id": r.forked_session_id,
+        "source_session_id": r.source_session_id,
+        "fork_turn": r.fork_turn,
+        "branch_message_sha256": r.branch_message_sha256,
+        "agent_id": r.agent_id,
+        "created_at": r.created_at,
+    })
+}
+
+fn fork_tree_node_json(n: &ForkTreeNode) -> serde_json::Value {
+    let mut v = fork_lineage_record_json(&n.record);
+    v["children"] = serde_json::Value::Array(n.children.iter().map(fork_tree_node_json).collect());
+    v
+}
+
+fn print_fork_tree(nodes: &[ForkTreeNode], depth: usize) {
+    for n in nodes {
+        let turn = n
+            .record
+            .fork_turn
+            .map(|t| format!(" @turn {t}"))
+            .unwrap_or_default();
+        println!(
+            "  {}{}{}{}{}  (created {})",
+            "  ".repeat(depth),
+            color::DIM,
+            n.record.forked_session_id,
+            color::RESET,
+            turn,
+            n.record.created_at
+        );
+        print_fork_tree(&n.children, depth + 1);
+    }
+}
+
+/// Handle `autonoetic trace fork-tree` command: show a session's ancestor
+/// chain (if it was itself a fork) and the tree of sessions forked FROM it.
+pub fn handle_trace_fork_tree(
+    config_path: &Path,
+    session_id: &str,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = config.agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+
+    let root_id =
+        autonoetic_gateway::runtime::content_store::root_session_id(session_id).to_string();
+
+    // Ancestor walk, nearest-first: immediate parent, grandparent, ... capped
+    // at depth 16 with a visited set (same guards as `fork_ancestor_roots`).
+    let mut ancestors = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut cursor = root_id.clone();
+    for _ in 0..16 {
+        let Some(record) = store.get_fork_lineage(&cursor)? else {
+            break;
+        };
+        if !visited.insert(record.forked_session_id.clone()) {
+            break; // cycle guard
+        }
+        // Advance by the source's ROOT: the lineage table is keyed by root
+        // ids, and legacy rows may have recorded a nested source id.
+        let next = autonoetic_gateway::runtime::content_store::root_session_id(
+            &record.source_session_id,
+        )
+        .to_string();
+        ancestors.push(record);
+        cursor = next;
+    }
+
+    let mut descendant_visited = std::collections::HashSet::new();
+    descendant_visited.insert(root_id.clone());
+    let descendants = collect_fork_descendants(&store, &root_id, 0, &mut descendant_visited)?;
+
+    if json_output {
+        let body = serde_json::json!({
+            "session_id": root_id,
+            "ancestors": ancestors.iter().map(fork_lineage_record_json).collect::<Vec<_>>(),
+            "descendants": descendants.iter().map(fork_tree_node_json).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    println!(
+        "{}Fork lineage{} for {}",
+        color::BOLD,
+        color::RESET,
+        color::agent(&root_id)
+    );
+    println!();
+
+    if ancestors.is_empty() {
+        println!("  (root session — not itself a fork)");
+    } else {
+        // Print oldest-first: the topmost ancestor, then each descendant of
+        // it down to `root_id` (the target, which is `ancestors[0]`'s
+        // forked_session_id).
+        let apex = &ancestors.last().unwrap().source_session_id;
+        println!("  {}", apex);
+        for a in ancestors.iter().rev() {
+            let turn = a
+                .fork_turn
+                .map(|t| format!(" @turn {t}"))
+                .unwrap_or_default();
+            println!(
+                "    -> {}{}{}  (created {})",
+                color::agent(&a.forked_session_id),
+                turn,
+                if a.branch_message_sha256.is_some() {
+                    " (branch message)"
+                } else {
+                    ""
+                },
+                a.created_at
+            );
+        }
+    }
+
+    println!();
+    if descendants.is_empty() {
+        println!("  No sessions have been forked from this one.");
+    } else {
+        println!("  Descendants:");
+        print_fork_tree(&descendants, 0);
     }
 
     Ok(())
@@ -1922,6 +2265,7 @@ fn task_status_snake(s: TaskRunStatus) -> &'static str {
         TaskRunStatus::Runnable => "runnable",
         TaskRunStatus::Running => "running",
         TaskRunStatus::AwaitingApproval => "awaiting_approval",
+        TaskRunStatus::Stale => "stale",
         TaskRunStatus::Paused => "paused",
         TaskRunStatus::Aborting => "aborting",
         TaskRunStatus::Aborted => "aborted",

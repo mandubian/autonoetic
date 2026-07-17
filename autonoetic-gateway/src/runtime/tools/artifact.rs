@@ -138,7 +138,7 @@ impl NativeTool for ArtifactBuildTool {
                     "inputs": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. Pass whole artifacts only — to pull in a single file, read it with resolve(ref, include=\"content\", file=…) and write it to content first."
+                        "description": "List of session content names/handles or existing artifact refs (`ar.*` or `art_*`) to include in the artifact. IMPORTANT: the filename recorded in the artifact is exactly the input string you provide. Two builds with the same file contents but different input names (e.g. 'SKILL.md' vs 'cnt_3fc9d2bb') will collide and be rejected as an identity mismatch. Prefer stable, human-readable names like 'main.py', 'SKILL.md', and 'test_main.py'. Pass whole artifacts only — to pull in a single file, read it with resolve(ref, include=\"content\", file=…) and write it to content first."
                     },
                     "entrypoints": {
                         "type": "array",
@@ -368,6 +368,51 @@ impl NativeTool for ArtifactBuildTool {
                 obj.insert("artifact_ref_scope".to_string(), scope);
             }
         }
+        // Make the next step explicit so the orchestrator goes straight ahead
+        // instead of rebuilding or re-inspecting. Only when we actually have an
+        // artifact_ref to act on, and naming the REAL tool contract: a bundle
+        // becomes a live agent via create-revision (which takes the artifact_ref)
+        // then promote (which takes agent_id + revision_id, NOT artifact_ref).
+        if matches!(bundle.kind, autonoetic_types::artifact::ArtifactKind::AgentBundle)
+            && out.get("artifact_ref").is_some()
+        {
+            if let Some(obj) = out.as_object_mut() {
+                obj.insert(
+                    "next".to_string(),
+                    serde_json::Value::String(
+                        "Agent bundle built. To make it a live agent: create a revision with \
+                         agent_revision_create_from_intent (pass this artifact_ref), then \
+                         agent_revision_promote that revision_id. Do not rebuild the bundle. \
+                         (If agent-factory is driving this pipeline, it performs these steps — \
+                         do not duplicate them.) \
+                         If you see an 'identity mismatch' error, do not try to bypass by seeding \
+                         revisions manually; inspect the existing artifact_ref and reuse it, or \
+                         change the input filenames/content to produce a new artifact_id."
+                            .to_string(),
+                    ),
+                );
+            }
+        }
+
+        if let Some(gs) = gateway_store.as_ref() {
+            let root = crate::runtime::content_store::root_session_id(sid);
+            if let Err(e) = crate::runtime::session_envelope::propose_envelopes_after_artifact_build(
+                gs,
+                gw_dir,
+                root,
+                &bundle.artifact_id,
+                &bundle.kind,
+                &_manifest.agent.id,
+            ) {
+                tracing::debug!(
+                    target: "session_envelope",
+                    error = %e,
+                    root_session_id = root,
+                    "envelope proposal after artifact_build failed"
+                );
+            }
+        }
+
         serde_json::to_string(&out).map_err(Into::into)
     }
 
@@ -533,6 +578,10 @@ impl NativeTool for ArtifactInspectTool {
             }
         }
 
+        let has_tests = bundle.files.iter().any(|f| {
+            crate::runtime::is_test_file(&f.name)
+        });
+
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "artifact_ref": args.artifact_ref,
@@ -544,6 +593,7 @@ impl NativeTool for ArtifactInspectTool {
                 "name": f.name,
                 "alias": f.alias,
             })).collect::<Vec<_>>(),
+            "has_tests": has_tests,
             "read_file": format!(
                 "resolve(ref=\"{}\", include=\"content\", file=<name>)", args.artifact_ref
             ),

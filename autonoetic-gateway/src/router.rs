@@ -3,9 +3,11 @@
 use crate::execution::{
     gateway_actor_id, init_gateway_causal_logger, sha256_hex, GatewayExecutionService, SpawnResult,
 };
+use crate::runtime::workbench_return::prepare_return_to_agent_wakeup;
 use crate::scheduler::append_task_board_entry;
 use crate::tracing::{EventScope, SessionId, TraceSession};
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::plan_frame::unsatisfied_dependencies;
 use autonoetic_types::task_board::{TaskBoardEntry, TaskStatus};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -451,6 +453,52 @@ impl JsonRpcRouter {
         entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
     }
 
+    /// Check whether a plan step's `depends_on` are all Completed.
+    /// Returns `Some(error_message)` if the spawn should be blocked, or `None` if it's allowed.
+    ///
+    /// Enforcement is opt-in: only activates when the spawn's `metadata` contains
+    /// a `step_id` field. Spawns without `step_id` are not checked (backwards-compatible).
+    fn check_plan_step_dependencies(
+        &self,
+        metadata: &Option<serde_json::Value>,
+        session_id: &str,
+    ) -> Option<String> {
+        let metadata = metadata.as_ref()?;
+        let step_id = metadata.get("step_id")?.as_str()?;
+        let root_session_id = session_id.split('/').next().unwrap_or(session_id);
+
+        let store = self.execution.gateway_store()?;
+
+        // Find the latest approved plan for this root session.
+        let plans = store.list_latest_plan_frames_for_root(root_session_id).ok()?;
+        let plan = plans.first()?;
+
+        // Verify the step exists in the plan (reject unknown step_ids).
+        let step_exists = plan.steps.iter().any(|s| s.step_id == step_id);
+        if !step_exists {
+            return Some(format!(
+                "Spawn metadata references step_id `{}` which does not exist in the approved plan `{}` (v{}). Remove step_id from metadata or use a valid step_id.",
+                step_id, plan.plan_id, plan.version,
+            ));
+        }
+
+        let unsatisfied = unsatisfied_dependencies(plan, step_id);
+        if unsatisfied.is_empty() {
+            return None;
+        }
+
+        let deps_desc: Vec<String> = unsatisfied
+            .iter()
+            .map(|(id, status)| format!("`{}` ({})", id, status.as_str()))
+            .collect();
+        Some(format!(
+            "Plan step `{}` depends on {} which {} not completed. Complete the dependency step(s) before spawning for this step.",
+            step_id,
+            deps_desc.join(", "),
+            if unsatisfied.len() == 1 { "is" } else { "are" },
+        ))
+    }
+
     pub async fn dispatch(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         tracing::debug!("Dispatching JSON-RPC method: {}", req.method);
 
@@ -486,6 +534,341 @@ impl JsonRpcRouter {
                     req.id,
                     serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
                 )
+            }
+            "constitution.resolve_proposal" => {
+                // O-6 (Decider Obligations, §O of the 2026.07.08 amendment):
+                // every Ri-0.8 proposal is owed a recorded decision. Mirrors
+                // admin.escalation_resolve's shape; no bidirectional projection
+                // to resolve (proposals don't project into another gate table).
+                #[derive(Deserialize)]
+                struct ResolveProposalParams {
+                    proposal_id: String,
+                    decided_by: String,
+                    status: String,
+                    reason: Option<String>,
+                }
+                let params: ResolveProposalParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for constitution.resolve_proposal: {}", e),
+                        );
+                    }
+                };
+                if params.proposal_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "proposal_id and decided_by must not be empty",
+                    );
+                }
+                if !crate::scheduler::gateway_store::constitutional_proposals::PROPOSAL_DECISION_STATUSES
+                    .contains(&params.status.as_str())
+                {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        format!(
+                            "Invalid status '{}'; expected one of {}",
+                            params.status,
+                            crate::scheduler::gateway_store::constitutional_proposals::PROPOSAL_DECISION_STATUSES
+                                .join(", "),
+                        ),
+                    );
+                }
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for constitution.resolve_proposal",
+                    );
+                };
+                match store.get_constitutional_proposal(&params.proposal_id) {
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Proposal '{}' not found", params.proposal_id),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to look up proposal: {}", e),
+                        );
+                    }
+                    Ok(Some(_)) => {}
+                }
+                match store.decide_constitutional_proposal(
+                    &params.proposal_id,
+                    &params.status,
+                    &params.decided_by,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(true) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "proposal_id": params.proposal_id,
+                            "status": params.status,
+                            "decided_by": params.decided_by,
+                        }),
+                    ),
+                    Ok(false) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Proposal '{}' not found", params.proposal_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to resolve proposal: {}", e),
+                    ),
+                }
+            }
+            "constitution.list_pending_proposals" => {
+                // Visibility counterpart to constitution.resolve_proposal.
+                // Deliberately NOT folded into operator_pending's per-root
+                // aggregation: a ConstitutionalProposal carries no
+                // root_session_id (it is a gateway-global concern — any
+                // agent may propose, any operator may decide), so it does not
+                // fit collect_pending_for_root's root-scoped model without a
+                // scoping decision the RFC (#359/#399) has not made. This is
+                // a separate, honestly-global list, mirroring
+                // wiki.proposals_pending's shape.
+                #[derive(Deserialize)]
+                struct ListPendingProposalsParams {
+                    #[serde(default)]
+                    status: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let params: ListPendingProposalsParams = if req.params.is_null() {
+                    ListPendingProposalsParams { status: None, limit: None }
+                } else {
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for constitution.list_pending_proposals: {}", e),
+                            );
+                        }
+                    }
+                };
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for constitution.list_pending_proposals",
+                    );
+                };
+                let status_filter = params.status.as_deref().unwrap_or("pending");
+                match store.list_constitutional_proposals(
+                    Some(status_filter),
+                    None,
+                    params.limit.unwrap_or(50),
+                ) {
+                    Ok(proposals) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({ "proposals": proposals }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to list proposals: {}", e),
+                    ),
+                }
+            }
+            "anomaly.resolve" => {
+                // O-7 (future obligation, issue #770 part C.1): every
+                // anomaly flag is owed a recorded decision. Mirrors
+                // "constitution.resolve_proposal", plus a decider-obligation
+                // motivation requirement on terminal decisions (mirroring
+                // scheduler::approval::enforce_decider_motivation's
+                // presence-only semantics — never judges the reason's
+                // quality, only requires one be present).
+                #[derive(Deserialize)]
+                struct ResolveFlagParams {
+                    flag_id: String,
+                    decided_by: String,
+                    status: String,
+                    reason: Option<String>,
+                }
+                let params: ResolveFlagParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for anomaly.resolve: {}", e),
+                        );
+                    }
+                };
+                if params.flag_id.trim().is_empty() || params.decided_by.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "flag_id and decided_by must not be empty",
+                    );
+                }
+                if !crate::scheduler::gateway_store::anomaly_flags::FLAG_DECISION_STATUSES
+                    .contains(&params.status.as_str())
+                {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        format!(
+                            "Invalid status '{}'; expected one of {}",
+                            params.status,
+                            crate::scheduler::gateway_store::anomaly_flags::FLAG_DECISION_STATUSES
+                                .join(", "),
+                        ),
+                    );
+                }
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for anomaly.resolve",
+                    );
+                };
+                let flag = match store.get_anomaly_flag(&params.flag_id) {
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Anomaly flag '{}' not found", params.flag_id),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to look up anomaly flag: {}", e),
+                        );
+                    }
+                    Ok(Some(f)) => f,
+                };
+
+                let is_terminal =
+                    crate::scheduler::gateway_store::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
+                        .contains(&params.status.as_str());
+                let config = self.execution.config();
+                if is_terminal && config.decider_obligations.enabled {
+                    let has_reason = params
+                        .reason
+                        .as_deref()
+                        .map(|r| !r.trim().is_empty())
+                        .unwrap_or(false);
+                    if !has_reason {
+                        emit_anomaly_decider_obligation_event(
+                            &store,
+                            &flag,
+                            &params.decided_by,
+                            &params.status,
+                            "refused",
+                        );
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!(
+                                "§O decider obligation (O-7): recording anomaly flag '{}' as '{}' \
+                                 requires a motivation. Provide a non-empty reason and retry.",
+                                params.flag_id, params.status
+                            ),
+                        );
+                    }
+                }
+
+                match store.decide_anomaly_flag(
+                    &params.flag_id,
+                    &params.status,
+                    &params.decided_by,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(true) => {
+                        if is_terminal && config.decider_obligations.enabled {
+                            emit_anomaly_decider_obligation_event(
+                                &store,
+                                &flag,
+                                &params.decided_by,
+                                &params.status,
+                                "satisfied",
+                            );
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "flag_id": params.flag_id,
+                                "status": params.status,
+                                "decided_by": params.decided_by,
+                            }),
+                        )
+                    }
+                    Ok(false) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Anomaly flag '{}' not found", params.flag_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to resolve anomaly flag: {}", e),
+                    ),
+                }
+            }
+            "anomaly.list_pending" => {
+                // Visibility counterpart to anomaly.resolve, mirroring
+                // "constitution.list_pending_proposals".
+                #[derive(Deserialize)]
+                struct ListPendingFlagsParams {
+                    #[serde(default)]
+                    status: Option<String>,
+                    #[serde(default)]
+                    limit: Option<usize>,
+                }
+                let params: ListPendingFlagsParams = if req.params.is_null() {
+                    ListPendingFlagsParams { status: None, limit: None }
+                } else {
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for anomaly.list_pending: {}", e),
+                            );
+                        }
+                    }
+                };
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for anomaly.list_pending",
+                    );
+                };
+                let status_filter = params.status.as_deref().unwrap_or("pending");
+                match store.list_anomaly_flags(Some(status_filter), None, params.limit.unwrap_or(50))
+                {
+                    Ok(flags) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({ "flags": flags }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to list anomaly flags: {}", e),
+                    ),
+                }
             }
             "interaction.answer" => {
                 let params: crate::interaction_answer::InteractionAnswerParams =
@@ -570,8 +953,18 @@ impl JsonRpcRouter {
                 };
                 let session_id = params
                     .session_id
+                    .clone()
                     .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 let agent_id = params.agent_id.clone();
+
+                // Enforce plan step depends_on ordering (#664).
+                // When the spawn carries a step_id in metadata, verify that all
+                // declared dependencies are Completed before allowing the spawn.
+                if let Some(block_msg) =
+                    self.check_plan_step_dependencies(&params.metadata, &session_id)
+                {
+                    return JsonRpcResponse::error(req.id, -32000, block_msg);
+                }
 
                 let ingress = IngressType::Spawn {
                     agent_id: params.agent_id.clone(),
@@ -1270,6 +1663,121 @@ impl JsonRpcRouter {
                 }
             }
 
+            "planframes.get" => {
+                let params: autonoetic_types::plan_frame::PlanFramesGetParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for planframes.get: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let result = match params.version {
+                    Some(v) => store.load_plan_frame_revision(&params.plan_id, v),
+                    None => store.load_plan_frame(&params.plan_id),
+                };
+                match result {
+                    Ok(Some(plan)) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::plan_frame::PlanFramesGetResult { plan },
+                        )
+                        .unwrap_or_else(|_| serde_json::json!({"plan": null})),
+                    ),
+                    Ok(None) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        match params.version {
+                            Some(v) => format!("Plan '{}' version {} not found", params.plan_id, v),
+                            None => format!("Plan '{}' not found", params.plan_id),
+                        },
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("planframes.get failed: {}", e),
+                    ),
+                }
+            }
+
+            "planframes.get_active" => {
+                #[derive(serde::Deserialize)]
+                struct PlanFramesGetActiveParams {
+                    root_session_id: String,
+                }
+                let params: PlanFramesGetActiveParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for planframes.get_active: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let wf_id = match store.resolve_workflow_id(&params.root_session_id) {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                            self.config.as_ref(),
+                            &params.root_session_id,
+                        )
+                        .ok()
+                        .flatten()
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to resolve workflow ID: {}", e),
+                        );
+                    }
+                };
+
+                let plan = if let Some(wf_id) = wf_id {
+                    match store.load_active_plan_for_workflow(&wf_id) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("Failed to load active plan: {}", e),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({ "plan": plan }),
+                )
+            }
+
             "planframes.approve" => {
                 let params: autonoetic_types::plan_frame::PlanFramesApproveParams =
                     match serde_json::from_value(req.params) {
@@ -1292,23 +1800,157 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                match crate::scheduler::approve_plan_frame_operator(
-                    self.config.as_ref(),
-                    store.as_ref(),
+                let plan = match store.load_plan_frame(&params.plan_id) {
+                    Ok(Some(p)) => p,
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("planframes.approve failed: plan not found"),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("planframes.approve failed: {}", e),
+                        );
+                    }
+                };
+                let request_id = crate::runtime::tools::plan_frame::plan_approval_request_id(
                     &params.plan_id,
+                    plan.version,
+                );
+                match crate::scheduler::approval::approve_request(
+                    self.config.as_ref(),
+                    Some(store.as_ref()),
+                    &request_id,
                     &params.approved_by,
+                    None,
+                    None,
+                    None,
+                    None,
                 ) {
-                    Ok(plan) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::to_value(
-                            autonoetic_types::plan_frame::PlanFramesApproveResult { plan },
-                        )
-                        .unwrap_or(serde_json::Value::Null),
-                    ),
+                    Ok(_) => match store.load_plan_frame(&params.plan_id) {
+                        Ok(Some(plan)) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::to_value(
+                                autonoetic_types::plan_frame::PlanFramesApproveResult { plan },
+                            )
+                            .unwrap_or(serde_json::Value::Null),
+                        ),
+                        _ => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "planframes.approve failed: plan disappeared after approval"
+                                .to_string(),
+                        ),
+                    },
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,
                         format!("planframes.approve failed: {}", e),
+                    ),
+                }
+            }
+
+            "workbench.prepare_return_to_agent" => {
+                #[derive(serde::Deserialize)]
+                struct WorkbenchPrepareReturnParams {
+                    root_session_id: String,
+                    #[serde(default)]
+                    force: bool,
+                    #[serde(default)]
+                    note: Option<String>,
+                }
+                let params: WorkbenchPrepareReturnParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for workbench.prepare_return_to_agent: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let wf_id = match store.resolve_workflow_id(&params.root_session_id) {
+                    Ok(Some(id)) => Some(id),
+                    Ok(None) => {
+                        crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(
+                            self.config.as_ref(),
+                            &params.root_session_id,
+                        )
+                        .ok()
+                        .flatten()
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to resolve workflow ID: {}", e),
+                        );
+                    }
+                };
+
+                let maybe_wb = if let Some(wf_id) = wf_id {
+                    match store.load_active_workbench_for_workflow(&wf_id) {
+                        Ok(wb) => wb,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("Failed to load active workbench: {}", e),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let Some(wb) = maybe_wb else {
+                    return JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({ "status": "no_workbench" }),
+                    );
+                };
+
+                match prepare_return_to_agent_wakeup(
+                    store.as_ref(),
+                    &wb.workbench_id,
+                    params.force,
+                    params.note.as_deref(),
+                ) {
+                    crate::runtime::workbench_return::ReturnToAgentStatus::Refused { reason } => {
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "status": "refused",
+                                "reason": reason,
+                            }),
+                        )
+                    }
+                    crate::runtime::workbench_return::ReturnToAgentStatus::Ready {
+                        target_agent_id,
+                        outbound_message,
+                        metadata,
+                    } => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "status": "ready",
+                            "target_agent_id": target_agent_id,
+                            "message": outbound_message,
+                            "metadata": metadata,
+                        }),
                     ),
                 }
             }
@@ -1516,14 +2158,22 @@ impl JsonRpcRouter {
                     session_id: params.session_id.as_deref(),
                     run_context: None,
                     config: Some(self.config.as_ref()),
-                    reason: if is_edit {
-                        format!("Edit wiki page '{}': {}", params.id, params.title)
-                    } else {
-                        format!("Propose new wiki page '{}': {}", params.id, params.title)
-                    },
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!(
+                            "wiki {} \"{}\" ({})",
+                            if is_edit { "edit" } else { "new" },
+                            params.title,
+                            params.id
+                        ),
+                        "agent proposes a wiki change for review",
+                        "publishes agent-authored content to the wiki",
+                        "Approve if the proposed wiki content is accurate and appropriate to publish; reject if it is inaccurate, low-quality, or out of scope",
+                    ),
                     summary: format!("Wiki proposal: {}", params.title),
                     approval_ref: None,
+                    request_id: None,
                     pre_validated: false,
+                    cache_backfill: None,
                     turn_id: params.turn_id.as_deref(),
                 };
 
@@ -1902,6 +2552,333 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.envelope.propose" => {
+                #[derive(Deserialize)]
+                struct EnvelopeProposeParams {
+                    root_session_id: String,
+                    #[serde(default = "default_envelope_source")]
+                    source: String,
+                    #[serde(default)]
+                    plan_id: Option<String>,
+                    #[serde(default = "default_envelope_proposed_by")]
+                    proposed_by: String,
+                }
+                fn default_envelope_source() -> String {
+                    "operator".to_string()
+                }
+                fn default_envelope_proposed_by() -> String {
+                    "operator".to_string()
+                }
+                let params: EnvelopeProposeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.propose: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::propose_session_envelope(
+                    store.as_ref(),
+                    &params.root_session_id,
+                    &params.source,
+                    params.plan_id.as_deref(),
+                    &params.proposed_by,
+                ) {
+                    Ok(proposal) => match store.discover_observed_hosts(&params.root_session_id) {
+                        Ok(observed_hosts) => JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "proposal": proposal,
+                                "observed_hosts": observed_hosts,
+                            }),
+                        ),
+                        Err(e) => JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("discover_observed_hosts failed: {}", e),
+                        ),
+                    },
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.propose failed: {}", e),
+                    ),
+                }
+            }
+
+            "session.envelope.lock" => {
+                #[derive(Deserialize)]
+                struct EnvelopeLockParams {
+                    envelope_id: i64,
+                    #[serde(default = "default_envelope_locked_by")]
+                    locked_by: String,
+                }
+                fn default_envelope_locked_by() -> String {
+                    "operator".to_string()
+                }
+                let params: EnvelopeLockParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.lock: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::lock_session_envelope_operator(
+                    store.as_ref(),
+                    params.envelope_id,
+                    &params.locked_by,
+                ) {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.lock failed: {}", e),
+                    ),
+                }
+            }
+
+            "session.envelope.revoke" => {
+                #[derive(Deserialize)]
+                struct EnvelopeRevokeParams {
+                    envelope_id: i64,
+                    #[serde(default = "default_envelope_revoked_by")]
+                    revoked_by: String,
+                }
+                fn default_envelope_revoked_by() -> String {
+                    "operator".to_string()
+                }
+                let params: EnvelopeRevokeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.revoke: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::runtime::session_envelope::revoke_session_envelope(
+                    store.as_ref(),
+                    params.envelope_id,
+                    &params.revoked_by,
+                ) {
+                    Ok(Some(record)) => {
+                        let promoted_agents = store
+                            .find_promotions_by_envelope(params.envelope_id)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(agent_id, promotion_id, created_at)| {
+                                serde_json::json!({
+                                    "agent_id": agent_id,
+                                    "promotion_id": promotion_id,
+                                    "created_at": created_at,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "ok": true,
+                                "envelope_id": params.envelope_id,
+                                "was_locked": record.locked_at.is_some(),
+                                "root_session_id": record.root_session_id,
+                                "agents_promoted_under_envelope": promoted_agents,
+                            }),
+                        )
+                    },
+                    Ok(None) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session envelope {} not found", params.envelope_id),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.revoke failed: {}", e),
+                    ),
+                }
+            }
+
+            "session.envelope.list" => {
+                #[derive(Deserialize)]
+                struct EnvelopeListParams {
+                    root_session_id: String,
+                }
+                let params: EnvelopeListParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.envelope.list: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::scheduler::list_session_envelopes(store.as_ref(), &params.root_session_id)
+                {
+                    Ok(result) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(result).unwrap_or_default(),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("session.envelope.list failed: {}", e),
+                    ),
+                }
+            }
+
+            // Suspend an agent: block new sessions while leaving in-flight
+            // sessions running. An operator decision, decoupled from envelope
+            // revocation. Read-only resolution stays open.
+            "agent.suspend" => {
+                #[derive(Deserialize)]
+                struct SuspendParams {
+                    agent_id: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                    #[serde(default = "default_suspended_by")]
+                    suspended_by: String,
+                }
+                fn default_suspended_by() -> String {
+                    "operator".to_string()
+                }
+                let params: SuspendParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for agent.suspend: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.suspend_agent(
+                    &params.agent_id,
+                    &params.suspended_by,
+                    params.reason.as_deref(),
+                ) {
+                    Ok(changed) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "agent_id": params.agent_id,
+                            // false when the agent was already suspended or has
+                            // no promoted alias to suspend.
+                            "suspended": changed,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("agent.suspend failed: {}", e),
+                    ),
+                }
+            }
+
+            // Lift a suspension. Re-promotion also clears it (unless the
+            // promotion was envelope-pre-authorized); this is the explicit lever.
+            "agent.unsuspend" => {
+                #[derive(Deserialize)]
+                struct UnsuspendParams {
+                    agent_id: String,
+                }
+                let params: UnsuspendParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for agent.unsuspend: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match store.unsuspend_agent(&params.agent_id) {
+                    Ok(changed) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "agent_id": params.agent_id,
+                            // false when the agent was not suspended.
+                            "unsuspended": changed,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("agent.unsuspend failed: {}", e),
+                    ),
+                }
+            }
+
             // Session fork - fork a session from a snapshot
             "session.fork" => {
                 #[derive(Deserialize)]
@@ -1988,58 +2965,42 @@ impl JsonRpcRouter {
                     }
                 };
 
-                // Mirror the source timeline into the forked session up to the
-                // fork turn (best effort) so the Session Room shows the inherited
-                // history immediately instead of an empty timeline. A fork writes
-                // a checkpoint but no `live_digest_events` of its own.
-                let mut mirrored_events = 0usize;
-                if let Some(store) = self.execution.gateway_store() {
-                    match store.clone_timeline_for_fork(
-                        &params.source_session_id,
-                        &fork.new_session_id,
-                        fork.fork_turn as u64,
-                    ) {
-                        Ok(n) => mirrored_events = n,
-                        Err(e) => tracing::warn!(
-                            target: "session.fork",
-                            source = %params.source_session_id,
-                            new = %fork.new_session_id,
-                            error = %e,
-                            "Failed to mirror source timeline into fork"
-                        ),
-                    }
-                }
-
-                // Determine target agent
+                // Determine the acting agent for lineage/causal attribution:
+                // an explicit target_agent_id, else the agent the source
+                // checkpoint was running (NOT the source session id — a
+                // session id is not an agent).
                 let target_agent_id = params
                     .target_agent_id
-                    .unwrap_or_else(|| params.source_session_id.clone());
+                    .unwrap_or_else(|| fork.agent_id.clone());
 
-                // Log fork in causal chain (best effort, don't fail fork on logging error)
-                let causal_logger_result =
-                    crate::execution::init_gateway_causal_logger(&self.config);
-                if let Ok(causal_logger) = causal_logger_result {
-                    let branch_message_sha256 = params.branch_message.as_ref().map(|m| {
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(m.as_bytes());
-                        format!("{:x}", hasher.finalize())
-                    });
-                    let _ = crate::execution::log_gateway_causal_event(
-                        &causal_logger,
+                // Single choke point for every fork side effect (timeline
+                // mirror, lineage row, both causal events) — shared with
+                // `trace fork` (CLI) so the two paths can't drift (#814).
+                // The lineage row is load-bearing (artifact-ref resolution
+                // across fork boundaries depends on it), so a failure there
+                // is logged loudly; but the fork itself already succeeded on
+                // disk, so we still return success with mirrored_events = 0
+                // rather than fail an otherwise-complete operation.
+                let mirrored_events = match self.execution.gateway_store() {
+                    Some(store) => match store.record_session_fork(
+                        &fork,
+                        params.branch_message.as_deref(),
                         &target_agent_id,
-                        &fork.new_session_id,
-                        1,
-                        "session.forked",
-                        autonoetic_types::causal_chain::EntryStatus::Success,
-                        Some(serde_json::json!({
-                            "source_session_id": params.source_session_id,
-                            "fork_turn": fork.fork_turn,
-                            "history_handle": fork.history_handle,
-                            "branch_message_sha256": branch_message_sha256,
-                        })),
-                    );
-                }
+                    ) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            tracing::error!(
+                                target: "session.fork",
+                                new = %fork.new_session_id,
+                                source = %params.source_session_id,
+                                error = %e,
+                                "Failed to record fork lineage"
+                            );
+                            0
+                        }
+                    },
+                    None => 0,
+                };
 
                 JsonRpcResponse::success(
                     req.id,
@@ -2244,6 +3205,408 @@ impl JsonRpcRouter {
                 }
             }
 
+            "content.list" => {
+                // List every content-store entry (name → handle) for a session.
+                // Mirrors `artifact.list_files` but over the live content store,
+                // so the operator can see what the session is producing in
+                // realtime — before any artifact is built (Pillar D, t=0
+                // visibility). Drafts are content-addressed blobs under mutable
+                // names; immutability is untouched.
+                #[derive(Deserialize)]
+                struct ContentListParams {
+                    session_id: String,
+                }
+                let params: ContentListParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.list: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                let names_handles = match store.list_names_with_handles(&params.session_id) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content.list failed: {}", e),
+                        );
+                    }
+                };
+                // Cross-session visibility: a handle can be registered under
+                // a child session but declared global. We need the LOCAL
+                // manifest (per-session visibility for this session_id) AND
+                // a probe of the GLOBAL manifest (where global entries are
+                // registered under the sentinel "__global__" session).
+                // The local map is authoritative for private/session; if a
+                // handle is missing locally, we fall back to the global
+                // manifest so global entries written by child sessions are
+                // labelled "global" (not "session") — and the UI shows the
+                // 🌐 badge correctly.
+                let visibility_map = store
+                    .load_manifest(&params.session_id)
+                    .map(|m| m.visibility)
+                    .unwrap_or_default();
+                let global_handles: std::collections::HashSet<String> = store
+                    .load_manifest(crate::runtime::content_store::GLOBAL_SESSION_ID)
+                    .map(|m| m.names.values().cloned().collect())
+                    .unwrap_or_default();
+                let files: Vec<serde_json::Value> = names_handles
+                    .into_iter()
+                    .map(|(name, handle)| {
+                        let alias = crate::runtime::content_store::ContentStore::get_short_alias(&handle);
+                        let visibility = visibility_map
+                            .get(&handle)
+                            .map(|v| match v {
+                                crate::runtime::content_store::ContentVisibility::Private => "private",
+                                crate::runtime::content_store::ContentVisibility::Session => "session",
+                                crate::runtime::content_store::ContentVisibility::Global => "global",
+                            })
+                            .unwrap_or(if global_handles.contains(&handle) { "global" } else { "session" });
+                        serde_json::json!({
+                            "name": name,
+                            "handle": handle,
+                            "alias": alias,
+                            "visibility": visibility,
+                        })
+                    })
+                    .collect();
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "session_id": params.session_id,
+                        "files": files,
+                    }),
+                )
+            }
+
+            // Materialize the session's live content drafts into a real
+            // directory the operator can open in an external editor. Read-only
+            // snapshot, rebuilt on each call; never feeds back into the store
+            // (the agent's working state is untouched). Tier 1 of the live
+            // workbench (#524).
+            "content.project_live" => {
+                #[derive(Deserialize)]
+                struct ContentProjectLiveParams {
+                    session_id: String,
+                }
+                let params: ContentProjectLiveParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.project_live: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                match store.project_live(&params.session_id) {
+                    Ok((dir, files)) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "session_id": params.session_id,
+                            "path": dir.to_string_lossy(),
+                            "files": files,
+                            "count": files.len(),
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("content.project_live failed: {}", e),
+                    ),
+                }
+            }
+
+            "content.read" => {
+                // Read a content-store entry's bytes by name or handle. Mirrors
+                // `artifact.read_file` but over the live content store.
+                #[derive(Deserialize)]
+                struct ContentReadParams {
+                    session_id: String,
+                    name: String,
+                }
+                let params: ContentReadParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for content.read: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                // Resolve the handle ONCE first, then read by the resolved
+                // handle. A read that succeeds against a name/alias must have
+                // a real handle behind it; returning an empty string when
+                // resolution fails would produce an inconsistent response
+                // (bytes present, handle missing). If the name/handle does
+                // not resolve at all, fail fast with -32000.
+                let handle = match store
+                    .resolve_name_or_handle_to_handle(&params.session_id, &params.name)
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("content.read resolve failed: {}", e),
+                        );
+                    }
+                };
+                match store.read_by_name_or_handle(&params.session_id, &handle) {
+                    Ok(bytes) => {
+                        // Lossy UTF-8: the viewer is text-oriented (markdown);
+                        // binary blobs surface a replacement-char placeholder.
+                        let content = String::from_utf8_lossy(&bytes).into_owned();
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "name": params.name,
+                                "handle": handle,
+                                "bytes": bytes.len(),
+                                "content": content,
+                            }),
+                        )
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("content.read failed: {}", e),
+                    ),
+                }
+            }
+
+            // Attach an operator comment to a live content file (file-level +
+            // optional line hint), record it on the timeline, and deliver it to
+            // the owning agent at its next turn. Comment-only — never mutates
+            // agent state. See `docs/design/operator-live-comments.md`.
+            "content.comment" => {
+                #[derive(Deserialize)]
+                struct ContentCommentParams {
+                    session_id: String,
+                    name: String,
+                    /// The content version the operator was viewing (anchor).
+                    /// Omitted → anchor to the current version.
+                    #[serde(default)]
+                    handle: Option<String>,
+                    #[serde(default)]
+                    line_start: Option<u32>,
+                    #[serde(default)]
+                    line_end: Option<u32>,
+                    body: String,
+                    #[serde(default = "default_commented_by")]
+                    commented_by: String,
+                }
+                fn default_commented_by() -> String {
+                    "operator".to_string()
+                }
+
+                let id = req.id.clone();
+                let auth_token = req.auth_token.clone();
+                let params: ContentCommentParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32602,
+                            format!("Invalid params for content.comment: {}", e),
+                        );
+                    }
+                };
+
+                if params.body.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32602,
+                        "content.comment requires a non-empty body".to_string(),
+                    );
+                }
+                if let (Some(s), Some(e)) = (params.line_start, params.line_end) {
+                    if e < s {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32602,
+                            format!(
+                                "content.comment line_end ({e}) precedes line_start ({s})"
+                            ),
+                        );
+                    }
+                }
+
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let store = match crate::runtime::content_store::ContentStore::new(&gateway_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("content store open failed: {}", e),
+                        );
+                    }
+                };
+                // Resolve the current version. A comment must reference a name
+                // that actually exists in the session.
+                let current_handle = match store
+                    .resolve_name_or_handle_to_handle(&params.session_id, &params.name)
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            id,
+                            -32000,
+                            format!("content.comment resolve failed: {}", e),
+                        );
+                    }
+                };
+                // Anchor to the viewed version; flag drift when the file has
+                // moved on since then.
+                let anchor_handle =
+                    params.handle.clone().unwrap_or_else(|| current_handle.clone());
+                let drifted = anchor_handle != current_handle;
+
+                let comment_id = format!(
+                    "cmt_{}",
+                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
+                );
+                let redacted_body =
+                    crate::log_redaction::redact_text_for_logs(&params.body);
+
+                let line_hint = match (params.line_start, params.line_end) {
+                    (Some(s), Some(e)) if e != s => format!(", lines {s}–{e}"),
+                    (Some(s), _) => format!(", line {s}"),
+                    _ => String::new(),
+                };
+
+                // Presentation: operator.comment row on the canonical timeline
+                // (Attention) so every channel surfaces it.
+                if let Some(ts) = self.execution.gateway_store() {
+                    let payload = serde_json::json!({
+                        "comment_id": comment_id,
+                        "name": params.name,
+                        "handle": anchor_handle,
+                        "current_handle": current_handle,
+                        "drifted": drifted,
+                        "line_start": params.line_start,
+                        "line_end": params.line_end,
+                        "body": redacted_body,
+                    });
+                    let event = crate::runtime::session_timeline::operator_comment_event(
+                        &params.session_id,
+                        &params.commented_by,
+                        payload,
+                    );
+                    if let Err(e) = ts.create_live_digest_event(&event) {
+                        tracing::debug!(
+                            target: "session_timeline",
+                            error = %e,
+                            "operator.comment timeline emit failed"
+                        );
+                    }
+                }
+
+                // Delivery: frame the comment and hand it to the owning agent at
+                // its next turn via the existing event.ingest path. A distinct
+                // event_type ("operator_comment", not "chat") avoids emitting a
+                // duplicate operator.message row.
+                let mut framed = format!(
+                    "Operator comment on file `{}` (version {}{}):\n> {}",
+                    params.name,
+                    anchor_handle,
+                    line_hint,
+                    params.body.trim()
+                );
+                if drifted {
+                    framed.push_str(&format!(
+                        "\n[note: this file has changed since the commented version \
+                         (current {current_handle}); re-read the current version \
+                         before acting on the line numbers.]"
+                    ));
+                }
+                framed.push_str(
+                    "\nAcknowledge this operator comment, then either address it \
+                     (say how) or explain why not.",
+                );
+
+                let ingest_req = JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "event.ingest".to_string(),
+                    params: serde_json::json!({
+                        "event_type": "operator_comment",
+                        "message": framed,
+                        "session_id": params.session_id,
+                        "async_mode": true,
+                        "metadata": {
+                            "source": "session_room",
+                            "kind": "operator_comment",
+                            "comment_id": comment_id,
+                            "name": params.name,
+                            "handle": anchor_handle,
+                            "current_handle": current_handle,
+                            "drifted": drifted,
+                        },
+                    }),
+                    auth_token,
+                };
+                let ingest_resp = Box::pin(self.dispatch(ingest_req)).await;
+                if let Some(err) = ingest_resp.error {
+                    return JsonRpcResponse::error(
+                        id,
+                        -32000,
+                        format!("content.comment delivery failed: {}", err.message),
+                    );
+                }
+
+                JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "ok": true,
+                        "comment_id": comment_id,
+                        "name": params.name,
+                        "handle": anchor_handle,
+                        "drifted": drifted,
+                    }),
+                )
+            }
+
             "gate.get_messages" => {
                 #[derive(Deserialize)]
                 struct GetMessagesParams {
@@ -2367,6 +3730,8 @@ impl JsonRpcRouter {
                     confirm_phrase: Option<String>,
                     #[serde(default)]
                     acknowledged_capabilities: Vec<String>,
+                    #[serde(default)]
+                    decider_session_id: Option<String>,
                 }
 
                 let params: ApproveParams = match serde_json::from_value(req.params) {
@@ -2413,6 +3778,7 @@ impl JsonRpcRouter {
                     crate::scheduler::ApproveOptions {
                         acknowledged_capabilities: params.acknowledged_capabilities,
                         confirm_phrase: params.confirm_phrase,
+                        decider_session_id: params.decider_session_id,
                         ..Default::default()
                     },
                 ) {
@@ -2544,6 +3910,8 @@ impl JsonRpcRouter {
                     request_id: String,
                     decided_by: String,
                     reason: Option<String>,
+                    #[serde(default)]
+                    decider_session_id: Option<String>,
                 }
 
                 let params: RejectParams = match serde_json::from_value(req.params) {
@@ -2569,13 +3937,17 @@ impl JsonRpcRouter {
                 let store = self.execution.gateway_store();
                 let hooks = self.execution.hook_executor();
 
-                match crate::scheduler::reject_request(
+                match crate::scheduler::reject_request_with_options(
                     config.as_ref(),
                     store.as_deref(),
                     params.request_id.trim(),
                     params.decided_by.trim(),
                     params.reason,
                     Some(hooks.as_ref()),
+                    crate::scheduler::ApproveOptions {
+                        decider_session_id: params.decider_session_id,
+                        ..Default::default()
+                    },
                 ) {
                     Ok(decision) => {
                         {
@@ -2599,6 +3971,83 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("Rejection failed: {}", e),
+                    ),
+                }
+            }
+
+            "workflow.task.retry" => {
+                #[derive(Deserialize)]
+                struct RetryTaskParams {
+                    task_id: String,
+                    workflow_id: Option<String>,
+                    #[serde(default)]
+                    root_session: Option<String>,
+                    #[serde(default)]
+                    note: Option<String>,
+                }
+
+                let params: RetryTaskParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for workflow.task.retry: {}", e),
+                        );
+                    }
+                };
+
+                if params.task_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "task_id must not be empty",
+                    );
+                }
+
+                let config = self.execution.config();
+                let store = self.execution.gateway_store();
+
+                // Resolve workflow_id with the shared helper so the
+                // (explicit workflow_id > root_session > error) ladder and the
+                // trim/empty-as-None normalization stay identical to the CLI.
+                let wf_id = match crate::scheduler::workflow_store::resolve_workflow_id_for_operator_retry(
+                    config.as_ref(),
+                    params.workflow_id.as_deref(),
+                    params.root_session.as_deref(),
+                ) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("workflow lookup failed: {}", e),
+                        );
+                    }
+                };
+
+                match crate::scheduler::workflow_store::retry_workflow_task(
+                    config.as_ref(),
+                    store.as_deref(),
+                    &wf_id,
+                    params.task_id.trim(),
+                    params.note.as_deref(),
+                ) {
+                    Ok(task) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "task_id": task.task_id,
+                            "workflow_id": task.workflow_id,
+                            "agent_id": task.agent_id,
+                            "status": "runnable",
+                            "retry_count": task.retry_count,
+                            "result_summary": task.result_summary,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("workflow.task.retry failed: {}", e),
                     ),
                 }
             }
@@ -2655,6 +4104,56 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("Clarification spawn failed: {}", e),
+                    ),
+                }
+            }
+
+            "operator.pending" => {
+                #[derive(Deserialize)]
+                struct PendingParams {
+                    root_session_id: String,
+                }
+                let params: PendingParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for operator.pending: {}", e),
+                        );
+                    }
+                };
+                if params.root_session_id.trim().is_empty() {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32602,
+                        "root_session_id must not be empty",
+                    );
+                }
+                let store = self.execution.gateway_store();
+                let Some(store) = store else {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        "GatewayStore not available for operator.pending",
+                    );
+                };
+                match crate::runtime::operator_pending::collect_pending_for_root(
+                    &store,
+                    &params.root_session_id,
+                    chrono::Utc::now(),
+                ) {
+                    Ok(pending) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::json!({
+                            "count": pending.len(),
+                            "pending": pending,
+                        }),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("operator.pending failed: {}", e),
                     ),
                 }
             }
@@ -2770,20 +4269,81 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+                let config = self.execution.config();
+                let hooks = self.execution.hook_executor();
                 match store.resolve_escalation(
                     &params.escalation_id,
                     status,
                     &params.decided_by,
                     params.reason.as_deref(),
                 ) {
-                    Ok(()) => JsonRpcResponse::success(
-                        req.id,
-                        serde_json::json!({
-                            "escalation_id": params.escalation_id,
-                            "status": params.status,
-                            "decided_by": params.decided_by,
-                        }),
-                    ),
+                    Ok(approval_request_id) => {
+                        // Bidirectional resolution (#724): if this escalation is a
+                        // projection of an approval row, resolve the approval too.
+                        if let Some(request_id) = approval_request_id {
+                            let approval_status =
+                                if status == autonoetic_types::escalation::EscalationStatus::Approved {
+                                    autonoetic_types::background::ApprovalStatus::Approved
+                                } else {
+                                    autonoetic_types::background::ApprovalStatus::Rejected
+                                };
+                            let result = if approval_status
+                                == autonoetic_types::background::ApprovalStatus::Approved
+                            {
+                                crate::scheduler::approval::approve_request(
+                                    &config,
+                                    Some(store.as_ref()),
+                                    &request_id,
+                                    &params.decided_by,
+                                    params.reason.clone(),
+                                    None,
+                                    None,
+                                    Some(hooks.as_ref()),
+                                )
+                            } else {
+                                crate::scheduler::approval::reject_request(
+                                    &config,
+                                    Some(store.as_ref()),
+                                    &request_id,
+                                    &params.decided_by,
+                                    params.reason.clone(),
+                                    Some(hooks.as_ref()),
+                                )
+                            };
+                            if let Err(e) = result {
+                                tracing::warn!(
+                                    target: "router",
+                                    escalation_id = %params.escalation_id,
+                                    approval_request_id = %request_id,
+                                    error = %e,
+                                    "Resolved escalation but failed to resolve linked approval"
+                                );
+                                // Surface the partial resolution instead of
+                                // reporting success — otherwise the escalation
+                                // reads as resolved while the linked approval
+                                // stays pending, the exact orphaned-row state
+                                // #724 removes (Part B review).
+                                return JsonRpcResponse::error(
+                                    req.id,
+                                    -32000,
+                                    format!(
+                                        "Escalation '{}' was resolved, but resolving the linked \
+                                         approval '{}' failed: {}. The approval may still be \
+                                         pending — retry resolution.",
+                                        params.escalation_id, request_id, e
+                                    ),
+                                );
+                            }
+                        }
+                        JsonRpcResponse::success(
+                            req.id,
+                            serde_json::json!({
+                                "escalation_id": params.escalation_id,
+                                "status": params.status,
+                                "decided_by": params.decided_by,
+                            }),
+                        )
+                    }
                     Err(e) => JsonRpcResponse::error(
                         req.id,
                         -32000,
@@ -2995,6 +4555,46 @@ fn append_delegation_task_entry(
     )
 }
 
+/// Emit an `O-7`-tagged causal event recording the anomaly-flag decider
+/// obligation outcome (`decider_obligation.refused` / `…satisfied`), mirroring
+/// `scheduler::approval::emit_decider_obligation_event`'s shape so
+/// contract-health attributes it consistently once O-7 is signed. Best-effort:
+/// a store/emit failure must not change the decision outcome.
+fn emit_anomaly_decider_obligation_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    flag: &crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag,
+    decided_by: &str,
+    status: &str,
+    action: &str,
+) {
+    let now = chrono::Utc::now();
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: format!("aflag-obligation-{}", uuid::Uuid::new_v4()),
+        agent_id: flag.reporter_agent_id.clone(),
+        session_id: flag.reporter_session_id.clone().unwrap_or_default(),
+        turn_id: None,
+        event_seq: now.timestamp_millis().max(0) as u64,
+        timestamp: now.to_rfc3339(),
+        category: "decider_obligation".to_string(),
+        action: action.to_string(),
+        status: if action == "refused" { "error" } else { "success" }.to_string(),
+        enforced_rules: vec!["O-7".to_string()],
+        target: Some(flag.flag_id.clone()),
+        payload: Some(
+            serde_json::json!({
+                "flag_id": flag.flag_id,
+                "status": status,
+                "decided_by": decided_by,
+            })
+            .to_string(),
+        ),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(format!("§O (O-7) decider motivation {action}")),
+    };
+    let _ = store.create_causal_event(&event);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3112,6 +4712,327 @@ mod tests {
             .result
             .expect("constitution.get should return payload");
         assert!(result["text"].as_str().unwrap_or("").contains("P-1.1"));
+    }
+
+    /// A router backed by a real `GatewayStore` (`test_router()` intentionally
+    /// passes `None` — most dispatch tests don't need one). Needed here
+    /// because `constitution.resolve_proposal` / `.list_pending_proposals`
+    /// read and write the store.
+    fn test_router_with_store() -> (TempDir, JsonRpcRouter, Arc<crate::scheduler::gateway_store::GatewayStore>) {
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&agents_dir.join(".gateway"))
+                .expect("store should open"),
+        );
+        let router = JsonRpcRouter::new(
+            GatewayConfig {
+                agents_dir,
+                ..GatewayConfig::default()
+            },
+            Some(store.clone()),
+        );
+        (temp, router, store)
+    }
+
+    fn sample_proposal(proposal_id: &str) -> crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal {
+        crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal {
+            proposal_id: proposal_id.to_string(),
+            proposer_agent_id: "auditor.default".to_string(),
+            proposer_session_id: None,
+            kind: "add_right".to_string(),
+            target_id: None,
+            proposed_text: Some("Agents may do X".to_string()),
+            justification: "closes a gap".to_string(),
+            evidence_json: serde_json::json!({}),
+            status: "pending".to_string(),
+            operator_decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            published_in_release: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
+        }
+    }
+
+    // O-6 (Decider Obligations, §O of docs/constitution/versions/2026.07.08):
+    // every Ri-0.8 proposal is owed a recorded decision. Before this RPC
+    // existed, `decide_constitutional_proposal` had no caller — a proposal
+    // could never leave `pending`. These tests pin the adjudication path.
+    #[tokio::test]
+    async fn test_dispatch_constitution_resolve_proposal() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_constitutional_proposal(&sample_proposal("prop-1"))
+            .expect("insert should succeed");
+
+        // Visible via the global pending-proposals list before resolution.
+        let list_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp1".to_string(),
+            method: "constitution.list_pending_proposals".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result = router
+            .dispatch(list_req)
+            .await
+            .result
+            .expect("list should return payload");
+        let proposals = list_result["proposals"].as_array().expect("proposals array");
+        assert!(proposals.iter().any(|p| p["proposal_id"] == "prop-1"));
+
+        // Resolve it.
+        let resolve_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "rp1".to_string(),
+            method: "constitution.resolve_proposal".to_string(),
+            params: serde_json::json!({
+                "proposal_id": "prop-1",
+                "decided_by": "operator",
+                "status": "approved",
+                "reason": "looks good",
+            }),
+            auth_token: None,
+        };
+        let resolve_resp = router.dispatch(resolve_req).await;
+        assert!(resolve_resp.error.is_none(), "unexpected error: {:?}", resolve_resp.error);
+        let result = resolve_resp.result.expect("resolve should return payload");
+        assert_eq!(result["status"], "approved");
+        assert_eq!(result["decided_by"], "operator");
+
+        // No longer surfaced as pending.
+        let list_req2 = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp2".to_string(),
+            method: "constitution.list_pending_proposals".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result2 = router.dispatch(list_req2).await.result.unwrap();
+        let proposals2 = list_result2["proposals"].as_array().unwrap();
+        assert!(!proposals2.iter().any(|p| p["proposal_id"] == "prop-1"));
+
+        // The store carries the full, attributed decision record (Ri-0.11 /
+        // O-2 — a decision that can be reattributed later is not attributed
+        // at all).
+        let stored = store
+            .get_constitutional_proposal("prop-1")
+            .unwrap()
+            .expect("proposal should still exist");
+        assert_eq!(stored.status, "approved");
+        assert_eq!(stored.decided_by.as_deref(), Some("operator"));
+        assert_eq!(stored.decision_reason.as_deref(), Some("looks good"));
+        assert!(stored.decided_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_constitution_resolve_proposal_rejects_unknown_status() {
+        let (_temp, router) = test_router();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "bad".to_string(),
+            method: "constitution.resolve_proposal".to_string(),
+            params: serde_json::json!({
+                "proposal_id": "prop-x",
+                "decided_by": "operator",
+                "status": "maybe",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32602));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_constitution_resolve_proposal_not_found() {
+        let (_temp, router, _store) = test_router_with_store();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "nf".to_string(),
+            method: "constitution.resolve_proposal".to_string(),
+            params: serde_json::json!({
+                "proposal_id": "does-not-exist",
+                "decided_by": "operator",
+                "status": "approved",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert!(resp.error.is_some(), "resolving an unknown proposal must error, not succeed");
+    }
+
+    fn sample_flag(flag_id: &str) -> crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag {
+        crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag {
+            flag_id: flag_id.to_string(),
+            reporter_agent_id: "witness.default".to_string(),
+            reporter_session_id: Some("witness-session".to_string()),
+            subject_ref: "sess-target-1".to_string(),
+            observation: "tool call bypassed policy check".to_string(),
+            evidence_json: serde_json::json!([]),
+            severity: "high".to_string(),
+            status: "pending".to_string(),
+            decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            sla_breached_at: None,
+        }
+    }
+
+    // O-7 (future obligation, issue #770 part C.1): every anomaly flag is
+    // owed a recorded decision. These tests pin the adjudication path.
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_happy_path_with_reason() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_anomaly_flag(&sample_flag("aflag-1"))
+            .expect("insert should succeed");
+
+        let list_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp1".to_string(),
+            method: "anomaly.list_pending".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result = router
+            .dispatch(list_req)
+            .await
+            .result
+            .expect("list should return payload");
+        let flags = list_result["flags"].as_array().expect("flags array");
+        assert!(flags.iter().any(|f| f["flag_id"] == "aflag-1"));
+
+        let resolve_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "rf1".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "aflag-1",
+                "decided_by": "operator",
+                "status": "confirmed",
+                "reason": "verified via causal trace",
+            }),
+            auth_token: None,
+        };
+        let resolve_resp = router.dispatch(resolve_req).await;
+        assert!(resolve_resp.error.is_none(), "unexpected error: {:?}", resolve_resp.error);
+        let result = resolve_resp.result.expect("resolve should return payload");
+        assert_eq!(result["status"], "confirmed");
+        assert_eq!(result["decided_by"], "operator");
+
+        let list_req2 = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "lp2".to_string(),
+            method: "anomaly.list_pending".to_string(),
+            params: serde_json::Value::Null,
+            auth_token: None,
+        };
+        let list_result2 = router.dispatch(list_req2).await.result.unwrap();
+        let flags2 = list_result2["flags"].as_array().unwrap();
+        assert!(!flags2.iter().any(|f| f["flag_id"] == "aflag-1"));
+
+        let stored = store
+            .get_anomaly_flag("aflag-1")
+            .unwrap()
+            .expect("flag should still exist");
+        assert_eq!(stored.status, "confirmed");
+        assert_eq!(stored.decided_by.as_deref(), Some("operator"));
+        assert_eq!(stored.decision_reason.as_deref(), Some("verified via causal trace"));
+        assert!(stored.decided_at.is_some());
+
+        // O-7 decider-obligation event was emitted, tagged with the future rule id.
+        let events = store
+            .search_causal_events(None, None, 100)
+            .expect("search events");
+        let obligation = events
+            .iter()
+            .find(|e| e.category == "decider_obligation" && e.action == "satisfied")
+            .expect("decider_obligation.satisfied event exists");
+        assert_eq!(obligation.enforced_rules, vec!["O-7".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_rejects_unknown_status() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_anomaly_flag(&sample_flag("aflag-bad-status"))
+            .expect("insert should succeed");
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "bad".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "aflag-bad-status",
+                "decided_by": "operator",
+                "status": "maybe",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert_eq!(resp.error.as_ref().map(|e| e.code), Some(-32602));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_not_found() {
+        let (_temp, router, _store) = test_router_with_store();
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "nf".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "does-not-exist",
+                "decided_by": "operator",
+                "status": "confirmed",
+                "reason": "x",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        assert!(resp.error.is_some(), "resolving an unknown flag must error, not succeed");
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_anomaly_resolve_terminal_decision_without_reason_rejected() {
+        let (_temp, router, store) = test_router_with_store();
+        store
+            .insert_anomaly_flag(&sample_flag("aflag-no-reason"))
+            .expect("insert should succeed");
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: "unmotivated".to_string(),
+            method: "anomaly.resolve".to_string(),
+            params: serde_json::json!({
+                "flag_id": "aflag-no-reason",
+                "decided_by": "operator",
+                "status": "dismissed",
+            }),
+            auth_token: None,
+        };
+        let resp = router.dispatch(req).await;
+        let err = resp.error.expect("unmotivated terminal decision must be rejected");
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("O-7"),
+            "error must cite the O-7 decider obligation: {}",
+            err.message
+        );
+
+        // Row must remain pending — the refusal must not have applied the decision.
+        let row = store.get_anomaly_flag("aflag-no-reason").unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+
+        // A refused decider-obligation event was emitted.
+        let events = store.search_causal_events(None, None, 100).expect("search events");
+        let obligation = events
+            .iter()
+            .find(|e| e.category == "decider_obligation" && e.action == "refused")
+            .expect("decider_obligation.refused event exists");
+        assert_eq!(obligation.enforced_rules, vec!["O-7".to_string()]);
     }
 
     #[tokio::test]

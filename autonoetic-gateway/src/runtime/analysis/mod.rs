@@ -125,6 +125,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::ReadAccess { .. } => "ReadAccess",
         Capability::WriteAccess { .. } => "WriteAccess",
         Capability::CodeExecution { .. } => "CodeExecution",
+        Capability::ArtifactExecution => "ArtifactExecution",
         Capability::AgentSpawn { .. } => "AgentSpawn",
         Capability::AgentMessage { .. } => "AgentMessage",
         Capability::SandboxFunctions { .. } => "SandboxFunctions",
@@ -144,8 +145,11 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
+        Capability::SelfCapsuleExport => "SelfCapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
+        Capability::PromoteWith { .. } => "PromoteWith",
+        Capability::GateDecider { .. } => "GateDecider",
     }
 }
 
@@ -164,6 +168,7 @@ fn type_to_capability(cap_type: &str) -> Option<Capability> {
             patterns: vec!["*".to_string()],
             commands: vec![],
         }),
+        "ArtifactExecution" => Some(Capability::ArtifactExecution),
         "AgentSpawn" => Some(Capability::AgentSpawn {
             max_children: 1,
             max_spawn_depth: 0,

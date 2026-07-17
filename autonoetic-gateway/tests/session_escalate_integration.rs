@@ -73,6 +73,7 @@ fn test_manifest() -> AgentManifest {
             id: "escalation-test-agent".to_string(),
             name: "Escalation Test Agent".to_string(),
             description: "Test agent for escalation flow".to_string(),
+            singleton: false,
         },
         llm_overrides: None,
         llm_preset: None,
@@ -84,6 +85,7 @@ fn test_manifest() -> AgentManifest {
         io: None,
         middleware: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
         script_entry: None,
         script_input_mode: Default::default(),
@@ -91,6 +93,7 @@ fn test_manifest() -> AgentManifest {
         gateway_token: None,
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -332,7 +335,8 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()> {
     let workspace = support::TestWorkspace::new()?;
-    let config = workspace.gateway_config();
+    let mut config = workspace.gateway_config();
+    config.approval_dwell_multiplier = 0.0;
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
 

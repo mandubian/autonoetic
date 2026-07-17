@@ -1,3 +1,5 @@
+mod support;
+
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -19,6 +21,7 @@ fn evaluator_manifest() -> AgentManifest {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator.default".to_string(),
             description: "Evaluator".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -35,31 +38,35 @@ fn evaluator_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
 
-fn setup_store(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+fn setup_store(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::sync::Arc<autonoetic_gateway::scheduler::gateway_store::GatewayStore>) {
     let gw = tmp.path().join(".gateway");
     std::fs::create_dir_all(&gw).unwrap();
     let cs = ContentStore::new(&gw).unwrap();
     let handle = cs.write(b"test artifact content".as_slice()).unwrap();
     cs.register_name("test-session", "artifact.tar.zst", &handle)
         .unwrap();
-    gw
+    let store = std::sync::Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gw).unwrap());
+    (gw, store)
 }
 
 #[test]
 fn test_promotion_record_rejects_empty_finding_description() {
     let tmp = tempdir().unwrap();
-    let gw = setup_store(&tmp);
+    let (gw, store) = setup_store(&tmp);
     let manifest = evaluator_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
+    support::promotion_trace::seed_execution_trace(store.as_ref(), "test-session", "trace-findings-fail", 1);
 
-    let err = registry
+    let out = registry
         .execute(
             "promotion_record",
             &manifest,
@@ -69,19 +76,22 @@ fn test_promotion_record_rejects_empty_finding_description() {
             &serde_json::json!({
                 "artifact_id": "art_test123",
                 "role": "sealed_evaluator",
-                "pass": false,
+                "execution_trace_id": "trace-findings-fail",
                 "findings": [{"severity": "error", "description": ""}]
             })
             .to_string(),
+            Some("test-session"),
             None,
             None,
-            None,
-            None,
+            Some(store),
             None,
         )
-        .unwrap_err();
+        .expect("promotion_record returns a structured Ok(ok:false) envelope (P-5.11)");
 
-    let msg = err.to_string();
+    // Findings validation is now a structured block, not a bare Err.
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false);
+    let msg = v["message"].as_str().unwrap_or_default().to_string();
     assert!(
         msg.contains("findings[0]"),
         "Expected findings index, got: {msg}"
@@ -95,10 +105,11 @@ fn test_promotion_record_rejects_empty_finding_description() {
 #[test]
 fn test_promotion_record_accepts_valid_findings() {
     let tmp = tempdir().unwrap();
-    let gw = setup_store(&tmp);
+    let (gw, store) = setup_store(&tmp);
     let manifest = evaluator_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
+    support::promotion_trace::seed_success_trace(store.as_ref(), "test-session", "trace-findings-ok");
 
     let result = registry
         .execute(
@@ -110,14 +121,14 @@ fn test_promotion_record_accepts_valid_findings() {
             &serde_json::json!({
                 "artifact_id": "art_test123",
                 "role": "sealed_evaluator",
-                "pass": true,
+                "execution_trace_id": "trace-findings-ok",
                 "findings": [{"severity": "info", "description": "All checks passed"}]
             })
             .to_string(),
+            Some("test-session"),
             None,
             None,
-            None,
-            None,
+            Some(store),
             None,
         )
         .unwrap();

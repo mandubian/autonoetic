@@ -72,6 +72,39 @@ pub struct LayerMountScopeInfo {
     pub source: String,
 }
 
+/// Sub-kind for `ScheduledAction::SessionEscalate`, distinguishing stuck-session
+/// guidance requests from federation promotion reviews without payload sniffing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationKind {
+    /// Agent is stuck and needs human guidance (default for backwards compatibility).
+    #[default]
+    GuidanceRequest,
+    /// Federation jury verdicts require operator promotion decision.
+    PromotionReview,
+}
+
+/// Federation jury context embedded in a merged `RevisionPromote` approval
+/// (#738). When present, the single approval authorizes both the capability
+/// delta and the federation jury review, replacing the separate FullJury
+/// escalation gate for existing-agent promotions that broaden capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevisionPromoteFederationContext {
+    /// Artifact the federation roles reviewed.
+    pub artifact_id: String,
+    /// Canonical content digest of the reviewed artifact. The FullJury gate
+    /// requires this to match the artifact being promoted, so an approval for
+    /// different content (re-promotion under the same artifact_id) cannot
+    /// satisfy the gate. Closes the #653 pattern structurally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+    /// Short human-readable summary of the federation role verdicts (e.g.
+    /// "static_evaluator: pass, unit_test_runner: pass").
+    pub role_verdicts_summary: String,
+    /// Planner's synthesis / recommendation distilled from the verdicts.
+    pub planner_synthesis: String,
+}
+
 /// Actions that can be stored in reevaluation state and executed by the background scheduler,
 /// or used as the *subject* of an approval request (ApprovalRequest/ApprovalDecision).
 ///
@@ -106,6 +139,9 @@ pub enum ScheduledAction {
         evidence_ref: Option<String>,
         #[serde(default)]
         detected_hosts: Option<Vec<String>>,
+        /// Agent-stated purpose from `sandbox_exec` `intent` (operator-facing).
+        #[serde(default)]
+        intent: Option<String>,
     },
     /// Approval subject only: "this approval request is for an agent install." Not executed by the scheduler; install is performed by the caller retrying `agent.install` with `install_approval_ref`.
     AgentInstall {
@@ -239,6 +275,10 @@ pub enum ScheduledAction {
         suggested_actions: Vec<String>,
         #[serde(default)]
         payload: Option<serde_json::Value>,
+        /// Distinguishes stuck-session guidance requests from promotion reviews
+        /// so the promotion gate and resolution paths do not rely on payload sniffing.
+        #[serde(default)]
+        kind: EscalationKind,
     },
     /// Approval subject only: sandbox.exec is about to mount layers whose build-time
     /// network scope is not covered by the current session's approval grants.
@@ -274,6 +314,15 @@ pub enum ScheduledAction {
         /// broadened: [{ capability_type, previous_scope, new_scope }, ...] }`.
         #[serde(default)]
         payload: Option<serde_json::Value>,
+        /// Federation jury context embedded when this promotion also carries
+        /// federation role verdicts (#738). When `Some`, this single approval
+        /// replaces the separate FullJury escalation gate — the operator's one
+        /// decision authorizes both the capability delta and the jury review.
+        /// `content_digest` binds the approval to specific artifact content so
+        /// an approval for different content never satisfies the FullJury gate
+        /// (closes the #653 pattern structurally).
+        #[serde(default)]
+        federation_context: Option<RevisionPromoteFederationContext>,
     },
     /// Wiki page contribution proposal. Approval subject only — not executed
     /// by the scheduler. On operator approval, the gateway materializes the
@@ -288,6 +337,17 @@ pub enum ScheduledAction {
         proposed_by_agent: String,
         #[serde(default)]
         proposed_by_session: Option<String>,
+    },
+    /// Approval subject only: a PlanFrame proposed by an agent. Not executed by
+    /// the scheduler; once approved, the gateway updates the plan status and
+    /// materializes its declared capability envelope as session approval grants.
+    PlanFrame {
+        plan_id: String,
+        version: u32,
+        /// Declared capability envelope for the plan. Used to materialize
+        /// session approval grants on approval.
+        #[serde(default)]
+        envelope: Vec<super::capability::Capability>,
     },
 }
 
@@ -305,6 +365,7 @@ impl ScheduledAction {
                 | Self::LayerMount { .. }
                 | Self::RevisionPromote { .. }
                 | Self::WikiProposal { .. }
+                | Self::PlanFrame { .. }
         )
     }
 
@@ -327,7 +388,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => true,
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => true,
         }
     }
 
@@ -365,6 +427,7 @@ impl ScheduledAction {
             Self::LayerMount { .. } => "layer_mount",
             Self::RevisionPromote { .. } => "revision_promote",
             Self::WikiProposal { .. } => "wiki_propose",
+            Self::PlanFrame { .. } => "plan_frame",
         }
     }
 
@@ -383,7 +446,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => None,
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => None,
         }
     }
 
@@ -406,7 +470,8 @@ impl ScheduledAction {
             | Self::SessionEscalate { .. }
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
-            | Self::WikiProposal { .. } => {}
+            | Self::WikiProposal { .. }
+            | Self::PlanFrame { .. } => {}
         }
         self
     }
@@ -497,6 +562,7 @@ impl ScheduledAction {
                 dependencies,
                 requires_approval,
                 detected_hosts,
+                intent,
                 ..
             } => Self::SandboxExec {
                 // Command is blanked for the Agent class because shell strings
@@ -511,6 +577,7 @@ impl ScheduledAction {
                 requires_approval: *requires_approval,
                 evidence_ref: None,
                 detected_hosts: detected_hosts.clone(),
+                intent: intent.clone(),
             },
             Self::WriteFile {
                 path,
@@ -639,10 +706,6 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub approval_level: ApprovalLevel,
     #[serde(default)]
-    pub similar_to_request_id: Option<String>,
-    #[serde(default)]
-    pub similarity_score: Option<f64>,
-    #[serde(default)]
     pub min_dwell_ms: Option<i64>,
     #[serde(default)]
     pub confirm_phrase: Option<String>,
@@ -654,6 +717,10 @@ pub struct ApprovalRequest {
     /// Risk summary derived from RemoteAccessAnalyzer + auditor promotion record.
     #[serde(default)]
     pub risk_summary: Option<RiskSummary>,
+    /// Optional expiry timestamp for standalone (non-workflow) approvals.
+    /// Workflow-bound approvals rely on task-level timeout instead.
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 impl ApprovalRequest {
@@ -734,6 +801,7 @@ pub enum ApprovalStatus {
     Approved,
     Rejected,
     Cancelled,
+    Stale,
 }
 
 impl ApprovalStatus {
@@ -742,6 +810,7 @@ impl ApprovalStatus {
             ApprovalStatus::Approved => "approved",
             ApprovalStatus::Rejected => "rejected",
             ApprovalStatus::Cancelled => "cancelled",
+            ApprovalStatus::Stale => "stale",
         }
     }
 }
@@ -939,6 +1008,8 @@ impl GrantScope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum GrantTarget {
+    /// Match any outbound host/URL target.
+    Any,
     /// Exact hostname match, e.g. `"api.github.com"`.
     ExactHost(String),
     /// Matches any subdomain of the suffix, e.g. `"*.github.com"` matches
@@ -954,6 +1025,7 @@ pub enum GrantTarget {
 impl GrantTarget {
     pub fn kind_str(&self) -> &'static str {
         match self {
+            Self::Any => "any",
             Self::ExactHost(_) => "exact_host",
             Self::HostSuffix(_) => "host_suffix",
             Self::HostAndPort { .. } => "host_and_port",
@@ -965,6 +1037,7 @@ impl GrantTarget {
     /// by this grant target.
     pub fn matches(&self, request_target: &str) -> bool {
         match self {
+            Self::Any => true,
             Self::ExactHost(host) => request_target.eq_ignore_ascii_case(host),
             Self::HostSuffix(suffix) => {
                 let suffix = suffix.trim_start_matches("*.");
@@ -1082,6 +1155,7 @@ mod redaction_tests {
             requires_approval: true,
             evidence_ref: Some("evidence_handle_xyz".into()),
             detected_hosts: Some(vec!["x.example.com".into()]),
+            intent: None,
         }
     }
 
@@ -1092,6 +1166,7 @@ mod redaction_tests {
             requires_approval: true,
             evidence_ref: Some("evidence_handle_xyz".into()),
             detected_hosts: Some(vec!["x.example.com".into()]),
+            intent: None,
         }
     }
 
@@ -1363,6 +1438,7 @@ mod detected_hosts_tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: Some(vec!["a.example.com".into(), "b.example.com".into()]),
+            intent: None,
         };
         assert_eq!(
             a.detected_hosts(),
@@ -1378,6 +1454,7 @@ mod detected_hosts_tests {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         };
         assert_eq!(a.detected_hosts(), None);
     }

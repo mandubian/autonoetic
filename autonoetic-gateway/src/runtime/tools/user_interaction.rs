@@ -5,6 +5,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{default_true, NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::background::UserInteractionStatus;
+use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -126,13 +127,12 @@ impl NativeTool for UserAskTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         if asks_for_secret(&args) {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "validation",
-                "message": "user.ask cannot be used to request secrets or credential values.",
-                "repair_hint": "Use credential.setup / credential.prompt flows so secrets stay in gateway vault-backed channels.",
-                "error": "secret_collection_not_allowed"
-            }).to_string());
+            return Ok(ToolError::validation(
+                "user.ask cannot be used to request secrets or credential values.",
+                Some("Use credential.setup / credential.prompt flows so secrets stay in gateway vault-backed channels."),
+            )
+            .with_code("secret_collection_not_allowed")
+            .to_error_response());
         }
 
         let sid = session_id.unwrap_or("unknown");
@@ -166,13 +166,12 @@ impl NativeTool for UserAskTool {
                     )
                 });
                 if has_active_children {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error_type": "conflict",
-                        "message": "user.ask is not available while workflow tasks are active. Use workflow.wait to handle pending child tasks, or respond in prose for clarifications.",
-                        "repair_hint": "Call workflow.wait until child tasks complete, then retry user.ask.",
-                        "error": "user.ask is not available while workflow tasks are active. Use workflow.wait to handle pending child tasks, or respond in prose for clarifications."
-                    }).to_string());
+                    return Ok(ToolError::conflict(
+                        "user.ask is not available while workflow tasks are active. Complete or cancel child tasks first.",
+                        Some("Call workflow.wait until child tasks complete, then retry."),
+                    )
+                    .with_code("workflow_tasks_active")
+                    .to_error_response());
                 }
             }
 
@@ -183,13 +182,12 @@ impl NativeTool for UserAskTool {
                 .get_pending_interactions_for_root_session(&root_session_id)
                 .unwrap_or_default();
             if !pending_approvals.is_empty() || !pending_interactions.is_empty() {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "conflict",
-                    "message": "user.ask is not available while gates are pending (approvals, interactions, or escalations). Resolve pending gates before retrying.",
-                    "repair_hint": "Resolve or wait for pending gates, then retry user.ask.",
-                    "error": "user.ask is not available while gates are pending. Resolve pending gates before retrying."
-                }).to_string());
+                return Ok(ToolError::conflict(
+                    "user.ask is not available while gates are pending. Resolve or wait for pending gates, then retry.",
+                    Some("Resolve or wait for pending gates, then retry."),
+                )
+                .with_code("gates_pending")
+                .to_error_response());
             }
         }
 
@@ -227,14 +225,12 @@ impl NativeTool for UserAskTool {
         let store = match gateway_store {
             Some(ref s) => s.clone(),
             None => {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "resource",
-                    "message": "Gateway store not available; user.ask requires persistent store",
-                    "repair_hint": "Configure GatewayStore for this runtime before calling user.ask.",
-                    "error": "Gateway store not available; user.ask requires persistent store"
-                })
-                .to_string());
+                return Ok(ToolError::resource(
+                    "Gateway store not available; user.ask requires persistent store",
+                    Some("Configure GatewayStore with a persistent backend for user interaction support."),
+                )
+                .with_code("user_interaction_store_unavailable")
+                .to_error_response());
             }
         };
 
@@ -255,24 +251,31 @@ impl NativeTool for UserAskTool {
             session_id: Some(sid),
             run_context: _run_context,
             config: _config,
-            reason: "user question".to_string(),
+            context: crate::runtime::human_gate::DecisionContext::tier2(
+                format!("agent asks: {}", question_for_side_effects),
+                "agent requested operator input",
+                "the answer feeds the agent's next step",
+                "answer per the question",
+            ),
             summary: "user question".to_string(),
             approval_ref: None,
+            request_id: None,
             pre_validated: false,
+            cache_backfill: None,
             turn_id,
         })?;
 
         match gate_result {
             GateResult::AlreadyPending { gate_id, .. } => {
-                Ok(serde_json::json!({
-                    "ok": false,
-                    "error_type": "conflict",
-                    "message": "A user interaction is already pending for this session.",
-                    "repair_hint": "Wait for the existing interaction to be answered, then retry.",
-                    "error": "A user interaction is already pending for this session.",
-                    "interaction_id": gate_id,
-                })
-                .to_string())
+                let err = ToolError::conflict(
+                    "A user interaction is already pending for this session.",
+                    Some("Wait for the existing interaction to be answered, then retry."),
+                )
+                .with_code("interaction_already_pending");
+                let mut v = serde_json::to_value(&err)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                v["interaction_id"] = serde_json::json!(gate_id);
+                Ok(v.to_string())
             }
             GateResult::Suspended {
                 gate_id,
@@ -426,15 +429,12 @@ impl NativeTool for UserInteractionStatusTool {
                 "message": "User interaction not found"
             }))
             .map_err(Into::into),
-            Err(e) => serde_json::to_string(&serde_json::json!({
-                "ok": false,
-                "interaction_id": args.interaction_id,
-                "error_type": "resource",
-                "message": e.to_string(),
-                "repair_hint": "Verify the interaction id and gateway store availability, then retry.",
-                "error": e.to_string()
-            }))
-            .map_err(Into::into),
+            Err(e) => Ok(ToolError::resource(
+                e.to_string(),
+                Some("Verify the interaction id and gateway store availability, then retry."),
+            )
+            .with_code("interaction_read_failed")
+            .to_error_response()),
         }
     }
 }

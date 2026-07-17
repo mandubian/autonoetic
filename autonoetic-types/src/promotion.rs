@@ -71,6 +71,8 @@ pub struct PromotionRecord {
     pub evaluator_findings: Vec<Finding>,
     #[serde(default)]
     pub evaluator_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator_execution_trace_id: Option<String>,
     #[serde(default)]
     pub auditor_id: Option<String>,
     #[serde(default)]
@@ -87,6 +89,8 @@ pub struct PromotionRecord {
     pub static_evaluator_findings: Vec<Finding>,
     #[serde(default)]
     pub static_evaluator_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_evaluator_execution_trace_id: Option<String>,
     #[serde(default)]
     pub unit_test_runner_id: Option<String>,
     #[serde(default)]
@@ -95,6 +99,8 @@ pub struct PromotionRecord {
     pub unit_test_runner_findings: Vec<Finding>,
     #[serde(default)]
     pub unit_test_runner_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_test_runner_execution_trace_id: Option<String>,
     #[serde(default)]
     pub sealed_evaluator_id: Option<String>,
     #[serde(default)]
@@ -103,6 +109,8 @@ pub struct PromotionRecord {
     pub sealed_evaluator_findings: Vec<Finding>,
     #[serde(default)]
     pub sealed_evaluator_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_evaluator_execution_trace_id: Option<String>,
     pub promotion_gate_version: String,
     /// The resolved dependency closure (name==version) **blessed** at promotion:
     /// the versions the validated, approved run actually used, frozen here so the
@@ -152,8 +160,15 @@ pub struct PromotionRecordArgs {
     pub content_digest: Option<String>,
     /// Role recording this promotion (evaluator or auditor).
     pub role: PromotionRole,
-    /// Whether this role's validation passed.
-    pub pass: bool,
+    /// Whether this role's validation passed. Required for `auditor`; ignored for
+    /// execution roles (derived from `execution_trace_id`).
+    #[serde(default)]
+    pub pass: Option<bool>,
+    /// Execution trace id for roles that run code (`unit_test_runner`,
+    /// `static_evaluator`, `sealed_evaluator`, legacy `evaluator`). Required for
+    /// those roles; `pass` is derived from `exit_code`.
+    #[serde(default)]
+    pub execution_trace_id: Option<String>,
     /// Findings from this validation.
     #[serde(default)]
     pub findings: Vec<Finding>,

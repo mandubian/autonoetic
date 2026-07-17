@@ -161,7 +161,7 @@ It is rule-based, cheap, and has no LLM cost.
 | `failure_pressure` | max over tools of `failures / max_tool_failures` | warn ≥ 0.8 |
 | `child_failure_pressure` | `child_failures / max_child_failures` | warn ≥ 0.66 |
 | `digest_stall` | turns since last new causal event category | warn ≥ 5 |
-| `repetition_entropy` | Shannon entropy of last-N tool fingerprints (low = repetitive) | warn ≤ 1.2 |
+| `repetition_entropy` | Shannon entropy of last-N tool fingerprints (low = repetitive). **Advisory-only**: caps at `Warn` severity — never escalates to `Critical` on its own (repeating a tool call is weak evidence of being stuck; the gate-worthy `Critical` verdicts belong to the loop guard's semantic no-progress and the error-burst signal). Evidence still records how low entropy is (`"critically low"` below `critical_bits`); planner is still notified. Requires `min_turns` (default 3) warm-up before evaluation to avoid tripping on an agent's opening burst of similar calls. | warn ≤ 1.2, advisory (max Warn) |
 | `error_burst` | error events in last-N turns | warn ≥ 5 |
 | `context_pressure` | already exists in `budget_tracker.rs` | warn ≥ 0.8 |
 
@@ -329,7 +329,7 @@ If the experiment fails, P3+ is dropped and Layer 1 is enough.
 
 ## 8. References
 
-- `docs/design/human-gate-unification-plan.md` — the precedent factorization
+- `docs/archived/human-gate-unification-plan.md` — the precedent factorization
   effort this design follows
 - `autonoetic-gateway/src/runtime/guard.rs` — LoopGuard, the closest existing
   cousin

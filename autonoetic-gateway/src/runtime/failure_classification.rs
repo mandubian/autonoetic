@@ -103,11 +103,58 @@ impl WorkflowFailureMetadata {
         }
     }
 
+    /// The host is missing the sandbox driver the agent requires (e.g. `bwrap`
+    /// not on PATH). A node-level infrastructure gap, not a transient blip:
+    /// retrying the same exec can never succeed, so mark it non-retryable and
+    /// surface it as "unable to evaluate" rather than a hard failure. (#600)
+    fn sandbox_unavailable() -> Self {
+        Self {
+            failure_class: Some(FailureClass::GateUnableToEvaluate),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
+            requires_external_event: Some(false),
+            requires_human: Some(true),
+            side_effect_state: Some(SideEffectState::NoSideEffect),
+        }
+    }
+
     fn unknown_failure() -> Self {
         Self {
             failure_class: Some(FailureClass::Unknown),
             retry_advice: None,
             retryable: None,
+            requires_external_event: Some(false),
+            requires_human: Some(false),
+            side_effect_state: Some(SideEffectState::Unknown),
+        }
+    }
+
+    /// RFC #775/#776 Part B: declared `expected_outputs` missing at child
+    /// completion. The child ran to completion but did not produce what the
+    /// parent declared it would. No blind retry — invariant 1: retrying
+    /// identical spawn against an unmet output contract is provably futile.
+    /// Parent must change something structural (re-delegate, decompose,
+    /// relax, or escalate) before any respawn.
+    fn output_contract_unmet() -> Self {
+        Self {
+            failure_class: Some(FailureClass::OutputContractUnmet),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
+            requires_external_event: Some(false),
+            requires_human: Some(false),
+            side_effect_state: Some(SideEffectState::Unknown),
+        }
+    }
+
+    /// RFC #775 Part A: child session ended cleanly but produced no
+    /// recognizable result or account. Distinct from `Unknown` (which is an
+    /// unclassifiable error) — this is a child that gave up silently.
+    /// No retry; counts toward the parent loop guard (Part B.4).
+    fn child_gave_up() -> Self {
+        Self {
+            failure_class: Some(FailureClass::ChildGaveUp),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
             requires_external_event: Some(false),
             requires_human: Some(false),
             side_effect_state: Some(SideEffectState::Unknown),
@@ -177,9 +224,59 @@ fn insert_if_missing(map: &mut Map<String, Value>, key: &str, value: Option<Valu
     }
 }
 
+/// P-5.14: classification is a pure function of gateway-observed state, and the
+/// `ToolErrorType` is the strongest such signal. For the variants that map to a
+/// failure class UNAMBIGUOUSLY, decide from the type alone — never let agent
+/// prose override it. Variants whose meaning genuinely depends on context
+/// (`Validation` → schema vs. contract, `Conflict` → install-conflict only in
+/// the revision context, etc.) return `None`, routing them to the logged prose
+/// fallback below, which preserves today's behavior for them.
+fn classify_by_type(error_type: &ToolErrorType) -> Option<WorkflowFailureMetadata> {
+    match error_type {
+        ToolErrorType::SandboxUnavailable => Some(WorkflowFailureMetadata::sandbox_unavailable()),
+        ToolErrorType::Permission => Some(WorkflowFailureMetadata::policy_denied()),
+        ToolErrorType::Timeout => Some(WorkflowFailureMetadata::timeout()),
+        // `Resource` is NOT unambiguous: a missing sandbox driver rides on a
+        // `Resource` error carrying the `[sandbox_driver_unavailable]` marker
+        // (the pre-typed representation), which must classify as
+        // `GateUnableToEvaluate` (do-not-retry), NOT `transient_infra`
+        // (retryable). Defer `Resource` to the prose fallback, which checks
+        // that marker before defaulting a plain resource error to transient.
+        ToolErrorType::Resource
+        | ToolErrorType::Validation
+        | ToolErrorType::Conflict
+        | ToolErrorType::QuotaExceeded
+        | ToolErrorType::NotFound
+        | ToolErrorType::Execution
+        | ToolErrorType::Fatal => None,
+    }
+}
+
 fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailureMetadata {
+    // P-5.14: typed classification first — the type is gateway-observed state
+    // and the authoritative signal. Prose is consulted only when the type is
+    // insufficient (`classify_by_type` returned `None`).
+    if let Some(metadata) = classify_by_type(&error_type) {
+        return metadata;
+    }
+
+    // Prose fallback (P-5.14 last-resort). Reached for error types without an
+    // unambiguous type-only mapping. Logged when reached, so reliance on prose
+    // (a potential discretion leak) is observable in traces.
+    tracing::debug!(
+        target: "failure_classification",
+        error_type = ?error_type,
+        "prose fallback used for failure classification (P-5.14 last-resort)"
+    );
+
     let lower = message.to_ascii_lowercase();
 
+    if matches!(error_type, ToolErrorType::SandboxUnavailable)
+        || lower.contains("sandbox_driver_unavailable")
+        || (lower.contains("sandbox driver") && lower.contains("not found on path"))
+    {
+        return WorkflowFailureMetadata::sandbox_unavailable();
+    }
     if lower.contains("approval required") || lower.contains("approval_pending") {
         return WorkflowFailureMetadata::approval_pending();
     }
@@ -200,6 +297,12 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
         || lower.contains("502")
         || lower.contains("503")
         || lower.contains("504")
+        || lower.contains("500")
+        || lower.contains("529")
+        || lower.contains("api error 5")
+        || lower.contains("overloaded")
+        || lower.contains("peg-native")
+        || lower.contains("internal server error")
         || lower.contains("temporarily unavailable")
     {
         return WorkflowFailureMetadata::transient_infra();
@@ -224,9 +327,14 @@ fn classify_message(message: &str, error_type: ToolErrorType) -> WorkflowFailure
     WorkflowFailureMetadata::unknown_failure()
 }
 
-pub(crate) fn decorate_tool_error(mut tool_error: ToolError) -> ToolError {
+pub fn decorate_tool_error(mut tool_error: ToolError) -> ToolError {
     let metadata = classify_message(&tool_error.message, tool_error.error_type.clone());
     metadata.apply_to_tool_error(&mut tool_error);
+    if tool_error.error_type == ToolErrorType::Permission && tool_error.available_actions.is_empty()
+    {
+        tool_error.available_actions =
+            crate::denial_affordances::available_actions_for_rules(&tool_error.enforced_rules);
+    }
     tool_error
 }
 
@@ -263,6 +371,7 @@ pub(crate) fn normalize_tool_result_json(result_json: &str) -> String {
                 "quota_exceeded" => ToolErrorType::QuotaExceeded,
                 "not_found" => ToolErrorType::NotFound,
                 "timeout" => ToolErrorType::Timeout,
+                "sandbox_unavailable" => ToolErrorType::SandboxUnavailable,
                 _ => ToolErrorType::Execution,
             };
             let message = object
@@ -309,6 +418,12 @@ pub(crate) fn classify_task_status(
                 || summary.contains("502")
                 || summary.contains("503")
                 || summary.contains("504")
+                || summary.contains("500")
+                || summary.contains("529")
+                || summary.contains("api error 5")
+                || summary.contains("overloaded")
+                || summary.contains("peg-native")
+                || summary.contains("internal server error")
                 || summary.contains("temporarily unavailable")
             {
                 Some(WorkflowFailureMetadata::transient_infra())
@@ -336,6 +451,10 @@ pub(crate) fn metadata_for_failure_class(failure_class: FailureClass) -> Workflo
         FailureClass::Timeout => WorkflowFailureMetadata::timeout(),
         FailureClass::TransientInfra => WorkflowFailureMetadata::transient_infra(),
         FailureClass::SchemaValidationFailed => WorkflowFailureMetadata::schema_validation_failed(),
+        FailureClass::OutputContractUnmet => {
+            WorkflowFailureMetadata::output_contract_unmet()
+        }
+        FailureClass::ChildGaveUp => WorkflowFailureMetadata::child_gave_up(),
         FailureClass::AwaitingUserInput
         | FailureClass::ArtifactInvalid
         | FailureClass::DependencyMissing
@@ -403,5 +522,121 @@ mod tests {
         assert_eq!(err.failure_class, Some(FailureClass::InstallConflict));
         assert_eq!(err.retry_advice, Some(RetryAdvice::DoNotRetry));
         assert_eq!(err.retryable, Some(false));
+    }
+
+    // A missing sandbox driver must be terminal & unable-to-evaluate, not the
+    // generic retryable Resource→transient_infra classification. (#600)
+    #[test]
+    fn sandbox_driver_unavailable_is_terminal_unable_to_evaluate() {
+        // The marker the SandboxRunner stamps on a spawn ENOENT.
+        let msg = "sandbox driver 'bwrap' not found on PATH — ... [sandbox_driver_unavailable]";
+        let err = decorate_tool_error(ToolError::resource(msg, None::<String>));
+        assert_eq!(err.failure_class, Some(FailureClass::GateUnableToEvaluate));
+        assert_eq!(err.retry_advice, Some(RetryAdvice::DoNotRetry));
+        assert_eq!(err.retryable, Some(false));
+    }
+
+    #[test]
+    fn typed_sandbox_unavailable_is_terminal_unable_to_evaluate() {
+        let err = decorate_tool_error(ToolError::sandbox_unavailable(
+            "sandbox driver 'bwrap' not found on PATH",
+        ));
+        assert_eq!(err.error_type, ToolErrorType::SandboxUnavailable);
+        assert_eq!(err.failure_class, Some(FailureClass::GateUnableToEvaluate));
+        assert_eq!(err.retryable, Some(false));
+    }
+
+    #[test]
+    fn plain_resource_error_stays_retryable() {
+        let err = decorate_tool_error(ToolError::resource("rate limited", None::<String>));
+        assert_eq!(err.failure_class, Some(FailureClass::TransientInfra));
+        assert_eq!(err.retryable, Some(true));
+    }
+
+    // P-5.14: classification is deterministic from an empty message —
+    // Permission/Timeout/SandboxUnavailable via the fast typed mapping, and
+    // Resource via the fallback's type branch (Resource is deliberately NOT in
+    // the fast map — see classify_by_type — yet still resolves with no prose).
+    #[test]
+    fn typed_classification_needs_no_message() {
+        assert_eq!(
+            classify_message("", ToolErrorType::Permission).failure_class,
+            Some(FailureClass::PolicyDenied)
+        );
+        assert_eq!(
+            classify_message("", ToolErrorType::Timeout).failure_class,
+            Some(FailureClass::Timeout)
+        );
+        assert_eq!(
+            classify_message("", ToolErrorType::Resource).failure_class,
+            Some(FailureClass::TransientInfra)
+        );
+        assert_eq!(
+            classify_message("", ToolErrorType::SandboxUnavailable).failure_class,
+            Some(FailureClass::GateUnableToEvaluate)
+        );
+    }
+
+    // Classification tests for LLM/server-style transient infrastructure
+    // failures. These exercise the prose fallback string heuristics that map
+    // HTTP 5xx and related overload phrases to TransientInfra.
+    #[test]
+    fn llm_5xx_task_status_is_transient_infra() {
+        let cases = [
+            "OpenAI API error 500: internal server error",
+            "Anthropic API error 529",
+            "model produced output that does not match the expected peg-native format",
+            "upstream returned api error 500",
+            "connection refused",
+            "transport reset",
+            "bad gateway 502",
+            "service unavailable 503",
+            "gateway timeout 504",
+            "server is temporarily unavailable",
+        ];
+        for summary in cases {
+            let metadata = classify_task_status(TaskRunStatus::Failed, Some(summary)).expect(summary);
+            assert_eq!(
+                metadata.failure_class,
+                Some(FailureClass::TransientInfra),
+                "{summary} should be transient_infra"
+            );
+            assert_eq!(metadata.retryable, Some(true));
+            assert_eq!(metadata.side_effect_state, Some(SideEffectState::NoSideEffect));
+        }
+    }
+
+    #[test]
+    fn llm_5xx_message_is_transient_infra() {
+        let cases = [
+            "OpenAI API error 500: internal server error",
+            "Anthropic API error 529",
+            "model produced output that does not match the expected peg-native format",
+            "upstream returned api error 5xx",
+        ];
+        for msg in cases {
+            let err = decorate_tool_error(ToolError::execution(msg, None::<String>));
+            assert_eq!(
+                err.failure_class,
+                Some(FailureClass::TransientInfra),
+                "{msg} should be transient_infra"
+            );
+            assert_eq!(err.retryable, Some(true));
+        }
+    }
+
+    #[test]
+    fn explicit_500_in_message_is_transient_infra() {
+        let err = decorate_tool_error(ToolError::execution("500", None::<String>));
+        assert_eq!(err.failure_class, Some(FailureClass::TransientInfra));
+    }
+
+    #[test]
+    fn non_retryable_validation_error_is_not_transient_infra() {
+        let err = decorate_tool_error(ToolError::validation(
+            "invalid json missing field",
+            None::<String>,
+        ));
+        assert_eq!(err.failure_class, Some(FailureClass::SchemaValidationFailed));
     }
 }

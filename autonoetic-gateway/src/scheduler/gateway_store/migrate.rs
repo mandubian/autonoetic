@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 49;
+const SCHEMA_VERSION_LATEST: i64 = 71;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -534,7 +534,470 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_decided_by_kind_v47(conn)?;
     apply_operator_channel_bindings_v48(conn)?;
     apply_session_inference_bindings_v49(conn)?;
+    apply_session_envelopes_v50(conn)?;
+    apply_plan_frame_capability_envelope_v51(conn)?;
+    apply_promotion_pre_authorization_v52(conn)?;
+    apply_agent_suspension_v53(conn)?;
+    apply_fork_lineage_v54(conn)?;
+    apply_drop_approval_similarity_v55(conn)?;
+    apply_agent_revision_detected_network_hosts_v56(conn)?;
+    apply_session_spawn_lineage_v57(conn)?;
+    apply_workflow_singleton_index_v58(conn)?;
+    apply_promotion_attempt_ledger_v59(conn)?;
+    apply_approval_expires_at_v60(conn)?;
+    apply_approval_waiters_v61(conn)?;
+    apply_escalation_approval_request_id_v62(conn)?;
+    apply_escalation_plan_frame_expiry_v63(conn)?;
+    apply_session_lifecycle_state_v64(conn)?;
+    apply_workflow_tasks_sqlite_v65(conn)?;
+    apply_anomaly_flags_v66(conn)?;
+    apply_adjudication_sla_v67(conn)?;
+    apply_revision_requested_by_v68(conn)?;
+    apply_amendment_invitations_v69(conn)?;
+    apply_fork_lineage_enrichment_v70(conn)?;
+    apply_session_constitution_pin_v71(conn)?;
 
+    Ok(())
+}
+
+fn apply_session_lifecycle_state_v64(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 64 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE session_transcripts ADD COLUMN lifecycle_state TEXT;
+         UPDATE session_transcripts SET lifecycle_state = 'active'
+           WHERE lifecycle_state IS NULL AND status = 'active';
+         UPDATE session_transcripts SET lifecycle_state = 'terminated:completed'
+           WHERE lifecycle_state IS NULL AND status IN ('completed', 'closed');
+         UPDATE session_transcripts SET lifecycle_state = 'terminated:failed'
+           WHERE lifecycle_state IS NULL AND status = 'failed';
+         UPDATE session_transcripts SET lifecycle_state = 'awaiting_gate'
+           WHERE lifecycle_state IS NULL AND status = 'suspended';",
+    )?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![64_i64, "session_lifecycle_state", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_approval_waiters_v61(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 61 {
+        return Ok(());
+    }
+
+    // #723: sessions that joined an existing pending approval (root-scoped,
+    // structurally-identical action) so its resolution fans in to all of them.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS approval_waiters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            workflow_id TEXT,
+            task_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(request_id, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_approval_waiters_request
+            ON approval_waiters(request_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![61, "approval_waiters", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_escalation_approval_request_id_v62(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 62 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE escalations ADD COLUMN approval_request_id TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![62, "escalation_approval_request_id", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_escalation_plan_frame_expiry_v63(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 63 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE escalations ADD COLUMN expires_at TEXT;
+         ALTER TABLE plan_frames ADD COLUMN expires_at TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![63, "escalation_plan_frame_expiry", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_approval_expires_at_v60(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 60 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE approvals ADD COLUMN expires_at TEXT;
+        CREATE INDEX IF NOT EXISTS idx_approvals_expires_at ON approvals(expires_at, status);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![60, "approval_expires_at", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_workflow_singleton_index_v58(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 58 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_singleton_index (
+            workflow_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL DEFAULT '',
+            task_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, agent_id, revision_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_singleton_index_task
+            ON workflow_singleton_index(workflow_id, task_id);
+        CREATE INDEX IF NOT EXISTS idx_workflow_singleton_index_workflow
+            ON workflow_singleton_index(workflow_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            58_i64,
+            "workflow_singleton_index",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_promotion_attempt_ledger_v59(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 59 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS promotion_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            alias_id TEXT NOT NULL,
+            revision_id TEXT NOT NULL,
+            content_digest TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            gate TEXT,
+            error_code TEXT,
+            session_id TEXT,
+            workflow_id TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_promotion_attempts_alias_digest
+            ON promotion_attempts(alias_id, content_digest);
+        CREATE INDEX IF NOT EXISTS idx_promotion_attempts_alias_revision
+            ON promotion_attempts(alias_id, revision_id);
+        CREATE INDEX IF NOT EXISTS idx_promotion_attempts_created_at
+            ON promotion_attempts(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            59_i64,
+            "promotion_attempt_ledger",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_session_spawn_lineage_v57(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 57 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_spawn_lineage (
+            child_session_id TEXT PRIMARY KEY,
+            parent_session_id TEXT NOT NULL,
+            root_session_id TEXT NOT NULL,
+            spawned_at_turn INTEGER NOT NULL,
+            target_agent_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_spawn_lineage_root
+            ON session_spawn_lineage(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            57_i64,
+            "session_spawn_lineage",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_agent_revision_detected_network_hosts_v56(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 56 {
+        return Ok(());
+    }
+
+    let col_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('agent_revisions') WHERE name = 'detected_network_hosts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if col_count == 0 {
+        conn.execute_batch("ALTER TABLE agent_revisions ADD COLUMN detected_network_hosts TEXT;")?;
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            56_i64,
+            "agent_revision_detected_network_hosts",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_drop_approval_similarity_v55(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 55 {
+        return Ok(());
+    }
+
+    for col in &["similar_to_request_id", "similarity_score"] {
+        let col_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('approvals') WHERE name = ?1",
+            [*col],
+            |row| row.get(0),
+        )?;
+        if col_count > 0 {
+            conn.execute(&format!("ALTER TABLE approvals DROP COLUMN {col}"), [])?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            55_i64,
+            "drop_approval_similarity",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_plan_frame_capability_envelope_v51(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 51 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE plan_frames ADD COLUMN capability_envelope_json TEXT NOT NULL DEFAULT '[]';",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            51_i64,
+            "plan_frame_capability_envelope",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_promotion_pre_authorization_v52(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 52 {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE promotion_history ADD COLUMN pre_authorization TEXT;")?;
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            52_i64,
+            "promotion_pre_authorization",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+fn apply_agent_suspension_v53(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 53 {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "ALTER TABLE agent_aliases ADD COLUMN suspended_at TEXT;
+         ALTER TABLE agent_aliases ADD COLUMN suspended_reason TEXT;
+         ALTER TABLE agent_aliases ADD COLUMN suspended_by TEXT;",
+    )?;
+    tx.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![53_i64, "agent_suspension", chrono::Utc::now().to_rfc3339()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn apply_fork_lineage_v54(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 54 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_fork_lineage (
+            forked_session_id TEXT PRIMARY KEY,
+            source_session_id TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );",
+    )?;
+
+    // Backfill lineage from existing `session.forked` causal events so forks
+    // created before this migration still resolve their parent's artifact refs.
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO session_fork_lineage (forked_session_id, source_session_id, created_at)
+         SELECT
+             ce.session_id,
+             json_extract(ce.payload, '$.source_session_id'),
+             ce.timestamp
+         FROM causal_events ce
+         WHERE ce.action = 'session.forked'
+           AND ce.session_id IS NOT NULL
+           AND json_extract(ce.payload, '$.source_session_id') IS NOT NULL;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![54_i64, "fork_lineage", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+fn apply_session_envelopes_v50(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 50 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_envelopes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_session_id TEXT NOT NULL,
+            capability_json TEXT NOT NULL,
+            source          TEXT NOT NULL,
+            observed_at     TEXT,
+            locked_at       TEXT,
+            locked_by       TEXT,
+            plan_id         TEXT,
+            created_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_envelopes_root
+            ON session_envelopes(root_session_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![50_i64, "session_envelopes", chrono::Utc::now().to_rfc3339()],
+    )?;
     Ok(())
 }
 
@@ -627,11 +1090,14 @@ fn apply_decided_by_kind_v47(conn: &mut Connection) -> Result<()> {
 
     // Backfill already-decided rows so SQL accountability queries cover history.
     // Mirrors `principal::decider_principal_kind` exactly: operator⇒human,
+    // `user:<id>`⇒served_user (checked before the agent heuristic so a dotted
+    // user id like `user:alice.smith` is not caught by the `%.%` arm),
     // agent-id-shaped (`agent:` or contains `.`)⇒autonoetic_agent, and
     // gateway/system/emergency_stop/unknown⇒NULL (mechanical, no obligation).
     conn.execute(
         "UPDATE approvals SET decided_by_kind = CASE
             WHEN trim(decided_by) = 'operator' THEN 'human'
+            WHEN decided_by LIKE 'user:%' THEN 'served_user'
             WHEN decided_by LIKE 'agent:%' OR decided_by LIKE '%.%' THEN 'autonoetic_agent'
             ELSE NULL
          END
@@ -737,11 +1203,7 @@ fn apply_operator_activity_v45(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            45_i64,
-            "operator_activity",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![45_i64, "operator_activity", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -774,11 +1236,7 @@ fn apply_stage_transitions_v37(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            37_i64,
-            "stage_transitions",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![37_i64, "stage_transitions", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -872,7 +1330,11 @@ fn apply_improvement_cycles_v39(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![39_i64, "improvement_cycles", chrono::Utc::now().to_rfc3339()],
+        params![
+            39_i64,
+            "improvement_cycles",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -892,7 +1354,10 @@ fn apply_credential_label_v40(conn: &mut Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if col_count == 0 {
-        conn.execute("ALTER TABLE credentials ADD COLUMN label TEXT DEFAULT NULL", [])?;
+        conn.execute(
+            "ALTER TABLE credentials ADD COLUMN label TEXT DEFAULT NULL",
+            [],
+        )?;
     }
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
@@ -1074,7 +1539,11 @@ fn apply_validation_waivers_v44(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![44_i64, "validation_waivers", chrono::Utc::now().to_rfc3339()],
+        params![
+            44_i64,
+            "validation_waivers",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -2123,11 +2592,7 @@ fn apply_security_findings_v26(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            26_i64,
-            "security_findings",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![26_i64, "security_findings", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -2309,11 +2774,7 @@ fn apply_gate_messages_v31(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            31_i64,
-            "gate_messages",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![31_i64, "gate_messages", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -2378,11 +2839,7 @@ fn apply_escalations_v33(conn: &mut Connection) -> Result<()> {
 
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-        params![
-            33_i64,
-            "escalations_table",
-            chrono::Utc::now().to_rfc3339()
-        ],
+        params![33_i64, "escalations_table", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }
@@ -2512,4 +2969,479 @@ fn apply_escalation_code_excerpts_v36(conn: &mut Connection) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+fn apply_workflow_tasks_sqlite_v65(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 65 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_runs (
+            task_id            TEXT NOT NULL,
+            workflow_id        TEXT NOT NULL,
+            agent_id           TEXT NOT NULL,
+            session_id         TEXT NOT NULL,
+            parent_session_id  TEXT NOT NULL DEFAULT '',
+            status             TEXT NOT NULL,
+            created_at         TEXT NOT NULL,
+            updated_at         TEXT NOT NULL,
+            source_agent_id    TEXT,
+            result_summary     TEXT,
+            join_group         TEXT,
+            message            TEXT,
+            metadata_json      TEXT,
+            retry_count        INTEGER NOT NULL DEFAULT 0,
+            last_failure_class TEXT,
+            retry_policy_json  TEXT,
+            side_effect_state  TEXT,
+            dedupe_key         TEXT,
+            PRIMARY KEY (workflow_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_runs_workflow
+            ON task_runs(workflow_id);
+
+        CREATE TABLE IF NOT EXISTS queued_task_runs (
+            task_id             TEXT NOT NULL,
+            workflow_id         TEXT NOT NULL,
+            agent_id            TEXT NOT NULL,
+            message             TEXT NOT NULL,
+            child_session_id    TEXT NOT NULL,
+            parent_session_id   TEXT NOT NULL,
+            source_agent_id     TEXT NOT NULL,
+            metadata_json       TEXT,
+            join_group          TEXT,
+            blocks_planner      INTEGER NOT NULL DEFAULT 1,
+            enqueued_at         TEXT NOT NULL,
+            credential_bindings_json TEXT,
+            PRIMARY KEY (workflow_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_queued_task_runs_workflow
+            ON queued_task_runs(workflow_id);
+
+        CREATE TABLE IF NOT EXISTS task_claims (
+            task_id                 TEXT NOT NULL,
+            workflow_id             TEXT NOT NULL,
+            scheduler_instance_id   TEXT NOT NULL,
+            claimed_at              TEXT NOT NULL,
+            heartbeat_at            TEXT NOT NULL,
+            PRIMARY KEY (workflow_id, task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_claims_workflow
+            ON task_claims(workflow_id);
+        CREATE INDEX IF NOT EXISTS idx_task_claims_heartbeat
+            ON task_claims(heartbeat_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![65_i64, "workflow_tasks_sqlite", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// Anomaly flag persistence — future Ri-0.18 / O-7 (issue #770 part C.1).
+/// See `anomaly_flags.rs` module docs for the state machine.
+fn apply_anomaly_flags_v66(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 66 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS anomaly_flags (
+            flag_id             TEXT PRIMARY KEY,
+            reporter_agent_id   TEXT NOT NULL,
+            reporter_session_id TEXT,
+            subject_ref         TEXT NOT NULL,
+            observation         TEXT NOT NULL,
+            evidence_json       TEXT NOT NULL DEFAULT '[]',
+            severity            TEXT NOT NULL DEFAULT 'medium',
+            status              TEXT NOT NULL DEFAULT 'pending',
+            decision            TEXT,
+            decision_reason     TEXT,
+            decided_by          TEXT,
+            decided_at          TEXT,
+            created_at          TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_anomaly_flags_status      ON anomaly_flags(status);
+        CREATE INDEX IF NOT EXISTS idx_anomaly_flags_reporter    ON anomaly_flags(reporter_agent_id);
+        CREATE INDEX IF NOT EXISTS idx_anomaly_flags_created_at  ON anomaly_flags(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![66_i64, "anomaly_flags", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// #771 D.1 — adjudication SLA. `sla_breached_at` is stamped once a
+/// constitutional proposal (O-6) or anomaly flag (O-7) sits un-adjudicated
+/// past the configured deadline. The breach does not change `status` — the
+/// decision is still owed.
+fn apply_adjudication_sla_v67(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 67 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE constitutional_proposals ADD COLUMN sla_breached_at TEXT;
+         ALTER TABLE anomaly_flags ADD COLUMN sla_breached_at TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![67_i64, "adjudication_sla", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// #803 — designer/requester lineage on agent revisions. `created_by_*`
+/// records the installer (in practice always `specialized_builder.default`,
+/// the sole holder of AgentRevision capability); `requested_by_*` records the
+/// delegating principal (e.g. `agent-factory.default`) derived by the gateway
+/// from the calling session's spawn lineage, so it survives past the causal
+/// chain's retention window.
+fn apply_revision_requested_by_v68(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 68 {
+        return Ok(());
+    }
+
+    // Guard each ADD COLUMN independently so a partial application (crash
+    // between the two ALTERs, before the schema_migrations insert) is
+    // recovered on restart instead of failing with a duplicate-column error
+    // (mirrors the v56 pragma_table_info idiom above).
+    for col in ["requested_by_type", "requested_by_id"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('agent_revisions') WHERE name = ?1",
+            params![col],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE agent_revisions ADD COLUMN {col} TEXT;"
+            ))?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            68_i64,
+            "revision_requested_by",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// #771 D.2 — mechanical amendment invitations from denial telemetry. When
+/// the same rule is denied to the same agent alias at least
+/// `amendment_invitations.threshold` times within `window_secs`, the gateway
+/// issues a durable invitation to draft an amendment (Ri-0.8). The gateway
+/// never judges the rule — it executes a pre-committed threshold (Lawful
+/// Executor). The partial unique index makes issuance race-safe: at most one
+/// OPEN invitation per (agent_id, rule_id) even under concurrent scheduler
+/// ticks, mirroring the stamp-once idiom of `flag_*_sla_breaches` (v67).
+fn apply_amendment_invitations_v69(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 69 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS amendment_invitations (
+            invitation_id        TEXT PRIMARY KEY,
+            agent_id             TEXT NOT NULL,
+            rule_id              TEXT NOT NULL,
+            denial_count         INTEGER NOT NULL,
+            threshold            INTEGER NOT NULL,
+            window_secs          INTEGER NOT NULL,
+            status               TEXT NOT NULL DEFAULT 'open',
+            answered_proposal_id TEXT,
+            created_at           TEXT NOT NULL,
+            resolved_at          TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_amendment_invitations_open
+          ON amendment_invitations(agent_id, rule_id) WHERE status = 'open';
+        CREATE INDEX IF NOT EXISTS idx_amendment_invitations_agent
+          ON amendment_invitations(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_amendment_invitations_status
+          ON amendment_invitations(status);
+        CREATE INDEX IF NOT EXISTS idx_amendment_invitations_created_at
+          ON amendment_invitations(created_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            69_i64,
+            "amendment_invitations",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// #814 — enrich `session_fork_lineage` (added by v54) with the turn a fork
+/// branched from, the branch message's digest, and the acting agent, so a
+/// `session.fork` (RPC) and `trace fork` (CLI) side effect can be unified into
+/// one choke point (`GatewayStore::record_session_fork`) that writes the same
+/// enriched row regardless of caller.
+fn apply_fork_lineage_enrichment_v70(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 70 {
+        return Ok(());
+    }
+
+    // Guard each ADD COLUMN independently (mirrors the v68 pragma_table_info
+    // idiom) so a partial application recovers cleanly on restart instead of
+    // failing with a duplicate-column error.
+    for (col, ty) in [
+        ("fork_turn", "INTEGER"),
+        ("branch_message_sha256", "TEXT"),
+        ("agent_id", "TEXT"),
+    ] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_fork_lineage') WHERE name = ?1",
+            params![col],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE session_fork_lineage ADD COLUMN {col} {ty};"
+            ))?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            70_i64,
+            "fork_lineage_enrichment",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// #821 — pins the constitution (version + digest) that admitted a session
+/// on `session_agent_bindings`, mirroring the `runtime_lock_hash` pin
+/// already stored there. Nullable: sessions bound before this migration (or
+/// started when the constitution runtime was never initialized) have no
+/// recorded pin.
+fn apply_session_constitution_pin_v71(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 71 {
+        return Ok(());
+    }
+
+    // Guard each ADD COLUMN independently (mirrors the v68 pragma_table_info
+    // idiom above) so a partial application (crash between the two ALTERs,
+    // before the schema_migrations insert) is recovered on restart instead
+    // of failing with a duplicate-column error.
+    for col in ["constitution_version", "constitution_digest"] {
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_agent_bindings') WHERE name = ?1",
+            params![col],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            conn.execute_batch(&format!(
+                "ALTER TABLE session_agent_bindings ADD COLUMN {col} TEXT;"
+            ))?;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            71_i64,
+            "session_constitution_pin",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #803 — v68 adds requested_by_* columns to agent_revisions and is
+    /// recorded in schema_migrations. Running migrate twice must be a no-op.
+    #[test]
+    fn v68_adds_agent_revisions_requested_by_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agent_revisions')
+                 WHERE name IN ('requested_by_type', 'requested_by_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 2);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// #771 D.2 — v69 creates amendment_invitations with the race-safe
+    /// partial unique index on OPEN (agent_id, rule_id). Migrate twice = no-op.
+    #[test]
+    fn v69_creates_amendment_invitations_with_open_dedup_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'amendment_invitations'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1);
+
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_amendment_invitations_open'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// #814 — v70 adds fork_turn/branch_message_sha256/agent_id to
+    /// session_fork_lineage (nullable) and is recorded in schema_migrations.
+    /// Running migrate twice must be a no-op.
+    #[test]
+    fn v70_adds_fork_lineage_enrichment_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_fork_lineage')
+                 WHERE name IN ('fork_turn', 'branch_message_sha256', 'agent_id')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 3);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// #821 — v71 adds constitution_version/constitution_digest columns to
+    /// session_agent_bindings and is recorded in schema_migrations. Running
+    /// migrate twice must be a no-op (idempotent), and a legacy row (as if
+    /// inserted before the columns existed) reads back `NULL`/`None`.
+    #[test]
+    fn v71_adds_session_agent_bindings_constitution_pin_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('session_agent_bindings')
+                 WHERE name IN ('constitution_version', 'constitution_digest')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 2);
+
+        conn.execute(
+            "INSERT INTO session_agent_bindings (
+                session_id, root_session_id, alias_id, agent_id, revision_id,
+                runtime_lock_hash, home_node_id, created_at, requested_target
+            ) VALUES ('sess-legacy', 'sess-legacy', NULL, 'agent.default', 'rev-1',
+                      'sha256:lock', 'gateway-1', '2024-01-01T00:00:00Z', 'agent.default')",
+            [],
+        )
+        .unwrap();
+
+        let (version, digest): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT constitution_version, constitution_digest
+                 FROM session_agent_bindings WHERE session_id = 'sess-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, None);
+        assert_eq!(digest, None);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
 }

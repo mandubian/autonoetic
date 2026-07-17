@@ -8,6 +8,12 @@ Every critical decision — resource allocation, secret access, inter-agent comm
 
 This gives Autonoetic its two key properties at once: **powerful autonomous reasoning** (the agent can do anything it can propose) and **constrained execution** (the gateway enforces boundaries the agent cannot bypass).
 
+> The three parties above (reasoner / enforcer / decider) are *seats* —
+> occupant-agnostic functions, not fixed identities. A human or an AI may
+> hold any of them subject to capability and obligation. See
+> [`principal-seat-capability.md`](principal-seat-capability.md) for the
+> precise principal / seat / capability distinction.
+
 ```
 Agent (low-privilege):           Gateway (high-privilege):
 ┌─────────────────────┐          ┌──────────────────────┐

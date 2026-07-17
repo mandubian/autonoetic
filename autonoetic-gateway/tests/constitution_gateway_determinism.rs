@@ -99,6 +99,7 @@ fn base_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             id: "determinism.gateway.default".to_string(),
             name: "Determinism Gateway".to_string(),
             description: "Property test manifest".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,
@@ -115,8 +116,10 @@ fn base_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

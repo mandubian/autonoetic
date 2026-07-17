@@ -588,6 +588,8 @@ Universal execution snapshots saved at every yield point for crash recovery and 
   "agent_id": "coder.default",
   "workflow_id": "wf-abc",
   "runtime_lock_hash": "sha256:...",
+  "constitution_version": "2026.06.05",
+  "constitution_digest": "sha256:...",
   "llm_config_snapshot": {...},
   "tool_registry_version": "...",
   "content_store_refs": [...],
@@ -606,7 +608,7 @@ Universal execution snapshots saved at every yield point for crash recovery and 
 |--------|---------|--------------|
 | `Hibernation` | EndTurn / StopSequence between turns | Yes |
 | `BudgetExhausted` | Session budget depleted | Yes (after budget reset) |
-| `ApprovalRequired` | Tool needs approval gate | Via turn continuation |
+| `ApprovalRequired` | Tool needs approval gate | Via signed checkpoint |
 | `UserInputRequired` | `user_ask` pending answer | Yes (when answered) |
 | `EmergencyStop` | Operator circuit breaker | **No** (blocks auto-resume) |
 | `MaxTurnsReached` | Loop guard limit | Yes |
@@ -625,51 +627,32 @@ ls .gateway/checkpoints/<session_id>/
 
 Checkpoints are pruned automatically (default: keep last N per session).
 
-### Turn Continuation (Approval-Gated Turns)
+### Turn Suspension (Approval-Gated Turns)
 
-When a tool call requires operator approval, the turn is **suspended to disk** rather than failing or retrying with synthetic prompts. On approval, execution resumes seamlessly with real tool results.
+When a tool call requires operator approval, the turn is **suspended to a signed session checkpoint** rather than failing or retrying with synthetic prompts. On approval, execution resumes seamlessly with real tool results.
 
 #### Suspension Flow
 
 1. Agent requests a privileged tool call (e.g., `agent_revision_promote`, `sandbox_exec` on a new resource)
 2. Gateway evaluates policy → approval required
-3. Gateway saves a `TurnContinuation` to `.gateway/continuations/{task_id}.json`
-4. Gateway checkpoints the session with `YieldReason::ApprovalRequired`
+3. Gateway creates an `ApprovalRequest` in SQLite
+4. Gateway checkpoints the session with `YieldReason::ApprovalRequired` (HMAC-signed)
 5. Turn execution pauses; approval request is emitted
 
-#### Continuation Structure
+#### Checkpoint Structure
 
-```json
-{
-  "task_id": "task-abc",
-  "session_id": "session-123",
-  "turn_id": "turn-042",
-  "history": [...],                           // Full conversation up to suspension
-  "assistant_message": "...",                  // The assistant message containing the tool call
-  "completed_tool_results": [...],             // Results from already-executed tool calls
-  "pending_tool_call": {...},                  // The tool call awaiting approval
-  "remaining_tool_calls": [...],               // Tool calls to execute after approval
-  "approval_request_id": "approval-xyz",
-  "workflow_id": "wf-abc",
-  "suspended_at": "2026-03-15T10:30:00Z",
-  "loop_guard_state": {...}
-}
-```
+Approval suspension is stored as a `SessionCheckpoint` under `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json`. The checkpoint is HMAC-SHA256 signed and includes the full conversation history, the pending tool call, remaining tool calls in the batch, and loop-guard state.
 
 #### Resume Flow
 
 1. Operator approves (or rejects) the approval request
-2. Gateway loads the continuation from disk
-3. For `sandbox_exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
-4. Gateway executes the approved action (sandbox exec, revision promote, etc.)
-5. Gateway injects the real tool result into conversation history
-6. Gateway executes any remaining tool calls from the original batch
-7. Gateway reconstructs the full history and resumes the reasoning loop
-8. Continuation file is deleted
-
-#### Approval Timeout
-
-The scheduler periodically checks for timed-out approvals. If a continuation's `suspended_at` exceeds the configured timeout, the task is failed, checkpointed, and the continuation file is cleaned up.
+2. Gateway applies the decision through `apply_decision`
+3. The scheduler wakes the session from checkpoint
+4. For `sandbox_exec` approvals: gateway records session approval grants for the detected hosts (enabling auto-approval of subsequent calls to the same hosts within this root session)
+5. Gateway injects `approval_ref` into the suspended tool call and resumes the reasoning loop
+6. The agent re-issues the tool call with `approval_ref`; the gateway executes it normally and injects the real tool result into conversation history
+7. Gateway executes any remaining tool calls from the original batch
+8. Checkpoint is deleted after successful resume
 
 ### Auto-Resume Behavior
 
@@ -1180,7 +1163,7 @@ The promotion gate uses a **federation of evaluation roles** — not a single ev
 | **Unit Test Runner** | `unit_test_runner.default` | Runs artifact's built-in test suite in a no-network sandbox | No |
 | **Sealed Evaluator** | `sealed_evaluator.default` | Dynamic execution in sealed sandbox with fixture-proxied HTTP | Sealed proxy only |
 
-The planner orchestrates federation: it inspects the artifact type, spawns the applicable roles in parallel, collects verdicts via `promotion_query`, and escalates the consolidated report to the operator.
+The planner orchestrates federation: it inspects the artifact type, runs the `unit_test_runner` correctness gate first (for artifact-backed agents), then spawns the review roles (`auditor.default` + `static_evaluator.default`) in parallel, collects verdicts via `promotion_query`, and escalates the consolidated report to the operator.
 
 ### FullJury Gate
 
@@ -1208,6 +1191,21 @@ Key properties:
 - **Dedup**: a second escalation for the same (artifact, revision) is rejected while a previous one is `Pending`
 - **Audit trail**: `decided_by` and `decision_reason` recorded on resolution
 - **Admin routes**: `admin.escalation_list`, `admin.escalation_inspect`, `admin.escalation_resolve`
+
+### Unified pending-decisions view
+
+An operator's outstanding decisions live in four separate tables — `approvals`,
+`user_interactions`, `escalations`, and `plan_frames` — each with its own list
+RPC and its own answer verb. The **`operator.pending`** JSON-RPC method
+(`{root_session_id}`) is a single read-only aggregation over all four for one
+root session, returning a normalized list (oldest-first) where each item carries
+its `kind` (`approval` / `interaction` / `escalation` / `plan`), age, a one-line
+summary, and an `answer` hint naming the RPC that resolves it (`approvals.approve`,
+`interaction.answer`, `admin.escalation_resolve`, `planframes.approve`). This is
+the server-side version of the mapping the room TUI applies client-side, so a
+headless operator no longer has to poll four RPC families to see what is waiting.
+(Issue #722 Stage 1; a coherent expiry policy and a CLI answer path are staged
+follow-ups.)
 
 ---
 
@@ -1461,7 +1459,7 @@ The LoopGuard uses `error_type` to distinguish recoverable from non-recoverable 
 
 #### Trip conditions
 
-The guard has five independent trip conditions, each attributed on the `loop_guard.tripped` causal event with a stable `reason` code and the constitutional rule whose text describes it. Thresholds are configurable; current defaults live in `docs/config-reference.md`:
+The guard's main independent trip conditions are below, each attributed on the `loop_guard.tripped` causal event with a stable `reason` code and the constitutional rule whose text describes it. Thresholds are configurable; current defaults live in `docs/config-reference.md`:
 
 | `reason` | Condition | Rule |
 |---|---|---|
@@ -1470,8 +1468,9 @@ The guard has five independent trip conditions, each attributed on the `loop_gua
 | `rotating_polling_pattern` | The last `rotation_window_size` successful calls hold ≤ `rotation_distinct_floor` distinct fingerprints — an agent cycling a small set of read-only tools without semantic progress. A result carrying `side_effect_state: "committed"` clears the window. | P-7.19 |
 | `redundant_roster_polling` | An idempotent read-only roster tool (`agent_list` / `agent_inspect` / `agent_discover`) is called `roster_repeat_floor` times in a row with identical normalized arguments — a fast path that fires before the rotating-polling window fills, since re-listing a directory never yields new data. | P-7.19 |
 | `child_failure_budget` | Child-task failures reach `max_child_failures`; does not reset on progress | P-7.20 |
+| `repeated_irrecoverable_rejection` | The same `(tool, normalized-error)` irrecoverable rejection (`permission` / `quota_exceeded` / `sandbox_unavailable`) recurs `max_irrecoverable_repeats` times. These are excluded from `max_tool_failures` (retrying can't fix them), so the first occurrences are free; re-asking one already-answered gate (e.g. `agent_revision_promote` against a standing approval requirement) is the single-tool sibling of `no_meaningful_progress`. The count survives an approval suspend/resume. | P-7.7 |
 
-`no_meaningful_progress` (P-7.7) and `rotating_polling_pattern` (P-7.19) are complementary: P-7.7 catches the absence of progress-making results; P-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset P-7.7's counter). `redundant_roster_polling` is a narrow, faster sibling of `rotating_polling_pattern` for the specific case of repeated idempotent roster reads.
+`no_meaningful_progress` (P-7.7) and `rotating_polling_pattern` (P-7.19) are complementary: P-7.7 catches the absence of progress-making results; P-7.19 catches *successful* results that nonetheless make no semantic progress (each distinct, so they reset P-7.7's counter). `redundant_roster_polling` is a narrow, faster sibling of `rotating_polling_pattern` for the specific case of repeated idempotent roster reads. `repeated_irrecoverable_rejection` (P-7.7) covers a gap the per-tool failure budget leaves open: gateway-side gate rejections deliberately don't burn that budget, so a single tool re-hammering one gate would otherwise loop unbounded.
 
 ### Design Rule
 

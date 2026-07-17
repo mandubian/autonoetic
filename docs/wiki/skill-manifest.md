@@ -22,12 +22,11 @@ metadata:
       id: "my.agent"
       name: "My Agent"
       description: "What this agent does"
-    llm_config:
-      provider: "openai"
-      model: "gpt-4o"
+    llm_preset: smart
+    llm_overrides:
       temperature: 0.1
     capabilities:
-      - type: "MemoryWrite"
+      - type: "WriteAccess"
         scopes: ["self.*"]
 ---
 # Agent Instructions
@@ -42,12 +41,18 @@ Your natural language instructions go here.
 | `name` | Yes | Fully qualified agent ID |
 | `description` | Yes | One-line description |
 | `metadata.autonoetic.agent.id` | Yes | Must match directory name |
-| `metadata.autonoetic.llm_config` | Reasoning mode | LLM provider/model config |
+| `metadata.autonoetic.llm_preset` | Reasoning mode | Named inference preset from gateway config |
+| `metadata.autonoetic.llm_overrides` | No | Temperature / thinking overrides on the resolved preset |
+| `metadata.autonoetic.llm_config` | Legacy | Inline provider/model (deprecated; prefer `llm_preset`) |
 | `metadata.autonoetic.capabilities` | No | Permission declarations |
 | `metadata.autonoetic.execution_mode` | No | `"reasoning"` (default) or `"script"` |
 | `metadata.autonoetic.script_entry` | Script mode | Entry script path |
 | `metadata.autonoetic.io` | No | JSON Schema for input/output |
 | `metadata.autonoetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
+| `metadata.autonoetic.script_input_mode` | No | `"stdin"` (default) or `"args"` |
+| `metadata.autonoetic.open_web` | No | Required when `NetworkAccess.hosts` is `["*"]` |
+| `metadata.autonoetic.disclosure` | No | Default visibility scopes for outputs |
+| `metadata.autonoetic.middleware` | No | Pre/post-processing hooks |
 
 ## Script vs Reasoning Mode
 

@@ -323,6 +323,7 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         },
         created_at: ts.clone(),
         reason: Some("needs approval for dangerous command".to_string()),
@@ -332,12 +333,12 @@ async fn emergency_stop_cancels_pending_approval_and_interaction() -> anyhow::Re
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+
+        expires_at: None,
     })?;
 
     // Create a pending user interaction

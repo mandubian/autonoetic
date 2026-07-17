@@ -27,6 +27,7 @@ fn writer_manifest() -> AgentManifest {
             id: "coder.default".to_string(),
             name: "coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::WriteAccess {
             scopes: vec!["*".to_string()],
@@ -46,8 +47,10 @@ fn writer_manifest() -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -320,6 +323,7 @@ fn reader_manifest() -> AgentManifest {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
@@ -339,8 +343,10 @@ fn reader_manifest() -> AgentManifest {
         gateway_token: None,
 
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

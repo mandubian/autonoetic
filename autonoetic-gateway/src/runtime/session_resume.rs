@@ -3,6 +3,104 @@
 use crate::llm::Message;
 use autonoetic_types::background::{UserInteraction, UserInteractionStatus};
 
+/// What woke a suspended session (#741). The single resume entrypoint
+/// (`GatewayExecutionService::resume_session`) verifies the trigger is
+/// coherent with the checkpoint's `YieldReason` before reconstructing —
+/// resuming a `UserInputRequired` checkpoint because an *approval* resolved
+/// (or vice versa) is a routing bug that previously surfaced only as
+/// downstream re-suspends or hangs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeTrigger {
+    /// An operator/decider resolved the approval the session is parked on.
+    ApprovalResolved { request_id: String },
+    /// The user interaction the session asked was answered.
+    InteractionAnswered { interaction_id: String },
+    /// Operator-driven or recovery resume with no specific gate resolution
+    /// (hibernation wake, crash recovery, manual restart).
+    Manual { session_id: String },
+}
+
+/// Why a trigger is not coherent with the checkpoint it would resume.
+/// The caller maps these to its legacy error strings — notably
+/// `WaitingForApproval`, whose `session_waiting_for_approval:<session>:<rid>`
+/// rendering is machine-matched by the scheduler's standalone-interaction
+/// sweep and must not change shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TriggerIncoherence {
+    /// Checkpoint waits on a different interaction than the trigger's.
+    InteractionMismatch { expected: String, got: String },
+    /// Checkpoint waits on a different approval than the trigger's.
+    ApprovalMismatch { expected: String, got: String },
+    /// An interaction trigger arrived but the session has since moved on to
+    /// an approval gate.
+    WaitingForApproval { request_id: String },
+    /// The checkpoint's yield reason is not one this trigger can resume.
+    WrongYieldReason { got: String },
+    /// Emergency-stopped sessions are never auto-resumed (R-6.14).
+    EmergencyStop,
+}
+
+/// Pure trigger-vs-checkpoint coherence check (#741). `Ok(())` means the
+/// trigger may resume a session whose latest checkpoint has `yield_reason`.
+/// Encodes exactly the checks the pre-#741 paths performed ad hoc:
+/// - the interaction path's "checkpoint is for interaction X, not Y" /
+///   "session now waiting for approval" / "not UserInputRequired" guards;
+/// - the universal EmergencyStop no-auto-resume rule;
+/// - `Manual` accepts anything except EmergencyStop (matching
+///   `spawn_agent_once`'s behavior of delegating every reason to
+///   `resume_from_checkpoint`).
+pub(crate) fn verify_trigger_coherence(
+    trigger: &ResumeTrigger,
+    yield_reason: &crate::runtime::checkpoint::YieldReason,
+) -> Result<(), TriggerIncoherence> {
+    use crate::runtime::checkpoint::YieldReason;
+
+    if matches!(yield_reason, YieldReason::EmergencyStop { .. }) {
+        return Err(TriggerIncoherence::EmergencyStop);
+    }
+
+    match trigger {
+        ResumeTrigger::Manual { .. } => Ok(()),
+        ResumeTrigger::InteractionAnswered { interaction_id } => match yield_reason {
+            YieldReason::UserInputRequired { interaction_id: cid } => {
+                if cid == interaction_id {
+                    Ok(())
+                } else {
+                    Err(TriggerIncoherence::InteractionMismatch {
+                        expected: cid.clone(),
+                        got: interaction_id.clone(),
+                    })
+                }
+            }
+            YieldReason::ApprovalRequired {
+                approval_request_id,
+            } => Err(TriggerIncoherence::WaitingForApproval {
+                request_id: approval_request_id.clone(),
+            }),
+            other => Err(TriggerIncoherence::WrongYieldReason {
+                got: format!("{other:?}"),
+            }),
+        },
+        ResumeTrigger::ApprovalResolved { request_id } => match yield_reason {
+            YieldReason::ApprovalRequired {
+                approval_request_id,
+            } => {
+                if approval_request_id == request_id {
+                    Ok(())
+                } else {
+                    Err(TriggerIncoherence::ApprovalMismatch {
+                        expected: approval_request_id.clone(),
+                        got: request_id.clone(),
+                    })
+                }
+            }
+            other => Err(TriggerIncoherence::WrongYieldReason {
+                got: format!("{other:?}"),
+            }),
+        },
+    }
+}
+
 pub(crate) fn should_auto_resume_checkpoint_yield_reason(
     yield_reason: &crate::runtime::checkpoint::YieldReason,
 ) -> bool {
@@ -139,7 +237,7 @@ mod session_resume_tests {
         use crate::runtime::checkpoint::{
             PendingToolCall, PendingToolState, SessionCheckpoint, YieldReason,
         };
-        use crate::runtime::guard::LoopGuardState;
+        use crate::runtime::guard::LoopGuard;
         let pts = PendingToolState {
             completed_tool_results: vec![],
             pending_tool_call: PendingToolCall {
@@ -153,7 +251,7 @@ mod session_resume_tests {
         let cp = SessionCheckpoint {
             history: vec![],
             turn_counter: 0,
-            loop_guard_state: LoopGuardState {
+            loop_guard_state: LoopGuard {
                 max_loops_without_progress: 1,
                 max_tool_failures: 5,
                 max_consecutive_same_progress: 0,
@@ -168,12 +266,15 @@ mod session_resume_tests {
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
             agent_id: "a".into(),
             session_id: "s".into(),
             turn_id: "turn-1".into(),
             workflow_id: None,
             task_id: None,
             runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
             llm_config_snapshot: None,
             tool_registry_version: None,
             yield_reason: YieldReason::UserInputRequired {
@@ -191,6 +292,9 @@ mod session_resume_tests {
             assistant_message: None,
             pending_action: None,
             suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
         };
         let (id, name) = resolve_pending_user_ask_call(&cp).unwrap();
         assert_eq!(id, "tid-99");
@@ -241,5 +345,105 @@ mod session_resume_tests {
             task_id: None,
         };
         assert!(should_auto_resume_checkpoint_yield_reason(&resumable));
+    }
+
+    // ── #741: trigger/YieldReason coherence ─────────────────────────────
+
+    fn approval_reason(rid: &str) -> crate::runtime::checkpoint::YieldReason {
+        crate::runtime::checkpoint::YieldReason::ApprovalRequired {
+            approval_request_id: rid.to_string(),
+        }
+    }
+
+    fn interaction_reason(id: &str) -> crate::runtime::checkpoint::YieldReason {
+        crate::runtime::checkpoint::YieldReason::UserInputRequired {
+            interaction_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn coherence_interaction_trigger_matches_its_checkpoint() {
+        let t = ResumeTrigger::InteractionAnswered {
+            interaction_id: "ui-1".into(),
+        };
+        assert_eq!(verify_trigger_coherence(&t, &interaction_reason("ui-1")), Ok(()));
+        assert_eq!(
+            verify_trigger_coherence(&t, &interaction_reason("ui-2")),
+            Err(TriggerIncoherence::InteractionMismatch {
+                expected: "ui-2".into(),
+                got: "ui-1".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn coherence_interaction_trigger_detects_session_moved_to_approval() {
+        let t = ResumeTrigger::InteractionAnswered {
+            interaction_id: "ui-1".into(),
+        };
+        assert_eq!(
+            verify_trigger_coherence(&t, &approval_reason("apr-9")),
+            Err(TriggerIncoherence::WaitingForApproval {
+                request_id: "apr-9".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn coherence_approval_trigger_matches_its_checkpoint() {
+        let t = ResumeTrigger::ApprovalResolved {
+            request_id: "apr-1".into(),
+        };
+        assert_eq!(verify_trigger_coherence(&t, &approval_reason("apr-1")), Ok(()));
+        assert_eq!(
+            verify_trigger_coherence(&t, &approval_reason("apr-2")),
+            Err(TriggerIncoherence::ApprovalMismatch {
+                expected: "apr-2".into(),
+                got: "apr-1".into(),
+            })
+        );
+        assert!(matches!(
+            verify_trigger_coherence(&t, &interaction_reason("ui-1")),
+            Err(TriggerIncoherence::WrongYieldReason { .. })
+        ));
+    }
+
+    #[test]
+    fn coherence_emergency_stop_refuses_every_trigger() {
+        let es = crate::runtime::checkpoint::YieldReason::EmergencyStop {
+            stop_id: "stop-1".into(),
+        };
+        for t in [
+            ResumeTrigger::Manual {
+                session_id: "s".into(),
+            },
+            ResumeTrigger::ApprovalResolved {
+                request_id: "apr-1".into(),
+            },
+            ResumeTrigger::InteractionAnswered {
+                interaction_id: "ui-1".into(),
+            },
+        ] {
+            assert_eq!(
+                verify_trigger_coherence(&t, &es),
+                Err(TriggerIncoherence::EmergencyStop),
+                "{t:?} must not resume an emergency-stopped session"
+            );
+        }
+    }
+
+    #[test]
+    fn coherence_manual_accepts_everything_but_emergency_stop() {
+        let t = ResumeTrigger::Manual {
+            session_id: "s".into(),
+        };
+        for reason in [
+            crate::runtime::checkpoint::YieldReason::Hibernation,
+            crate::runtime::checkpoint::YieldReason::BudgetExhausted,
+            approval_reason("apr-1"),
+            interaction_reason("ui-1"),
+        ] {
+            assert_eq!(verify_trigger_coherence(&t, &reason), Ok(()));
+        }
     }
 }

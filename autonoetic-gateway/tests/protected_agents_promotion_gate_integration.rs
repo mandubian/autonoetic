@@ -48,6 +48,7 @@ fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -66,8 +67,10 @@ fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -104,6 +107,8 @@ fn make_revision_record(agent_id: &str, revision_id: &str) -> AgentRevisionRecor
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "artifact".to_string(),
         source_ref: None,
         origin_node_id: "local".to_string(),
@@ -111,6 +116,7 @@ fn make_revision_record(agent_id: &str, revision_id: &str) -> AgentRevisionRecor
         status: AgentRevisionStatus::Candidate,
         metadata_json: serde_json::Value::Null,
         short_id: revision_id.chars().take(8).collect(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     }
@@ -174,6 +180,9 @@ fn setup_harness(agent_id: &str) -> PromoteHarness {
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: None,
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 
@@ -273,6 +282,13 @@ fn protected_agent_with_passed_eval_run_proceeds() {
 
     assert_eq!(result["ok"], true, "unexpected: {:?}", result);
     assert_eq!(result["status"], "promoted");
+    // Terminal signals so the orchestrator goes straight to spawning the agent
+    // instead of looping to "confirm" the install.
+    assert_eq!(result["installed"], true, "promote success must signal installed: {result:?}");
+    assert!(
+        result["next"].as_str().is_some_and(|n| n.contains("agent_spawn")),
+        "promote success must tell the orchestrator to spawn the agent: {result:?}"
+    );
 }
 
 #[test]

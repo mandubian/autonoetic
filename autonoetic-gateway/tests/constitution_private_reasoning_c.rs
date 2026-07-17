@@ -35,6 +35,7 @@ fn manifest_with_reasoning_audit(targets: Vec<&str>) -> AgentManifest {
             id: "auditor.agent".to_string(),
             name: "Auditor Agent".to_string(),
             description: "test auditor".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReasoningAudit {
             targets: targets.iter().map(|t| t.to_string()).collect(),
@@ -53,8 +54,10 @@ fn manifest_with_reasoning_audit(targets: Vec<&str>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -74,6 +77,7 @@ fn manifest_without_audit() -> AgentManifest {
             id: "plain.agent".to_string(),
             name: "Plain Agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -90,8 +94,10 @@ fn manifest_without_audit() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

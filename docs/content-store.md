@@ -171,6 +171,8 @@ Accepted `inputs` forms:
 | `artifact_prepare.artifact_ref` / `artifact_exec.artifact_ref` | `ar.*`, `art_*` | content handles, single-file selectors |
 | `resolve.ref` | any artifact/content handle — `ar.*`, `art_*`, `cnt_*`, bare alias, content name, `sha256:...` (scope inferred from the session); for one file inside an artifact, add `file="<name>"` | — |
 
+Content aliases (`cnt_...`, `sha256:...`, bare hex aliases) accepted by `artifact_build.inputs[]` are resolved back to their registered human-readable names (e.g. `SKILL.md`, `main.py`) before the artifact identity is computed. This prevents the same content from producing a different artifact ID just because the caller used an alias instead of the original filename.
+
 Homogeneity rule:
 
 - When a tool is artifact-oriented (`artifact_inspect`, `artifact_prepare`, `artifact_exec`, `artifact_build` artifact reuse), pass the artifact itself as `ar.*` or `art_*`.

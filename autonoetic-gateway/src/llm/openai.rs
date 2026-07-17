@@ -34,6 +34,150 @@ fn model_supports_tools(model: &str) -> bool {
     true
 }
 
+/// Moonshot's schema validator rejects a `type` field sitting alongside `anyOf`
+/// or `oneOf` at the same level. Move the parent `type` into each branch item
+/// and drop it from the parent.
+pub(crate) fn sanitize_schema_for_strict_anyof(schema: &serde_json::Value) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(map) => {
+            let typ = map.get("type").cloned();
+            let has_branches = map.contains_key("anyOf") || map.contains_key("oneOf");
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if k == "anyOf" || k == "oneOf" {
+                    if let serde_json::Value::Array(branches) = v {
+                        let new_branches: Vec<serde_json::Value> = branches
+                            .iter()
+                            .map(|branch| {
+                                let mut branch = sanitize_schema_for_strict_anyof(branch);
+                                if has_branches && branch.get("type").is_none() {
+                                    if let Some(ref t) = typ {
+                                        if let serde_json::Value::Object(ref mut b) = branch {
+                                            b.insert("type".to_string(), t.clone());
+                                        }
+                                    }
+                                }
+                                branch
+                            })
+                            .collect();
+                        out.insert(k.clone(), serde_json::Value::Array(new_branches));
+                    } else {
+                        out.insert(k.clone(), sanitize_schema_for_strict_anyof(v));
+                    }
+                } else {
+                    out.insert(k.clone(), sanitize_schema_for_strict_anyof(v));
+                }
+            }
+            if has_branches && out.contains_key("type") {
+                out.remove("type");
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.iter().map(sanitize_schema_for_strict_anyof).collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// OpenCode Go's gateway accepts Anthropic-style `cache_control` breakpoints on
+/// most models, but passes them through untouched to GLM/Zhipu upstreams, which
+/// reject the extra field. Match the model ids Pi's extension skips.
+fn model_is_opencode_cache_unsupported(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("glm") || m.contains("zhipu")
+}
+
+/// Whether an OpenRouter model id routes to a provider that honors Anthropic-style
+/// `cache_control` breakpoints (Claude, Gemini). OpenRouter ids are namespaced
+/// (`anthropic/claude-…`, `google/gemini-…`); we also match bare family names.
+fn model_supports_openrouter_cache_control(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("anthropic/")
+        || m.starts_with("google/")
+        || m.contains("claude")
+        || m.contains("gemini")
+}
+
+/// Build an OpenRouter system-message `content` array that marks the stable
+/// leading `prefix_bytes` with `cache_control: {type: ephemeral}` and leaves the
+/// volatile suffix uncached. Falls back to the plain string when no valid
+/// boundary is supplied.
+fn openrouter_cached_system_content(
+    content: &str,
+    prefix_bytes: Option<usize>,
+) -> serde_json::Value {
+    let ephemeral = || json!({ "type": "ephemeral" });
+    match prefix_bytes {
+        Some(n) if n >= content.len() && !content.trim().is_empty() => {
+            json!([{ "type": "text", "text": content, "cache_control": ephemeral() }])
+        }
+        Some(n) if n > 0 && n < content.len() && content.is_char_boundary(n) => {
+            let (prefix, suffix) = content.split_at(n);
+            let mut parts = vec![json!({
+                "type": "text",
+                "text": prefix,
+                "cache_control": ephemeral(),
+            })];
+            if !suffix.trim().is_empty() {
+                parts.push(json!({ "type": "text", "text": suffix }));
+            }
+            json!(parts)
+        }
+        _ => json!(content),
+    }
+}
+
+/// Anthropic-style `cache_control` used by the OpenCode Go gateway. The `ttl`
+/// is the documented maximum for this control; combined with top-level
+/// `prompt_cache_retention: "24h"` it keeps long sessions cheap across pauses.
+fn opencode_cache_control() -> serde_json::Value {
+    json!({ "type": "ephemeral", "ttl": "1h" })
+}
+
+/// Wrap a plain text message in a single content block marked with the OpenCode
+/// Go `cache_control` breakpoint.
+fn opencode_cached_text_content(content: &str) -> serde_json::Value {
+    json!([{
+        "type": "text",
+        "text": content,
+        "cache_control": opencode_cache_control(),
+    }])
+}
+
+/// Build an OpenCode Go system-message `content` array. The stable leading
+/// `prefix_bytes` is cached; any volatile suffix is appended uncached. When no
+/// boundary is supplied the whole system message is cached.
+fn opencode_cached_system_content(
+    content: &str,
+    prefix_bytes: Option<usize>,
+) -> serde_json::Value {
+    match prefix_bytes {
+        Some(n) if n >= content.len() && !content.trim().is_empty() => {
+            opencode_cached_text_content(content)
+        }
+        Some(n) if n > 0 && n < content.len() && content.is_char_boundary(n) => {
+            let (prefix, suffix) = content.split_at(n);
+            let mut parts = vec![json!({
+                "type": "text",
+                "text": prefix,
+                "cache_control": opencode_cache_control(),
+            })];
+            if !suffix.trim().is_empty() {
+                parts.push(json!({ "type": "text", "text": suffix }));
+            }
+            json!(parts)
+        }
+        _ => {
+            if content.trim().is_empty() {
+                json!(content)
+            } else {
+                opencode_cached_text_content(content)
+            }
+        }
+    }
+}
+
 fn model_is_reasoning_model(model: &str) -> bool {
     let m = model.to_lowercase();
     m.starts_with("o1")
@@ -64,14 +208,65 @@ impl OpenAiDriver {
     }
 
     fn build_body(&self, req: &CompletionRequest, stream: bool) -> serde_json::Value {
+        // OpenRouter passes `cache_control` through to Anthropic/Gemini models
+        // (OpenAI-family models cache automatically and ignore it). Only emit it
+        // for OpenRouter + a Claude/Gemini model with a stable prefix boundary,
+        // so strict OpenAI-compatible providers never see the extra field.
+        let cache_system = req.system_cache_prefix_bytes.is_some()
+            && matches!(
+                self.provider.capabilities.reasoning,
+                crate::llm::provider::ReasoningStyle::OpenRouterUnified
+            )
+            && model_supports_openrouter_cache_control(&self.provider.model);
+
+        // OpenCode Go honors Anthropic-style `cache_control` breakpoints on all
+        // models except GLM/Zhipu. We mark the stable system prefix, the last two
+        // user/assistant messages, and the last tool definition.
+        let is_opencode = matches!(
+            self.provider.capabilities.reasoning,
+            crate::llm::provider::ReasoningStyle::OpenCodeGo
+        );
+        let opencode_cache_supported =
+            is_opencode && !model_is_opencode_cache_unsupported(&self.provider.model);
+
+        // Indices of the last two non-tool conversation turns; these move every
+        // turn but keep the recent context cached so the growing tail doesn't
+        // invalidate the whole prefix.
+        let mut user_assistant_indices: Vec<usize> = req
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::User || m.role == Role::Assistant)
+            .map(|(i, _)| i)
+            .collect();
+        let last_two_ua: std::collections::HashSet<usize> = user_assistant_indices
+            .split_off(user_assistant_indices.len().saturating_sub(2))
+            .into_iter()
+            .collect();
+
         let messages: Vec<serde_json::Value> = req
             .messages
             .iter()
-            .map(|m| {
+            .enumerate()
+            .map(|(idx, m)| {
                 let mut msg = json!({ "role": m.role.as_str() });
 
                 if !m.content.is_empty() {
-                    msg["content"] = json!(m.content);
+                    if m.role == Role::System && cache_system {
+                        msg["content"] = openrouter_cached_system_content(
+                            &m.content,
+                            req.system_cache_prefix_bytes,
+                        );
+                    } else if m.role == Role::System && opencode_cache_supported {
+                        msg["content"] = opencode_cached_system_content(
+                            &m.content,
+                            req.system_cache_prefix_bytes,
+                        );
+                    } else if opencode_cache_supported && last_two_ua.contains(&idx) {
+                        msg["content"] = opencode_cached_text_content(&m.content);
+                    } else {
+                        msg["content"] = json!(m.content);
+                    }
                 }
                 if !m.tool_calls.is_empty() {
                     msg["tool_calls"] = json!(m
@@ -148,18 +343,43 @@ impl OpenAiDriver {
             && self.provider.capabilities.supports_tools
             && model_supports_tools
         {
-            body["tools"] = json!(req
-                .tools
-                .iter()
-                .map(|t| json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.input_schema,
-                    }
-                }))
-                .collect::<Vec<_>>());
+            // OpenRouter passes `cache_control` through to Anthropic/Gemini
+            // upstreams for tool definitions too (same mechanism as the system
+            // message). When the system prefix is being cached AND we're routing
+            // to a cache_control-honoring model, mark the last tool so the whole
+            // tool catalog is cached across turns. OpenAI-family and plain
+            // providers cache automatically by prefix and must not see the field.
+            let mark_tools_openrouter = cache_system;
+            let mark_last_tool_opencode = opencode_cache_supported;
+            let sanitize_schema = self.provider.capabilities.strict_schema_anyof;
+            body["tools"] = serde_json::Value::Array(
+                req.tools
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        let schema = if sanitize_schema {
+                            sanitize_schema_for_strict_anyof(&t.input_schema)
+                        } else {
+                            t.input_schema.clone()
+                        };
+                        let mut entry = json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.name,
+                                "description": t.description,
+                                "parameters": schema,
+                            }
+                        });
+                        if mark_tools_openrouter && i == req.tools.len() - 1 {
+                            entry["function"]["cache_control"] = json!({ "type": "ephemeral" });
+                        }
+                        if mark_last_tool_opencode && i == req.tools.len() - 1 {
+                            entry["function"]["cache_control"] = opencode_cache_control();
+                        }
+                        entry
+                    })
+                    .collect(),
+            );
             if self.provider.capabilities.supports_tool_choice {
                 body["tool_choice"] = json!("auto");
             }
@@ -169,6 +389,11 @@ impl OpenAiDriver {
             use autonoetic_types::agent::ThinkingEffort;
             match self.provider.capabilities.reasoning {
                 crate::llm::provider::ReasoningStyle::None => {}
+                crate::llm::provider::ReasoningStyle::OpenCodeGo => {
+                    // OpenCode Go's gateway is OpenAI-compatible but does not
+                    // document a provider-native reasoning field shape. Keep the
+                    // request clean until a supported mapping is known.
+                }
                 crate::llm::provider::ReasoningStyle::OpenAiEffort => {
                     // OpenAI's `reasoning_effort` only accepts low|medium|high,
                     // so `XHigh` collapses to "high". The field is also rejected
@@ -202,17 +427,40 @@ impl OpenAiDriver {
             }
         }
 
-        // Prompt caching: send a stable key so repeated turns in a session
-        // reuse cached prompt-prefix tokens. OpenRouter and OpenAI both accept
-        // top-level `prompt_cache_key`; other OpenAI-compatible providers
-        // ignore unknown fields, so gate on the providers known to honor it.
+        // Prompt caching: keep repeated turns landing on the same cached prefix.
+        // The stable-routing field differs by provider:
+        // - OpenAI (`OpenAiEffort`) has a real top-level `prompt_cache_key`.
+        // - OpenRouter has NO `prompt_cache_key`; it uses top-level `session_id`
+        //   (≤256 chars) for sticky routing so a session's turns reuse the same
+        //   upstream provider instance — the affinity that makes its (implicit or
+        //   `cache_control`-marked) cache actually hit. See OpenRouter prompt-
+        //   caching docs.
+        // - OpenCode Go supports both `prompt_cache_key` (clamped to 64 chars) and
+        //   `prompt_cache_retention: "24h"` to keep the session prefix alive
+        //   across turns and longer pauses.
+        // Other OpenAI-compatible providers ignore unknown fields.
         if let Some(ref key) = req.prompt_cache_key {
-            if matches!(
-                self.provider.capabilities.reasoning,
-                crate::llm::provider::ReasoningStyle::OpenRouterUnified
-                    | crate::llm::provider::ReasoningStyle::OpenAiEffort
-            ) {
-                body["prompt_cache_key"] = json!(key);
+            match self.provider.capabilities.reasoning {
+                crate::llm::provider::ReasoningStyle::OpenAiEffort => {
+                    body["prompt_cache_key"] = json!(key);
+                }
+                crate::llm::provider::ReasoningStyle::OpenRouterUnified => {
+                    // session_id is capped at 256 chars by OpenRouter.
+                    let sid: String = key.chars().take(256).collect();
+                    body["session_id"] = json!(sid);
+                }
+                crate::llm::provider::ReasoningStyle::OpenCodeGo => {
+                    // GLM/Zhipu upstreams reject cache_control markers, so skip
+                    // all cache instrumentation for those models and let the
+                    // request go out unchanged. Other OpenCode Go models get the
+                    // full recipe.
+                    if opencode_cache_supported {
+                        let k: String = key.chars().take(64).collect();
+                        body["prompt_cache_key"] = json!(k);
+                        body["prompt_cache_retention"] = json!("24h");
+                    }
+                }
+                crate::llm::provider::ReasoningStyle::None => {}
             }
         }
 
@@ -233,36 +481,45 @@ impl LlmDriver for OpenAiDriver {
             }
         }
 
-        const MAX_RETRIES: u32 = 3;
-        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-        for attempt in 0..=MAX_RETRIES {
+        let complete_timeout = crate::llm::request_timeout();
+        // Bound total wall-clock so a slow endpoint can't multiply the
+        // per-request timeout across retries.
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
-                    .timeout(COMPLETE_TIMEOUT)
+                    .timeout(complete_timeout)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
 
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
-                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
-                    tracing::warn!(
+                Err(e) => {
+                    if let Some(wait_ms) = crate::llm::next_connection_retry_wait(
+                        &e,
                         attempt,
-                        wait_ms,
-                        error = %e,
-                        "LLM connection error, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    continue;
+                        loop_start.elapsed(),
+                        retry_deadline,
+                    ) {
+                        tracing::warn!(
+                            attempt,
+                            wait_ms,
+                            error = %e,
+                            "LLM connection error, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(e.into());
                 }
-                Err(e) => return Err(e.into()),
             };
             let status = response.status();
 
             if status.as_u16() == 429 || status.as_u16() == 529 {
-                if attempt < MAX_RETRIES {
+                if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                     let wait_ms = (attempt + 1) as u64 * 2000;
                     tracing::warn!(
                         status = status.as_u16(),
@@ -273,7 +530,7 @@ impl LlmDriver for OpenAiDriver {
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                anyhow::bail!("OpenAI API rate limited after {} retries", MAX_RETRIES);
+                anyhow::bail!("OpenAI API rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
             }
 
             if !status.is_success() {
@@ -282,6 +539,22 @@ impl LlmDriver for OpenAiDriver {
                     anyhow::bail!(
                         "context_overflow: provider=openai status={} detail={}", status, text
                     );
+                }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status.as_u16(),
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
                 }
                 tracing::warn!(
                     target: "llm::openai",
@@ -337,8 +610,10 @@ impl LlmDriver for OpenAiDriver {
 
         let body = self.build_body(req, true);
 
-        const MAX_RETRIES: u32 = 3;
-        for attempt in 0..=MAX_RETRIES {
+        let complete_timeout = crate::llm::request_timeout();
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
@@ -349,7 +624,7 @@ impl LlmDriver for OpenAiDriver {
 
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < crate::llm::MAX_CONNECTION_RETRIES => {
                     let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
                     tracing::warn!(
                         attempt,
@@ -365,6 +640,27 @@ impl LlmDriver for OpenAiDriver {
             if !response.status().is_success() {
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
+                if crate::llm::is_context_overflow_error(status.as_u16(), &text) {
+                    anyhow::bail!(
+                        "context_overflow: provider=openai status={} detail={}", status, text
+                    );
+                }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status.as_u16(),
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status = status.as_u16(),
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error in stream, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     target: "autonoetic::llm::openai",
                     status = %status,
@@ -532,7 +828,7 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
     let text = extract_text_content(&choice["message"]["content"]);
     let reasoning_content = extract_reasoning_content(&choice["message"]);
 
-    let tool_calls = choice["message"]["tool_calls"]
+    let mut tool_calls: Vec<ToolCall> = choice["message"]["tool_calls"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -556,6 +852,24 @@ fn parse_response(j: &serde_json::Value) -> CompletionResponse {
                 .collect()
         })
         .unwrap_or_default();
+
+    // Fallback: extract XML-style tool calls from the text content when the
+    // structured `tool_calls` field is empty but the response contains
+    // `<tool_call>` blocks. This handles models that use XML-based chat
+    // templates (e.g. Qwen 3.5 with qwen35-template.jinja) where the server
+    // may not extract tool calls into the structured JSON field.
+    if tool_calls.is_empty() && text.contains("<tool_call>") {
+        let (_reasoning, xml_calls) =
+            crate::llm::xml_tool_calls::extract_xml_tool_calls(&text);
+        if !xml_calls.is_empty() {
+            tracing::info!(
+                target: "llm::openai",
+                count = xml_calls.len(),
+                "Extracted XML tool calls from response text fallback"
+            );
+            tool_calls = xml_calls;
+        }
+    }
 
     let stop_reason = parse_stop_reason(choice["finish_reason"].as_str().unwrap_or(""));
 
@@ -779,6 +1093,7 @@ mod tests {
             metadata: None,
             thinking: Some(ThinkingConfig { effort, budget_tokens: budget }),
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         }
     }
 
@@ -960,6 +1275,7 @@ mod tests {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         };
         let body = driver.build_body(&req, false);
         // reasoning_details replayed; plain reasoning_content suppressed.
@@ -981,29 +1297,217 @@ mod tests {
             metadata: None,
             thinking: None,
             prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
         };
         let body = driver.build_body(&req, false);
         assert_eq!(body["messages"][0]["reasoning_content"], "plain");
     }
 
     #[test]
-    fn prompt_cache_key_emitted_for_openrouter() {
+    fn openrouter_uses_session_id_not_prompt_cache_key() {
+        // OpenRouter has no prompt_cache_key; the stable-routing field is
+        // top-level `session_id` (sticky routing → cache affinity).
         let driver = driver_with("deepseek/deepseek-v4-flash", ReasoningStyle::OpenRouterUnified);
         let mut req = req_with_thinking("deepseek/deepseek-v4-flash", ThinkingEffort::Low, None);
         req.prompt_cache_key = Some("session-abc".to_string());
         let body = driver.build_body(&req, false);
-        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert_eq!(body["session_id"], "session-abc");
+        assert!(body.get("prompt_cache_key").is_none(), "OpenRouter must not get prompt_cache_key");
     }
 
     #[test]
-    fn prompt_cache_key_omitted_for_plain_provider() {
-        // A provider with ReasoningStyle::None (e.g. groq) doesn't get the key.
+    fn openrouter_session_id_capped_at_256_chars() {
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let mut req = req_with_thinking("anthropic/claude-sonnet-5", ThinkingEffort::Low, None);
+        req.prompt_cache_key = Some("x".repeat(300));
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["session_id"].as_str().unwrap().chars().count(), 256);
+    }
+
+    #[test]
+    fn openai_emits_prompt_cache_key() {
+        // Direct OpenAI (OpenAiEffort) uses the real top-level prompt_cache_key.
+        let driver = driver_with("gpt-5", ReasoningStyle::OpenAiEffort);
+        let mut req = req_with_thinking("gpt-5", ThinkingEffort::Low, None);
+        req.prompt_cache_key = Some("session-abc".to_string());
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert!(body.get("session_id").is_none());
+    }
+
+    #[test]
+    fn plain_provider_gets_neither_cache_routing_field() {
+        // ReasoningStyle::None (e.g. groq, llama.cpp) gets neither field.
         let driver = driver_with("llama-3.1-70b", ReasoningStyle::None);
         let mut req = req_with_thinking("llama-3.1-70b", ThinkingEffort::Low, None);
         req.prompt_cache_key = Some("session-abc".to_string());
         let body = driver.build_body(&req, false);
         assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("session_id").is_none());
     }
+
+    fn req_with_system(model: &str, system: &str, prefix_bytes: Option<usize>) -> CompletionRequest {
+        CompletionRequest {
+            model: model.to_string(),
+            messages: vec![Message::system(system), Message::user("hi")],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: None,
+            thinking: None,
+            prompt_cache_key: None,
+            system_cache_prefix_bytes: prefix_bytes,
+        }
+    }
+
+    #[test]
+    fn openrouter_claude_marks_system_cache_prefix() {
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("anthropic/claude-sonnet-5", system, Some(prefix)), false);
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "system content must be structured, got {content}");
+        assert_eq!(content[0]["text"], "STABLE DOCTRINE");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert!(content[1]["cache_control"].is_null(), "volatile suffix must not be cached");
+        assert!(content[1]["text"].as_str().unwrap().contains("volatile"));
+    }
+
+    #[test]
+    fn openrouter_openai_model_leaves_system_plain() {
+        // OpenAI-family model via OpenRouter caches automatically — no cache_control.
+        let driver = driver_with("openai/gpt-5", ReasoningStyle::OpenRouterUnified);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("openai/gpt-5", system, Some(prefix)), false);
+        assert!(body["messages"][0]["content"].is_string(), "non-Claude/Gemini stays a plain string");
+    }
+
+    #[test]
+    fn plain_provider_never_gets_cache_control() {
+        // llama.cpp / groq (ReasoningStyle::None) rely on automatic prefix reuse.
+        let driver = driver_with("some-local-model", ReasoningStyle::None);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("some-local-model", system, Some(prefix)), false);
+        assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn openrouter_cache_control_gating_by_model() {
+        assert!(model_supports_openrouter_cache_control("anthropic/claude-sonnet-5"));
+        assert!(model_supports_openrouter_cache_control("google/gemini-2.5-pro"));
+        assert!(model_supports_openrouter_cache_control("some/claude-clone"));
+        assert!(!model_supports_openrouter_cache_control("openai/gpt-5"));
+        assert!(!model_supports_openrouter_cache_control("deepseek/deepseek-v4"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tools-array caching (cache_control on the last tool definition)
+    // -----------------------------------------------------------------------
+
+    use crate::llm::ToolDefinition;
+
+    fn tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("desc for {name}"),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    fn req_with_tools(
+        model: &str,
+        tools: Vec<ToolDefinition>,
+        prefix_bytes: Option<usize>,
+    ) -> CompletionRequest {
+        let mut req = req_with_system(model, "system", prefix_bytes);
+        req.tools = tools;
+        req
+    }
+
+    #[test]
+    fn openrouter_claude_marks_last_tool_with_cache_control() {
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("alpha"), tool_def("beta"), tool_def("gamma")];
+        let req = req_with_tools(
+            "anthropic/claude-sonnet-5",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 3);
+        assert!(tools_arr[0]["function"]["cache_control"].is_null(), "first tool must not be marked");
+        assert!(tools_arr[1]["function"]["cache_control"].is_null(), "middle tool must not be marked");
+        assert_eq!(tools_arr[2]["function"]["cache_control"]["type"], "ephemeral");
+        // Schemas preserved.
+        assert_eq!(tools_arr[2]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn openrouter_gemini_marks_last_tool_with_cache_control() {
+        let driver = driver_with("google/gemini-2.5-pro", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("solo")];
+        let req = req_with_tools(
+            "google/gemini-2.5-pro",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["tools"][0]["function"]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn openrouter_claude_leaves_tools_plain_without_prefix() {
+        // No system_cache_prefix_bytes → caching off → tools unmarked.
+        let driver = driver_with("anthropic/claude-sonnet-5", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("alpha"), tool_def("beta")];
+        let req = req_with_tools(
+            "anthropic/claude-sonnet-5",
+            tools,
+            None,
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().unwrap();
+        assert!(tools_arr[0]["function"]["cache_control"].is_null());
+        assert!(tools_arr[1]["function"]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn openrouter_openai_model_leaves_tools_plain() {
+        // OpenAI-family via OpenRouter caches automatically — no cache_control on tools.
+        let driver = driver_with("openai/gpt-5", ReasoningStyle::OpenRouterUnified);
+        let tools = vec![tool_def("alpha"), tool_def("beta")];
+        let req = req_with_tools(
+            "openai/gpt-5",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().unwrap();
+        assert!(tools_arr[0]["function"]["cache_control"].is_null());
+        assert!(tools_arr[1]["function"]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn direct_openai_leaves_tools_plain() {
+        // Direct OpenAI (OpenAiEffort) uses prompt_cache_key, never cache_control.
+        let driver = driver_with("gpt-5", ReasoningStyle::OpenAiEffort);
+        let tools = vec![tool_def("alpha"), tool_def("beta")];
+        let req = req_with_tools(
+            "gpt-5",
+            tools,
+            Some("system".len()),
+        );
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().unwrap();
+        assert!(tools_arr[0]["function"]["cache_control"].is_null());
+        assert!(tools_arr[1]["function"]["cache_control"].is_null());
+    }
+
+
 
     #[test]
     fn stream_request_includes_usage_option() {
@@ -1011,5 +1515,190 @@ mod tests {
         let req = CompletionRequest::simple("gpt-4o", vec![Message::user("hi")]);
         let body = driver.build_body(&req, true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // OpenCode Go prompt caching
+    // -----------------------------------------------------------------------
+
+    fn opencode_tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("desc for {name}"),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    fn opencode_req_with_tools(
+        model: &str,
+        tools: Vec<ToolDefinition>,
+        prefix_bytes: Option<usize>,
+    ) -> CompletionRequest {
+        let mut req = req_with_system(model, "system", prefix_bytes);
+        req.tools = tools;
+        req
+    }
+
+    #[test]
+    fn opencode_emits_prompt_cache_key_and_retention() {
+        let driver = driver_with("deepseek-v4-flash", ReasoningStyle::OpenCodeGo);
+        let mut req = req_with_system("deepseek-v4-flash", "system", None);
+        req.prompt_cache_key = Some("session-abc".to_string());
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["prompt_cache_key"], "session-abc");
+        assert_eq!(body["prompt_cache_retention"], "24h");
+        assert!(body.get("session_id").is_none());
+    }
+
+    #[test]
+    fn opencode_prompt_cache_key_clamped_to_64_chars() {
+        let driver = driver_with("deepseek-v4-flash", ReasoningStyle::OpenCodeGo);
+        let mut req = req_with_system("deepseek-v4-flash", "system", None);
+        req.prompt_cache_key = Some("x".repeat(100));
+        let body = driver.build_body(&req, false);
+        assert_eq!(body["prompt_cache_key"].as_str().unwrap().chars().count(), 64);
+        assert_eq!(body["prompt_cache_retention"], "24h");
+    }
+
+    #[test]
+    fn opencode_caches_system_prefix_with_ttl() {
+        let driver = driver_with("deepseek-v4-flash", ReasoningStyle::OpenCodeGo);
+        let system = "STABLE DOCTRINE\n\n[state] volatile";
+        let prefix = "STABLE DOCTRINE".len();
+        let body = driver.build_body(&req_with_system("deepseek-v4-flash", system, Some(prefix)), false);
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "system content must be structured, got {content}");
+        assert_eq!(content[0]["text"], "STABLE DOCTRINE");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(content[0]["cache_control"]["ttl"], "1h");
+        assert!(content[1]["cache_control"].is_null(), "volatile suffix must not be cached");
+        assert!(content[1]["text"].as_str().unwrap().contains("volatile"));
+    }
+
+    #[test]
+    fn opencode_caches_last_two_user_assistant_messages() {
+        let driver = driver_with("kimi-k2.7-code", ReasoningStyle::OpenCodeGo);
+        // req_with_system already includes a user "hi" turn; append more turns
+        // so we can verify the last two user/assistant messages are cached.
+        let mut req = req_with_system("kimi-k2.7-code", "system", None);
+        req.messages.push(Message::user("first user"));
+        req.messages.push(Message::assistant("first assistant"));
+        req.messages.push(Message::user("second user"));
+        req.messages.push(Message::assistant("second assistant"));
+        let body = driver.build_body(&req, false);
+        // System message is cached as a whole (no prefix boundary supplied).
+        assert!(body["messages"][0]["content"].is_array());
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        // The leading user "hi" and the next two turns stay plain strings.
+        assert!(body["messages"][1]["content"].is_string());
+        assert!(body["messages"][2]["content"].is_string());
+        assert!(body["messages"][3]["content"].is_string());
+        // Last two user/assistant turns get cache_control breakpoints.
+        assert!(body["messages"][4]["content"].is_array());
+        assert_eq!(body["messages"][4]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["messages"][5]["content"].is_array());
+        assert_eq!(body["messages"][5]["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn opencode_caches_last_tool_definition() {
+        let driver = driver_with("mimo-v2.5-pro", ReasoningStyle::OpenCodeGo);
+        let tools = vec![opencode_tool_def("alpha"), opencode_tool_def("beta"), opencode_tool_def("gamma")];
+        let req = opencode_req_with_tools("mimo-v2.5-pro", tools, Some("system".len()));
+        let body = driver.build_body(&req, false);
+        let tools_arr = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools_arr.len(), 3);
+        assert!(tools_arr[0]["function"]["cache_control"].is_null(), "first tool must not be marked");
+        assert!(tools_arr[1]["function"]["cache_control"].is_null(), "middle tool must not be marked");
+        assert_eq!(tools_arr[2]["function"]["cache_control"]["type"], "ephemeral");
+        assert_eq!(tools_arr[2]["function"]["cache_control"]["ttl"], "1h");
+        // Schemas preserved.
+        assert_eq!(tools_arr[2]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn opencode_glm_skips_all_cache_stamping() {
+        let driver = driver_with("glm-5.1", ReasoningStyle::OpenCodeGo);
+        let mut req = req_with_system("glm-5.1", "system", Some("system".len()));
+        req.prompt_cache_key = Some("session-abc".to_string());
+        req.messages.push(Message::user("hi"));
+        req.tools = vec![opencode_tool_def("only")];
+        let body = driver.build_body(&req, false);
+        // No top-level cache fields.
+        assert!(body.get("prompt_cache_key").is_none(), "GLM must not get prompt_cache_key");
+        assert!(body.get("prompt_cache_retention").is_none(), "GLM must not get prompt_cache_retention");
+        // Content remains plain strings; no cache_control markers.
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(body["messages"][1]["content"].is_string());
+        assert!(body["tools"][0]["function"]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn opencode_zhipu_skips_all_cache_stamping() {
+        let driver = driver_with("zhipu-glm-5", ReasoningStyle::OpenCodeGo);
+        let mut req = req_with_system("zhipu-glm-5", "system", Some("system".len()));
+        req.prompt_cache_key = Some("session-abc".to_string());
+        let body = driver.build_body(&req, false);
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("prompt_cache_retention").is_none());
+        assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn sanitize_moves_type_into_anyof_branches() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "target_session_id": { "type": "string" },
+                "target_agent_id": { "type": "string" }
+            },
+            "required": ["message"],
+            "anyOf": [
+                { "required": ["target_session_id"] },
+                { "required": ["target_agent_id"] }
+            ]
+        });
+        let sanitized = sanitize_schema_for_strict_anyof(&schema);
+        assert!(sanitized.get("type").is_none(), "parent type must be removed");
+        let branches = sanitized["anyOf"].as_array().unwrap();
+        assert_eq!(branches[0]["type"], "object");
+        assert_eq!(branches[1]["type"], "object");
+    }
+
+    #[test]
+    fn sanitize_preserves_existing_branch_type() {
+        let schema = json!({
+            "type": "object",
+            "oneOf": [
+                { "type": "string" },
+                { "type": "null" }
+            ]
+        });
+        let sanitized = sanitize_schema_for_strict_anyof(&schema);
+        let branches = sanitized["oneOf"].as_array().unwrap();
+        assert_eq!(branches[0]["type"], "string");
+        assert_eq!(branches[1]["type"], "null");
+        assert!(sanitized.get("type").is_none(), "parent type must be removed");
+    }
+
+    #[test]
+    fn sanitize_recurses_into_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "string",
+                    "anyOf": [
+                        { "enum": ["a"] },
+                        { "enum": ["b"] }
+                    ]
+                }
+            }
+        });
+        let sanitized = sanitize_schema_for_strict_anyof(&schema);
+        let nested = &sanitized["properties"]["nested"];
+        assert!(nested.get("type").is_none(), "parent type must be removed");
+        assert_eq!(nested["anyOf"][0]["type"], "string");
+        assert_eq!(nested["anyOf"][1]["type"], "string");
     }
 }

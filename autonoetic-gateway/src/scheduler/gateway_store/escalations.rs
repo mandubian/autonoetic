@@ -14,6 +14,8 @@ fn row_to_escalation(row: &rusqlite::Row) -> rusqlite::Result<EscalationMessage>
     let escalation_type_str: String = row.get(14)?;
     let escalation_type =
         EscalationType::parse(&escalation_type_str).unwrap_or(EscalationType::PromotionReview);
+    let approval_request_id: Option<String> = row.get(15)?;
+    let expires_at: Option<String> = row.get(16)?;
     Ok(EscalationMessage {
         escalation_id: row.get(0)?,
         artifact_id: row.get(1)?,
@@ -30,6 +32,8 @@ fn row_to_escalation(row: &rusqlite::Row) -> rusqlite::Result<EscalationMessage>
         decision_reason: row.get(12)?,
         code_excerpts,
         escalation_type,
+        approval_request_id,
+        expires_at,
     })
 }
 
@@ -89,8 +93,9 @@ impl GatewayStore {
         conn.execute(
             "INSERT INTO escalations (escalation_id, artifact_id, artifact_digest, agent_id,
              revision_id, role_verdicts, planner_synthesis, created_at, resolved_at,
-             root_session_id, status, code_excerpts, escalation_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             root_session_id, status, code_excerpts, escalation_type, approval_request_id,
+             expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 escalation.escalation_id,
                 escalation.artifact_id,
@@ -105,6 +110,8 @@ impl GatewayStore {
                 escalation.status.as_str(),
                 code_excerpts_json,
                 escalation.escalation_type.as_str(),
+                escalation.approval_request_id,
+                escalation.expires_at,
             ],
         )?;
         // Release the conn lock before emitting — create_live_digest_event re-locks
@@ -116,7 +123,13 @@ impl GatewayStore {
         // directly (not via the gate service), so no `approval.pending` fires —
         // the escalation was invisible in the room. Attributed to the agent under
         // review; Attention altitude (an operator decision is pending).
-        if !escalation.root_session_id.is_empty() {
+        //
+        // Only emit for a genuinely pending escalation: a projection created
+        // already-resolved (e.g. a promotion review cleared via approval_ref or
+        // policy, #724 Part B) must not record a misleading "pending" event.
+        if !escalation.root_session_id.is_empty()
+            && escalation.status == autonoetic_types::escalation::EscalationStatus::Pending
+        {
             let principal = autonoetic_types::principal::Principal::agent(&escalation.agent_id);
             let seat = crate::runtime::session_timeline::derive_role(&escalation.agent_id);
             let event = crate::runtime::session_timeline::build_timeline_event(
@@ -140,10 +153,7 @@ impl GatewayStore {
                 autonoetic_types::session_timeline::TimelineRefs {
                     artifact_id: (!escalation.artifact_id.is_empty())
                         .then(|| escalation.artifact_id.clone()),
-                    approval_request_id: Some(format!(
-                        "apr-esc-{}",
-                        &escalation.escalation_id[..16.min(escalation.escalation_id.len())]
-                    )),
+                    approval_request_id: escalation.approval_request_id.clone(),
                     ..Default::default()
                 },
             );
@@ -176,7 +186,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
              FROM escalations WHERE escalation_id = ?1",
         )?;
         let mut rows = stmt.query_map(params![escalation_id], row_to_escalation)?;
@@ -188,7 +199,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
              FROM escalations WHERE status = 'pending' ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], row_to_escalation)?;
@@ -197,6 +209,70 @@ impl GatewayStore {
             results.push(row?);
         }
         Ok(results)
+    }
+
+    /// Mark pending escalations whose `expires_at` timestamp has passed as
+    /// `stale`. Returns the IDs of escalations that were transitioned.
+    pub fn expire_timed_out_escalations(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT escalation_id FROM escalations
+             WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            let id: String = row.get(0)?;
+            Ok(id)
+        })?;
+
+        let mut expired_ids = Vec::new();
+        for row in rows {
+            let id = row?;
+            conn.execute(
+                "UPDATE escalations SET status = 'stale' WHERE escalation_id = ?1",
+                params![id],
+            )?;
+            expired_ids.push(id);
+        }
+        Ok(expired_ids)
+    }
+
+    /// List stale escalations for a root session. Stale escalations are still
+    /// resolvable by the operator — they just exceeded the configured TTL.
+    pub fn get_stale_escalations_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<EscalationMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
+             role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
+             FROM escalations WHERE root_session_id = ?1 AND status = 'stale'
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], row_to_escalation)?;
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row?);
+        }
+        Ok(results)
+    }
+
+    /// Check whether any pending (unresolved) escalations exist for the given
+    /// root session. Used by `try_complete_workflow` to prevent the workflow
+    /// from completing while the planner is waiting for operator input — the
+    /// plan may have more steps to run after the operator responds.
+    pub fn has_pending_escalations_for_session(&self, root_session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM escalations \
+             WHERE root_session_id = ?1 AND status = 'pending'",
+            params![root_session_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     /// Find the latest escalation for an artifact+revision with a matching
@@ -211,7 +287,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
              FROM escalations
              WHERE artifact_id = ?1 AND revision_id = ?2 AND status = ?3
              ORDER BY created_at DESC LIMIT 1",
@@ -231,7 +308,8 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT escalation_id, artifact_id, artifact_digest, agent_id, revision_id,
              role_verdicts, planner_synthesis, created_at, resolved_at, root_session_id, status,
-             decided_by, decision_reason, code_excerpts, escalation_type
+             decided_by, decision_reason, code_excerpts, escalation_type, approval_request_id,
+             expires_at
              FROM escalations
              WHERE artifact_id = ?1 AND status = 'approved'
              ORDER BY created_at DESC LIMIT 1",
@@ -246,19 +324,19 @@ impl GatewayStore {
         status: EscalationStatus,
         decided_by: &str,
         decision_reason: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
 
         if !self.escalation_exists_with_conn(&conn, escalation_id)? {
             bail!("Escalation '{}' not found", escalation_id);
         }
 
-        let current_status: String = conn.query_row(
-            "SELECT status FROM escalations WHERE escalation_id = ?1",
+        let (current_status, approval_request_id): (String, Option<String>) = conn.query_row(
+            "SELECT status, approval_request_id FROM escalations WHERE escalation_id = ?1",
             params![escalation_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if current_status != "pending" {
+        if current_status != "pending" && current_status != "stale" {
             bail!(
                 "Escalation '{}' is already '{}'; cannot resolve again",
                 escalation_id,
@@ -277,7 +355,7 @@ impl GatewayStore {
                 escalation_id
             ],
         )?;
-        Ok(())
+        Ok(approval_request_id)
     }
 }
 

@@ -15,10 +15,11 @@ metadata:
       id: "debugger.default"
       name: "Debugger Default"
       description: "Isolates root causes and proposes targeted fixes."
+      singleton: true
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "sandbox."]
+        allowed: ["knowledge_", "sandbox_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]
       - type: "WriteAccess"

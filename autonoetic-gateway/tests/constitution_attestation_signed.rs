@@ -35,6 +35,7 @@ fn manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
             id: "signed-test-agent".to_string(),
             name: "signed-test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,
@@ -51,8 +52,10 @@ fn manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -68,11 +71,17 @@ fn default_inputs<'a>(manifest: &'a AgentManifest) -> AttestationInputs<'a> {
         pending_approval_ids: vec!["apr-001".to_string(), "apr-002".to_string()],
         pending_user_interaction_ids: vec![],
         pending_escalation_ids: vec![],
+        pending_proposal_ids: vec![],
+        pending_flag_ids: vec![],
+        pending_invitations: vec![],
         budget_meters: vec![BudgetMeter {
             name: "llm_rounds".to_string(),
             used: 5.0,
             limit: Some(20.0),
         }],
+        burn_rate: None,
+        constitution_version: "2026.07.02",
+        constitution_digest: "abc123def456",
     }
 }
 
@@ -175,6 +184,20 @@ fn different_gateway_key_rejects_attestation() {
         "{}",
         err
     );
+}
+
+#[test]
+fn tampered_constitution_digest_breaks_verification() {
+    // The constitution digest is bound into the signed payload (P-6.23 /
+    // Ri-0.10): swapping the law under an agent mid-session, without the
+    // gateway re-signing, must be detectable.
+    let dir = tempdir().expect("tempdir");
+    let key = GatewayIdentityKey::load_or_generate(dir.path()).expect("key");
+    let manifest = manifest_with_caps(vec![]);
+    let mut att = compose_and_sign(default_inputs(&manifest), &key).expect("compose");
+    att.payload.constitution_digest = "0000000000000000".to_string();
+    let err = verify(&key.public_key_bytes(), &att).expect_err("tampered digest");
+    assert!(err.to_string().contains("did not verify"), "{}", err);
 }
 
 #[test]

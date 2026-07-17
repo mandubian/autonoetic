@@ -527,6 +527,10 @@ mechanism or breaking the wire.
 
 ## Relationship to existing docs
 
+- [`../principal-seat-capability.md`](../principal-seat-capability.md) — the
+  stable reference for the three orthogonal axes this RFC's `Principal`
+  (Part A) and authority-as-role (Part D) assume: principal-kind vs seat vs
+  capability, and why `GateDecider` is a capability rather than a role.
 - [`../constitution-signing.md`](../constitution-signing.md) — authoritative lock
   signing (unchanged by this RFC).
 - [`../revision-signing.md`](../revision-signing.md) — revision keys, candidate

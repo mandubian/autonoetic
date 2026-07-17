@@ -224,7 +224,9 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
             manifest_hash,
             created_at: now,
             created_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
-            created_by_id: "capsule.import".to_string(),
+            created_by_id: "capsule_import".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
             source_kind: "capsule_import".to_string(),
             source_ref: Some(manifest.capsule_id.clone()),
             origin_node_id: manifest.provenance.origin_node_id.clone(),
@@ -241,6 +243,7 @@ pub fn import(req: ImportRequest, ctx: ImportContext<'_>) -> Result<ImportOutcom
                 }
             }),
             short_id: manifest.revision_short_id.clone(),
+        detected_network_hosts: None,
             signature: manifest.signature.as_ref().map(|s| s.signature.clone()),
             signer_id: manifest.signature.as_ref().map(|s| s.signer_id.clone()),
         };
@@ -573,8 +576,11 @@ fn bind_alias(
         revision_id: revision_id.to_string(),
         updated_at: now,
         updated_by_type: autonoetic_types::principal::PrincipalKind::Script.tag().to_string(),
-        updated_by_id: "capsule.import".to_string(),
+        updated_by_id: "capsule_import".to_string(),
         reason: Some("capsule import --activate".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(())

@@ -1,28 +1,32 @@
 # Memory Architecture
 
-## Three Tiers
+## Two Tiers
+
+The canonical architecture defines two memory tiers:
 
 | Tier | Storage | Lifetime | Visibility | Use Case |
 |------|---------|----------|------------|----------|
-| **Tier 0** | Session context | Single turn | Agent-only | Working memory for the current reasoning step |
-| **Tier 1** | File-like (content store) | Session | Configurable | Scratch files, intermediate data, agent artifacts |
+| **Tier 1** | File-like (content store) | Session / artifact | Configurable | Scratch files, intermediate data, agent artifacts |
 | **Tier 2** | Structured knowledge (SQLite + FTS5) | Durable | Configurable | Cross-session facts with provenance |
+
+The agent's current reasoning context is passed in the system prompt and turn-start messages; it is not a separate named tier.
 
 ## Tier 1: File-Like Storage
 
-Accessed via `sdk.memory.read/write` or `content_write`:
-- `sdk.memory.write(path, content)` — private scratch pad
-- `sdk.memory.read(path)` — read from Tier 1
+Accessed via content tools and sandbox SDK memory helpers:
 - `content_write(name, content, visibility)` — write with visibility control
+- `content_patch(name, patch)` — apply a patch to existing content
+- `resolve(ref)` — read any artifact/content handle
+- `sdk.memory.read(path)` / `sdk.memory.write(path, content)` — script-agent scratch pad
 
 ## Tier 2: Structured Knowledge
 
-Accessed via `knowledge_store/recall/search` tools:
+Accessed via `knowledge_store` / `knowledge_recall` / `knowledge_search` tools and `sdk.memory.remember()` / `sdk.memory.recall()`:
 - **Scope**: Logical grouping (e.g., `sdk`, `project`, `agent`)
 - **Tags**: AND-matched filtering
 - **Confidence**: Optional numeric confidence score
 - **Retention**: `stable` (default), `ephemeral`, `1d`, `30d`
-- **Visibility**: `session` (default), `private`, `global`
+- **Visibility**: `session`, `private`, `global`
 
 ## Visibility Rules
 

@@ -30,7 +30,7 @@ agent:
   description: "Implements focused changes with verification."
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content.", "knowledge."]
+      allowed: ["content_", "knowledge_"]
 llm_config:
   provider: "openai"
   model: "gpt-4o"
@@ -79,7 +79,7 @@ agent:
   description: "Installs new durable specialists."
   capabilities:
     - type: "SandboxFunctions"
-      allowed: ["content.", "agent."]
+      allowed: ["content_", "agent_"]
     - type: "AgentInstall"
 llm_config:
   provider: "openai"
@@ -274,7 +274,7 @@ fn test_session_snapshot_fork() {
     use autonoetic_gateway::runtime::checkpoint::{
         save_checkpoint, SessionCheckpoint, SessionFork, YieldReason,
     };
-    use autonoetic_gateway::runtime::guard::LoopGuardState;
+    use autonoetic_gateway::runtime::guard::LoopGuard;
     use autonoetic_types::config::GatewayConfig;
 
     let workspace = TestWorkspace::new().unwrap();
@@ -297,7 +297,8 @@ fn test_session_snapshot_fork() {
         session_state: Default::default(),
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
-        loop_guard_state: LoopGuardState {
+        blocked_state_event_emitted: false,
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
             max_consecutive_same_progress: 2,
@@ -315,6 +316,8 @@ fn test_session_snapshot_fork() {
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: None,
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason: YieldReason::Hibernation,
@@ -330,6 +333,9 @@ fn test_session_snapshot_fork() {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(&config, &cp).unwrap();
 

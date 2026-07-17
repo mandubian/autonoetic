@@ -5,8 +5,20 @@
 //! viewer, and (later) external channel bridges all share the *same* formatting.
 //! Presentation only — importance/altitude is decided gateway-side.
 
+use std::collections::HashSet;
+
 use autonoetic_types::principal::PrincipalKind;
 use autonoetic_types::session_timeline::{Altitude, SessionRole, SessionTimelineEntry};
+
+/// Short agent id for spawn badges — `coder.default` → `coder`.
+pub fn agent_id_short(agent_id: &str) -> &str {
+    agent_id
+        .strip_suffix(".default")
+        .unwrap_or(agent_id)
+        .split('.')
+        .next()
+        .unwrap_or(agent_id)
+}
 
 /// Altitude glyph — the at-a-glance importance marker.
 pub fn altitude_glyph(altitude: Altitude) -> &'static str {
@@ -24,6 +36,7 @@ pub fn actor_label(entry: &SessionTimelineEntry) -> String {
     let seat = role_label(&entry.role);
     match &entry.principal.kind {
         PrincipalKind::Human => format!("🧑 {seat}"),
+        PrincipalKind::ServedUser => format!("👤 {seat}"),
         PrincipalKind::ForeignAgent { provider } => format!("🌐 {seat}·{provider}"),
         PrincipalKind::Script => seat,
         PrincipalKind::AutonoeticAgent => seat,
@@ -177,7 +190,48 @@ fn coerce_message_string(s: &str) -> serde_json::Value {
         }
         return serde_json::Value::Object(obj);
     }
+    // Fallback: the string looks like an io.returns envelope but has unescaped
+    // newlines inside string values (common with smaller LLMs). Try to salvage
+    // the `summary` field so the operator sees formatted prose, not raw JSON.
+    if s.starts_with('{') {
+        if let Some(summary) = extract_summary_from_broken_json(s) {
+            return serde_json::json!({ "status": "ok", "summary": summary });
+        }
+    }
     serde_json::Value::String(s.to_string())
+}
+
+/// Heuristic extraction of the `"summary"` value from a JSON object that has
+/// unescaped newlines in string values (making it unparseable by serde_json).
+/// Looks for `"summary":` and reads until the matching closing quote.
+fn extract_summary_from_broken_json(s: &str) -> Option<String> {
+    let key_pos = s.find("\"summary\"")?;
+    let after_key = &s[key_pos + "\"summary\"".len()..];
+    let colon = after_key.trim_start();
+    let after_colon = colon.strip_prefix(':')?;
+    let after_space = after_colon.trim_start();
+    let rest = after_space.strip_prefix('"')?;
+    // Read until the closing quote: look for `"` followed by `}` or `,` or
+    // end-of-string. Since the JSON is broken, we have to be lenient — take
+    // everything until the last `"` that's followed by `}` or EOF.
+    let raw = rest;
+    // Find the last occurrence of `"` followed by `}` (the closing of the object)
+    let mut end = raw.len();
+    for (i, ch) in raw.char_indices().rev() {
+        if ch == '"' {
+            let after = &raw[i + 1..];
+            if after.trim_start().starts_with('}') || after.trim_start().is_empty() {
+                end = i;
+                break;
+            }
+        }
+    }
+    let summary = &raw[..end];
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.to_string())
+    }
 }
 
 /// Split agent text that may lead with prose and end with an embedded JSON object.
@@ -746,7 +800,28 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
         }
     }
     if let Some(cmd) = field("command") {
-        lines.push(format!("  command: {}", one_line(&cmd, 140)));
+        if field("command_kind").as_deref() == Some("content_ref") {
+            lines.push(format!("  command: {} (content ref)", one_line(&cmd, 120)));
+            if let Some(hint) = field("command_hint") {
+                lines.push(format!("  note: {}", one_line(&hint, 140)));
+            }
+        } else {
+            lines.push(format!("  command: {}", one_line(&cmd, 140)));
+        }
+    }
+    if let Some(intent) = field("intent") {
+        lines.push("  purpose:".to_string());
+        for line in wrap_display_lines(&intent, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    if action != "revision_promote" {
+        if let Some(summary) = field("summary") {
+            lines.push("  details:".to_string());
+            for line in wrap_display_lines(&summary, 76) {
+                lines.push(format!("    {line}"));
+            }
+        }
     }
     if let Some(hosts) = p
         .as_ref()
@@ -798,6 +873,12 @@ fn interaction_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String
         .and_then(|v| v.get("allow_freeform"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    if let Some(ctx) = field("context").filter(|c| !c.is_empty()) {
+        lines.push("  context:".to_string());
+        for line in wrap_display_lines(&ctx, 76) {
+            lines.push(format!("    {line}"));
+        }
+    }
     if freeform {
         lines.push("  (or type your own answer)".to_string());
     }
@@ -849,6 +930,25 @@ fn plan_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     }
     lines.push("  ↳ y approve · Enter/p review · n request changes".to_string());
     (headline, Some(lines.join("\n")))
+}
+
+/// True when this `approval.pending` is a federation-escalation mirror.
+/// `federation.escalate` emits both `escalation.pending` (the canonical verdict
+/// card) and an `approval.pending` with `action: session_escalate` (a resolvable
+/// mirror). We always suppress the mirror so the operator only sees one gate.
+fn is_session_escalate_mirror(entry: &SessionTimelineEntry) -> bool {
+    if entry.event_type != "approval.pending" {
+        return false;
+    }
+    let request_id = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("request_id").and_then(|x| x.as_str()).map(str::to_string))
+        .or_else(|| entry.refs.approval_request_id.clone());
+    request_id
+        .as_ref()
+        .is_some_and(|id| id.starts_with("apr-esc-"))
 }
 
 /// High-visibility session-escalate gate card (`approval.pending` + session_escalate).
@@ -914,8 +1014,13 @@ fn session_escalate_gate_card(entry: &SessionTimelineEntry) -> (String, Option<S
 fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) {
     let p = parse_entry_payload(entry);
     let field = |key: &str| p.as_ref().and_then(|v| payload_field_str(v, key));
-    let synthesis = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
-    let headline = format!("⏸ PROMOTION ESCALATION — {}", one_line(&synthesis, 88));
+    let synthesis_raw = field("synthesis").unwrap_or_else(|| "operator decision requested".into());
+    let synthesis_plain = if super::markdown::looks_like_markdown(&synthesis_raw) {
+        super::markdown::strip_markdown(&synthesis_raw)
+    } else {
+        synthesis_raw.clone()
+    };
+    let headline = format!("⏸ PROMOTION ESCALATION — {}", one_line(&synthesis_plain, 88));
     let mut lines = Vec::new();
     if let Some(id) = field("escalation_id") {
         lines.push(format!("  escalation: {id}"));
@@ -936,7 +1041,7 @@ fn escalation_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>
         lines.push(format!("  artifact: {artifact}"));
     }
     lines.push("  synthesis:".to_string());
-    for line in wrap_display_lines(&synthesis, 76) {
+    for line in wrap_display_lines(&synthesis_plain, 76) {
         lines.push(format!("    {line}"));
     }
     lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());
@@ -1203,6 +1308,11 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "approval.cancelled" => format!("approval cancelled ({})", field("request_id").unwrap_or_default()),
         "plan.pending" => format!("plan proposed: {}", field("title").unwrap_or_default()),
         "plan.approved" => format!("plan approved ({})", field("plan_id").unwrap_or_default()),
+        "plan.withdrawn" => format!(
+            "plan withdrawn v{} (superseded by v{})",
+            field("version").unwrap_or_else(|| "?".into()),
+            field("superseded_by").unwrap_or_else(|| "?".into()),
+        ),
         "wiki.proposed" => format!("wiki proposed: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "wiki.promoted" => format!("wiki promoted: {} ({})", field("title").unwrap_or_default(), field("page_id").unwrap_or_default()),
         "wiki.rejected" => format!("wiki rejected: {} — {}", field("title").unwrap_or_default(), field("reason").unwrap_or_else(|| "no reason".into())),
@@ -1633,15 +1743,25 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
             }
         }
         "approval.pending" => {
-            let action = entry
-                .payload
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
-            match action.as_deref() {
-                Some("wiki_propose") => wiki_proposal_gate_card(entry),
-                Some("session_escalate") => session_escalate_gate_card(entry),
-                _ => approval_gate_card(entry),
+            // Federation escalations render as `escalation.pending` cards.
+            // Their `approval.pending session_escalate` mirror is suppressed so
+            // the operator sees exactly one gate per escalation.
+            if is_session_escalate_mirror(entry) {
+                (
+                    String::new(),
+                    None,
+                )
+            } else {
+                let action = entry
+                    .payload
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
+                match action.as_deref() {
+                    Some("wiki_propose") => wiki_proposal_gate_card(entry),
+                    Some("session_escalate") => session_escalate_gate_card(entry),
+                    _ => approval_gate_card(entry),
+                }
             }
         }
         "user.ask.pending" => interaction_gate_card(entry),
@@ -1669,7 +1789,9 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         headline,
         detail,
         turn_id: entry.turn_id.clone(),
-        turn_index: None, // The TUI fills in a 1-based ordinal once turns are scanned.
+        source_session_id: Some(entry.source_session_id.clone()),
+        turn_index: None, // The TUI fills in from turn_id via turn_number_of (turn_counter).
+        turn_label: None, // Child spawn badge (e.g. `3→coder`) filled by the TUI.
         in_flight: false, // The TUI fills this in once it knows turn lifecycle.
         show_reasoning,
     }
@@ -1701,7 +1823,13 @@ pub fn render_line(entry: &SessionTimelineEntry) -> String {
 pub enum RenderedRow {
     /// A single event rendered as a structured spec.
     Line(RowSpec),
-    Collapsed { count: usize, summary: String },
+    /// A collapsed run of routine events. `in_flight` is set by the TUI when
+    /// any event inside the run belongs to an open turn.
+    Collapsed {
+        count: usize,
+        summary: String,
+        in_flight: bool,
+    },
 }
 
 /// Visual class for a timeline row — lets channels style agent narrative
@@ -1807,9 +1935,15 @@ pub struct RowSpec {
     pub detail: Option<String>,
     /// Turn this event belongs to (if any). Used to draw turn boundaries.
     pub turn_id: Option<String>,
-    /// 1-based ordinal of this turn in the session (first `turn_id` seen = 1).
-    /// Filled by the TUI after scanning the timeline; `None` when untagged.
+    /// Session that produced this row (`source_session_id` from the timeline).
+    pub source_session_id: Option<String>,
+    /// Turn counter number parsed from `turn_id` (`turn-000003` → 3). Matches
+    /// gateway `turn_counter` / `session.fork --at-turn N`. `None` when untagged
+    /// or the id is not a canonical `turn-NNNNNN` string.
     pub turn_index: Option<u32>,
+    /// Display override for spawned child rows — e.g. `3→coder` or `3.2`.
+    /// When set, used instead of bare `turn_index` in labels and turn dividers.
+    pub turn_label: Option<String>,
     /// True when the turn containing this row is still in flight (no matching
     /// `turn.end` has been seen yet). The TUI uses this to show a spinner.
     pub in_flight: bool,
@@ -1851,22 +1985,81 @@ pub enum RowSource {
     Run { start: usize, len: usize },
 }
 
-/// Fold consecutive `Detail` events into a single collapsed row so routine
-/// plumbing (turns, workbench bookkeeping, polls) doesn't flood the view when
-/// the floor is low. A lone Detail event renders normally — collapsing one is
-/// pointless. Higher altitudes always render individually. Coalescing is
+/// Fold consecutive **routine** events into a single collapsed row so plumbing
+/// (turns, LLM rounds, read-only tool calls, workflow bookkeeping) doesn't
+/// flood the view. Classification is by [`event_tier`], not raw altitude, so
+/// that routine `tool.completed` rows (which the gateway tags `Normal`) also
+/// fold — previously only `Detail`-altitude events collapsed, which left the
+/// asymmetric `tool.requested` (Detail, folded) vs `tool.completed` (Normal,
+/// individual) pair and produced dozens of completion rows.
+///
+/// A lone routine event renders normally — collapsing one is pointless.
+/// Checkpoint and Significant tiers always render individually. Coalescing is
 /// page-local; a run split across reads collapses per page.
 pub fn coalesce(entries: &[SessionTimelineEntry]) -> Vec<RenderedRow> {
     coalesce_indexed(entries).into_iter().map(|(r, _)| r).collect()
 }
 
+/// Approval ids already surfaced by a linked `escalation.pending` row.
+///
+/// `federation.escalate` emits both `escalation.pending` (verdict summary) and
+/// `approval.pending` (`session_escalate` mirror) for the same `apr-esc-*` gate.
+pub fn linked_promotion_escalation_approval_ids(
+    entries: &[SessionTimelineEntry],
+) -> HashSet<String> {
+    entries
+        .iter()
+        .filter(|e| e.event_type == "escalation.pending")
+        .filter_map(|e| e.refs.approval_request_id.clone())
+        .collect()
+}
+
+/// Hide the `session_escalate` approval mirror when the federation escalation
+/// card is already on the timeline for the same approval request.
+pub fn is_redundant_promotion_escalation_approval(
+    entry: &SessionTimelineEntry,
+    linked_escalation_approvals: &HashSet<String>,
+) -> bool {
+    if entry.event_type != "approval.pending" {
+        return false;
+    }
+    let payload = match parse_entry_payload(entry) {
+        Some(v) => v,
+        None => return false,
+    };
+    if payload_field_str(&payload, "action").as_deref() != Some("session_escalate") {
+        return false;
+    }
+    let request_id = payload_field_str(&payload, "request_id")
+        .or_else(|| entry.refs.approval_request_id.clone());
+    if request_id
+        .as_ref()
+        .is_some_and(|id| id.starts_with("apr-esc-"))
+    {
+        return true;
+    }
+    request_id
+        .as_ref()
+        .is_some_and(|id| linked_escalation_approvals.contains(id))
+}
+
 /// Like [`coalesce`], but also returns each row's [`RowSource`] for drill-down.
 pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, RowSource)> {
+    let linked_escalation_approvals = linked_promotion_escalation_approval_ids(entries);
     let mut out = Vec::new();
     let mut run_start: Option<usize> = None;
     let mut run_len: usize = 0;
     for (i, e) in entries.iter().enumerate() {
-        if e.altitude == Altitude::Detail {
+        if is_redundant_promotion_escalation_approval(e, &linked_escalation_approvals) {
+            continue;
+        }
+        // Defense-in-depth: only fold Routine-tier events that are ALSO below
+        // the Attention altitude. This preserves the original invariant that
+        // Attention/Error rows (gates, failures, interventions) NEVER collapse,
+        // even if a future event type is mis-classified as Routine by `event_tier`.
+        let foldable = event_tier(e) == EventTier::Routine
+            && e.altitude < Altitude::Attention;
+        if foldable {
             if run_start.is_none() {
                 run_start = Some(i);
             }
@@ -1881,6 +2074,113 @@ pub fn coalesce_indexed(entries: &[SessionTimelineEntry]) -> Vec<(RenderedRow, R
     }
     flush_run(entries, &mut run_start, &mut run_len, &mut out);
     out
+}
+
+/// Visibility tier for a timeline event — drives squashing in the default
+/// (squashed) view. Pure-view classification; the gateway-assigned altitude
+/// remains the source of truth for glyph/color, and the floor filter still
+/// applies before coalescing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTier {
+    /// Decisions, boundaries, and errors — plans, approvals, escalations,
+    /// operator messages, session starts. Always rendered individually; the
+    /// TUI elevates these with banner chrome and jump-to-checkpoint keys.
+    Checkpoint,
+    /// Agent output and state-changing actions — `agent.message`, audits, and
+    /// `tool.completed` for privileged/state-changing tools. Always rendered
+    /// individually so the operator sees what the session *produced*.
+    Significant,
+    /// Plumbing — turns, LLM rounds, reasoning, tool requests, read-only tool
+    /// completions, workflow bookkeeping. Folded into collapsed runs.
+    Routine,
+}
+
+/// `tool.completed` for these state-changing tools is Significant (shown
+/// individually); every other `tool.completed` is Routine (folded).
+const SIGNIFICANT_TOOL_NAMES: &[&str] = &[
+    "agent_spawn",
+    "content_write",
+    "content_patch",
+    "artifact_build",
+    "artifact_project",
+    "artifact_exec",
+    "sandbox_exec",
+    "promotion_record",
+    "agent_revision_create",
+    "agent_revision_create_from_intent",
+    "agent_revision_promote",
+    "agent_revision_rollback",
+    "skill_install",
+    "federation.escalate",
+];
+
+/// Classify a timeline event into a visibility tier. Used by the squashed
+/// view to decide what folds vs renders individually.
+///
+/// The `_ => Significant` default is deliberately conservative: an unknown
+/// event type renders individually (never folds) until it is consciously
+/// classified here. Folding is opt-in for known plumbing only.
+pub fn event_tier(entry: &SessionTimelineEntry) -> EventTier {
+    match entry.event_type.as_str() {
+        // ── Checkpoints: operator decisions, gates, boundaries. Jump targets. ──
+        "plan.pending" | "plan.approved" | "plan.rejected" | "plan.withdrawn"
+        | "approval.pending" | "approval.approved" | "approval.rejected"
+        | "approval.cancelled" | "approval.withdrawn"
+        | "escalation.pending" | "escalation.approved" | "escalation.rejected"
+        | "user.ask.pending"
+        | "operator.message"
+        | "session.start" | "session.end"
+        | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
+        | "runtime.lock_drift"
+        | "divergence.intervention"
+        | "security.escape_threshold"
+        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" | "wiki.withdrawn" => {
+            EventTier::Checkpoint
+        }
+        // ── Significant: agent output, audits, and failures. Never folded. ──
+        "agent.message" | "digest_annotate"
+        | "llm.request_failed" | "llm.empty_response" | "llm.retry"
+        | "tool.failed" | "guard.tripped"
+        | "session.emergency_stop" | "security.sandbox_escape" => EventTier::Significant,
+        "tool.completed" => tool_completed_tier(entry),
+        // ── Routine: known plumbing only. Folded into collapsed runs. ──
+        "turn.start" | "turn.end" | "llm.round" | "agent.reasoning"
+        | "tool.requested"
+        | "workflow.child_state" | "workflow.join_satisfied" | "workflow.signal"
+        | "workflow.started" | "workflow.completed"
+        | "scheduled_job.triggered" | "scheduled_job.completed" | "scheduled_job.failed" => {
+            EventTier::Routine
+        }
+        // Unknown event type: render individually (never fold) until classified.
+        _ => EventTier::Significant,
+    }
+}
+
+/// `tool.completed` is Significant only for a state-changing tool; routine
+/// (folded) otherwise. Reads `tool_name` from the payload defensively.
+fn tool_completed_tier(entry: &SessionTimelineEntry) -> EventTier {
+    let Some(p) = entry.payload.as_deref() else {
+        return EventTier::Significant;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(p) else {
+        return EventTier::Significant;
+    };
+    let tool = v
+        .get("tool_name")
+        .or_else(|| v.get("tool"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    if SIGNIFICANT_TOOL_NAMES.contains(&tool) {
+        EventTier::Significant
+    } else {
+        EventTier::Routine
+    }
+}
+
+/// True when the event is a first-class checkpoint (see [`EventTier::Checkpoint`]).
+/// Convenience for the TUI to mark checkpoint rows for banner/jump handling.
+pub fn is_checkpoint(entry: &SessionTimelineEntry) -> bool {
+    event_tier(entry) == EventTier::Checkpoint
 }
 
 fn flush_run(
@@ -1900,7 +2200,11 @@ fn flush_run(
         n => {
             let run: Vec<&SessionTimelineEntry> = entries[start..start + n].iter().collect();
             out.push((
-                RenderedRow::Collapsed { count: n, summary: collapsed_summary(&run) },
+                RenderedRow::Collapsed {
+                    count: n,
+                    summary: collapsed_summary(&run),
+                    in_flight: false,
+                },
                 RowSource::Run { start, len: n },
             ));
         }
@@ -1928,18 +2232,30 @@ fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
 /// Multi-line detail view of a single event for the drill-down pane: metadata,
 /// refs, and the pretty-printed payload. Pure (no I/O) and channel-neutral.
 /// Render a `turn.end` detail by aggregating `llm.round` events from the same
-/// turn. Returns `None` if the entry is not `turn.end` or no rounds were found.
-pub fn turn_summary(entry: &SessionTimelineEntry, all: &[SessionTimelineEntry]) -> Option<Vec<String>> {
+/// turn. `end_index` is the entry's index in `all` — only events from the
+/// matching `turn.start` through `end_index` are scanned (not the full session).
+pub fn turn_summary(
+    entry: &SessionTimelineEntry,
+    all: &[SessionTimelineEntry],
+    end_index: usize,
+) -> Option<Vec<String>> {
     if entry.event_type != "turn.end" {
         return None;
     }
     let turn_id = entry.turn_id.as_deref()?;
+    let mut start_index = end_index;
+    for j in (0..=end_index).rev() {
+        if all[j].turn_id.as_deref() == Some(turn_id) && all[j].event_type == "turn.start" {
+            start_index = j;
+            break;
+        }
+    }
     let mut total_in: u64 = 0;
     let mut total_out: u64 = 0;
     let mut calls: u64 = 0;
     let mut models: Vec<String> = Vec::new();
     let mut in_turn = false;
-    for e in all {
+    for e in &all[start_index..=end_index] {
         if e.turn_id.as_deref() != Some(turn_id) {
             continue;
         }
@@ -2063,7 +2379,26 @@ pub fn format_detail(entry: &SessionTimelineEntry) -> Vec<String> {
 /// Payload string keys whose values are operator-facing prose — rendered as
 /// markdown in the client detail pane (gateway stays format-agnostic).
 const NARRATIVE_PAYLOAD_KEYS: &[&str] = &[
-    "summary", "prose", "message", "text", "content", "body", "question",
+    "summary",
+    "prose",
+    "message",
+    "text",
+    "content",
+    "body",
+    "question",
+    "reason",
+    "explanation",
+    "description",
+    "detail",
+    "answer",
+    "output",
+    "result",
+    "synthesis",
+    "guidance",
+    "context",
+    "risk_summary",
+    "diagnosis",
+    "recommendation",
 ];
 
 fn is_narrative_payload_key(key: &str) -> bool {
@@ -2071,15 +2406,29 @@ fn is_narrative_payload_key(key: &str) -> bool {
 }
 
 fn should_render_payload_as_narrative(key: &str, value: &str) -> bool {
-    if !is_narrative_payload_key(key) {
+    // Skip values that are valid structured JSON — those should be rendered
+    // as pretty-printed JSON, not markdown. But a value that merely *starts*
+    // with `{` but contains unescaped newlines (common when the agent emits
+    // an io.returns envelope with literal newlines inside string values)
+    // is NOT valid JSON and should be treated as narrative prose.
+    if (value.starts_with('{') || value.starts_with('['))
+        && serde_json::from_str::<serde_json::Value>(value).is_ok()
+    {
         return false;
     }
-    if value.starts_with('{') || value.starts_with('[') {
-        return false;
+    if is_narrative_payload_key(key) {
+        return value.contains('\n')
+            || value.chars().count() > 80
+            || super::markdown::looks_like_narrative_content(value);
     }
-    value.contains('\n')
-        || value.chars().count() > 80
-        || super::markdown::looks_like_narrative_content(value)
+    // For unknown keys, still render as narrative when the value clearly
+    // contains markdown formatting — the agent may put rich text in
+    // arbitrary fields. Single-line markdown signals (e.g. `**bold**`,
+    // `# heading`, links) are enough; plain multiline prose without any
+    // markdown marker is left as-is to avoid over-rendering data values.
+    super::markdown::looks_like_markdown(value)
+        || (value.contains('\n')
+            && super::markdown::looks_like_narrative_content(value))
 }
 
 fn push_narrative_payload_lines(
@@ -2090,6 +2439,22 @@ fn push_narrative_payload_lines(
     comma: &str,
 ) {
     lines.push(format!("{inner}\"{key}\":"));
+    lines.push(format!("{inner}  {}", super::markdown::NARRATIVE_MD_START));
+    for sub in value.split('\n') {
+        lines.push(format!("{inner}  {sub}"));
+    }
+    lines.push(format!("{inner}  {}{comma}", super::markdown::NARRATIVE_MD_END));
+}
+
+/// Variant of [`push_narrative_payload_lines`] for array elements — no `key:`
+/// header, just the narrative markers so the TUI runs the value through the
+/// markdown pipeline.
+fn push_narrative_array_elem(
+    value: &str,
+    lines: &mut Vec<String>,
+    inner: &str,
+    comma: &str,
+) {
     lines.push(format!("{inner}  {}", super::markdown::NARRATIVE_MD_START));
     for sub in value.split('\n') {
         lines.push(format!("{inner}  {sub}"));
@@ -2171,6 +2536,11 @@ fn render_payload_lines_indent(v: &serde_json::Value, lines: &mut Vec<String>, d
                                 last.push_str(comma);
                             }
                         }
+                    }
+                    serde_json::Value::String(s)
+                        if should_render_payload_as_narrative("", s) =>
+                    {
+                        push_narrative_array_elem(s, lines, &inner, comma);
                     }
                     serde_json::Value::String(s) if s.contains('\n') => {
                         for sub in s.split('\n') {
@@ -2348,7 +2718,7 @@ pub fn row_text(row: &RenderedRow) -> std::borrow::Cow<'_, str> {
             spec.actor_label,
             spec.to_plain_text()
         )),
-        RenderedRow::Collapsed { count, summary } => std::borrow::Cow::Owned(format!(
+        RenderedRow::Collapsed { count, summary, .. } => std::borrow::Cow::Owned(format!(
             "{} ⟨{} {}⟩",
             altitude_glyph(Altitude::Detail),
             count,
@@ -2463,7 +2833,7 @@ mod tests {
     }
 
     #[test]
-    fn coalesce_folds_detail_runs_but_keeps_higher_altitudes() {
+    fn coalesce_folds_routine_runs_but_keeps_checkpoints_and_significant() {
         let mk = |et: &str, alt: Altitude| {
             entry(
                 SessionRole::Planner,
@@ -2475,24 +2845,176 @@ mod tests {
         };
         let entries = vec![
             mk("turn.start", Altitude::Detail),
-            mk("workbench.created", Altitude::Detail),
+            mk("llm.round", Altitude::Detail),
             mk("turn.start", Altitude::Detail),
-            mk("approval.pending", Altitude::Attention), // breaks the run
-            mk("turn.end", Altitude::Detail),            // lone detail ⇒ normal line
+            mk("approval.pending", Altitude::Attention), // checkpoint — breaks the run
+            mk("turn.end", Altitude::Detail),            // lone routine ⇒ normal line
         ];
         let rows = coalesce(&entries);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 3, "run + checkpoint + lone routine");
         match &rows[0] {
-            RenderedRow::Collapsed { count, summary } => {
+            RenderedRow::Collapsed { count, summary, .. } => {
                 assert_eq!(*count, 3);
                 assert!(summary.contains("turn.start×2"));
+                assert!(summary.contains("llm.round"));
             }
             other => panic!("expected collapsed run, got {other:?}"),
         }
         assert!(matches!(&rows[1], RenderedRow::Line(spec) if spec.headline.contains("APPROVAL REQUIRED")));
-        // The trailing lone Detail event is a normal line, not collapsed.
+        // The trailing lone routine event is a normal line, not collapsed.
         assert!(matches!(&rows[2], RenderedRow::Line { .. }));
         assert!(row_text(&rows[0]).contains("⟨3 routine events"));
+    }
+
+    #[test]
+    fn coalesce_folds_routine_tool_completed_but_keeps_significant() {
+        // The clutter fix: a read-only tool.completed (e.g. workflow_wait)
+        // folds as Routine, while a state-changing tool.completed
+        // (e.g. agent_spawn) renders individually as Significant.
+        let mk_tool = |et: &str, tool: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": tool }),
+            )
+        };
+        let entries = vec![
+            mk_tool("tool.completed", "workflow_wait"), // routine
+            mk_tool("tool.completed", "workflow_wait"), // routine  (run of 2)
+            mk_tool("tool.completed", "agent_spawn"),   // significant — breaks run
+            mk_tool("tool.completed", "resolve"),       // routine (lone ⇒ individual)
+        ];
+        let rows = coalesce(&entries);
+        assert_eq!(rows.len(), 3, "run(2) + agent_spawn + lone resolve");
+        assert!(
+            matches!(&rows[0], RenderedRow::Collapsed { count: 2, .. }),
+            "two read-only completions should fold; got {:?}",
+            rows[0]
+        );
+        assert!(matches!(&rows[1], RenderedRow::Line { .. }));
+        assert!(matches!(&rows[2], RenderedRow::Line { .. }));
+    }
+
+    #[test]
+    fn event_tier_classification() {
+        let mk = |et: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({}),
+            )
+        };
+        // Checkpoints
+        for et in [
+            "plan.pending", "plan.approved", "approval.pending", "approval.approved",
+            "escalation.pending", "operator.message", "session.start", "workbench.created",
+            "runtime.lock_drift", "user.ask.pending", "divergence.intervention",
+            "security.escape_threshold",
+        ] {
+            assert_eq!(
+                event_tier(&mk(et)),
+                EventTier::Checkpoint,
+                "{et} should be a checkpoint"
+            );
+        }
+        // Significant — agent output, audits, AND failures (never folded).
+        for et in [
+            "agent.message", "digest_annotate",
+            "llm.request_failed", "llm.empty_response", "guard.tripped",
+            "tool.failed", "session.emergency_stop", "security.sandbox_escape",
+        ] {
+            assert_eq!(
+                event_tier(&mk(et)),
+                EventTier::Significant,
+                "{et} should be significant (never folded)"
+            );
+        }
+        // Unknown event type defaults to Significant (never folded).
+        assert_eq!(
+            event_tier(&mk("some.future.event_type")),
+            EventTier::Significant,
+            "unknown event type must not default to Routine (would hide it)"
+        );
+        // Routine — known plumbing only.
+        for et in [
+            "turn.start", "turn.end", "llm.round", "agent.reasoning",
+            "tool.requested", "workflow.child_state", "workflow.join_satisfied",
+        ] {
+            assert_eq!(event_tier(&mk(et)), EventTier::Routine, "{et} should be routine");
+        }
+    }
+
+    #[test]
+    fn coalesce_never_folds_attention_or_error_rows() {
+        // Defense-in-depth: even if a high-importance event were mis-classified
+        // as Routine, the altitude guard in coalesce_indexed must keep it
+        // individual. Attention/Error rows never collapse into a run.
+        let mk_at = |et: &str, alt: Altitude| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                alt,
+                serde_json::json!({}),
+            )
+        };
+        let entries = vec![
+            mk_at("turn.start", Altitude::Detail),                 // routine, folds
+            mk_at("user.ask.pending", Altitude::Attention),        // checkpoint — never folds
+            mk_at("turn.end", Altitude::Detail),                   // routine, folds (lone ⇒ line)
+            mk_at("llm.request_failed", Altitude::Error),          // significant — never folds
+        ];
+        let rows = coalesce(&entries);
+        // No row may be a Collapsed run containing an Attention/Error event.
+        for r in &rows {
+            match r {
+                RenderedRow::Collapsed { summary, .. } => {
+                    assert!(
+                        !summary.contains("user.ask.pending") && !summary.contains("llm.request_failed"),
+                        "high-importance event leaked into a collapsed run: {summary}"
+                    );
+                }
+                _ => {}
+            }
+        }
+        // The Attention and Error rows must be present as individual lines.
+        assert!(
+            rows.iter().any(|r| matches!(r, RenderedRow::Line(s) if s.headline.contains("CLARIFICATION") || s.headline.contains("user.ask"))),
+            "user.ask.pending must render individually"
+        );
+    }
+
+    #[test]
+    fn event_tier_tool_completed_splits_by_tool_name() {
+        let mk = |tool: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                "tool.completed",
+                Altitude::Normal,
+                serde_json::json!({ "tool_name": tool }),
+            )
+        };
+        // Significant tools
+        for tool in ["agent_spawn", "content_write", "artifact_build", "sandbox_exec"] {
+            assert_eq!(
+                event_tier(&mk(tool)),
+                EventTier::Significant,
+                "tool.completed({tool}) should be significant"
+            );
+        }
+        // Routine tools
+        for tool in ["resolve", "artifact_inspect", "workflow_wait", "agent_list"] {
+            assert_eq!(
+                event_tier(&mk(tool)),
+                EventTier::Routine,
+                "tool.completed({tool}) should be routine"
+            );
+        }
     }
 
     #[test]
@@ -2503,8 +3025,8 @@ mod tests {
         let entries = vec![
             mk("turn.start", Altitude::Detail),   // 0 ┐ run
             mk("turn.end", Altitude::Detail),     // 1 ┘
-            mk("approval.pending", Altitude::Attention), // 2 single
-            mk("turn.start", Altitude::Detail),   // 3 lone detail → single
+            mk("approval.pending", Altitude::Attention), // 2 single (checkpoint)
+            mk("turn.start", Altitude::Detail),   // 3 lone routine → single
         ];
         let rows = coalesce_indexed(&entries);
         assert_eq!(rows.len(), 3);
@@ -2598,6 +3120,34 @@ mod tests {
         // Pre-digested choices rendered inline and numbered.
         assert!(line.contains("[1] US equities"));
         assert!(line.contains("[2] Crypto"));
+    }
+
+    #[test]
+    fn user_ask_detail_shows_context_for_divergence_sentinel() {
+        let e = entry(
+            SessionRole::Specialist {
+                kind: "researcher".to_string(),
+            },
+            Principal::agent("researcher.default"),
+            "user.ask.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "interaction_id": "ui-abc123",
+                "kind": "divergence_sentinel",
+                "question": "Critical divergence in 'researcher.default' turn 1: 10 consecutive cycles without meaningful progress (limit 10)",
+                "context": "Signals:\n- loop_pressure (critical): 10 consecutive cycles without meaningful progress (limit 10)",
+                "options": [
+                    {"id": "ack", "label": "Acknowledge"},
+                    {"id": "stop", "label": "Stop"},
+                ],
+                "allow_freeform": true,
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("10 consecutive cycles"));
+        let detail = spec.detail.expect("should have detail");
+        assert!(detail.contains("context:"));
+        assert!(detail.contains("loop_pressure"));
     }
 
     #[test]
@@ -2838,6 +3388,113 @@ mod tests {
         assert!(line.contains("[coder]"));
         // Revision id shown as-is (already prefixed), not doubled to "rev rev-9".
         assert!(line.contains("escalation: recommend promote (rev-9)"));
+    }
+
+    #[test]
+    fn coalesce_indexed_hides_session_escalate_mirror_when_escalation_pending_exists() {
+        let approval_id = "apr-esc-esc_ed2ebff710e4";
+        let mut esc = entry(
+            SessionRole::Specialist {
+                kind: "weather-lo".into(),
+            },
+            Principal::agent("weather-lookup"),
+            "escalation.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "escalation_id": "esc_ed2ebff710e44b27bf4cb82d2e6f4547",
+                "agent_id": "weather-lookup",
+                "revision_id": "1",
+                "synthesis": "All federation roles passed.",
+                "escalation_type": "promotion_review",
+            }),
+        );
+        esc.refs.approval_request_id = Some(approval_id.into());
+        let appr = entry(
+            SessionRole::Specialist {
+                kind: "weather-lo".into(),
+            },
+            Principal::agent("weather-lookup"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": approval_id,
+                "action": "session_escalate",
+                "reason": "Promotion review for agent 'weather-lookup'",
+                "context": "All federation roles passed.",
+            }),
+        );
+        let rows = coalesce_indexed(&[esc, appr]);
+        assert_eq!(rows.len(), 1);
+        let RenderedRow::Line(spec) = &rows[0].0 else {
+            panic!("expected line row");
+        };
+        assert!(spec.headline.contains("PROMOTION ESCALATION"));
+        assert!(!spec.headline.contains("SESSION ESCALATION"));
+    }
+
+    #[test]
+    fn session_escalate_without_escalation_pending_still_renders() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "esc-human-1",
+                "action": "session_escalate",
+                "reason": "stuck on integration test",
+                "context": "needs operator guidance",
+            }),
+        );
+        let rows = coalesce_indexed(&[appr]);
+        assert_eq!(rows.len(), 1);
+        let RenderedRow::Line(spec) = &rows[0].0 else {
+            panic!("expected line row");
+        };
+        assert!(spec.headline.contains("SESSION ESCALATION"));
+    }
+
+    #[test]
+    fn session_escalate_mirror_with_apr_esc_prefix_always_suppressed() {
+        // Even without the escalation.pending card in the same batch, an
+        // approval.pending whose request_id starts with apr-esc- is a mirror
+        // and should produce no visible row.
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-esc-abc123",
+                "action": "session_escalate",
+                "reason": "Promotion review for agent 'weather-agent'",
+                "context": "All federation roles passed.",
+            }),
+        );
+        let rows = coalesce_indexed(&[appr]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn non_escalate_approval_pending_still_renders() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-normal-1",
+                "action": "revision_promote",
+                "agent_id": "weather-agent",
+                "reason": "acknowledge capabilities",
+            }),
+        );
+        let rows = coalesce_indexed(&[appr]);
+        assert_eq!(rows.len(), 1);
+        let RenderedRow::Line(spec) = &rows[0].0 else {
+            panic!("expected line row");
+        };
+        assert!(spec.headline.contains("PROMOTION APPROVAL"));
     }
 
     #[test]
@@ -3093,6 +3750,35 @@ mod tests {
             !payload.contains("\"message\":\n      All federation"),
             "raw glued message"
         );
+    }
+
+    #[test]
+    fn render_spec_sandbox_approval_shows_summary_and_content_ref_hint() {
+        let appr = entry(
+            SessionRole::Planner,
+            Principal::agent("researcher.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-59f8",
+                "approval_level": "operator",
+                "action": "sandbox_exec",
+                "command": "cnt_f57014c6",
+                "command_kind": "content_ref",
+                "command_hint": "Content handle — not a shell command.",
+                "host_patterns": ["api.open-meteo.com"],
+                "intent": "Run weather fetch script against Open-Meteo",
+                "summary": "What will run:\ncnt_f57014c6\n\nWhy approval is required:\nRemote URL detected in script",
+            }),
+        );
+        let spec = render_spec(&appr);
+        let detail = spec.detail.expect("approval card body");
+        assert!(detail.contains("content ref"));
+        assert!(detail.contains("purpose:"));
+        assert!(detail.contains("Open-Meteo"));
+        assert!(detail.contains("details:"));
+        assert!(detail.contains("Why approval is required"));
+        assert!(detail.contains("api.open-meteo.com"));
     }
 
     #[test]
@@ -3555,7 +4241,9 @@ mod tests {
             headline: "headline here".into(),
             detail: Some("and a detail".into()),
             turn_id: None,
+            source_session_id: None,
             turn_index: None,
+            turn_label: None,
             in_flight: false,
             show_reasoning: true,
         };
@@ -3659,7 +4347,9 @@ mod tests {
             headline: "tool sandbox_exec".into(),
             detail: Some("hello world".into()),
             turn_id: None,
+            source_session_id: None,
             turn_index: None,
+            turn_label: None,
             in_flight: false,
             show_reasoning: true,
         };
@@ -3667,5 +4357,199 @@ mod tests {
         let s = row_text(&row);
         assert!(s.contains('\n'), "detail boundary must be preserved: {s:?}");
         assert!(s.contains("hello world"));
+    }
+
+    #[test]
+    fn detail_narrative_markers_for_expanded_keys() {
+        for key in ["reason", "explanation", "diagnosis", "output", "synthesis"] {
+            let e = entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                "agent.message",
+                Altitude::Normal,
+                serde_json::json!({ key: "## Heading\n\nSome text here." }),
+            );
+            let lines = format_detail(&e);
+            let joined = lines.join("\n");
+            assert!(
+                joined.contains("@@NARRATIVE@@"),
+                "key `{key}` should produce narrative markers, got:\n{joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_narrative_markers_for_unknown_key_with_markdown() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "custom_field": "### Title\n\n- item one\n- item two" }),
+        );
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("@@NARRATIVE@@"),
+            "unknown key with markdown should produce narrative markers, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn detail_no_narrative_for_plain_short_unknown_key() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "custom_field": "just a short string" }),
+        );
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("@@NARRATIVE@@"),
+            "short plain unknown key should NOT produce narrative markers, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn detail_narrative_for_summary_inside_nested_message_object() {
+        // Payload where `message` is a JSON object (not a stringified JSON
+        // envelope), with `summary` as a prose field inside it.
+        let payload_json = r#"{"message":{"result":{"conditions":"Mainly clear","current_temp":"24.6°C"},"status":"ok","summary":"Current weather in Paris, France\n\n- Temperature: 24.6°C (76°F)\n- Conditions: Mainly clear skies\n- Humidity: 51%\n- Wind: 13.4 km/h from the West\n\n| Time | Temp | Conditions |\n|------|------|------------|\n| 21:00 | 24.4°C | Mainly clear |\n| 22:00 | 23.1°C | Mainly clear |"}}"#;
+        let e = SessionTimelineEntry {
+            event_id: "ev2".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("researcher.default"),
+            role: SessionRole::Specialist { kind: "researcher".into() },
+            event_type: "agent.message".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-06-12T20:45:00Z".into(),
+            payload: Some(payload_json.to_string()),
+            refs: Default::default(),
+        };
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("@@NARRATIVE@@"),
+            "nested-message summary should have narrative markers, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("Current weather in Paris"),
+            "should contain the summary content"
+        );
+    }
+
+    #[test]
+    fn diag_realistic_weather_message() {
+        let payload_json = r#"{"message":"{\"status\":\"ok\",\"summary\":\"**Current Weather in Paris, France** (as of 4:15 PM CEST, June 12, 2026)\n\n- **Temperature:** 24.7°C (76.5°F)\n- **Conditions:** Partly cloudy\n- **Humidity:** 50%\n- **Wind Speed:** 18.5 km/h (11.5 mph)\n- **Precipitation:** 0.0 mm — no rain\n\n---\n\n**Hourly Forecast — Next 8 Hours**\n\n| Time (CEST) | Temp (°C / °F) | Conditions | Humidity | Wind (km/h) | Precip Chance |\n|---|---|---|---|---|---|\n| 5:00 PM | 24.9°C / 76.8°F | Partly cloudy | 49% | 18.2 | 0% |\"}"}"#;
+        let e = SessionTimelineEntry {
+            event_id: "ev1".into(),
+            root_session_id: "root".into(),
+            source_session_id: "src".into(),
+            turn_id: None,
+            principal: Principal::agent("researcher.default"),
+            role: SessionRole::Specialist { kind: "researcher".into() },
+            event_type: "agent.message".into(),
+            altitude: Altitude::Normal,
+            occurred_at: "2026-06-12T14:20:00Z".into(),
+            payload: Some(payload_json.to_string()),
+            refs: Default::default(),
+        };
+        let lines = format_detail(&e);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("@@NARRATIVE@@"),
+            "should have narrative markers"
+        );
+        assert!(
+            joined.contains("**Temperature:**"),
+            "should contain the summary markdown content"
+        );
+    }
+
+    // ── Markdown-coverage probes: these exercise the gaps that historically
+    // caused agent prose to render as raw text in the detail pane. Each
+    // payload below MUST produce @@NARRATIVE@@ markers so the TUI runs it
+    // through the markdown pipeline.
+
+    fn narrative_entries(payload: serde_json::Value) -> bool {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            payload,
+        );
+        format_detail(&e).join("\n").contains("@@NARRATIVE@@")
+    }
+
+    #[test]
+    fn narrative_unknown_key_single_line_bold() {
+        assert!(
+            narrative_entries(serde_json::json!({ "note": "**important** single line" })),
+            "single-line bold in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_unknown_key_single_line_heading() {
+        assert!(
+            narrative_entries(serde_json::json!({ "note": "## Heading only" })),
+            "single-line heading in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_unknown_key_single_line_underscore_bold() {
+        assert!(
+            narrative_entries(serde_json::json!({ "note": "__bold__ via underscores" })),
+            "__bold__ in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_unknown_key_multiline_code_block() {
+        let val = "Here is code:\n\ndef fib(n):\n    return n\n\nDone.";
+        assert!(
+            narrative_entries(serde_json::json!({ "note": val })),
+            "multiline python-ish block in unknown key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_known_key_summary_with_link() {
+        let val = "See [the docs](https://example.com) for details.";
+        assert!(
+            narrative_entries(serde_json::json!({ "summary": val })),
+            "markdown link in known key should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_known_key_ascii_thematic_break() {
+        let val = "Intro paragraph.\n\n---\n\nAfter the break.";
+        assert!(
+            narrative_entries(serde_json::json!({ "summary": val })),
+            "ASCII --- thematic break should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_array_of_markdown_strings() {
+        assert!(
+            narrative_entries(serde_json::json!({ "findings": ["## Critical\n\nbad thing", "## Warning\n\nmeh"] })),
+            "markdown strings inside an array should render as markdown"
+        );
+    }
+
+    #[test]
+    fn narrative_nested_array_of_objects_with_prose() {
+        assert!(
+            narrative_entries(serde_json::json!({ "results": [{ "answer": "## Yes\n\nHere is why…" }] })),
+            "prose inside array-of-objects should render as markdown"
+        );
     }
 }

@@ -6,7 +6,13 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use tokio::task::AbortHandle;
 
-/// Scope passed into native tools (e.g. `sandbox.exec`) for PID registration.
+#[derive(Clone, Default)]
+pub struct NativeToolDiscoveryCatalog {
+    pub registered: std::collections::HashSet<String>,
+    pub available: std::collections::HashSet<String>,
+}
+
+/// Scope passed into native tools (e.g. `sandbox_exec`) for PID registration.
 #[derive(Clone)]
 pub struct NativeToolRunContext {
     pub registry: Arc<ActiveExecutionRegistry>,
@@ -28,6 +34,9 @@ pub struct NativeToolRunContext {
     /// Shared discovered-tools set. `tool_discover` writes here; the lifecycle
     /// reads and drains after tool execution to update the session surface.
     pub discovered_tools: Option<Arc<Mutex<std::collections::HashSet<String>>>>,
+    /// Capability-filtered native tool catalog used by `tool_discover` to
+    /// distinguish available, forbidden, and unmatched requests.
+    pub tool_discovery_catalog: Option<Arc<NativeToolDiscoveryCatalog>>,
     /// Wake hint for the post-approval guardrail on `agent_list`.
     /// Set by the TUI after a plan-approval wake message.
     pub wake_hint: Option<crate::execution::WakeHintState>,

@@ -19,6 +19,14 @@ pub enum FailureClass {
     PolicyDenied,
     SchemaValidationFailed,
     TaskContractInvalid,
+    /// Declared `expected_outputs` missing at child completion (RFC #775/#776 Part B).
+    /// The child "succeeded" but did not produce what the parent declared it would.
+    /// No blind retry — parent must change something structural.
+    OutputContractUnmet,
+    /// Child session ended cleanly but produced no recognizable result or account
+    /// (RFC #775 Part A). Distinct from `Unknown` (unclassifiable error) — this is
+    /// a child that gave up without explanation. Counts toward the parent loop guard.
+    ChildGaveUp,
     Unknown,
 }
 
@@ -75,6 +83,7 @@ pub enum ToolErrorType {
     /// Timeout: operation exceeded its time limit.
     /// The agent can retry with backoff.
     Timeout,
+    SandboxUnavailable,
 }
 
 impl std::fmt::Display for ToolErrorType {
@@ -89,8 +98,30 @@ impl std::fmt::Display for ToolErrorType {
             ToolErrorType::QuotaExceeded => write!(f, "quota_exceeded"),
             ToolErrorType::NotFound => write!(f, "not_found"),
             ToolErrorType::Timeout => write!(f, "timeout"),
+            ToolErrorType::SandboxUnavailable => write!(f, "sandbox_unavailable"),
         }
     }
+}
+
+/// A lawful next move the agent can take from inside a denial itself:
+/// propose an amendment, delegate to a capable agent, or inspect itself.
+/// Static and pre-committed (Ri-0.3) — the gateway maps rule IDs to
+/// affordances mechanically, it never judges which move is "best".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AvailableAction {
+    /// Machine key: "propose_amendment" | "delegate" | "self_describe".
+    pub action: String,
+    /// One sentence, imperative.
+    pub description: String,
+    /// Exact tool name the agent can call, if one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// Constitutional clause backing the affordance, e.g. "Ri-0.8".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clause: Option<String>,
+    /// Capability type name required, e.g. "ConstitutionalProposal".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_capability: Option<String>,
 }
 
 /// Structured tool error response for agent feedback.
@@ -112,6 +143,11 @@ pub struct ToolError {
     /// Specific constitutional or policy rule IDs enforced for this error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enforced_rules: Vec<String>,
+    /// Lawful next moves available to the agent from inside this denial
+    /// (Ri-0.3 named rejection): propose an amendment, delegate, or inspect
+    /// itself. Populated mechanically from `enforced_rules`; never judged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_actions: Vec<AvailableAction>,
     /// Mechanical failure classification used by workflow orchestration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_class: Option<FailureClass>,
@@ -133,6 +169,12 @@ pub struct ToolError {
     /// Stable dedupe key for durable operations when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedupe_key: Option<String>,
+    /// Stable, machine-readable failure code (snake_case), e.g.
+    /// `auditor_pass_missing`. Finer-grained than `error_type` so an
+    /// orchestrator branches on one field instead of parsing `message` prose.
+    /// Optional and additive (P-5.11); serialized as `error`.
+    #[serde(rename = "error", default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 impl ToolError {
@@ -149,6 +191,7 @@ impl ToolError {
             repair_hint,
             details,
             enforced_rules: Vec::new(),
+            available_actions: Vec::new(),
             failure_class: None,
             retry_advice: None,
             retryable: None,
@@ -156,7 +199,21 @@ impl ToolError {
             requires_human: None,
             side_effect_state: None,
             dedupe_key: None,
+            code: None,
         }
+    }
+
+    /// Attach the stable machine-readable failure `code` (P-5.11).
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.code = Some(code.into());
+        self
+    }
+
+    /// Override the `repair_hint` (the mechanical remedy). Useful with
+    /// constructors like `permission` that only take a message.
+    pub fn with_repair_hint(mut self, repair_hint: impl Into<String>) -> Self {
+        self.repair_hint = Some(repair_hint.into());
+        self
     }
 
     /// Creates a new validation error.
@@ -226,6 +283,11 @@ impl ToolError {
         self
     }
 
+    pub fn with_available_actions(mut self, actions: Vec<AvailableAction>) -> Self {
+        self.available_actions = actions;
+        self
+    }
+
     pub fn with_failure_class(mut self, failure_class: FailureClass) -> Self {
         self.failure_class = Some(failure_class);
         self
@@ -290,6 +352,15 @@ impl ToolError {
             ToolErrorType::Timeout,
             message,
             repair_hint.map(|h| h.into()),
+            None,
+        )
+    }
+
+    pub fn sandbox_unavailable(message: impl Into<String>) -> Self {
+        Self::new(
+            ToolErrorType::SandboxUnavailable,
+            message,
+            Some("Install the sandbox driver on this host or use a different agent/sandbox backend.".to_string()),
             None,
         )
     }
@@ -389,6 +460,12 @@ macro_rules! tool_error {
     }};
     (timeout, $msg:expr) => {{
         return Ok($crate::tool_error::ToolError::timeout($msg, None::<String>).to_error_response());
+    }};
+    (sandbox_unavailable, $msg:expr, $hint:expr) => {{
+        return Ok($crate::tool_error::ToolError::sandbox_unavailable($msg).with_repair_hint($hint).to_error_response());
+    }};
+    (sandbox_unavailable, $msg:expr) => {{
+        return Ok($crate::tool_error::ToolError::sandbox_unavailable($msg).to_error_response());
     }};
 }
 
@@ -559,6 +636,7 @@ impl From<tagged::Tagged> for ToolError {
             ToolErrorType::QuotaExceeded => Self::quota_exceeded(message, None::<String>),
             ToolErrorType::NotFound => Self::not_found(message, None::<String>),
             ToolErrorType::Timeout => Self::timeout(message, None::<String>),
+            ToolErrorType::SandboxUnavailable => Self::sandbox_unavailable(message),
         };
         err.with_enforced_rules(enforced_rules)
     }
@@ -592,6 +670,17 @@ impl From<anyhow::Error> for ToolError {
                 return Some("Ensure all required fields are provided and not empty.".to_string());
             }
 
+            if lower.contains("invalid json arguments")
+                && lower.contains("capabilities[")
+                && lower.contains("missing field")
+            {
+                return Some("capabilities items are tagged objects and each type requires specific fields: \
+                    SandboxFunctions→allowed[], NetworkAccess→hosts[], \
+                    ReadAccess/WriteAccess/UserProfileAccess→scopes[], \
+                    AgentSpawn→max_children, BackgroundReevaluation→min_interval_secs+allow_reasoning, \
+                    PromoteWith→capabilities[]. Add the missing field named in the error and retry.".to_string());
+            }
+
             if lower.contains("invalid json") {
                 return Some("Check the tool schema and ensure JSON is valid.".to_string());
             }
@@ -604,33 +693,36 @@ impl From<anyhow::Error> for ToolError {
             let msg = cause.to_string();
             let msg_trimmed = msg.trim();
             if msg.starts_with("validation:") {
-                let inner = msg.strip_prefix("validation:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("validation:").unwrap_or(&msg).trim();
                 let repair_hint = derive_validation_hint(msg_trimmed);
                 return Self::validation(inner.to_string(), repair_hint);
             } else if msg.starts_with("permission:") {
-                let inner = msg.strip_prefix("permission:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("permission:").unwrap_or(&msg).trim();
                 return Self::permission(inner.to_string());
             } else if msg.starts_with("resource:") {
-                let inner = msg.strip_prefix("resource:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("resource:").unwrap_or(&msg).trim();
                 return Self::resource(inner.to_string(), None::<String>);
             } else if msg.starts_with("execution:") {
-                let inner = msg.strip_prefix("execution:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("execution:").unwrap_or(&msg).trim();
                 return Self::execution(inner.to_string(), None::<String>);
             } else if msg.starts_with("fatal:") {
-                let inner = msg.strip_prefix("fatal:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("fatal:").unwrap_or(&msg).trim();
                 return Self::fatal(inner.to_string(), Some(err.to_string()));
             } else if msg.starts_with("conflict:") {
-                let inner = msg.strip_prefix("conflict:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("conflict:").unwrap_or(&msg).trim();
                 return Self::conflict(inner.to_string(), None::<String>);
             } else if msg.starts_with("quota_exceeded:") {
-                let inner = msg.strip_prefix("quota_exceeded:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("quota_exceeded:").unwrap_or(&msg).trim();
                 return Self::quota_exceeded(inner.to_string(), None::<String>);
             } else if msg.starts_with("not_found:") {
-                let inner = msg.strip_prefix("not_found:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("not_found:").unwrap_or(&msg).trim();
                 return Self::not_found(inner.to_string(), None::<String>);
             } else if msg.starts_with("timeout:") {
-                let inner = msg.strip_prefix("timeout:").unwrap_or(&msg);
+                let inner = msg.strip_prefix("timeout:").unwrap_or(&msg).trim();
                 return Self::timeout(inner.to_string(), None::<String>);
+            } else if msg.starts_with("sandbox_unavailable:") {
+                let inner = msg.strip_prefix("sandbox_unavailable:").unwrap_or(&msg).trim();
+                return Self::sandbox_unavailable(inner.to_string());
             }
         }
 
@@ -684,6 +776,25 @@ mod tests {
         assert_eq!(err.error_type, ToolErrorType::Validation);
         assert!(err.is_recoverable());
         assert!(err.repair_hint.is_some());
+    }
+
+    // Tagged anyhow errors use the "{type}: {msg}" convention (Tagged::Display).
+    // Stripping the prefix must not leave a leading space on the surfaced
+    // message (PR #601 review).
+    #[test]
+    fn tagged_anyhow_message_has_no_leading_space() {
+        let err: ToolError = anyhow::anyhow!("resource: sandbox driver 'bwrap' not found").into();
+        assert_eq!(err.error_type, ToolErrorType::Resource);
+        assert_eq!(err.message, "sandbox driver 'bwrap' not found");
+        assert!(!err.message.starts_with(' '));
+    }
+
+    #[test]
+    fn sandbox_unavailable_prefix_maps_to_typed_error() {
+        let err: ToolError = anyhow::anyhow!("sandbox_unavailable: sandbox driver 'bwrap' not found on PATH — ... [sandbox_driver_unavailable]").into();
+        assert_eq!(err.error_type, ToolErrorType::SandboxUnavailable);
+        assert_eq!(err.message, "sandbox driver 'bwrap' not found on PATH — ... [sandbox_driver_unavailable]");
+        assert!(err.is_recoverable());
     }
 
     #[test]
@@ -749,5 +860,57 @@ mod tests {
         assert_eq!(err.error_type, ToolErrorType::Validation);
         let hint = err.repair_hint.unwrap_or_default();
         assert!(hint.contains("allowed enum"));
+    }
+
+    #[test]
+    fn with_code_serializes_as_error_field_and_is_omitted_when_absent() {
+        // Present → serialized under the canonical `error` key (P-5.11 stable code).
+        let coded = ToolError::permission("auditor did not pass").with_code("auditor_pass_missing");
+        let v: serde_json::Value = serde_json::from_str(&coded.to_json_string()).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error_type"], "permission");
+        assert_eq!(v["error"], "auditor_pass_missing");
+
+        // Absent → field omitted, so the base envelope is unchanged for callers
+        // that do not set a code (additive, P-5.11).
+        let plain = ToolError::permission("denied");
+        let v2: serde_json::Value = serde_json::from_str(&plain.to_json_string()).unwrap();
+        assert!(v2.get("error").is_none(), "error code omitted when absent: {v2}");
+    }
+
+    #[test]
+    fn available_actions_serialize_when_present_and_omitted_when_absent() {
+        let action = AvailableAction {
+            action: "propose_amendment".to_string(),
+            description: "propose an amendment".to_string(),
+            tool: Some("constitution_propose_amendment".to_string()),
+            clause: Some("Ri-0.8".to_string()),
+            requires_capability: Some("ConstitutionalProposal".to_string()),
+        };
+        let with_actions = ToolError::permission("denied").with_available_actions(vec![action]);
+        let v: serde_json::Value = serde_json::from_str(&with_actions.to_json_string()).unwrap();
+        let actions = v["available_actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0]["action"], "propose_amendment");
+        assert_eq!(actions[0]["clause"], "Ri-0.8");
+
+        // Absent → key omitted entirely (additive, mirrors enforced_rules).
+        let without_actions = ToolError::permission("denied");
+        let v2: serde_json::Value =
+            serde_json::from_str(&without_actions.to_json_string()).unwrap();
+        assert!(
+            v2.get("available_actions").is_none(),
+            "available_actions omitted when empty: {v2}"
+        );
+    }
+
+    #[test]
+    fn with_repair_hint_overrides_default() {
+        let err = ToolError::permission("auditor did not pass")
+            .with_code("auditor_pass_missing")
+            .with_repair_hint("Obtain an auditor pass record, then retry.");
+        let v: serde_json::Value = serde_json::from_str(&err.to_json_string()).unwrap();
+        assert_eq!(v["error"], "auditor_pass_missing");
+        assert_eq!(v["repair_hint"], "Obtain an auditor pass record, then retry.");
     }
 }

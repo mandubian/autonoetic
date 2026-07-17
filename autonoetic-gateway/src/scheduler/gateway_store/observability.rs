@@ -1,8 +1,8 @@
-use super::GatewayStore;
-use super::LiveDigestEventRecord;
+use super::{GatewayStore, LiveDigestEventRecord, LIVE_DIGEST_BUFFER_CAPACITY};
 use anyhow::Result;
 use autonoetic_types::config::RetentionConfig;
 use rusqlite::params;
+use std::collections::BTreeMap;
 
 fn looks_like_fts_syntax(query: &str) -> bool {
     query
@@ -22,6 +22,31 @@ fn is_sqlite_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<rusqlite::Error>()
         .map(|e| matches!(e, rusqlite::Error::SqliteFailure(_, _)))
         .unwrap_or(false)
+}
+
+/// Per-agent tally for the **civic-health** view (#772 E.2 / #771 D.2). See
+/// [`GatewayStore::civic_health`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CivicHealthEntry {
+    pub agent_id: String,
+    pub proposals_filed: u64,
+    pub proposals_pending: u64,
+    pub flags_filed: u64,
+    pub flags_pending: u64,
+    /// #771 D.2: mechanical amendment invitations issued to this agent
+    /// (all-time in window) and how many are open vs answered.
+    pub invitations_issued: u64,
+    pub invitations_open: u64,
+    pub invitations_answered: u64,
+}
+
+/// Standing civic-health view: how often each agent exercises its civic
+/// affordances (constitutional proposals, anomaly flags), and how much of
+/// that is still awaiting a decision. See [`GatewayStore::civic_health`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CivicHealth {
+    /// Sorted by (proposals_filed + flags_filed) desc, then agent_id asc.
+    pub by_agent: Vec<CivicHealthEntry>,
 }
 
 impl GatewayStore {
@@ -415,6 +440,234 @@ impl GatewayStore {
         Ok(crate::enforcement_register::contract_health(rule_ids))
     }
 
+    /// Standing **civic-health** view (#772 E.2): the dual of contract-health.
+    /// Contract-health measures whether the *gateway* honors the law;
+    /// civic-health measures whether *agents* use it — tallying each agent's
+    /// constitutional proposals and anomaly flags, filed vs still-pending, so
+    /// both that agents exercise voice/witnessing and whether it is being
+    /// answered are visible in one view.
+    ///
+    /// `since` is an optional RFC3339 lower bound on `created_at`, compared
+    /// by absolute instant like `contract_health`; items whose own timestamp
+    /// fails to parse are kept rather than dropped.
+    ///
+    /// Full scan over both tables streaming only the columns the tally needs
+    /// (mirrors `contract_health` above) — deliberately no row cap: a hard
+    /// `LIMIT` would silently truncate the view once a table grew past it
+    /// and present partial counts as complete.
+    pub fn civic_health(&self, since: Option<&str>) -> Result<CivicHealth> {
+        let since_dt = match since {
+            Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                anyhow::anyhow!("invalid `since` timestamp {ts:?}: {e} (expected RFC3339)")
+            })?),
+            None => None,
+        };
+
+        let in_window = |ts: &str| -> bool {
+            match since_dt {
+                Some(bound) => match chrono::DateTime::parse_from_rfc3339(ts) {
+                    Ok(dt) => dt >= bound,
+                    Err(_) => true,
+                },
+                None => true,
+            }
+        };
+
+        let conn = self.conn.lock().unwrap();
+        let mut by_agent: BTreeMap<String, CivicHealthEntry> = BTreeMap::new();
+
+        {
+            let mut stmt = conn.prepare(
+                "SELECT proposer_agent_id, status, created_at FROM constitutional_proposals",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (agent_id, status, created_at) = r?;
+                if !in_window(&created_at) {
+                    continue;
+                }
+                let entry = by_agent
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| CivicHealthEntry {
+                        agent_id,
+                        proposals_filed: 0,
+                        proposals_pending: 0,
+                        flags_filed: 0,
+                        flags_pending: 0,
+                        invitations_issued: 0,
+                        invitations_open: 0,
+                        invitations_answered: 0,
+                    });
+                entry.proposals_filed += 1;
+                if !super::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES
+                    .contains(&status.as_str())
+                {
+                    entry.proposals_pending += 1;
+                }
+            }
+        }
+
+        {
+            let mut stmt =
+                conn.prepare("SELECT reporter_agent_id, status, created_at FROM anomaly_flags")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (agent_id, status, created_at) = r?;
+                if !in_window(&created_at) {
+                    continue;
+                }
+                let entry = by_agent
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| CivicHealthEntry {
+                        agent_id,
+                        proposals_filed: 0,
+                        proposals_pending: 0,
+                        flags_filed: 0,
+                        flags_pending: 0,
+                        invitations_issued: 0,
+                        invitations_open: 0,
+                        invitations_answered: 0,
+                    });
+                entry.flags_filed += 1;
+                if !super::anomaly_flags::FLAG_TERMINAL_DECISION_STATUSES
+                    .contains(&status.as_str())
+                {
+                    entry.flags_pending += 1;
+                }
+            }
+        }
+
+        {
+            let mut stmt = conn.prepare(
+                "SELECT agent_id, status, created_at FROM amendment_invitations",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (agent_id, status, created_at) = r?;
+                if !in_window(&created_at) {
+                    continue;
+                }
+                let entry = by_agent
+                    .entry(agent_id.clone())
+                    .or_insert_with(|| CivicHealthEntry {
+                        agent_id,
+                        proposals_filed: 0,
+                        proposals_pending: 0,
+                        flags_filed: 0,
+                        flags_pending: 0,
+                        invitations_issued: 0,
+                        invitations_open: 0,
+                        invitations_answered: 0,
+                    });
+                entry.invitations_issued += 1;
+                match status.as_str() {
+                    "open" => entry.invitations_open += 1,
+                    "answered" => entry.invitations_answered += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        let mut by_agent: Vec<CivicHealthEntry> = by_agent.into_values().collect();
+        by_agent.sort_by(|a, b| {
+            let a_total = a.proposals_filed + a.flags_filed;
+            let b_total = b.proposals_filed + b.flags_filed;
+            b_total
+                .cmp(&a_total)
+                .then_with(|| a.agent_id.cmp(&b.agent_id))
+        });
+
+        Ok(CivicHealth { by_agent })
+    }
+
+    /// **DISCRETION LEAK register** read side (#771 D.3): tally
+    /// `discretion_leak` causal events by (rule, kind) — the "top leaks
+    /// this window" standing agenda the steward office (RFC Part F) drafts
+    /// amendments against. `since` is an optional RFC3339 lower bound,
+    /// compared by absolute instant like `contract_health`; events whose
+    /// own timestamp fails to parse are kept rather than dropped. Sorted
+    /// by descending count, then (rule, kind) for stable output.
+    pub fn discretion_leak_summary(
+        &self,
+        since: Option<&str>,
+    ) -> Result<Vec<crate::runtime::discretion_leak::DiscretionLeakTally>> {
+        let since_dt = match since {
+            Some(ts) => Some(chrono::DateTime::parse_from_rfc3339(ts).map_err(|e| {
+                anyhow::anyhow!("invalid `since` timestamp {ts:?}: {e} (expected RFC3339)")
+            })?),
+            None => None,
+        };
+
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT enforced_rules, action, timestamp FROM causal_events \
+             WHERE category = 'discretion_leak'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+
+        let mut counts: BTreeMap<(String, String), u64> = BTreeMap::new();
+        for r in rows {
+            let (raw_rules, kind, ts) = r?;
+            if let Some(bound) = since_dt {
+                if let Ok(event_dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    if event_dt < bound {
+                        continue;
+                    }
+                }
+            }
+            // Tolerate malformed rule cells by skipping the row rather than
+            // failing the whole tally (mirrors `contract_health`).
+            let Ok(rule_ids) = serde_json::from_str::<Vec<String>>(&raw_rules) else {
+                continue;
+            };
+            for rule_id in rule_ids {
+                *counts.entry((rule_id, kind.clone())).or_insert(0) += 1;
+            }
+        }
+
+        let mut out: Vec<crate::runtime::discretion_leak::DiscretionLeakTally> = counts
+            .into_iter()
+            .map(
+                |((rule_id, kind), count)| crate::runtime::discretion_leak::DiscretionLeakTally {
+                    rule_id,
+                    kind,
+                    count,
+                },
+            )
+            .collect();
+        out.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.rule_id.cmp(&b.rule_id))
+                .then_with(|| a.kind.cmp(&b.kind))
+        });
+        Ok(out)
+    }
+
     /// List curator decision events (`category = 'curator'`, `action = 'decision'`)
     /// for a specific target URI/id. Used by operator workflows asking
     /// "why was memory X dropped" (issue #30). The underlying `idx_causal_target`
@@ -464,6 +717,46 @@ impl GatewayStore {
         Ok(results)
     }
 
+    pub fn get_execution_trace(
+        &self,
+        trace_id: &str,
+    ) -> Result<Option<autonoetic_types::causal_chain::ExecutionTraceRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT trace_id, event_id, agent_id, session_id, turn_id, timestamp,
+                tool_name, command, exit_code, stdout, stderr, duration_ms,
+                success, error_type, error_summary, approval_required,
+                approval_request_id, arguments, result
+             FROM execution_traces WHERE trace_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![trace_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(autonoetic_types::causal_chain::ExecutionTraceRecord {
+                trace_id: row.get(0)?,
+                event_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                session_id: row.get(3)?,
+                turn_id: row.get(4)?,
+                timestamp: row.get(5)?,
+                tool_name: row.get(6)?,
+                command: row.get(7)?,
+                exit_code: row.get(8)?,
+                stdout: row.get(9)?,
+                stderr: row.get(10)?,
+                duration_ms: row.get(11)?,
+                success: row.get(12)?,
+                error_type: row.get(13)?,
+                error_summary: row.get(14)?,
+                approval_required: row.get(15)?,
+                approval_request_id: row.get(16)?,
+                arguments: row.get(17)?,
+                result: row.get(18)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn create_execution_trace(
         &self,
         trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,
@@ -501,30 +794,12 @@ impl GatewayStore {
     }
 
     pub fn create_live_digest_event(&self, event: &LiveDigestEventRecord) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO live_digest_events (
-                event_id, root_session_id, source_session_id, turn_id, source_agent_id,
-                source_node_id, event_type, payload, created_at,
-                principal_kind, principal_id, role, altitude, refs_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                &event.event_id,
-                &event.root_session_id,
-                &event.source_session_id,
-                event.turn_id.as_deref(),
-                event.source_agent_id.as_deref(),
-                &event.source_node_id,
-                &event.event_type,
-                event.payload.as_deref(),
-                &event.created_at,
-                event.principal_kind.as_deref(),
-                event.principal_id.as_deref(),
-                event.role.as_deref(),
-                event.altitude.as_deref(),
-                event.refs_json.as_deref(),
-            ],
-        )?;
+        let mut buf = self.live_digest_buffer.lock().unwrap();
+        buf.push(event.clone());
+        if buf.len() >= LIVE_DIGEST_BUFFER_CAPACITY {
+            drop(buf);
+            return self.flush_live_digest_events();
+        }
         Ok(())
     }
 
@@ -637,8 +912,18 @@ impl GatewayStore {
             "INSERT INTO session_transcripts (
                 transcript_id, session_id, root_session_id, agent_id,
                 revision_id, user_id, started_at, ended_at, status,
-                turn_count, transcript_handle, excerpt, origin_node_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                turn_count, transcript_handle, excerpt, origin_node_id,
+                lifecycle_state
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                CASE ?9
+                    WHEN 'active' THEN 'active'
+                    WHEN 'completed' THEN 'terminated:completed'
+                    WHEN 'closed' THEN 'terminated:completed'
+                    WHEN 'failed' THEN 'terminated:failed'
+                    WHEN 'suspended' THEN 'awaiting_gate'
+                    ELSE 'active'
+                END
+            )
             ON CONFLICT(session_id) DO UPDATE SET
                 transcript_id = excluded.transcript_id,
                 ended_at = CASE
@@ -655,7 +940,13 @@ impl GatewayStore {
                 END,
                 turn_count = excluded.turn_count,
                 transcript_handle = excluded.transcript_handle,
-                excerpt = excluded.excerpt",
+                excerpt = excluded.excerpt,
+                lifecycle_state = CASE
+                    WHEN excluded.status = 'active'
+                     AND session_transcripts.status IN ('completed', 'failed', 'suspended', 'closed')
+                    THEN session_transcripts.lifecycle_state
+                    ELSE excluded.lifecycle_state
+                END",
             params![
                 record.transcript_id,
                 record.session_id,
@@ -675,6 +966,36 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Resolve the agent identity that owns a session. Used to authenticate a
+    /// caller-supplied `decider_session_id` against the recorded owner before
+    /// applying R-10.7 trust-boundary checks. Consults `session_transcripts`
+    /// first (covers root and child sessions), then falls back to
+    /// `session_spawn_lineage.target_agent_id` for child sessions whose
+    /// transcript has not yet been written. Returns `None` when the session is
+    /// not recorded anywhere (treated as untrusted by callers).
+    pub fn session_owner_agent(&self, session_id: &str) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        let agent: Option<String> = conn
+            .query_row(
+                "SELECT agent_id FROM session_transcripts WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if agent.is_some() {
+            return Ok(agent);
+        }
+        let lineage_agent: Option<String> = conn
+            .query_row(
+                "SELECT target_agent_id FROM session_spawn_lineage WHERE child_session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(lineage_agent)
+    }
+
     pub fn finalize_session_transcript(
         &self,
         session_id: &str,
@@ -686,23 +1007,81 @@ impl GatewayStore {
             "UPDATE session_transcripts SET ended_at = ?1, status = ?2 WHERE session_id = ?3",
             params![ended_at, status, session_id],
         )?;
+        // #742: set lifecycle state to match the terminal status.
+        // Only "completed" and "failed" are truly terminal; "suspended" is
+        // resumable (its lifecycle was already set by save_yield_checkpoint).
+        // For "completed", avoid overwriting "hibernated" (between-turn yield)
+        // — only set "terminated:completed" when the current state is not
+        // already a resumable lifecycle state.
+        let lifecycle = match status {
+            "completed" => Some("terminated:completed"),
+            "failed" => Some("terminated:failed"),
+            _ => None,
+        };
+        if let Some(lifecycle) = lifecycle {
+            // Only overwrite if the current lifecycle is not a resumable state.
+            // This preserves "hibernated" between turns and "awaiting_gate"
+            // for gate-suspended sessions. Truly terminal sessions (headless
+            // complete, error, etc.) will have "active" or NULL lifecycle.
+            conn.execute(
+                "UPDATE session_transcripts
+                 SET lifecycle_state = ?1
+                 WHERE session_id = ?2
+                   AND (lifecycle_state IS NULL
+                        OR lifecycle_state NOT IN ('hibernated', 'awaiting_gate'))",
+                params![lifecycle, session_id],
+            )?;
+        }
         Ok(())
     }
 
     /// Re-open a previously finalized session for a new turn.
     ///
-    /// Between turns the session is `completed` (from `close_session`), but the
-    /// orphan-child reaper (R+12) treats any completed/failed parent as "terminated"
-    /// and will cancel its children.  Call this at the start of each turn to restore
-    /// `active` so that child agents spawned during execution are not immediately
-    /// orphaned.
+    /// Between turns the session's transcript status is `completed` (from
+    /// `close_session`) and lifecycle_state is `hibernated` (from the yield
+    /// checkpoint). Call this at the start of each turn to restore `active`
+    /// in both fields so child agents spawned during execution are not
+    /// immediately orphaned (siblings of a `hibernated` parent are protected
+    /// by the lifecycle-state-based orphan reaper, but we still need a clean
+    /// slate for the new turn).
     pub fn reopen_session_transcript(&self, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE session_transcripts SET status = 'active', ended_at = NULL WHERE session_id = ?1",
+            "UPDATE session_transcripts SET status = 'active', ended_at = NULL, lifecycle_state = 'active' WHERE session_id = ?1",
             params![session_id],
         )?;
         Ok(())
+    }
+
+    /// #742: set the session lifecycle state explicitly.
+    pub fn set_session_lifecycle_state(
+        &self,
+        session_id: &str,
+        state: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session_transcripts SET lifecycle_state = ?1 WHERE session_id = ?2",
+            params![state, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// #742: read the session lifecycle state.
+    pub fn get_session_lifecycle_state(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        let state: Option<String> = conn
+            .query_row(
+                "SELECT lifecycle_state FROM session_transcripts WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(state)
     }
 
     pub fn find_transcript_by_handle(
@@ -1114,21 +1493,25 @@ impl GatewayStore {
         Ok(results)
     }
 
-    /// Find active sessions whose parent session has ended (orphan detection for R+12).
+    /// Find active or suspended sessions whose parent session has ended (orphan detection for R+12).
     ///
     /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
-    /// for each orphaned child. A child is "active" if its transcript status is 'active'
-    /// and its parent (derived from session_id path) has a terminal transcript
-    /// (`completed` or `failed`). `suspended` parents are NOT terminal (resumable).
+    /// for each orphaned child. A child is orphaned if its parent's `lifecycle_state`
+    /// is `terminated:*`. Children of `active`, `hibernated`, or `awaiting_gate`
+    /// parents are protected — the parent is expected to resume and coordinate them.
+    /// Children that are themselves already terminated are excluded.
     pub fn find_orphaned_sessions(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
+        // Select non-terminated child sessions (session_id contains '/').
+        // Pre-migration rows (lifecycle_state IS NULL) use status as fallback.
         let mut stmt = conn.prepare(
             "SELECT session_id, root_session_id, agent_id
              FROM session_transcripts
-             WHERE status = 'active'
-               AND session_id LIKE '%/%'",
+             WHERE session_id LIKE '%/%'
+               AND (lifecycle_state IS NULL AND status IN ('active', 'suspended')
+                    OR lifecycle_state IS NOT NULL AND lifecycle_state NOT LIKE 'terminated:%')",
         )?;
-        let active_children: Vec<(String, String, String, String)> = stmt
+        let children: Vec<(String, String, String, String)> = stmt
             .query_map([], |row| {
                 let sid: String = row.get(0)?;
                 let root: String = row.get(1)?;
@@ -1143,16 +1526,26 @@ impl GatewayStore {
         drop(stmt);
 
         let mut orphans = Vec::new();
-        for (child_session_id, parent_session_id, root_session_id, agent_id) in active_children {
-            let parent_status: Option<String> = conn
+        for (child_session_id, parent_session_id, root_session_id, agent_id) in children {
+            let parent_lifecycle: Option<String> = conn
                 .query_row(
-                    "SELECT status FROM session_transcripts WHERE session_id = ?1",
+                    "SELECT COALESCE(lifecycle_state,
+                        CASE status
+                            WHEN 'completed' THEN 'terminated:completed'
+                            WHEN 'closed' THEN 'terminated:completed'
+                            WHEN 'failed' THEN 'terminated:failed'
+                            ELSE 'active'
+                        END
+                     ) FROM session_transcripts WHERE session_id = ?1",
                     params![parent_session_id],
                     |row| row.get(0),
                 )
                 .ok();
-            match parent_status.as_deref() {
-                Some("completed") | Some("failed") => {
+            // #742: parent is terminated → child is orphaned, full stop.
+            // Lifecycle states active, hibernated, awaiting_gate protect children.
+            // Falls back to status-based inference for pre-migration data.
+            match parent_lifecycle.as_deref() {
+                Some(s) if s.starts_with("terminated:") => {
                     orphans.push((
                         child_session_id,
                         parent_session_id,
@@ -1379,7 +1772,7 @@ impl GatewayStore {
                  FROM live_digest_events
                  WHERE source_agent_id = ?2
                  GROUP BY root_session_id
-                 ORDER BY last_ts DESC
+                 ORDER BY last_ts DESC, root_session_id DESC
                  LIMIT ?1",
                 vec![Box::new(limit), Box::new(agent_id.unwrap().to_string())],
             ),
@@ -1387,7 +1780,7 @@ impl GatewayStore {
                 "SELECT root_session_id, source_agent_id, MAX(created_at) as last_ts
                  FROM live_digest_events
                  GROUP BY root_session_id
-                 ORDER BY last_ts DESC
+                 ORDER BY last_ts DESC, root_session_id DESC
                  LIMIT ?1",
                 vec![Box::new(limit)],
             ),
@@ -1497,5 +1890,425 @@ mod sandbox_escape_timeline_tests {
         assert!(matches!(ev.role, SessionRole::Specialist { .. }));
         assert_eq!(ev.principal.id, "coder.default");
         assert!(ev.payload.as_deref().unwrap().contains("ptrace syscall"));
+    }
+}
+
+/// Civic-health view (#772 E.2): the dual of contract-health. Tallies each
+/// agent's constitutional proposals and anomaly flags, filed vs pending.
+#[cfg(test)]
+mod civic_health_tests {
+    use super::*;
+    use crate::scheduler::gateway_store::amendment_invitations::AmendmentInvitation;
+    use crate::scheduler::gateway_store::anomaly_flags::AnomalyFlag;
+    use crate::scheduler::gateway_store::constitutional_proposals::ConstitutionalProposal;
+    use tempfile::tempdir;
+
+    fn proposal(id: &str, proposer: &str, status: &str, created_at: &str) -> ConstitutionalProposal {
+        ConstitutionalProposal {
+            proposal_id: id.to_string(),
+            proposer_agent_id: proposer.to_string(),
+            proposer_session_id: None,
+            kind: "add_right".to_string(),
+            target_id: None,
+            proposed_text: Some("agents may do X".to_string()),
+            justification: "closes a gap".to_string(),
+            evidence_json: serde_json::json!({}),
+            status: status.to_string(),
+            operator_decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            published_in_release: None,
+            created_at: created_at.to_string(),
+            sla_breached_at: None,
+        }
+    }
+
+    fn flag(id: &str, reporter: &str, status: &str, created_at: &str) -> AnomalyFlag {
+        AnomalyFlag {
+            flag_id: id.to_string(),
+            reporter_agent_id: reporter.to_string(),
+            reporter_session_id: None,
+            subject_ref: "sess-target".to_string(),
+            observation: "tool call bypassed policy check".to_string(),
+            evidence_json: serde_json::json!([]),
+            severity: "high".to_string(),
+            status: status.to_string(),
+            decision: None,
+            decision_reason: None,
+            decided_by: None,
+            decided_at: None,
+            created_at: created_at.to_string(),
+            sla_breached_at: None,
+        }
+    }
+
+    fn invitation(
+        id: &str,
+        agent: &str,
+        rule: &str,
+        status: &str,
+        created_at: &str,
+    ) -> AmendmentInvitation {
+        AmendmentInvitation {
+            invitation_id: id.to_string(),
+            agent_id: agent.to_string(),
+            rule_id: rule.to_string(),
+            denial_count: 3,
+            threshold: 3,
+            window_secs: 604800,
+            status: status.to_string(),
+            answered_proposal_id: None,
+            created_at: created_at.to_string(),
+            resolved_at: None,
+        }
+    }
+
+    /// Two agents with mixed proposal/flag statuses: filed totals count
+    /// every item; pending excludes terminal statuses but *includes*
+    /// `under_review` (a non-terminal review-start transition). A third,
+    /// more active agent proves the by-total-desc sort, and a tie between
+    /// the first two proves the agent-id-asc tiebreak.
+    #[test]
+    fn civic_health_tallies_filed_and_pending_by_agent() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        // alpha.agent: 1 proposal (under_review, non-terminal -> pending) +
+        // 2 flags (1 confirmed terminal, 1 pending non-terminal). total = 3.
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-alpha-1",
+                "alpha.agent",
+                "under_review",
+                "2026-05-01T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .insert_anomaly_flag(&flag(
+                "flag-alpha-1",
+                "alpha.agent",
+                "confirmed",
+                "2026-05-01T00:00:01Z",
+            ))
+            .unwrap();
+        store
+            .insert_anomaly_flag(&flag(
+                "flag-alpha-2",
+                "alpha.agent",
+                "pending",
+                "2026-05-01T00:00:02Z",
+            ))
+            .unwrap();
+
+        // beta.agent: 2 proposals (1 pending non-terminal, 1 approved
+        // terminal) + 1 flag (dismissed terminal). total = 3 (tie w/ alpha).
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-beta-1",
+                "beta.agent",
+                "pending",
+                "2026-05-01T00:00:03Z",
+            ))
+            .unwrap();
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-beta-2",
+                "beta.agent",
+                "approved",
+                "2026-05-01T00:00:04Z",
+            ))
+            .unwrap();
+        store
+            .insert_anomaly_flag(&flag(
+                "flag-beta-1",
+                "beta.agent",
+                "dismissed",
+                "2026-05-01T00:00:05Z",
+            ))
+            .unwrap();
+
+        // gamma.agent: 5 pending proposals, no flags. total = 5 (highest).
+        for i in 0..5 {
+            store
+                .insert_constitutional_proposal(&proposal(
+                    &format!("prop-gamma-{i}"),
+                    "gamma.agent",
+                    "pending",
+                    "2026-05-01T00:00:06Z",
+                ))
+                .unwrap();
+        }
+
+        let health = store.civic_health(None).unwrap();
+        assert_eq!(
+            health
+                .by_agent
+                .iter()
+                .map(|e| e.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gamma.agent", "alpha.agent", "beta.agent"],
+            "sorted by total-filed desc, ties broken by agent_id asc"
+        );
+
+        let alpha = health
+            .by_agent
+            .iter()
+            .find(|e| e.agent_id == "alpha.agent")
+            .unwrap();
+        assert_eq!(alpha.proposals_filed, 1);
+        assert_eq!(alpha.proposals_pending, 1); // under_review counts as pending
+        assert_eq!(alpha.flags_filed, 2);
+        assert_eq!(alpha.flags_pending, 1); // confirmed is terminal, pending is not
+        assert_eq!(alpha.invitations_issued, 0);
+        assert_eq!(alpha.invitations_open, 0);
+        assert_eq!(alpha.invitations_answered, 0);
+
+        let beta = health
+            .by_agent
+            .iter()
+            .find(|e| e.agent_id == "beta.agent")
+            .unwrap();
+        assert_eq!(beta.proposals_filed, 2);
+        assert_eq!(beta.proposals_pending, 1);
+        assert_eq!(beta.flags_filed, 1);
+        assert_eq!(beta.flags_pending, 0); // dismissed is terminal
+        assert_eq!(beta.invitations_issued, 0);
+        assert_eq!(beta.invitations_open, 0);
+        assert_eq!(beta.invitations_answered, 0);
+
+        let gamma = health
+            .by_agent
+            .iter()
+            .find(|e| e.agent_id == "gamma.agent")
+            .unwrap();
+        assert_eq!(gamma.proposals_filed, 5);
+        assert_eq!(gamma.proposals_pending, 5);
+        assert_eq!(gamma.flags_filed, 0);
+        assert_eq!(gamma.flags_pending, 0);
+        assert_eq!(gamma.invitations_issued, 0);
+        assert_eq!(gamma.invitations_open, 0);
+        assert_eq!(gamma.invitations_answered, 0);
+    }
+
+    /// #771 D.2: invitations are tallied alongside proposals/flags, with
+    /// issued/open/answered split. Expired invitations count as issued but
+    /// neither open nor answered.
+    #[test]
+    fn civic_health_tallies_invitations() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-1",
+                "agent-a",
+                "P-1.5",
+                "open",
+                "2026-05-01T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-2",
+                "agent-a",
+                "P-1.9",
+                "open",
+                "2026-05-01T00:00:01Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-3",
+                "agent-a",
+                "P-1.5",
+                "answered",
+                "2026-05-01T00:00:02Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-4",
+                "agent-a",
+                "P-7.5",
+                "expired",
+                "2026-05-01T00:00:03Z",
+            ))
+            .unwrap();
+        store
+            .insert_amendment_invitation(&invitation(
+                "ainv-5",
+                "agent-b",
+                "P-1.5",
+                "open",
+                "2026-05-01T00:00:04Z",
+            ))
+            .unwrap();
+
+        let health = store.civic_health(None).unwrap();
+        assert_eq!(health.by_agent.len(), 2);
+        let a = health.by_agent.iter().find(|e| e.agent_id == "agent-a").unwrap();
+        assert_eq!(a.invitations_issued, 4);
+        assert_eq!(a.invitations_open, 2);
+        assert_eq!(a.invitations_answered, 1);
+        let b = health.by_agent.iter().find(|e| e.agent_id == "agent-b").unwrap();
+        assert_eq!(b.invitations_issued, 1);
+        assert_eq!(b.invitations_open, 1);
+        assert_eq!(b.invitations_answered, 0);
+    }
+
+    /// `since` excludes an old item and includes a recent one, compared by
+    /// absolute instant like `contract_health`.
+    #[test]
+    fn civic_health_since_filters_by_absolute_instant() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-old",
+                "delta.agent",
+                "pending",
+                "2020-01-01T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .insert_constitutional_proposal(&proposal(
+                "prop-recent",
+                "delta.agent",
+                "pending",
+                "2026-06-01T00:00:00Z",
+            ))
+            .unwrap();
+
+        let health = store
+            .civic_health(Some("2025-01-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(health.by_agent.len(), 1);
+        assert_eq!(health.by_agent[0].proposals_filed, 1);
+        assert_eq!(health.by_agent[0].proposals_pending, 1);
+
+        let health_all = store.civic_health(None).unwrap();
+        assert_eq!(health_all.by_agent[0].proposals_filed, 2);
+    }
+
+    #[test]
+    fn civic_health_invalid_since_errors_clearly() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let err = store
+            .civic_health(Some("not-a-timestamp"))
+            .expect_err("invalid since must error");
+        assert!(
+            err.to_string().contains("invalid `since` timestamp"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+/// DISCRETION LEAK register read side (#771 D.3): "top leaks this window".
+#[cfg(test)]
+mod discretion_leak_summary_tests {
+    use super::*;
+    use crate::runtime::discretion_leak::DiscretionLeakTally;
+    use autonoetic_types::causal_chain::CausalEventRecord;
+    use tempfile::tempdir;
+
+    fn leak(seq: u64, rule: &str, kind: &str, secs_ago: i64) -> CausalEventRecord {
+        CausalEventRecord {
+            event_id: format!("leak-{seq}"),
+            agent_id: "coder.default".to_string(),
+            session_id: "sess-1".to_string(),
+            turn_id: None,
+            event_seq: seq,
+            timestamp: (chrono::Utc::now() - chrono::Duration::seconds(secs_ago)).to_rfc3339(),
+            category: "discretion_leak".to_string(),
+            action: kind.to_string(),
+            status: "recorded".to_string(),
+            enforced_rules: vec![rule.to_string()],
+            target: None,
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn summary_tallies_by_rule_and_kind_with_window() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        store.create_causal_event(&leak(1, "P-5.2", "lenient_string_coercion", 10)).unwrap();
+        store.create_causal_event(&leak(2, "P-5.2", "lenient_string_coercion", 20)).unwrap();
+        store.create_causal_event(&leak(3, "P-5.2", "fuzzy_patch_match", 30)).unwrap();
+        store.create_causal_event(&leak(4, "P-5.8", "gateway_authored_repair", 40)).unwrap();
+        // A non-leak event in the same window must not be tallied.
+        store
+            .create_causal_event(&CausalEventRecord {
+                event_id: "not-a-leak".to_string(),
+                agent_id: "coder.default".to_string(),
+                session_id: "sess-1".to_string(),
+                turn_id: None,
+                event_seq: 99,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "tool".to_string(),
+                action: "failure".to_string(),
+                status: "ERROR".to_string(),
+                enforced_rules: vec!["P-1.5".to_string()],
+                target: None,
+                payload: None,
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            })
+            .unwrap();
+
+        let all = store.discretion_leak_summary(None).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                DiscretionLeakTally {
+                    rule_id: "P-5.2".to_string(),
+                    kind: "lenient_string_coercion".to_string(),
+                    count: 2,
+                },
+                DiscretionLeakTally {
+                    rule_id: "P-5.2".to_string(),
+                    kind: "fuzzy_patch_match".to_string(),
+                    count: 1,
+                },
+                DiscretionLeakTally {
+                    rule_id: "P-5.8".to_string(),
+                    kind: "gateway_authored_repair".to_string(),
+                    count: 1,
+                },
+            ]
+        );
+
+        // Window bound: only the last 15s — one coercion event remains.
+        let since = (chrono::Utc::now() - chrono::Duration::seconds(15)).to_rfc3339();
+        let windowed = store.discretion_leak_summary(Some(&since)).unwrap();
+        assert_eq!(
+            windowed,
+            vec![DiscretionLeakTally {
+                rule_id: "P-5.2".to_string(),
+                kind: "lenient_string_coercion".to_string(),
+                count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn summary_invalid_since_errors_clearly() {
+        let temp = tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let err = store
+            .discretion_leak_summary(Some("not-a-timestamp"))
+            .expect_err("invalid since must error");
+        assert!(
+            err.to_string().contains("invalid `since` timestamp"),
+            "unexpected error: {err}"
+        );
     }
 }

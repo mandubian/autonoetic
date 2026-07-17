@@ -16,7 +16,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::network_policy::DeclarationRequirement;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::{AgentManifest, CredentialRecord, CredentialSetupStep};
-use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::capability::Capability;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -123,7 +123,7 @@ impl NativeTool for CredentialCheckTool {
                 "error_type": "permission",
                 "message": message,
                 "repair_hint": "Request CredentialAccess for this service or choose an authorized service.",
-                "error": message,
+                "error": "credential_access_requires_approval",
                 "approval_required": true,
                 "reason": format!("Access to {} credentials requires approval", args.service),
             })
@@ -299,7 +299,7 @@ impl NativeTool for CredentialRequestTool {
                 "error_type": "permission",
                 "message": message,
                 "repair_hint": "Request CredentialAccess for this service or choose an authorized service.",
-                "error": message,
+                "error": "credential_access_requires_approval",
                 "approval_required": true,
                 "reason": format!("Access to {} credentials requires approval", cred.service),
             })
@@ -424,10 +424,20 @@ impl NativeTool for CredentialRequestTool {
                         session_id: _session_id,
                         run_context: _run_context,
                         config: _config,
-                        reason: reason.clone(),
+                        context: crate::runtime::human_gate::DecisionContext::tier2(
+                            format!("credential request to {}", url_host),
+                            format!(
+                                "remote target policy not satisfied for {} (policy: {})",
+                                url_host, violation.error_type
+                            ),
+                            format!("uses stored credential for {}", url_host),
+                            "Approve if this host is an expected credential target for the agent's task; reject if the host is unexpected",
+                        ),
                         summary: format!("Credential request to {}", url_host),
                         approval_ref: None,
                         pre_validated: false,
+                        cache_backfill: None,
+                        request_id: None,
                         turn_id: None,
                     },
                 )?;
@@ -447,18 +457,19 @@ impl NativeTool for CredentialRequestTool {
                                 "summary": format!("Credential request to {}", url_host),
                                 "retry_field": "approval_ref"
                             }
-                        }).to_string());
+                        })
+                        .to_string());
                     }
                     crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                         return Ok(json!({
                             "ok": false,
-                            "error_type": violation.error_type,
+                            "error_type": "permission",
                             "message": format!(
                                 "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
                                 gate_id
                             ),
                             "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                            "error": violation.message,
+                            "error": "approval_required",
                             "approval_required": true,
                             "request_id": gate_id,
                             "suspended": true,
@@ -515,10 +526,20 @@ impl NativeTool for CredentialRequestTool {
                     session_id: _session_id,
                     run_context: _run_context,
                     config: _config,
-                    reason: reason.clone(),
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!("credential request to {}", url_host),
+                        format!(
+                            "{} is not in an approved network grant (NetworkAccess policy)",
+                            url_host
+                        ),
+                        format!("uses stored credential for {}", url_host),
+                        "Approve if this host is an expected credential target for the agent's task; reject if the host is unexpected",
+                    ),
                     summary: format!("Credential request to {}", url_host),
                     approval_ref: None,
                     pre_validated: false,
+                    cache_backfill: None,
+                    request_id: None,
                     turn_id: None,
                 },
             )?;
@@ -538,7 +559,8 @@ impl NativeTool for CredentialRequestTool {
                             "summary": format!("Credential request to {}", url_host),
                             "retry_field": "approval_ref"
                         }
-                    }).to_string());
+                    })
+                    .to_string());
                 }
                 crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
                     return Ok(json!({
@@ -549,7 +571,7 @@ impl NativeTool for CredentialRequestTool {
                             gate_id
                         ),
                         "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
-                        "error": format!("Network access denied for host: {}", url_host),
+                        "error": "network_access_denied",
                         "approval_required": true,
                         "request_id": gate_id,
                         "suspended": true,
@@ -774,24 +796,20 @@ fn skills_dir(gateway_dir: &Path) -> PathBuf {
     gateway_dir.join("skills")
 }
 
-fn validate_local_skill_path(
-    gateway_dir: &Path,
-    path_hint: &str,
-) -> anyhow::Result<PathBuf> {
+fn validate_local_skill_path(gateway_dir: &Path, path_hint: &str) -> anyhow::Result<PathBuf> {
     let base = skills_dir(gateway_dir);
     let canonical_base = base.canonicalize().unwrap_or_else(|_| base.clone());
     let candidate = if path_hint.starts_with("file://") {
         let url = url::Url::parse(path_hint)
             .map_err(|e| anyhow::anyhow!("invalid file:// skill_url: {}", e))?;
-        url.to_file_path()
-            .map_err(|_| anyhow::anyhow!("file:// skill_url must point to a local filesystem path"))?
+        url.to_file_path().map_err(|_| {
+            anyhow::anyhow!("file:// skill_url must point to a local filesystem path")
+        })?
     } else {
         let normalized = path_hint.trim_start_matches("./");
         let normalized = normalized.strip_prefix("skills/").unwrap_or(normalized);
         if !normalized.ends_with(".md") {
-            anyhow::bail!(
-                "local skill_url must be a .md file in the gateway skills/ directory"
-            );
+            anyhow::bail!("local skill_url must be a .md file in the gateway skills/ directory");
         }
         let path = PathBuf::from(normalized);
         if path.is_absolute() {
@@ -802,9 +820,7 @@ fn validate_local_skill_path(
         base.join(path)
     };
     if candidate.extension().and_then(|ext| ext.to_str()) != Some("md") {
-        anyhow::bail!(
-            "local skill_url must be a .md file in the gateway skills/ directory"
-        );
+        anyhow::bail!("local skill_url must be a .md file in the gateway skills/ directory");
     }
     let canonical_target = match std::fs::canonicalize(&candidate) {
         Ok(p) => p,
@@ -815,9 +831,7 @@ fn validate_local_skill_path(
                 canonical_base.join(&candidate)
             };
             if !resolved.starts_with(&canonical_base) {
-                anyhow::bail!(
-                    "skill_url path escapes the gateway skills/ directory"
-                );
+                anyhow::bail!("skill_url path escapes the gateway skills/ directory");
             }
             anyhow::bail!(
                 "skill file not found in gateway skills/ directory: {}",
@@ -834,7 +848,10 @@ fn validate_local_skill_path(
         let resolved_link = if link_target.is_absolute() {
             link_target
         } else {
-            canonical_target.parent().unwrap_or(&canonical_base).join(link_target)
+            canonical_target
+                .parent()
+                .unwrap_or(&canonical_base)
+                .join(link_target)
         };
         let canonical_link = match std::fs::canonicalize(&resolved_link) {
             Ok(p) => p,
@@ -1358,7 +1375,8 @@ impl SkillStep {
             t => {
                 return Err(autonoetic_types::tool_error::tagged::Tagged::validation(
                     anyhow::anyhow!("Unknown step type in skill.md onboarding: '{}'", t),
-                ).into());
+                )
+                .into());
             }
         }
     }
@@ -1591,11 +1609,13 @@ impl NativeTool for CredentialSetupTool {
                 cred_id,
                 manifest,
                 policy,
-                &store,
+                store.clone(),
                 &mut vault,
                 &vault_path,
                 _session_id,
+                _turn_id,
                 _config,
+                _run_context,
                 None,
             );
         }
@@ -1611,24 +1631,30 @@ impl NativeTool for CredentialSetupTool {
                     let url_host = host;
                     let url = url;
 
-                    let skill_url_is_approved = approved_setup_remote_url.as_deref()
+                    let skill_url_is_approved = approved_setup_remote_url
+                        .as_deref()
                         .map(|u| extract_host(u).unwrap_or_default() == url_host)
                         .unwrap_or(false);
                     if !skill_url_is_approved {
-                        let policy_violation = crate::runtime::network_policy::enforce_remote_target_policy(
-                            manifest,
-                            _agent_dir,
-                            &url_host,
-                            Some(&url),
-                            DeclarationRequirement::Required,
-                        ).err().map(|v| v.error_type.to_string())
-                        .or_else(|| {
-                            if url_host.is_empty() || !policy.can_connect_net(&url_host).is_allowed() {
-                                Some("network_access_denied".to_string())
-                            } else {
-                                None
-                            }
-                        });
+                        let policy_violation =
+                            crate::runtime::network_policy::enforce_remote_target_policy(
+                                manifest,
+                                _agent_dir,
+                                &url_host,
+                                Some(&url),
+                                DeclarationRequirement::Required,
+                            )
+                            .err()
+                            .map(|v| v.error_type.to_string())
+                            .or_else(|| {
+                                if url_host.is_empty()
+                                    || !policy.can_connect_net(&url_host).is_allowed()
+                                {
+                                    Some("network_access_denied".to_string())
+                                } else {
+                                    None
+                                }
+                            });
 
                         if let Some(violation_type) = policy_violation {
                             let action = ScheduledAction::CredentialRequest {
@@ -1662,16 +1688,29 @@ impl NativeTool for CredentialSetupTool {
                                     session_id: _session_id,
                                     run_context: _run_context,
                                     config: _config,
-                                    reason: reason.clone(),
+                                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                                        format!("fetch skill.md from {}", url_host),
+                                        format!(
+                                            "remote target policy not satisfied for {} (policy: {})",
+                                            url_host, violation_type
+                                        ),
+                                        format!("downloads agent skill manifest from {}", url_host),
+                                        "Approve if this host is the expected source of the agent's skill manifest; reject if the host is unexpected",
+                                    ),
                                     summary: format!("Fetch skill.md from {}", url_host),
                                     approval_ref: None,
                                     pre_validated: false,
+                                    cache_backfill: None,
+                        request_id: None,
                         turn_id: None,
                                 },
                             )?;
                             match gate_result {
                                 crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                                crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                                crate::runtime::human_gate::GateResult::AlreadyPending {
+                                    gate_id,
+                                    ..
+                                } => {
                                     return Ok(json!({
                                         "ok": false,
                                         "approval_required": true,
@@ -1687,7 +1726,10 @@ impl NativeTool for CredentialSetupTool {
                                         }
                                     }).to_string());
                                 }
-                                crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                                crate::runtime::human_gate::GateResult::Suspended {
+                                    gate_id,
+                                    ..
+                                } => {
                                     return Ok(json!({
                                         "ok": false,
                                         "error_type": violation_type,
@@ -1794,8 +1836,7 @@ impl NativeTool for CredentialSetupTool {
                 credential: None,
                 onboarding: None,
             });
-            let resolved_base_url = base_url
-                .or_else(|| autonoetic.base_url.clone());
+            let resolved_base_url = base_url.or_else(|| autonoetic.base_url.clone());
             let cred_spec = autonoetic.credential.unwrap_or(SkillCredentialSpec {
                 service: None,
                 inject_as: None,
@@ -1809,7 +1850,13 @@ impl NativeTool for CredentialSetupTool {
             let allowed_hosts = cred_spec
                 .allowed_hosts
                 .or_else(|| args.allowed_hosts.clone())
-                .unwrap_or_else(|| if url_host.is_empty() { vec![] } else { vec![url_host.clone()] });
+                .unwrap_or_else(|| {
+                    if url_host.is_empty() {
+                        vec![]
+                    } else {
+                        vec![url_host.clone()]
+                    }
+                });
 
             let raw_steps = autonoetic.onboarding.map(|o| o.steps).unwrap_or_default();
             let mut steps: Vec<CredentialSetupStep> = Vec::with_capacity(raw_steps.len());
@@ -1898,7 +1945,8 @@ impl NativeTool for CredentialSetupTool {
             } = step
             {
                 let host = extract_host(url)?;
-                let step_url_is_approved = approved_setup_remote_url.as_deref()
+                let step_url_is_approved = approved_setup_remote_url
+                    .as_deref()
                     .map(|u| extract_host(u).unwrap_or_default() == host)
                     .unwrap_or(false);
                 if !step_url_is_approved {
@@ -1921,7 +1969,11 @@ impl NativeTool for CredentialSetupTool {
                         });
 
                     if let Some(violation_type) = policy_violation {
-                        let display_host = if host.is_empty() { "<empty host>" } else { &host };
+                        let display_host = if host.is_empty() {
+                            "<empty host>"
+                        } else {
+                            &host
+                        };
                         let action = ScheduledAction::CredentialRequest {
                             credential_id: args.credential_id.clone().unwrap_or_default(),
                             url: url.clone(),
@@ -1953,16 +2005,29 @@ impl NativeTool for CredentialSetupTool {
                                 session_id: _session_id,
                                 run_context: _run_context,
                                 config: _config,
-                                reason: reason.clone(),
+                                context: crate::runtime::human_gate::DecisionContext::tier2(
+                                    format!("credential setup API call to {}", display_host),
+                                    format!(
+                                        "remote target policy not satisfied for {} (policy: {})",
+                                        display_host, violation_type
+                                    ),
+                                    format!("registers/sets a credential against {}", display_host),
+                                    "Approve if this host is the expected credential-setup endpoint for the agent's task; reject if the host is unexpected",
+                                ),
                                 summary: format!("Credential setup API call to {}", display_host),
                                 approval_ref: None,
                                 pre_validated: false,
+                                cache_backfill: None,
+                        request_id: None,
                         turn_id: None,
                             },
                         )?;
                         match gate_result {
                             crate::runtime::human_gate::GateResult::Cleared { .. } => {}
-                            crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. } => {
+                            crate::runtime::human_gate::GateResult::AlreadyPending {
+                                gate_id,
+                                ..
+                            } => {
                                 return Ok(json!({
                                     "ok": false,
                                     "approval_required": true,
@@ -1978,7 +2043,9 @@ impl NativeTool for CredentialSetupTool {
                                     }
                                 }).to_string());
                             }
-                            crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                            crate::runtime::human_gate::GateResult::Suspended {
+                                gate_id, ..
+                            } => {
                                 return Ok(json!({
                                     "ok": false,
                                     "error_type": violation_type,
@@ -2043,11 +2110,13 @@ impl NativeTool for CredentialSetupTool {
             &credential_id,
             manifest,
             policy,
-            &store,
+            store.clone(),
             &mut vault,
             &vault_path,
             _session_id,
+            _turn_id,
             _config,
+            _run_context,
             setup_label.as_deref(),
         )
     }
@@ -2071,11 +2140,13 @@ fn execute_steps(
     credential_id: &str,
     manifest: &AgentManifest,
     _policy: &PolicyEngine,
-    store: &crate::scheduler::gateway_store::GatewayStore,
+    store: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
     vault: &mut crate::vault::Vault,
     vault_path: &Path,
     session_id: Option<&str>,
+    turn_id: Option<&str>,
     config: Option<&autonoetic_types::config::GatewayConfig>,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     label: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut secret_names: Vec<String> = Vec::new();
@@ -2237,12 +2308,9 @@ fn execute_steps(
                 message,
                 secret_fields,
             } => {
-                // Create an approval request (existing behavior unchanged).
-                let request_id = format!(
-                    "cred_setup_{}_{}",
-                    credential_id,
-                    uuid::Uuid::new_v4().to_string().replace('-', "")
-                );
+                // Route the credential prompt through GateService so it participates
+                // in typed DecisionContext enforcement, dedup, and the root-scoped
+                // identical-action join (#724).
                 let approval_action = ScheduledAction::CredentialPrompt {
                     service: service.to_string(),
                     credential_id: credential_id.to_string(),
@@ -2254,37 +2322,91 @@ fn execute_steps(
                         "expires_at": expires_at,
                     })),
                 };
-                let mut approval_req = ApprovalRequest {
-                    request_id: request_id.clone(),
-                    agent_id: manifest.agent.id.clone(),
-                    session_id: session_id.unwrap_or("").to_string(),
-                    action: approval_action.clone(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    reason: Some(format!(
-                        "Credential setup for '{}' requires human input for secret fields",
-                        service
-                    )),
-                    evidence_ref: None,
-                    root_session_id: None,
-                    workflow_id: None,
-                    task_id: None,
-                    status: None,
-                    decided_at: None,
-                    decided_by: None,
-                    decision_reason: None,
-                    approval_level: config
-                        .map(|c| {
-                            crate::scheduler::approval::resolve_approval_level(c, &approval_action)
+
+                let field_names: Vec<&str> = secret_fields
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect();
+
+                let gate = crate::runtime::human_gate::GateService::new(store.clone());
+                let gate_result = gate.check(crate::runtime::human_gate::GateRequest {
+                    kind: crate::runtime::human_gate::GateKind::Approval {
+                        action: approval_action.clone(),
+                        targets: Vec::new(),
+                        match_strategy: crate::runtime::human_gate::MatchStrategy::ExactPayload,
+                    },
+                    manifest,
+                    session_id,
+                    run_context,
+                    config,
+                    context: crate::runtime::human_gate::DecisionContext::tier2(
+                        format!("Credential setup for '{}'", service),
+                        "Human input required for secret fields",
+                        format!("Prompt asks for: {}", field_names.join(", ")),
+                        "Approve to allow the credential setup prompt; the operator must still provide the requested secret fields",
+                    ),
+                    summary: format!("Credential setup prompt for '{}'", service),
+                    approval_ref: None,
+                    request_id: None,
+                    pre_validated: false,
+                    cache_backfill: None,
+                    turn_id,
+                })?;
+
+                let request_id = match &gate_result {
+                    crate::runtime::human_gate::GateResult::AlreadyPending { gate_id, .. }
+                    | crate::runtime::human_gate::GateResult::Suspended { gate_id, .. } => {
+                        gate_id.clone()
+                    }
+                    crate::runtime::human_gate::GateResult::Cleared { .. }
+                    | crate::runtime::human_gate::GateResult::PolicyAllowed => {
+                        // An identical prompt was already approved. If the credential
+                        // now exists we can resume immediately; otherwise the
+                        // operator must provide the secrets directly — there is no
+                        // pending approval row to attach them to, so synthesizing a
+                        // fake request_id and reporting `approval_required: true`
+                        // would dead-end the workflow (#724 Part B review).
+                        if let Some(cred) = store.get_credential(credential_id)? {
+                            return Ok(json!({
+                                "ok": true,
+                                "credential_id": cred.credential_id,
+                                "service": cred.service,
+                                "secrets_stored": 1,
+                                "resumed_from_approval": true,
+                            })
+                            .to_string());
+                        }
+                        // No approval row exists and none will be minted. Suspend
+                        // for direct secret input rather than approval — do NOT
+                        // report a request_id or approval_required here.
+                        step_results.push(json!({
+                            "step": i,
+                            "step_type": "user_prompt",
+                            "message": message,
+                            "secret_fields": secret_fields,
+                            "status": "awaiting_secret_input",
+                        }));
+                        vault.persist_to_file(vault_path)?;
+                        return Ok(json!({
+                            "ok": false,
+                            "error_type": "permission",
+                            "message": "credential.setup suspended: equivalent prompt was already cleared but the secret is still missing",
+                            "repair_hint": format!(
+                                "Ask the operator for the requested secret field(s) ({}), then call \
+                                 credential.setup with credential_id + resume_vars to provide them.",
+                                field_names.join(", ")
+                            ),
+                            "suspended": true,
+                            "approval_required": false,
+                            "request_id": serde_json::Value::Null,
+                            "credential_id": credential_id,
+                            "service": service,
+                            "steps": step_results,
+                            "reason": "UserPrompt step cleared by GateService but secret fields are still empty",
                         })
-                        .unwrap_or(ApprovalLevel::Operator),
-                    similar_to_request_id: None,
-                    similarity_score: None,
-                    min_dwell_ms: None,
-                    confirm_phrase: None,
-            code_excerpts: None,
-            risk_summary: None,
+                        .to_string());
+                    }
                 };
-                store.create_approval(&mut approval_req)?;
 
                 step_results.push(json!({
                     "step": i,

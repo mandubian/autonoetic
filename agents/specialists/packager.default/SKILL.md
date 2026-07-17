@@ -15,12 +15,14 @@ metadata:
       id: "packager.default"
       name: "Packager Default"
       description: "Resolves and packages build-time dependencies into artifact layers."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.1
+    open_web: true
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["content.", "artifact.", "sandbox."]
+        allowed: ["content_", "artifact_", "sandbox_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "pip ", "npm install", "bash -c ", "sh -c "]
       - type: "NetworkAccess"
@@ -109,6 +111,8 @@ When installing dependencies, you MUST pass `capture_paths` to `sandbox_exec` to
 ```
 
 The response will contain `captured_layers` with `layer_id` and `digest`. **Copy these values exactly.**
+
+**Gateway-injected packages are NEVER installed by pip:** `autonoetic_sdk` is provided by the runtime via `PYTHONPATH`. Before installing, read `requirements.txt` and remove any line containing `autonoetic_sdk`. Do not install it, do not capture it, and do not include it as a layer.
 
 | Language | Command | capture_paths |
 |----------|---------|---------------|

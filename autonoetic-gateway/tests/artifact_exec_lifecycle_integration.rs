@@ -5,7 +5,7 @@
 //! 2. Classify coverage → Concrete (import + URL allows reuse)
 //! 3. Fingerprint stability → same artifact_id produces same fingerprint
 //! 4. Cache hit on second run → approval reuse works
-//! 5. artifact.exec tool is registered and gated by CodeExecution
+//! 5. artifact_exec tool is registered and gated by ArtifactExecution
 
 mod support;
 
@@ -20,7 +20,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use tempfile::tempdir;
 
-fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
+fn manifest_with_artifact_execution(agent_id: &str) -> AgentManifest {
     AgentManifest {
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
@@ -35,12 +35,10 @@ fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "Test agent".to_string(),
+            singleton: false,
         },
         capabilities: vec![
-            Capability::CodeExecution {
-                patterns: vec!["*".to_string()],
-                commands: vec![],
-            },
+            Capability::ArtifactExecution,
             Capability::NetworkAccess {
                 hosts: vec!["*".to_string()],
             },
@@ -59,8 +57,10 @@ fn manifest_with_code_execution(agent_id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -80,11 +80,9 @@ fn manifest_without_network() -> AgentManifest {
             id: "executor.default".to_string(),
             name: "Executor".to_string(),
             description: "Test executor".to_string(),
+            singleton: false,
         },
-        capabilities: vec![Capability::CodeExecution {
-            patterns: vec!["*".to_string()],
-            commands: vec![],
-        }],
+        capabilities: vec![Capability::ArtifactExecution],
         llm_overrides: None,
         llm_preset: None,
         llm_config: None,
@@ -99,8 +97,10 @@ fn manifest_without_network() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -175,19 +175,19 @@ fn test_artifact_fingerprint_stable_across_shell_wrappers() {
         &["wttr.in".to_string()],
         "python3 -c 'import requests; requests.get(\"https://wttr.in/Paris\")'",
         Some("art-weather-abc"),
-    );
+        &manifest.capabilities,    );
     let fp_shell_v2 = compute_fingerprint(
         &manifest.agent.id,
         &["wttr.in".to_string()],
         "python3 /tmp/weather.py Paris",
         Some("art-weather-abc"),
-    );
+        &manifest.capabilities,    );
     let fp_shell_v3 = compute_fingerprint(
         &manifest.agent.id,
         &["wttr.in".to_string()],
         "python3 /tmp/weather.py London",
         Some("art-weather-abc"),
-    );
+        &manifest.capabilities,    );
 
     assert_eq!(
         fp_shell_v1, fp_shell_v2,
@@ -208,13 +208,13 @@ fn test_artifact_fingerprint_differs_across_artifacts() {
         &["wttr.in".to_string()],
         "code",
         Some("art-weather-v1"),
-    );
+        &manifest.capabilities,    );
     let fp_art_b = compute_fingerprint(
         &manifest.agent.id,
         &["wttr.in".to_string()],
         "code",
         Some("art-weather-v2"),
-    );
+        &manifest.capabilities,    );
 
     assert_ne!(
         fp_art_a, fp_art_b,
@@ -239,7 +239,7 @@ fn test_lifecycle_cache_reuse_simulated() {
         &targets,
         WEATHER_ARTIFACT_CODE,
         Some("art-weather-lifecycle"),
-    );
+        &manifest.capabilities,    );
 
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache create");
     let now = chrono::Utc::now().to_rfc3339();
@@ -264,7 +264,7 @@ fn test_lifecycle_cache_reuse_simulated() {
         &["wttr.in".to_string()],
         "python3 /tmp/weather.py London",
         Some("art-weather-lifecycle"),
-    );
+        &manifest.capabilities,    );
 
     assert_eq!(
         fingerprint_first, fingerprint_second,
@@ -284,12 +284,29 @@ fn test_artifact_exec_tool_registered_and_gated() {
     let registry = default_registry();
     assert!(registry.has_tool("artifact_exec"));
 
-    let manifest = manifest_with_code_execution("coder.default");
+    let manifest = manifest_with_artifact_execution("coder.default");
     let defs = registry.available_definitions(&manifest);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
         names.contains(&"artifact_exec"),
-        "artifact.exec should be available with CodeExecution"
+        "artifact_exec should be available with ArtifactExecution"
+    );
+
+    let shell_only = AgentManifest {
+        capabilities: vec![Capability::CodeExecution {
+            patterns: vec!["*".to_string()],
+            commands: vec![],
+        }],
+        ..manifest_with_artifact_execution("executor.shell-only")
+    };
+    let shell_names: Vec<String> = registry
+        .available_definitions(&shell_only)
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    assert!(
+        !shell_names.iter().any(|name| name == "artifact_exec"),
+        "CodeExecution alone must not grant artifact_exec"
     );
 
     let manifest_no_exec = AgentManifest {
@@ -306,6 +323,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
             id: "researcher.default".to_string(),
             name: "Researcher".to_string(),
             description: "No code execution".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
@@ -324,14 +342,142 @@ fn test_artifact_exec_tool_registered_and_gated() {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     };
     let defs = registry.available_definitions(&manifest_no_exec);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
         !names.contains(&"artifact_exec"),
-        "artifact.exec should NOT be available without CodeExecution"
+        "artifact_exec should NOT be available without ArtifactExecution or a legacy promotion exec gate role"
+    );
+}
+
+fn unit_test_runner_gate_manifest() -> AgentManifest {
+    AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "acme.custom_unit_test_runner".to_string(),
+            name: "Custom Unit Test Runner".to_string(),
+            description: "Federation unit-test gate".to_string(),
+            singleton: false,
+        },
+        capabilities: vec![
+            Capability::SandboxFunctions {
+                allowed: vec![
+                    "artifact_inspect".to_string(),
+                    "artifact_exec".to_string(),
+                    "promotion_".to_string(),
+                ],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            },
+        ],
+        llm_overrides: None,
+        llm_preset: None,
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+        agentskills_import: None,
+        compression: None,
+        open_web: false,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    }
+}
+
+#[test]
+fn test_artifact_exec_available_for_promotion_gate_runner_without_evaluation() {
+    let registry = default_registry();
+    let manifest = unit_test_runner_gate_manifest();
+    let defs = registry.available_definitions(&manifest);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.contains(&"artifact_exec"),
+        "artifact_exec must be available for promotion exec gate declared in SandboxFunctions"
+    );
+    assert!(
+        !names.contains(&"eval_suite_publish"),
+        "promotion gate runner must not gain eval-suite tools via Evaluation cap"
+    );
+    assert!(
+        !names.contains(&"sandbox_exec"),
+        "promotion gate runner must not gain sandbox_exec without CodeExecution"
+    );
+}
+
+#[test]
+fn test_artifact_exec_not_available_for_static_evaluator() {
+    let registry = default_registry();
+    let manifest = AgentManifest {
+        version: "1.0".to_string(),
+        runtime: RuntimeDeclaration {
+            engine: "autonoetic".to_string(),
+            gateway_version: "0.1.0".to_string(),
+            sdk_version: "0.1.0".to_string(),
+            runtime_type: "stateful".to_string(),
+            sandbox: "bubblewrap".to_string(),
+            runtime_lock: "runtime.lock".to_string(),
+        },
+        agent: AgentIdentity {
+            id: "static_evaluator.default".to_string(),
+            name: "Static Evaluator".to_string(),
+            description: "Static federation gate".to_string(),
+            singleton: false,
+        },
+        capabilities: vec![
+            Capability::SandboxFunctions {
+                allowed: vec!["promotion_".to_string()],
+            },
+            Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            },
+        ],
+        llm_overrides: None,
+        llm_preset: None,
+        llm_config: None,
+        limits: None,
+        background: None,
+        disclosure: None,
+        io: None,
+        middleware: None,
+        execution_mode: Default::default(),
+        script_entry: None,
+        script_input_mode: Default::default(),
+        gateway_url: None,
+        gateway_token: None,
+        allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+        agentskills_import: None,
+        compression: None,
+        open_web: false,
+        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+    };
+    let defs = registry.available_definitions(&manifest);
+    let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        !names.contains(&"artifact_exec"),
+        "static_evaluator must not gain artifact_exec via promotion verdict list"
     );
 }

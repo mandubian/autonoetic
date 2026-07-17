@@ -79,6 +79,25 @@ pub enum CapabilityDeltaGateMode {
     Bootstrap,
 }
 
+/// Smoke-test gate mode for new agent installation.
+///
+/// **Deprecated (#578):** promotion now requires smoke tests unconditionally for
+/// capability-bearing agents (`NetworkAccess` / `CodeExecution`). This field is
+/// retained for backwards-compatible YAML only and has no effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInstallSmokeTestMode {
+    /// Ask the operator whether to run a smoke test before promoting.
+    /// If the operator declines or the test fails, the agent is not installed.
+    #[default]
+    Ask,
+    /// Require a successful smoke test for every new agent promotion.
+    /// `agent_revision_promote` will reject the promotion without evidence.
+    Required,
+    /// Skip the smoke-test gate (legacy behavior).
+    Skip,
+}
+
 /// Configuration for schema enforcement on agent.spawn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaEnforcementConfig {
@@ -95,6 +114,10 @@ pub struct SchemaEnforcementConfig {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_plan_auto_approver() -> String {
+    "auto-approve".to_string()
 }
 
 impl Default for SchemaEnforcementConfig {
@@ -180,6 +203,23 @@ pub struct DigestAgentConfig {
 
 fn default_digest_min_turns() -> u32 {
     2
+}
+
+/// Structured live/session report files under `.gateway/sessions/<id>/`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionReportConfig {
+    /// When true, rewrite `session_overview.html` on every report update.
+    /// Default `false` — HTML is written on session close only (lower CPU/IO).
+    #[serde(default)]
+    pub live_html_on_update: bool,
+}
+
+impl Default for SessionReportConfig {
+    fn default() -> Self {
+        Self {
+            live_html_on_update: false,
+        }
+    }
 }
 
 impl Default for DigestAgentConfig {
@@ -359,6 +399,7 @@ fn default_improve_high_blast_radius_capability_kinds() -> Vec<String> {
         "SandboxFunctions".to_string(),
         "NetworkAccess".to_string(),
         "CodeExecution".to_string(),
+        "ArtifactExecution".to_string(),
         "CredentialAccess".to_string(),
         "EmergencyStop".to_string(),
         "AgentRevision".to_string(),
@@ -415,6 +456,11 @@ pub struct AutoLearningConfig {
     /// Default: every 4 hours ("0 */4 * * *").
     #[serde(default = "default_curation_schedule")]
     pub curation_schedule: String,
+
+    /// Score wake-time memory priming (context.rs) against the incoming task
+    /// text (Jaccard token overlap) instead of pure recency. Default: true.
+    #[serde(default = "default_true")]
+    pub task_matched_recall: bool,
 }
 
 fn default_auto_learning_enabled() -> bool {
@@ -431,6 +477,7 @@ impl Default for AutoLearningConfig {
             enabled: default_auto_learning_enabled(),
             quality_signals: default_auto_learning_enabled(),
             curation_schedule: default_curation_schedule(),
+            task_matched_recall: default_true(),
         }
     }
 }
@@ -760,12 +807,27 @@ impl Default for ConstitutionConfig {
     }
 }
 
-fn default_constitution_source_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.06.08/constitution.md")
+/// The single source of truth for the active ratified constitution version.
+///
+/// On a version bump, create `docs/constitution/versions/{VERSION}/`
+/// (`constitution.md` + `RATIFY.md`), update this constant, and re-run
+/// `docs/constitution/recompute_lock.py --version {VERSION}` — that one script
+/// re-signs the lock **and** rewrites `docs/constitution/CURRENT`, so the
+/// default paths, the `CURRENT` pointer, and the lock-inventory tests all stay
+/// in sync from this one edit. The guard test
+/// `current_file_matches_active_constitution_version` fails CI if the two drift.
+pub const ACTIVE_CONSTITUTION_VERSION: &str = "2026.07.08";
+
+pub fn default_constitution_source_path() -> PathBuf {
+    PathBuf::from(format!(
+        "docs/constitution/versions/{ACTIVE_CONSTITUTION_VERSION}/constitution.md"
+    ))
 }
 
-fn default_constitution_lock_path() -> PathBuf {
-    PathBuf::from("docs/constitution/versions/2026.06.08/gateway-constitution.lock.json")
+pub fn default_constitution_lock_path() -> PathBuf {
+    PathBuf::from(format!(
+        "docs/constitution/versions/{ACTIVE_CONSTITUTION_VERSION}/gateway-constitution.lock.json"
+    ))
 }
 
 fn default_require_constitution_signature() -> bool {
@@ -822,6 +884,24 @@ impl Default for FederationConstitutionConfig {
 
 fn default_allow_missing_peer_constitution_digest() -> bool {
     true
+}
+
+/// Action taken by the stuck-task sweeper when a `Running` task has a stale
+/// heartbeat / no progress and no completion evidence (session manifest,
+/// digest, checkpoint, or implicit artifact).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StuckTaskNoEvidenceAction {
+    /// Resolve the stuck task as `Failed` and finalize its session as failed.
+    Fail,
+    /// Preserve legacy behavior: resolve the stuck task as `Succeeded`.
+    Succeed,
+}
+
+impl Default for StuckTaskNoEvidenceAction {
+    fn default() -> Self {
+        StuckTaskNoEvidenceAction::Fail
+    }
 }
 
 /// Top-level Gateway daemon configuration.
@@ -948,6 +1028,11 @@ pub struct GatewayConfig {
     #[serde(default = "default_true")]
     pub require_operator_approval_for_new_agents: bool,
 
+    /// **Deprecated (#578):** ignored — smoke-test requirement is derived from the
+    /// candidate revision's declared capabilities. Retained for YAML compatibility.
+    #[serde(default)]
+    pub agent_install_smoke_test: AgentInstallSmokeTestMode,
+
     /// Optional per-session budgets (LLM rounds, tools, tokens, wall clock).
     #[serde(default)]
     pub session_budget: SessionBudgetConfig,
@@ -958,10 +1043,38 @@ pub struct GatewayConfig {
     pub root_session_budget: RootSessionBudgetConfig,
 
     /// Maximum seconds a workflow task may remain in `AwaitingApproval` before it is
-    /// automatically marked `Failed`. Set to 0 to disable (not recommended for production).
+    /// automatically marked `Stale`. Set to 0 to disable (not recommended for production).
+    /// A `Stale` task preserves its checkpoint (the approval can still be resolved later)
+    /// and counts as terminal for workflow joins, but is visibly not `Failed`.
     /// Default: 600 (10 minutes).
     #[serde(default = "default_approval_timeout_secs")]
     pub approval_timeout_secs: u64,
+
+    /// Maximum seconds a **standalone** (non-workflow) approval may remain pending
+    /// before it is flagged as stale. Unlike workflow tasks, a stale standalone
+    /// approval is NOT automatically cancelled — it is surfaced as stale in
+    /// `operator.pending` so operators can resolve it. Set to 0 to disable.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_standalone_approval_timeout_secs")]
+    pub standalone_approval_timeout_secs: u64,
+
+    /// Maximum seconds a user interaction may remain pending before it is
+    /// automatically marked `expired`. Set to 0 to disable.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_interaction_timeout_secs")]
+    pub interaction_timeout_secs: u64,
+
+    /// Maximum seconds an escalation may remain pending before it is
+    /// automatically marked `stale`. Set to 0 to disable.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_escalation_timeout_secs")]
+    pub escalation_timeout_secs: u64,
+
+    /// Maximum seconds a plan frame may remain in `awaiting_approval` before
+    /// it is automatically marked `stale`. Set to 0 to disable.
+    /// Default: 86400 (24 hours).
+    #[serde(default = "default_plan_frame_timeout_secs")]
+    pub plan_frame_timeout_secs: u64,
 
     /// Maximum number of concurrent pending approvals per root_session_id (P-7.17).
     /// When a new approval request would push the count above this cap, the insert is
@@ -976,6 +1089,17 @@ pub struct GatewayConfig {
     /// Default: 50.
     #[serde(default = "default_max_pending_escalations_per_root")]
     pub max_pending_escalations_per_root: usize,
+
+    /// Maximum number of concurrent un-adjudicated anomaly flags
+    /// (`pending`/`under_review`) per reporter agent — the Ri-0.18 spam
+    /// triage bound (#770). `anomaly_flag` intake is capability-free, so a
+    /// prompt-injected reporter could otherwise flood the review queue. A
+    /// filing that would push the count above this cap is rejected loudly
+    /// with `anomaly_flag_flood` (never silently dropped); terminal
+    /// adjudications (confirmed/dismissed/deferred) free capacity.
+    /// Set to 0 to disable (not recommended). Default: 50.
+    #[serde(default = "default_max_pending_anomaly_flags_per_reporter")]
+    pub max_pending_anomaly_flags_per_reporter: usize,
 
     /// Default TTL in seconds for auto-generated session approval grants.
     /// When an approval is resolved and a grant is auto-inserted without an
@@ -1024,6 +1148,13 @@ pub struct GatewayConfig {
     #[serde(default = "default_stuck_task_timeout_secs_val")]
     pub stuck_task_timeout_secs: Option<u64>,
 
+    /// What the stuck-task sweeper should do when a `Running` task has no completion
+    /// evidence and no fresh heartbeat. `fail` (default) resolves the task as `Failed`
+    /// and emits a `task.stuck` anomaly event. `succeed` preserves legacy behavior and
+    /// force-completes it as `Succeeded`.
+    #[serde(default)]
+    pub stuck_task_no_evidence_action: StuckTaskNoEvidenceAction,
+
     /// Evidence mode configuration.
     /// Controls how much tool/LLM execution data is saved to evidence files for debugging.
     /// "full": all tool results and LLM completions (default for development)
@@ -1031,6 +1162,10 @@ pub struct GatewayConfig {
     /// "off": no evidence files (causal_events DB still captures everything)
     #[serde(default)]
     pub evidence_mode: String,
+
+    /// Live/session structured report files (`session_overview.md`, `session_report.*`).
+    #[serde(default)]
+    pub session_report: SessionReportConfig,
 
     /// Optional post-session digest (narrative + extracted memories). Off by default — enable in config.
     #[serde(default)]
@@ -1070,6 +1205,12 @@ pub struct GatewayConfig {
     /// in agent metadata before returning SpawnResult to the caller.
     #[serde(default)]
     pub response_validation: ResponseValidationConfig,
+
+    /// Optional validation-waiver workflow (#333).
+    /// Disabled by default; enable to let operators skip advisory validations
+    /// through a TUI picklist or `/waive` command.
+    #[serde(default)]
+    pub validation_waivers: ValidationWaiversConfig,
 
     /// Sandbox (bubblewrap) isolation overrides.
     /// Env overrides are ignored unless AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES=true.
@@ -1122,6 +1263,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub decider_obligations: DeciderObligationsConfig,
 
+    /// Mechanical amendment invitations from denial telemetry (#771 D.2).
+    #[serde(default)]
+    pub amendment_invitations: AmendmentInvitationConfig,
+
     /// Approval level / escalation settings.
     #[serde(default)]
     pub approval_levels: ApprovalLevelConfig,
@@ -1140,6 +1285,19 @@ pub struct GatewayConfig {
     /// legacy immediate-return behaviour. Default: 30.
     #[serde(default = "default_workflow_wait_secs")]
     pub default_workflow_wait_secs: u64,
+
+    /// Server-side total wall-clock budget for a single `workflow.wait` call
+    /// (issue #702). When a wait chunk (`timeout_secs`, default
+    /// `default_workflow_wait_secs`) elapses with tasks still running, the
+    /// gateway re-issues the wait internally — without returning to the LLM —
+    /// until all watched task IDs reach a terminal state or this total budget
+    /// is exhausted. This eliminates the expensive `wait → timeout → full LLM
+    /// round → wait` churn where the model re-reads the whole context only to
+    /// re-issue the same wait. Callers may lower it per-call via `max_wait_secs`.
+    /// Set equal to `default_workflow_wait_secs` (or 0) to disable
+    /// auto-extension. Default: 300 (5 minutes).
+    #[serde(default = "default_workflow_wait_max_total_secs")]
+    pub workflow_wait_max_total_secs: u64,
 
     #[serde(default)]
     pub hooks: Vec<crate::hooks::HookConfig>,
@@ -1171,6 +1329,21 @@ pub struct GatewayConfig {
     /// Default: false (drift is fatal).
     #[serde(default)]
     pub allow_runtime_lock_drift: bool,
+
+    /// Auto-approve a PlanFrame the moment it is proposed, instead of waiting for
+    /// an authority to approve it. A convenience for local/dev and autonomous
+    /// runs where no operator is in the loop. Default: false — plans await an
+    /// authority (separation of powers: agents propose, an authority disposes).
+    /// The approval is recorded under `plan_auto_approver` so the causal chain
+    /// shows it was an automatic decision, not a human/agent authority.
+    #[serde(default)]
+    pub plan_auto_approve: bool,
+
+    /// Identity recorded as the approver when `plan_auto_approve` is enabled.
+    /// Default: "auto-approve" — documents in the audit trail that approval was
+    /// automatic rather than a deliberate authority decision.
+    #[serde(default = "default_plan_auto_approver")]
+    pub plan_auto_approver: String,
 
     /// When true, allow revision creation to proceed without a gateway signature
     /// when the gateway identity key is unavailable (e.g. first boot on a read-only
@@ -1314,6 +1487,12 @@ pub struct PromotionGovernorConfig {
     /// streak. Default: 6.
     #[serde(default = "default_promotion_governor_eval_regression_lookback")]
     pub eval_regression_lookback: usize,
+
+    /// Maximum number of rejected promotion attempts for the same
+    /// `(alias, content_digest)` before further attempts are blocked until an
+    /// operator ack resets the counter (issue #720). Default: 3.
+    #[serde(default = "default_promotion_governor_max_promotion_attempts_per_revision")]
+    pub max_promotion_attempts_per_revision: usize,
 }
 
 impl Default for PromotionGovernorConfig {
@@ -1325,6 +1504,8 @@ impl Default for PromotionGovernorConfig {
             flapping_lookback: default_promotion_governor_flapping_lookback(),
             eval_regression_streak: default_promotion_governor_eval_regression_streak(),
             eval_regression_lookback: default_promotion_governor_eval_regression_lookback(),
+            max_promotion_attempts_per_revision:
+                default_promotion_governor_max_promotion_attempts_per_revision(),
         }
     }
 }
@@ -1382,6 +1563,10 @@ fn default_promotion_governor_eval_regression_streak() -> usize {
 
 fn default_promotion_governor_eval_regression_lookback() -> usize {
     6
+}
+
+fn default_promotion_governor_max_promotion_attempts_per_revision() -> usize {
+    3
 }
 
 fn default_fast_scheduler_enabled() -> bool {
@@ -1560,18 +1745,78 @@ pub struct DeciderObligationsConfig {
     /// Require a motivation for BLOCKING-tier decisions. Default: true.
     #[serde(default = "default_decider_obligations_enabled")]
     pub enabled: bool,
+
+    /// Adjudication SLA in seconds (#771 D.1): a constitutional proposal
+    /// (O-6) or anomaly flag (O-7) still un-adjudicated past this deadline is
+    /// flagged as an SLA breach (does not change status). `0` disables the
+    /// check. Default: 7 days.
+    #[serde(default = "default_adjudication_sla_secs")]
+    pub adjudication_sla_secs: u64,
 }
 
 impl Default for DeciderObligationsConfig {
     fn default() -> Self {
         Self {
             enabled: default_decider_obligations_enabled(),
+            adjudication_sla_secs: default_adjudication_sla_secs(),
         }
     }
 }
 
 fn default_decider_obligations_enabled() -> bool {
     true
+}
+
+fn default_adjudication_sla_secs() -> u64 {
+    604800
+}
+
+/// Mechanical amendment invitations (#771 D.2, citizenship RFC Part D).
+/// When the same rule is denied to the same agent alias at least
+/// `threshold` times within `window_secs`, the gateway issues a durable
+/// invitation to draft an amendment (Ri-0.8) — surfaced in the agent's
+/// signed per-turn attestation and as a notification. The gateway executes
+/// a pre-committed threshold; it never judges the rule (Lawful Executor).
+/// An invitation is not an amendment and carries no authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmendmentInvitationConfig {
+    /// Master switch for the invitation tick. Default: true.
+    #[serde(default = "default_amendment_invitations_enabled")]
+    pub enabled: bool,
+
+    /// Number of denials of the same rule for the same agent alias within
+    /// `window_secs` that triggers an invitation. `0` disables issuance.
+    /// Default: 3.
+    #[serde(default = "default_amendment_invitation_threshold")]
+    pub threshold: u64,
+
+    /// Telemetry window in seconds over which denials are counted. An open
+    /// invitation also expires after this window elapses without an answer.
+    /// `0` disables issuance. Default: 7 days.
+    #[serde(default = "default_amendment_invitation_window_secs")]
+    pub window_secs: u64,
+}
+
+impl Default for AmendmentInvitationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_amendment_invitations_enabled(),
+            threshold: default_amendment_invitation_threshold(),
+            window_secs: default_amendment_invitation_window_secs(),
+        }
+    }
+}
+
+fn default_amendment_invitations_enabled() -> bool {
+    true
+}
+
+fn default_amendment_invitation_threshold() -> u64 {
+    3
+}
+
+fn default_amendment_invitation_window_secs() -> u64 {
+    604800
 }
 
 /// Configuration for the operator activity feed (Phase 4 hardening).
@@ -1824,6 +2069,37 @@ fn default_response_validation_max_repair_attempts_ceiling() -> u32 {
     2
 }
 
+/// Configuration for the optional validation-waiver workflow (#333).
+///
+/// Validation waivers let operators skip advisory artifact validations
+/// (unit tests, style review, etc.) while recording the skip as audit
+/// provenance. Mechanical safety gates and security reviews can never be
+/// waived. The feature is opt-in and defaults to disabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationWaiversConfig {
+    /// Enable the operator-facing validation waiver workflow.
+    /// When false (default), `/waive` is not offered in the TUI and the
+    /// backend waiver tools are not surfaced to operators, but existing
+    /// waivers remain queryable.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Automatically propose the waiver picklist after a successful
+    /// `workbench reconcile`. When false (default), the operator must
+    /// explicitly trigger `/waive`.
+    #[serde(default)]
+    pub auto_propose_after_reconcile: bool,
+}
+
+impl Default for ValidationWaiversConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_propose_after_reconcile: false,
+        }
+    }
+}
+
 /// Sandbox (bubblewrap) isolation overrides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
@@ -1931,12 +2207,69 @@ pub struct LoopGuardConfig {
     /// generic rotating-polling detector still applies).
     #[serde(default = "default_roster_repeat_floor")]
     pub roster_repeat_floor: u32,
+
+    /// Max consecutive LLM transport/endpoint failures before tripping. When
+    /// the model API is flapping (timeouts, connection refused, 5xx), the
+    /// guard trips to prevent expensive retry spirals. A successful LLM call
+    /// resets the counter to 0.
+    #[serde(default = "default_max_llm_failures")]
+    pub max_llm_failures: u32,
+
+    /// Loop-counter penalty added to `current_loops` on each child task failure
+    /// (issue #704). A queued `agent_spawn` returns `ok: true` and resets the
+    /// no-progress counter, but a child that later fails means that spawn made
+    /// no net progress — so each `any_failed` result advances `current_loops`
+    /// by this amount (it does NOT reset it). Combined with read-only tools no
+    /// longer resetting progress (#701), a spawn→probe→spawn death spiral now
+    /// reaches `max_loops_without_progress`. Set to 0 to disable (legacy behavior).
+    #[serde(default = "default_child_failure_loop_penalty")]
+    pub child_failure_loop_penalty: u32,
+
+    /// Recurring-error detector window (issue #703). The guard fingerprints each
+    /// error tool-result (volatile ids/timestamps/numbers stripped) and tracks
+    /// the last N in a sliding window. Set to 0 to disable the detector.
+    #[serde(default = "default_recurring_error_window")]
+    pub recurring_error_window: usize,
+
+    /// Recurring-error trip threshold (issue #703). When the same normalized
+    /// error fingerprint has surfaced from at least this many *distinct* tool
+    /// names within `recurring_error_window`, the guard trips with
+    /// `RecurringUnrecoverableError`. Catches an agent rotating through
+    /// different tools that all hit one unrecoverable root cause — a pattern the
+    /// per-tool failure budgets miss.
+    #[serde(default = "default_recurring_error_distinct_tools")]
+    pub recurring_error_distinct_tools: usize,
+
+    /// Repeated-irrecoverable-rejection trip threshold (issue #718). Permission
+    /// / quota / sandbox-unavailable rejections are deliberately excluded from
+    /// the per-tool failure budget (`max_tool_failures`) — the agent cannot fix
+    /// them by retrying with different arguments, so the first occurrences are
+    /// free (a gateway-side block is not divergence; the agent legitimately
+    /// ends its turn to wait for an operator). But re-issuing the *same* call
+    /// and getting the *same* deterministic rejection is a no-progress loop
+    /// (P-7.7): the agent re-asked a question the gateway already answered. When
+    /// the same `(tool, normalized-error)` rejection recurs this many times the
+    /// guard trips with `RepeatedIrrecoverableRejection`. Distinct rejections
+    /// never accumulate together (fixing one gate and hitting the next is
+    /// progress). Set to 0 to disable.
+    #[serde(default = "default_max_irrecoverable_repeats")]
+    pub max_irrecoverable_repeats: u32,
+
+    /// RFC #776 Part B.4 — threshold for repeated spawn identity. When a
+    /// parent spawns the same agent with the same contract + input this
+    /// many times, the LoopGuard trips `RepeatedSpawnIdentity`. 0 disables.
+    #[serde(default = "default_max_spawn_identity_repeats")]
+    pub max_spawn_identity_repeats: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
     [
         ("knowledge_store".to_string(), 3u32),
         ("knowledge_search".to_string(), 3u32),
+        // workflow_wait is a polling tool — each "still running" result
+        // shouldn't indefinitely reset the no-progress counter. After 3
+        // successful waits, further waits stop resetting current_loops.
+        ("workflow_wait".to_string(), 3u32),
     ]
     .into_iter()
     .collect()
@@ -1953,6 +2286,12 @@ impl Default for LoopGuardConfig {
             rotation_window_size: default_rotation_window_size(),
             rotation_distinct_floor: default_rotation_distinct_floor(),
             roster_repeat_floor: default_roster_repeat_floor(),
+            max_llm_failures: default_max_llm_failures(),
+            child_failure_loop_penalty: default_child_failure_loop_penalty(),
+            recurring_error_window: default_recurring_error_window(),
+            recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
+            max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
+            max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
         }
     }
 }
@@ -1982,6 +2321,30 @@ fn default_rotation_distinct_floor() -> usize {
 }
 
 fn default_roster_repeat_floor() -> u32 {
+    3
+}
+
+fn default_max_llm_failures() -> u32 {
+    3
+}
+
+fn default_child_failure_loop_penalty() -> u32 {
+    2
+}
+
+fn default_recurring_error_window() -> usize {
+    10
+}
+
+fn default_recurring_error_distinct_tools() -> usize {
+    3
+}
+
+fn default_max_irrecoverable_repeats() -> u32 {
+    3
+}
+
+fn default_max_spawn_identity_repeats() -> u32 {
     3
 }
 
@@ -2098,7 +2461,11 @@ impl Default for CodeAnalysisConfig {
             capability_provider: default_capability_provider(),
             security_provider: default_security_provider(),
             require_capabilities: default_require_capabilities(),
-            require_approval_for: vec!["NetworkAccess".to_string(), "CodeExecution".to_string()],
+            require_approval_for: vec![
+                "NetworkAccess".to_string(),
+                "CodeExecution".to_string(),
+                "ArtifactExecution".to_string(),
+            ],
             llm_config: CodeAnalysisLlmConfig::default(),
         }
     }
@@ -2208,7 +2575,23 @@ fn default_max_background_due_per_tick() -> usize {
 }
 
 fn default_approval_timeout_secs() -> u64 {
-    3600
+    600
+}
+
+fn default_standalone_approval_timeout_secs() -> u64 {
+    86400
+}
+
+fn default_interaction_timeout_secs() -> u64 {
+    86400
+}
+
+fn default_escalation_timeout_secs() -> u64 {
+    86400
+}
+
+fn default_plan_frame_timeout_secs() -> u64 {
+    86400
 }
 
 fn default_max_pending_approvals_per_root() -> usize {
@@ -2216,6 +2599,10 @@ fn default_max_pending_approvals_per_root() -> usize {
 }
 
 fn default_max_pending_escalations_per_root() -> usize {
+    50
+}
+
+fn default_max_pending_anomaly_flags_per_reporter() -> usize {
     50
 }
 
@@ -2251,6 +2638,10 @@ fn default_workflow_wait_secs() -> u64 {
     30
 }
 
+fn default_workflow_wait_max_total_secs() -> u64 {
+    300
+}
+
 fn default_evidence_mode() -> String {
     "full".to_string()
 }
@@ -2274,9 +2665,19 @@ pub struct PromptBudgetConfig {
     #[serde(default = "default_prompt_budget_margin")]
     pub margin_tokens: usize,
 
-    /// Strip tool JSON schemas to `{}` after the first turn to save tokens.
-    /// Some LLM providers require full schemas on every request — enable with caution.
+    /// DEPRECATED — no longer used; tool schemas are never compressed.
+    ///
+    /// Stripping tool JSON schemas to a minimal `{"type": "object"}` placeholder after turn 0 corrupted tool-calling
+    /// (the model needs the full schema on every turn; prompt caching is a
+    /// billing optimization, not a "remember the tools" mechanism). The
+    /// governor's schema-compression strategy was removed for the same reason.
+    /// Tool tokens are now saved losslessly via provider tool-array caching
+    /// (see `prompt_cache_enabled`). Retained only for config backward-compat.
     #[serde(default)]
+    #[deprecated(
+        since = "0.x",
+        note = "no longer used; tool schemas are never compressed. Retained for config backward-compat."
+    )]
     pub compress_tool_schemas_after_turn_0: bool,
 
     /// Maximum number of tool definitions to send to the LLM per turn.
@@ -2290,6 +2691,71 @@ pub struct PromptBudgetConfig {
     /// the session escalates to all tiers for the rest of its lifetime.
     #[serde(default)]
     pub progressive_tool_disclosure: bool,
+
+    /// Soft token budget that triggers the context governor *before* the hard
+    /// context-window limit is reached. When set, the governor proactively
+    /// summarizes/capsules old turns once `total_tokens` exceeds this value,
+    /// even if the session is still far from `context_window_tokens - margin_tokens`.
+    ///
+    /// This is useful for large context-window models (e.g. 200K tokens) where
+    /// waiting for the hard limit wastes tokens on every round. Recommended
+    /// value for such models: 30000–50000.
+    ///
+    /// `None` (the default) disables the soft budget; only the hard limit fires.
+    #[serde(default)]
+    pub soft_budget_tokens: Option<u32>,
+
+    /// Strip `reasoning_content` / `reasoning_details` from assistant messages
+    /// before sending them to the LLM. The model does not need to re-read its
+    /// own chain-of-thought; stripping it saves tokens without losing the
+    /// reasoning in storage (checkpoints, exports, timeline events keep it).
+    ///
+    /// **Disabled by default.** Many thinking/reasoning models (DeepSeek,
+    /// OpenRouter reasoning models, and other OpenAI-compatible thinking
+    /// models) require the reasoning blocks to be replayed on subsequent
+    /// turns; stripping them breaks chain-of-thought continuity. Operators
+    /// whose model does not require replay can enable this to save tokens.
+    #[serde(default = "default_strip_reasoning")]
+    pub strip_reasoning_from_request: bool,
+
+    /// Maximum characters to allow in a tool-result message content before it
+    /// is truncated to `head + "[... N chars truncated ...]" + tail` for the
+    /// LLM request. Large stdout/stderr/tool outputs are common and do not need
+    /// to be replayed in full on every turn. The full result is still stored.
+    /// Set to 0 to disable truncation. Default is 2000.
+    #[serde(default = "default_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+
+    /// Collapse consecutive duplicate tool-result messages into a short marker
+    /// for the LLM request. Re-reading artifacts, polling `approval.status`, or
+    /// repeated `workflow.state` snapshots often produce identical output across
+    /// turns; replaying the full content every round wastes tokens without
+    /// adding information. The first occurrence is kept; later consecutive
+    /// duplicates are replaced with a reference marker. The full results are
+    /// still stored. Enabled by default.
+    #[serde(default = "default_dedup_tool_results")]
+    pub dedup_tool_results: bool,
+
+    /// Collapse *recurring errors* (issue #705) in the LLM request. Unlike
+    /// `dedup_tool_results` (byte-identical, consecutive), this fingerprints the
+    /// error text (volatile ids/timestamps/numbers stripped) so the same
+    /// root-cause failure surfacing non-consecutively — the hallmark of an
+    /// install/spawn death spiral — is collapsed to a marker on all but its most
+    /// recent occurrence. The full results are still stored. Enabled by default.
+    #[serde(default = "default_collapse_repeated_errors")]
+    pub collapse_repeated_errors: bool,
+
+    /// Mark the stable leading portion of the system prompt (foundation
+    /// doctrine + SKILL instructions + guidance + output contract) as a
+    /// provider prompt-cache prefix. Cache-capable drivers (Anthropic; and
+    /// OpenRouter when routing Claude/Gemini) attach
+    /// `cache_control: {type: ephemeral}` to that prefix so repeated turns in a
+    /// session re-read it at cache rates instead of full price; the volatile
+    /// per-turn tail (state attestation, degradation notice) is never cached.
+    /// OpenAI and llama.cpp reuse a stable prefix automatically regardless.
+    /// Enabled by default.
+    #[serde(default = "default_prompt_cache_enabled")]
+    pub prompt_cache_enabled: bool,
 
     /// Override the chars-per-token ratio used by the prompt budget
     /// estimator. `None` (the default) means "use the built-in default of
@@ -2312,6 +2778,26 @@ fn default_prompt_budget_margin() -> usize {
     4096
 }
 
+fn default_strip_reasoning() -> bool {
+    false
+}
+
+fn default_max_tool_result_chars() -> usize {
+    4000
+}
+
+fn default_dedup_tool_results() -> bool {
+    true
+}
+
+fn default_collapse_repeated_errors() -> bool {
+    true
+}
+
+fn default_prompt_cache_enabled() -> bool {
+    true
+}
+
 impl Default for PromptBudgetConfig {
     fn default() -> Self {
         Self {
@@ -2319,9 +2805,16 @@ impl Default for PromptBudgetConfig {
             tool_definitions_max_tokens: 0,
             warn_at_pct: default_prompt_budget_warn_pct(),
             margin_tokens: default_prompt_budget_margin(),
+            #[allow(deprecated)]
             compress_tool_schemas_after_turn_0: false,
             max_tool_definitions: 0,
             progressive_tool_disclosure: false,
+            soft_budget_tokens: None,
+            strip_reasoning_from_request: default_strip_reasoning(),
+            max_tool_result_chars: default_max_tool_result_chars(),
+            dedup_tool_results: default_dedup_tool_results(),
+            collapse_repeated_errors: default_collapse_repeated_errors(),
+            prompt_cache_enabled: default_prompt_cache_enabled(),
             chars_per_token: None,
         }
     }
@@ -2389,6 +2882,16 @@ pub struct TrajectoryConfig {
     /// Serves as a safety bound on planner self-suppression.
     #[serde(default = "default_trajectory_suppress_max_turns")]
     pub suppress_max_turns: u32,
+
+    /// RFC D.5 — suppress-on-progress grace. Number of consecutive turns with
+    /// feedback being incorporated that triggers suppression.
+    #[serde(default = "default_progress_grace_window")]
+    pub progress_grace_window: u32,
+
+    /// RFC D.5 — how many turns to suppress Sentinel escalation once progress
+    /// grace has been earned.
+    #[serde(default = "default_progress_grace_turns")]
+    pub progress_grace_turns: u32,
 }
 
 fn default_trajectory_enabled() -> bool {
@@ -2411,6 +2914,14 @@ fn default_trajectory_suppress_max_turns() -> u32 {
     10
 }
 
+fn default_progress_grace_window() -> u32 {
+    2
+}
+
+fn default_progress_grace_turns() -> u32 {
+    3
+}
+
 impl Default for TrajectoryConfig {
     fn default() -> Self {
         Self {
@@ -2424,6 +2935,8 @@ impl Default for TrajectoryConfig {
             notify_planner: default_trajectory_notify_planner(),
             notify_operator: default_trajectory_notify_operator(),
             suppress_max_turns: default_trajectory_suppress_max_turns(),
+            progress_grace_window: default_progress_grace_window(),
+            progress_grace_turns: default_progress_grace_turns(),
         }
     }
 }
@@ -2496,6 +3009,14 @@ pub struct TrajectoryRepetitionEntropyConfig {
     /// repeating itself.
     #[serde(default = "default_repetition_entropy_warn_bits")]
     pub warn_bits: f32,
+    /// Entropy at or below this (in bits) is labelled "critically low" in the
+    /// divergence evidence. The repetition-entropy signal is **advisory**: it
+    /// caps at `Warn` severity and never escalates a session to `Critical` on
+    /// its own (so it never raises the operator divergence gate). Tool-call
+    /// repetition is weak evidence of being stuck — an I/O agent such as
+    /// `researcher.default` legitimately repeats fetch/search calls. The
+    /// gate-worthy `Critical` verdicts come from the loop guard's semantic
+    /// no-progress (P-7.19) and the error-burst signal.
     #[serde(default = "default_repetition_entropy_critical_bits")]
     pub critical_bits: f32,
     /// Minimum number of tool calls in the window before the signal is
@@ -2503,6 +3024,12 @@ pub struct TrajectoryRepetitionEntropyConfig {
     /// two calls observed.
     #[serde(default = "default_repetition_entropy_min_observations")]
     pub min_observations: usize,
+    /// Warm-up: the signal is not evaluated until the session reaches this
+    /// turn. Divergence is a trajectory property, not a single-turn one — an
+    /// agent's opening burst of similar calls (e.g. a researcher fetching many
+    /// pages in turn 1) must not trip it.
+    #[serde(default = "default_repetition_entropy_min_turns")]
+    pub min_turns: u64,
 }
 
 fn default_repetition_entropy_warn_bits() -> f32 {
@@ -2514,6 +3041,9 @@ fn default_repetition_entropy_critical_bits() -> f32 {
 fn default_repetition_entropy_min_observations() -> usize {
     4
 }
+fn default_repetition_entropy_min_turns() -> u64 {
+    3
+}
 
 impl Default for TrajectoryRepetitionEntropyConfig {
     fn default() -> Self {
@@ -2521,6 +3051,7 @@ impl Default for TrajectoryRepetitionEntropyConfig {
             warn_bits: default_repetition_entropy_warn_bits(),
             critical_bits: default_repetition_entropy_critical_bits(),
             min_observations: default_repetition_entropy_min_observations(),
+            min_turns: default_repetition_entropy_min_turns(),
         }
     }
 }
@@ -2702,18 +3233,26 @@ impl Default for GatewayConfig {
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
             allow_zero_capability_direct_promote: true,
             require_operator_approval_for_new_agents: true,
+            agent_install_smoke_test: AgentInstallSmokeTestMode::Ask,
             session_budget: SessionBudgetConfig::default(),
             root_session_budget: RootSessionBudgetConfig::default(),
             approval_timeout_secs: default_approval_timeout_secs(),
+            standalone_approval_timeout_secs: default_standalone_approval_timeout_secs(),
+            interaction_timeout_secs: default_interaction_timeout_secs(),
+            escalation_timeout_secs: default_escalation_timeout_secs(),
+            plan_frame_timeout_secs: default_plan_frame_timeout_secs(),
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             max_pending_escalations_per_root: default_max_pending_escalations_per_root(),
+            max_pending_anomaly_flags_per_reporter: default_max_pending_anomaly_flags_per_reporter(),
             default_grant_ttl_secs: default_grant_ttl_secs(),
             escape_attempt_degrade_threshold: default_escape_attempt_degrade_threshold(),
             escape_attempt_emergency_threshold: default_escape_attempt_emergency_threshold(),
             continuation_key: None,
             workflow_task_heartbeat_secs: default_workflow_task_heartbeat_secs_val(),
             stuck_task_timeout_secs: default_stuck_task_timeout_secs_val(),
+            stuck_task_no_evidence_action: StuckTaskNoEvidenceAction::default(),
             evidence_mode: default_evidence_mode(),
+            session_report: SessionReportConfig::default(),
             digest_agent: DigestAgentConfig::default(),
             outcome_grader: OutcomeGraderConfig::default(),
             improve: ImproveConfig::default(),
@@ -2721,6 +3260,7 @@ impl Default for GatewayConfig {
             capsule: CapsuleConfig::default(),
             reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),
+            validation_waivers: ValidationWaiversConfig::default(),
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),
             loop_guard: LoopGuardConfig::default(),
@@ -2730,10 +3270,12 @@ impl Default for GatewayConfig {
             chat: ChatConfig::default(),
             operator_activity: OperatorActivityConfig::default(),
             decider_obligations: DeciderObligationsConfig::default(),
+            amendment_invitations: AmendmentInvitationConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
             default_workflow_wait_secs: default_workflow_wait_secs(),
+            workflow_wait_max_total_secs: default_workflow_wait_max_total_secs(),
             hooks: Vec::new(),
             scheduled_jobs: ScheduledJobsConfig::default(),
             promotion_governor: PromotionGovernorConfig::default(),
@@ -2741,6 +3283,8 @@ impl Default for GatewayConfig {
             system_agents: Vec::new(),
             interaction_answer_orchestration: default_interaction_answer_orchestration(),
             allow_runtime_lock_drift: false,
+            plan_auto_approve: false,
+            plan_auto_approver: default_plan_auto_approver(),
             trust_unsigned_bundles: false,
             approval_dwell_multiplier: default_approval_dwell_multiplier(),
             sentinel: SentinelConfig::default(),
@@ -2755,6 +3299,17 @@ impl Default for GatewayConfig {
 }
 
 impl GatewayConfig {
+    /// Apply profile-specific defaults for knobs that use serde defaults when omitted.
+    /// Explicit operator values in `config.yaml` are preserved.
+    pub fn apply_profile_defaults(&mut self) {
+        if matches!(self.profile, Profile::Starter) {
+            if self.evidence_mode == default_evidence_mode() {
+                self.evidence_mode = "errors".to_string();
+            }
+            // `session_report.live_html_on_update` defaults to false via serde.
+        }
+    }
+
     /// Validate that LLM preset references are consistent.
     /// Returns a list of error messages; empty vec means valid.
     pub fn validate_llm_presets(&self) -> Vec<String> {
@@ -3163,5 +3718,52 @@ mod tests {
         });
         let err = serde_json::from_value::<GatewayConfig>(j).unwrap_err();
         assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn validation_waivers_defaults_to_disabled() {
+        let config = GatewayConfig::default();
+        assert!(!config.validation_waivers.enabled);
+        assert!(!config.validation_waivers.auto_propose_after_reconcile);
+    }
+
+    #[test]
+    fn validation_waivers_config_parses_when_omitted() {
+        let j = serde_json::json!({
+            "agents_dir": "/tmp/autonoetic-agents"
+        });
+        let parsed: GatewayConfig = serde_json::from_value(j).expect("parse json");
+        assert!(!parsed.validation_waivers.enabled);
+        assert!(!parsed.validation_waivers.auto_propose_after_reconcile);
+    }
+
+    #[test]
+    fn validation_waivers_config_parses_when_enabled() {
+        let j = serde_json::json!({
+            "agents_dir": "/tmp/autonoetic-agents",
+            "validation_waivers": {
+                "enabled": true,
+                "auto_propose_after_reconcile": true
+            }
+        });
+        let parsed: GatewayConfig = serde_json::from_value(j).expect("parse json");
+        assert!(parsed.validation_waivers.enabled);
+        assert!(parsed.validation_waivers.auto_propose_after_reconcile);
+    }
+
+    #[test]
+    fn decider_obligations_adjudication_sla_secs_defaults_to_seven_days() {
+        assert_eq!(
+            DeciderObligationsConfig::default().adjudication_sla_secs,
+            604800
+        );
+    }
+
+    #[test]
+    fn amendment_invitations_default_to_enabled_threshold_3_window_7d() {
+        let cfg = AmendmentInvitationConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.threshold, 3);
+        assert_eq!(cfg.window_secs, 604800);
     }
 }

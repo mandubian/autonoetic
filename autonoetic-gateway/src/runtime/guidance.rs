@@ -108,25 +108,103 @@ pub fn compose_guidance(blocks: &[GuidanceBlock], ctx: &GuidanceContext) -> Stri
 
 /// Cross-cutting guidance blocks not owned by any single tool (#466). Tool- and
 /// role-specific doctrine lives with its tool's `guidance()`; this is for
-/// genuinely universal doctrine (e.g. the clarification principle).
+/// universal doctrine plus role-gated builtins that should not be duplicated
+/// across every agent's SKILL.md (e.g. the clarification principle and the
+/// planner Sentinel self-correction rule).
 pub fn builtin_blocks() -> Vec<GuidanceBlock> {
-    vec![GuidanceBlock {
-        // Universal clarification principle (#466 recurring-section migration).
-        // Each role keeps its own *triggers* (what counts as blocked); this is
-        // the shared "ask-or-default, don't fabricate" rule.
-        id: "clarification.ask_or_default",
-        when: GuidanceCondition::Always,
-        priority: 5,
-        prose: "**Don't fabricate a missing fact.** When you're blocked on something only the \
+    vec![
+        GuidanceBlock {
+            // Universal clarification principle (#466 recurring-section migration).
+            // Each role keeps its own *triggers* (what counts as blocked); this is
+            // the shared "ask-or-default, don't fabricate" rule.
+            id: "clarification.ask_or_default",
+            when: GuidanceCondition::Always,
+            priority: 5,
+            prose: "**Don't fabricate a missing fact.** When you're blocked on something only the \
 caller or operator can supply — a missing required parameter, a genuinely ambiguous instruction, or \
 conflicting requirements — do not guess and do not spin discovery tools (`agent_list`, \
 `workflow_state`, repeated re-reads) to manufacture the answer. Return `clarification_needed` (or use \
 `user_ask` if you hold that tool) and end the turn — the reply must still satisfy your declared \
 output schema (required fields, types). Otherwise proceed with a sensible, documented default — a \
 reasonable default or a clearly-better interpretation does not warrant a round-trip."
-            .to_string(),
-    }]
+                .to_string(),
+        },
+        GuidanceBlock {
+            // D.7b planner doctrine: Sentinel notices are advisory self-correction signals.
+            // Only applies to lead planners; other agents rely on their own SKILL.md doctrine
+            // or the LoopGuard directly.
+            id: "sentinel.self_correct_planner",
+            when: GuidanceCondition::Role("planner"),
+            priority: 10,
+            prose: "**Sentinel notices are advisory — self-correct, don't ask.** When the gateway emits a `sentinel_notice` \
+(repetition, ignored feedback, loop pressure, or trajectory divergence), treat it as a hint to replan, \
+NOT as a reason to ask the operator. Stop repeating the same action; inspect `workflow_state` and, for \
+`planner.collaborative`, `planframe_get` to reconcile with ground truth; change shape (yield for children, \
+use `debugger.default`, apply feedback, amend the plan). Use `user_ask` or `clarification_needed` only for \
+genuine missing facts the operator must supply. The operator can stop the session via `/sentinel stop` or \
+`Ctrl+X` if they want to."
+                .to_string(),
+        },
+    ]
 }
+
+/// `(fingerprint, owning guidance block — where the doctrine lives now)`.
+/// Doctrine that has been centralized into tool-contributed guidance blocks must
+/// NOT be re-pasted into individual `SKILL.md` files (repo-authored or
+/// runtime-born via `create_from_intent`). Single source of truth shared by the
+/// CI regression guard (`tests/skill_doctrine_guard.rs`) and the create-time
+/// scan (`install_contract::scan_body_for_migrated_doctrine`, RFC #799 F.4b).
+/// Each phrase was verified absent from every SKILL.md at migration time.
+pub const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
+    ("Forbidden shell commands", "sandbox.forbidden_commands (sandbox_exec.guidance)"),
+    (
+        "requires both `name` and `content`",
+        "content.write_protocol (content_write.guidance)",
+    ),
+    (
+        "alternate names like `outcome`",
+        "promotion.record_protocol (promotion_record.guidance)",
+    ),
+    (
+        "do not invent or guess",
+        "exec.approval_continuation (sandbox_exec/artifact_exec.guidance)",
+    ),
+    (
+        "never restart from scratch",
+        "resumption.workflow_state_first (workflow_state.guidance)",
+    ),
+    (
+        "warrant a round-trip",
+        "clarification.ask_or_default (builtin block)",
+    ),
+    (
+        "wrap JSON in markdown code fences",
+        "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
+    ),
+    (
+        "Return a single raw JSON object",
+        "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
+    ),
+    // Centralized into foundation_core.md §7 — the rights/self-describe/community
+    // doctrine every agent already receives. Keep these specific enough that they
+    // only match the centralized phrasing, not legitimate role-specific wording.
+    (
+        "Your headline rights, in force every turn",
+        "foundation_core.md §7 (the constitution is your contract)",
+    ),
+    (
+        "are one call away: `self_describe()`",
+        "foundation_core.md §7 (self_describe nudge)",
+    ),
+    (
+        "its rights bind the gateway as its rules bind you",
+        "foundation_core.md §7 (community / social-contract framing)",
+    ),
+    (
+        "standing witness contract",
+        "the io.returns Output Contract renderer (context.rs) — `anomalies` is gateway-injected (RFC C.2, #770), declare it in your own schema only if you need custom fields",
+    ),
+];
 
 /// Stable discriminant string for a capability, matched by
 /// [`GuidanceCondition::Capability`]. Exhaustive on purpose: adding a capability
@@ -141,6 +219,7 @@ pub fn capability_kind(cap: &Capability) -> &'static str {
         Capability::AgentMessage { .. } => "agent_message",
         Capability::BackgroundReevaluation { .. } => "background_reevaluation",
         Capability::CodeExecution { .. } => "code_execution",
+        Capability::ArtifactExecution => "artifact_execution",
         Capability::EmergencyStop => "emergency_stop",
         Capability::AgentRevision { .. } => "agent_revision",
         Capability::Evaluation { .. } => "evaluation",
@@ -156,8 +235,11 @@ pub fn capability_kind(cap: &Capability) -> &'static str {
         Capability::GithubIssueCreate { .. } => "github_issue_create",
         Capability::SecurityRedTeam => "security_red_team",
         Capability::CapsuleExport => "capsule_export",
+        Capability::SelfCapsuleExport => "self_capsule_export",
         Capability::WikiContribute => "wiki_contribute",
         Capability::PlanFrameAccess { .. } => "plan_frame_access",
+        Capability::PromoteWith { .. } => "promote_with",
+        Capability::GateDecider { .. } => "gate_decider",
     }
 }
 

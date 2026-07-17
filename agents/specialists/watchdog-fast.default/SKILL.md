@@ -15,6 +15,7 @@ metadata:
       id: "watchdog-fast.default"
       name: "Watchdog (Fast)"
       description: "Observer-only divergence judge that produces a verdict in a single LLM completion. No tool calls, no side effects."
+      singleton: true
     llm_preset: haiku
     llm_overrides:
       temperature: 0.0

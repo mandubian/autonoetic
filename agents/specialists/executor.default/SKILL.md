@@ -18,10 +18,11 @@ metadata:
     llm_preset: coding
     capabilities:
       - type: "SandboxFunctions"
-        allowed: ["knowledge.", "sandbox.", "credential."]
+        allowed: ["knowledge_", "sandbox_", "credential_"]
       - type: "CodeExecution"
         patterns: ["python3 ", "python ", "node ", "bash -c ", "sh -c ", "python3 scripts/", "python scripts/"]
         commands: ["date", "ls", "echo", "cat", "pwd", "wc", "grep", "sed", "awk", "sort", "head", "tail", "cut", "tr", "tee", "find", "xargs", "diff", "mkdir", "touch", "cp", "mv", "stat", "du", "df", "uname", "hostname", "whoami", "which", "basename", "dirname", "readlink", "file", "sleep", "test", "true", "false", "curl", "wget"]
+      - type: "ArtifactExecution"
       - type: "WriteAccess"
         scopes: ["self.*"]
       - type: "ReadAccess"
@@ -117,10 +118,10 @@ When the planner delegates a task that requires an API key or secret, use `artif
 ```json
 artifact_prepare({
   "artifact_ref": "ar.example",
-  "entrypoint": "weather_lookup.py",
-  "args": ["London", "tomorrow"],
+  "entrypoint": "data_fetcher.py",
+  "args": ["input.csv", "--format", "json"],
   "required_credentials": [
-    { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
+    { "credential_id": "cred_abc123", "env_var": "API_TOKEN" }
   ]
 })
 ```
@@ -138,8 +139,8 @@ Once you have the ticket, execute:
 artifact_exec({
   "deployment_ticket": "dtk-abc12345def",
   "artifact_ref": "ar.example",
-  "entrypoint": "weather_lookup.py",
-  "args": ["London", "tomorrow"]
+  "entrypoint": "data_fetcher.py",
+  "args": ["input.csv", "--format", "json"]
 })
 ```
 
@@ -151,7 +152,7 @@ For simple sandbox_exec calls without artifacts, use `credential_env` directly:
 sandbox_exec({
   "command": "python3 /tmp/script.py",
   "credential_env": [
-    { "credential_id": "cred_abc123", "env_var": "OPENWEATHER_API_KEY" }
+    { "credential_id": "cred_abc123", "env_var": "API_TOKEN" }
   ]
 })
 ```

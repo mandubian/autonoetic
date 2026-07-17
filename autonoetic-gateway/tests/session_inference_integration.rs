@@ -27,6 +27,7 @@ fn test_manifest() -> AgentManifest {
             id: "coder.default".to_string(),
             name: "Coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
@@ -45,8 +46,10 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: Default::default(),
     }
 }

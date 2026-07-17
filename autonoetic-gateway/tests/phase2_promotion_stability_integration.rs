@@ -28,6 +28,7 @@ fn revision_manifest() -> AgentManifest {
             id: "test-promoter".to_string(),
             name: "test-promoter".to_string(),
             description: "Test promotion agent".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -46,8 +47,10 @@ fn revision_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -64,6 +67,8 @@ fn make_revision(agent_id: &str, suffix: &str) -> AgentRevisionRecord {
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "test".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -71,6 +76,7 @@ fn make_revision(agent_id: &str, suffix: &str) -> AgentRevisionRecord {
         status: AgentRevisionStatus::Candidate,
         metadata_json: json!({}),
         short_id: format!("sid{}", &suffix[..8]),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     }
@@ -85,6 +91,9 @@ fn upsert_alias(store: &GatewayStore, agent_id: &str, revision_id: &str, reason:
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "test".to_string(),
         reason: Some(reason.to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias).unwrap();
 }
@@ -151,6 +160,7 @@ fn test_promote_changes_only_future_alias_resolution_and_running_session_stays_p
             "test-promoter",
             Some("promote for test"),
             None,
+            None,
         )
         .unwrap();
 
@@ -216,6 +226,7 @@ fn test_explicit_agent_ref_sessions_are_unaffected_by_later_promotion() {
             "agent",
             "test-promoter",
             Some("promote for explicit test"),
+            None,
             None,
         )
         .unwrap();
@@ -359,4 +370,172 @@ fn test_promotion_fails_for_mismatched_alias_and_agent() {
         err.to_string().contains("belongs to agent"),
         "unexpected error: {err}"
     );
+}
+
+/// An envelope-pre-authorized promotion is automatic (no fresh operator
+/// decision), so it must not silently un-suspend a suspended agent. A normal
+/// operator re-promotion (no pre-authorization) still clears suspension.
+#[test]
+fn envelope_preauthorized_promotion_preserves_suspension() {
+    let (_tmp, store, _repo) = setup_store_and_repo();
+    let agent_id = "planner.default";
+    let rev1 = make_revision(
+        agent_id,
+        "1111111111111111111111111111111111111111111111111111111111111111",
+    );
+    let rev2 = make_revision(
+        agent_id,
+        "2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    let rev3 = make_revision(
+        agent_id,
+        "3333333333333333333333333333333333333333333333333333333333333333",
+    );
+    store.insert_agent_revision(&rev1).unwrap();
+    store.insert_agent_revision(&rev2).unwrap();
+    store.insert_agent_revision(&rev3).unwrap();
+    upsert_alias(store.as_ref(), agent_id, &rev1.revision_id, "initial");
+
+    // Operator suspends the agent.
+    assert!(store
+        .suspend_agent(agent_id, "operator", Some("under review"))
+        .unwrap());
+
+    // Envelope pre-authorized promotion (pre_authorization = Some) preserves it.
+    store
+        .atomic_promote(
+            agent_id,
+            &rev2.revision_id,
+            "prom-preauth",
+            "gateway",
+            "gateway",
+            Some("envelope pre-auth"),
+            None,
+            Some(r#"{"method":"envelope","envelope_id":7,"rule":"P-2.27"}"#),
+        )
+        .unwrap();
+    let alias = store.resolve_alias(agent_id).unwrap().expect("alias");
+    assert!(
+        alias.suspended_at.is_some(),
+        "envelope-pre-authorized promotion must NOT clear suspension"
+    );
+
+    // Plain operator re-promotion (pre_authorization = None) clears it.
+    store
+        .atomic_promote(
+            agent_id,
+            &rev3.revision_id,
+            "prom-operator",
+            "human",
+            "operator",
+            Some("operator re-promote"),
+            None,
+            None,
+        )
+        .unwrap();
+    let alias = store.resolve_alias(agent_id).unwrap().expect("alias");
+    assert!(
+        alias.suspended_at.is_none(),
+        "operator re-promotion (no pre-auth) clears suspension"
+    );
+}
+
+/// Helper: a promoted agent with one revision, then suspended.
+fn setup_suspended_agent() -> (TempDir, Arc<GatewayStore>, AgentRepository, String, AgentRevisionRecord)
+{
+    let (tmp, store, repo) = setup_store_and_repo();
+    let agent_id = "planner.default".to_string();
+    let rev = make_revision(
+        &agent_id,
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    );
+    store.insert_agent_revision(&rev).unwrap();
+    upsert_alias(store.as_ref(), &agent_id, &rev.revision_id, "initial");
+    assert!(store
+        .suspend_agent(&agent_id, "operator", Some("over-privileged"))
+        .unwrap());
+    (tmp, store, repo, agent_id, rev)
+}
+
+#[test]
+fn suspended_agent_cannot_start_new_session_via_alias() {
+    let (_tmp, store, repo, agent_id, _rev) = setup_suspended_agent();
+    let err = repo
+        .resolve_and_pin_session(
+            "session-new-alias",
+            "session-new-alias",
+            &agent_id,
+            Some(store.as_ref()),
+            "host:test",
+        )
+        .expect_err("suspended agent must not start a new session via alias");
+    assert!(err.to_string().contains("suspended"), "unexpected: {err}");
+}
+
+#[test]
+fn suspended_agent_cannot_start_new_session_via_explicit_ref() {
+    let (_tmp, store, repo, agent_id, rev) = setup_suspended_agent();
+    // Explicit revision ref bypasses the alias — the gate must still fire,
+    // keyed on the resolved agent_id.
+    let explicit_target = format!("{agent_id}@{}", rev.revision_id);
+    let err = repo
+        .resolve_and_pin_session(
+            "session-new-explicit",
+            "session-new-explicit",
+            &explicit_target,
+            Some(store.as_ref()),
+            "host:test",
+        )
+        .expect_err("suspended agent must not start a new session via explicit ref");
+    assert!(err.to_string().contains("suspended"), "unexpected: {err}");
+}
+
+#[test]
+fn suspended_agent_remains_readable() {
+    let (_tmp, store, repo, agent_id, rev) = setup_suspended_agent();
+    // Read-only resolution (evaluation/diff) must succeed while suspended so an
+    // operator can decide whether to lift the suspension.
+    let (agent_ref, _rev) = repo
+        .resolve_agent(&agent_id, Some(store.as_ref()))
+        .expect("resolving a suspended agent for read must succeed");
+    assert_eq!(agent_ref.revision_id, rev.revision_id);
+}
+
+#[test]
+fn running_session_survives_agent_suspension() {
+    let (_tmp, store, repo) = setup_store_and_repo();
+    let agent_id = "planner.default";
+    let rev = make_revision(
+        agent_id,
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    );
+    store.insert_agent_revision(&rev).unwrap();
+    upsert_alias(store.as_ref(), agent_id, &rev.revision_id, "initial");
+
+    // Session starts before suspension and pins its binding.
+    repo.resolve_and_pin_session(
+        "session-running",
+        "session-running",
+        agent_id,
+        Some(store.as_ref()),
+        "host:test",
+    )
+    .unwrap();
+
+    // Operator suspends the agent mid-flight.
+    assert!(store
+        .suspend_agent(agent_id, "operator", Some("over-privileged"))
+        .unwrap());
+
+    // The already-running session keeps resolving via its existing binding.
+    let (agent_ref, _rev, _binding) = repo
+        .resolve_and_pin_session(
+            "session-running",
+            "session-running",
+            agent_id,
+            Some(store.as_ref()),
+            "host:test",
+        )
+        .expect("in-flight session must survive suspension (grace period)");
+    assert_eq!(agent_ref.revision_id, rev.revision_id);
 }

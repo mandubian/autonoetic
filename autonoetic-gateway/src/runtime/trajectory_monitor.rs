@@ -18,12 +18,13 @@ use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 
 use autonoetic_types::config::{TrajectoryConfig, TrajectorySignalsToggle};
+use autonoetic_types::trajectory::FeedbackEvent;
 
 use super::trajectory_health::{
     aggregate, signals_from_loop_guard, DivergenceSignal, DivergenceSignalKind, SignalSeverity,
     TrajectoryHealth,
 };
-use crate::runtime::guard::LoopGuardState;
+use crate::runtime::guard::LoopGuard;
 
 /// Observation of one tool call this turn, used by entropy and stall
 /// signals. Lightweight on purpose — the monitor never stores arguments,
@@ -46,6 +47,10 @@ pub struct TickResult {
     /// level. Caller should emit a `divergence.*` causal event when this
     /// is `true` and `health` is not `Healthy`.
     pub level_changed: bool,
+    /// RFC D.5 — if progress grace was earned this turn, the caller should
+    /// suppress Sentinel escalation until this turn (exclusive). `None` when
+    /// no extension is requested.
+    pub suppress_until_turn: Option<u64>,
 }
 
 /// Per-session monitor state.
@@ -66,9 +71,18 @@ pub struct TrajectoryMonitor {
     fingerprint_window: VecDeque<u64>,
     /// Sliding window of error counts (one entry per turn).
     error_window: VecDeque<u32>,
+    /// Feedback events the gateway has issued to the agent, with the turn
+    /// at which they were issued. Used to compute `feedback_ignored` vs
+    /// `feedback_incorporated`.
+    feedback_events: Vec<FeedbackEvent>,
+    /// Turn counter at which each feedback event was issued.
+    feedback_turns: Vec<u64>,
     /// Last verdict's level slug — used to detect transitions and to emit
     /// only on change. `None` until the first `tick`.
     last_level: Option<&'static str>,
+    /// RFC D.5 — consecutive turns showing `FeedbackIncorporated`. Resets when
+    /// a turn does not earn progress grace.
+    consecutive_progress_turns: u32,
 }
 
 impl TrajectoryMonitor {
@@ -79,14 +93,152 @@ impl TrajectoryMonitor {
             last_distinct_fingerprint_turn: 0,
             fingerprint_window: VecDeque::new(),
             error_window: VecDeque::new(),
+            feedback_events: Vec::new(),
+            feedback_turns: Vec::new(),
             last_level: None,
+            consecutive_progress_turns: 0,
         }
+    }
+
+    /// Restore the last known divergence level from a checkpoint.
+    /// Called on session resume to prevent the first post-resume tick
+    /// from always firing level_changed=true.
+    pub fn restore_last_level(&mut self, level: Option<&str>) {
+        self.last_level = level.and_then(restore_level);
+    }
+
+    /// Snapshot feedback events issued so far, paired with the turn at which
+    /// they were issued. Used to persist feedback state across checkpoint
+    /// save/restore so cross-turn `FeedbackIgnored` detection survives respawn.
+    pub fn feedback_snapshot(&self) -> Vec<(u64, FeedbackEvent)> {
+        self.feedback_turns
+            .iter()
+            .cloned()
+            .zip(self.feedback_events.iter().cloned())
+            .collect()
+    }
+
+    /// Restore feedback events from a checkpoint snapshot. The turn counters
+    /// are preserved so the next `tick` can compare current events against
+    /// feedback issued before the checkpoint.
+    pub fn restore_feedback(&mut self, events: Vec<(u64, FeedbackEvent)>) {
+        self.feedback_events = events.iter().map(|(_, e)| e.clone()).collect();
+        self.feedback_turns = events.iter().map(|(t, _)| *t).collect();
+    }
+
+    /// Snapshot the last known level for checkpoint serialization.
+    pub fn last_level_as_string(&self) -> Option<String> {
+        self.last_level.map(|s| s.to_string())
     }
 
     /// `true` if the monitor will run at all. When the master switch is
     /// off the monitor is inert and produces no events.
     pub fn enabled(&self) -> bool {
         self.config.enabled
+    }
+
+    /// Record that the gateway issued feedback to the agent this turn.
+    ///
+    /// Callers should record every validation violation and every typed tool
+    /// error returned to the agent. The monitor uses these events to decide
+    /// whether subsequent turns incorporated the feedback.
+    pub fn record_feedback(&mut self, turn_counter: u64, events: &[FeedbackEvent]) {
+        for event in events {
+            self.feedback_events.push(event.clone());
+            self.feedback_turns.push(turn_counter);
+        }
+        // Prune feedback older than the configured window so "ignored" only
+        // measures recent feedback. Use the same window_size as error/fingerprint
+        // windows for consistency.
+        let cap = self.config.window_size.max(1) as u64;
+        while self.feedback_turns.len() > cap as usize {
+            self.feedback_turns.remove(0);
+            self.feedback_events.remove(0);
+        }
+    }
+
+    /// Compute feedback-signal state from recorded feedback events and the
+    /// current turn's observed violations/error signatures.
+    ///
+    /// Returns `(ignored_signal?, incorporated_signal?)`. Only one of the two
+    /// is produced per turn; ignored wins if any prior feedback signature
+    /// repeats, otherwise incorporated is emitted when the agent is still
+    /// producing errors after receiving feedback.
+    fn feedback_signals(
+        &self,
+        turn_counter: u64,
+        current_events: &[FeedbackEvent],
+    ) -> (Option<DivergenceSignal>, Option<DivergenceSignal>) {
+        if self.feedback_events.is_empty() || current_events.is_empty() {
+            return (None, None);
+        }
+
+        let current_keys: std::collections::HashSet<String> = current_events
+            .iter()
+            .map(|e| e.signature_key())
+            .collect();
+
+        // Match against feedback issued on previous turns only; feedback given
+        // this turn cannot be "ignored" until the next turn.
+        let mut ignored_counts: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for (event, turn) in self.feedback_events.iter().zip(self.feedback_turns.iter()) {
+            if *turn >= turn_counter {
+                continue;
+            }
+            let key = event.signature_key();
+            if current_keys.contains(&key) {
+                *ignored_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        if !ignored_counts.is_empty() {
+            let (worst_key, worst_count) = ignored_counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .unwrap();
+            let severity = if worst_count >= 3 {
+                SignalSeverity::Critical
+            } else {
+                SignalSeverity::Warn
+            };
+            let signal = DivergenceSignal::new(
+                DivergenceSignalKind::FeedbackIgnored,
+                severity,
+                worst_count as f32,
+                1.0,
+            )
+            .with_evidence(format!(
+                "feedback signature '{}' repeated {} time(s) after gateway correction",
+                worst_key, worst_count
+            ));
+            return (Some(signal), None);
+        }
+
+        // Only emit FeedbackIncorporated when feedback was issued on a
+        // previous turn. Feedback recorded this turn has not yet had a chance
+        // to be incorporated, so a same-turn signal would be misleading.
+        let has_prior_feedback = self
+            .feedback_turns
+            .iter()
+            .any(|turn| *turn < turn_counter);
+        if !has_prior_feedback {
+            return (None, None);
+        }
+
+        // Feedback was given earlier, but this turn's errors are different —
+        // the agent is incorporating the feedback (even if not yet succeeding).
+        let incorporated = DivergenceSignal::new(
+            DivergenceSignalKind::FeedbackIncorporated,
+            SignalSeverity::Warn,
+            current_events.len() as f32,
+            1.0,
+        )
+        .with_evidence(format!(
+            "{} distinct error/violation signature(s) after feedback — trajectory is evolving",
+            current_events.len()
+        ));
+        (None, Some(incorporated))
     }
 
     /// Recompute the verdict after one turn of work.
@@ -99,6 +251,11 @@ impl TrajectoryMonitor {
     /// their fingerprints and error status. Pass an empty slice when the
     /// turn produced no tool calls.
     ///
+    /// `feedback_events` records corrective feedback the gateway issued to
+    /// the agent this turn (validation violations, typed tool errors). The
+    /// monitor compares these against prior turns to detect ignored
+    /// feedback.
+    ///
     /// `context_utilization` is the prompt-budget utilization fraction in
     /// `[0.0, 1.0+]` (e.g. `0.82` for 82%). `None` when the breakdown
     /// hasn't computed one this turn — the signal is then skipped.
@@ -106,13 +263,15 @@ impl TrajectoryMonitor {
         &mut self,
         turn_counter: u64,
         observations: &[ToolObservation],
+        feedback_events: &[FeedbackEvent],
         context_utilization: Option<f32>,
-        guard_state: &LoopGuardState,
+        guard_state: &LoopGuard,
     ) -> TickResult {
         if !self.config.enabled {
             return TickResult {
                 health: TrajectoryHealth::Healthy,
                 level_changed: false,
+                suppress_until_turn: None,
             };
         }
 
@@ -145,7 +304,7 @@ impl TrajectoryMonitor {
             }
         }
         if toggles.repetition_entropy {
-            if let Some(s) = self.repetition_entropy_signal() {
+            if let Some(s) = self.repetition_entropy_signal(turn_counter) {
                 signals.push(s);
             }
         }
@@ -162,7 +321,36 @@ impl TrajectoryMonitor {
             }
         }
 
+        // Compare this turn's feedback against prior feedback events.
+        let (ignored, incorporated) = self.feedback_signals(turn_counter, feedback_events);
+        if let Some(s) = ignored {
+            signals.push(s);
+        } else if let Some(s) = incorporated {
+            signals.push(s);
+        }
+
         let health = aggregate(signals);
+
+        // RFC D.5 — suppress-on-progress grace. Consecutive turns where the
+        // agent is clearly incorporating feedback earn a suppression window
+        // during which Sentinel escalation is silenced.
+        let has_progress = health
+            .signals()
+            .iter()
+            .any(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated);
+        let suppress_until_turn = if has_progress {
+            self.consecutive_progress_turns += 1;
+            if self.consecutive_progress_turns >= self.config.progress_grace_window {
+                let grace_turns = self.config.progress_grace_turns.max(1);
+                Some(turn_counter.saturating_add(grace_turns as u64))
+            } else {
+                None
+            }
+        } else {
+            self.consecutive_progress_turns = 0;
+            None
+        };
+
         let level = health.level_str();
         let level_changed = self.last_level.map(|prev| prev != level).unwrap_or(true);
         self.last_level = Some(level);
@@ -170,6 +358,7 @@ impl TrajectoryMonitor {
         TickResult {
             health,
             level_changed,
+            suppress_until_turn,
         }
     }
 
@@ -229,45 +418,51 @@ impl TrajectoryMonitor {
         }
     }
 
-    fn repetition_entropy_signal(&self) -> Option<DivergenceSignal> {
+    fn repetition_entropy_signal(&self, turn_counter: u64) -> Option<DivergenceSignal> {
         let cfg = &self.config.repetition_entropy;
+        // Warm-up: divergence is a trajectory property, not a single-turn one.
+        // I/O-heavy agents (e.g. `researcher.default`) legitimately fire many
+        // similar calls in their opening turns — fetching pages, re-querying.
+        // Don't judge tool-call repetition before `min_turns` so that burst
+        // does not trip the signal at turn 1.
+        if turn_counter < cfg.min_turns {
+            return None;
+        }
         if self.fingerprint_window.len() < cfg.min_observations.max(1) {
             return None;
         }
         let entropy = shannon_entropy_bits(&self.fingerprint_window);
-        if entropy <= cfg.critical_bits {
-            Some(
-                DivergenceSignal::new(
-                    DivergenceSignalKind::RepetitionEntropy,
-                    SignalSeverity::Critical,
-                    entropy,
-                    cfg.critical_bits,
-                )
-                .with_evidence(format!(
-                    "tool-fingerprint entropy {:.2} bits over last {} calls (critical ≤ {:.2})",
-                    entropy,
-                    self.fingerprint_window.len(),
-                    cfg.critical_bits
-                )),
-            )
-        } else if entropy <= cfg.warn_bits {
-            Some(
-                DivergenceSignal::new(
-                    DivergenceSignalKind::RepetitionEntropy,
-                    SignalSeverity::Warn,
-                    entropy,
-                    cfg.warn_bits,
-                )
-                .with_evidence(format!(
-                    "tool-fingerprint entropy {:.2} bits over last {} calls (warn ≤ {:.2})",
-                    entropy,
-                    self.fingerprint_window.len(),
-                    cfg.warn_bits
-                )),
-            )
-        } else {
-            None
+        if entropy > cfg.warn_bits {
+            return None;
         }
+        // Repetition entropy is ADVISORY: it caps at `Warn` and never escalates
+        // a session to `Critical` on its own, so it never raises the operator
+        // divergence gate. Repeating a tool call is weak evidence of being
+        // stuck — a researcher fetching many URLs is doing its job. The
+        // gate-worthy `Critical` verdicts come from the loop guard's semantic
+        // no-progress (P-7.19) and the error-burst signal. The evidence still
+        // records how low the entropy is (`critical_bits` band) so the
+        // divergence event stays informative.
+        let band = if entropy <= cfg.critical_bits {
+            "critically low"
+        } else {
+            "low"
+        };
+        Some(
+            DivergenceSignal::new(
+                DivergenceSignalKind::RepetitionEntropy,
+                SignalSeverity::Warn,
+                entropy,
+                cfg.warn_bits,
+            )
+            .with_evidence(format!(
+                "tool-fingerprint entropy {:.2} bits over last {} calls ({}, warn ≤ {:.2}) — advisory, not gating",
+                entropy,
+                self.fingerprint_window.len(),
+                band,
+                cfg.warn_bits
+            )),
+        )
     }
 
     fn error_burst_signal(&self) -> Option<DivergenceSignal> {
@@ -353,6 +548,11 @@ fn signal_enabled(toggles: &TrajectorySignalsToggle, kind: DivergenceSignalKind)
         DivergenceSignalKind::RepetitionEntropy => toggles.repetition_entropy,
         DivergenceSignalKind::ErrorBurst => toggles.error_burst,
         DivergenceSignalKind::ContextPressure => toggles.context_pressure,
+        // Feedback signals are computed from the feedback event store and
+        // always fed into aggregation; they are not gated by legacy toggles.
+        DivergenceSignalKind::BlockedState
+        | DivergenceSignalKind::FeedbackIgnored
+        | DivergenceSignalKind::FeedbackIncorporated => true,
     }
 }
 
@@ -414,6 +614,7 @@ fn shannon_entropy_bits(window: &VecDeque<u64>) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use autonoetic_types::tool_error::ToolErrorType;
     use std::collections::HashMap;
 
     fn cfg() -> TrajectoryConfig {
@@ -426,8 +627,8 @@ mod tests {
         c
     }
 
-    fn quiet_guard_state() -> LoopGuardState {
-        LoopGuardState::default()
+    fn quiet_guard_state() -> LoopGuard {
+        LoopGuard::default()
     }
 
     // ── Master switch / no-op behavior ──────────────────────────────────
@@ -441,6 +642,7 @@ mod tests {
                 fingerprint: 1,
                 failed: true,
             }],
+            &[],
             Some(0.95),
             &quiet_guard_state(),
         );
@@ -456,7 +658,7 @@ mod tests {
         // `build_event_payload(None)`. The test validates this contract:
         // changed but no payload.
         let mut mon = TrajectoryMonitor::new(cfg());
-        let r = mon.tick(1, &[], None, &quiet_guard_state());
+        let r = mon.tick(1, &[], &[], None, &quiet_guard_state());
         assert!(matches!(r.health, TrajectoryHealth::Healthy));
         // `level_changed` is `true` on the first tick (no prior level)
         // but the caller's emit rule is `level_changed && !Healthy`.
@@ -467,8 +669,8 @@ mod tests {
     fn repeated_same_level_does_not_re_trigger() {
         // Two consecutive Healthy ticks: only the first counts as a change.
         let mut mon = TrajectoryMonitor::new(cfg());
-        let _ = mon.tick(1, &[], None, &quiet_guard_state());
-        let r2 = mon.tick(2, &[], None, &quiet_guard_state());
+        let _ = mon.tick(1, &[], &[], None, &quiet_guard_state());
+        let r2 = mon.tick(2, &[], &[], None, &quiet_guard_state());
         assert!(matches!(r2.health, TrajectoryHealth::Healthy));
         assert!(!r2.level_changed);
     }
@@ -476,35 +678,85 @@ mod tests {
     // ── Per-signal extraction ───────────────────────────────────────────
 
     #[test]
-    fn repetition_entropy_zero_for_repeated_fingerprint() {
-        // Send the same fingerprint enough times to reach min_observations.
+    fn repetition_entropy_is_advisory_warn_never_critical() {
+        // Repeated identical fingerprints (entropy ≈ 0) must surface a Warn
+        // advisory — NOT a Critical signal — so a repetitive I/O agent never
+        // raises the operator divergence gate on repetition alone.
         let mut mon = TrajectoryMonitor::new(cfg());
         let fp = 42;
+        // Tick past the warm-up (min_turns = 3) and min_observations (4).
         for turn in 1..=4 {
             let _ = mon.tick(
                 turn,
                 &[ToolObservation { fingerprint: fp, failed: false }],
+            &[],
                 None,
                 &quiet_guard_state(),
             );
         }
-        // Entropy ≈ 0 → critical band.
         let r = mon.tick(
             5,
             &[ToolObservation { fingerprint: fp, failed: false }],
+            &[],
             None,
             &quiet_guard_state(),
         );
-        let has_entropy_critical = r
+        let entropy_signals: Vec<_> = r
             .health
             .signals()
             .iter()
-            .any(|s| s.kind == DivergenceSignalKind::RepetitionEntropy && s.severity == SignalSeverity::Critical);
+            .filter(|s| s.kind == DivergenceSignalKind::RepetitionEntropy)
+            .collect();
         assert!(
-            has_entropy_critical,
-            "expected entropy=critical signal, got health={:?}",
+            !entropy_signals.is_empty(),
+            "expected an entropy advisory signal, got health={:?}",
             r.health
         );
+        assert!(
+            entropy_signals
+                .iter()
+                .all(|s| s.severity == SignalSeverity::Warn),
+            "repetition entropy must cap at Warn, got {:?}",
+            entropy_signals
+        );
+        // …and it must not, by itself, drive the session to Critical.
+        assert!(
+            !matches!(r.health, TrajectoryHealth::Critical { .. }),
+            "entropy alone must not reach Critical, got {:?}",
+            r.health
+        );
+    }
+
+    #[test]
+    fn repetition_entropy_warmup_suppresses_early_turns() {
+        // Even with identical fingerprints meeting min_observations, the signal
+        // stays silent before min_turns (default 3) — an opening burst of
+        // similar calls (researcher fetching many URLs in turn 1) is fine.
+        let mut mon = TrajectoryMonitor::new(cfg());
+        for turn in 1..=2 {
+            let r = mon.tick(
+                turn,
+                &[
+                    ToolObservation { fingerprint: 9, failed: false },
+                    ToolObservation { fingerprint: 9, failed: false },
+                    ToolObservation { fingerprint: 9, failed: false },
+                    ToolObservation { fingerprint: 9, failed: false },
+                ],
+                &[],
+                None,
+                &quiet_guard_state(),
+            );
+            let has_entropy = r
+                .health
+                .signals()
+                .iter()
+                .any(|s| s.kind == DivergenceSignalKind::RepetitionEntropy);
+            assert!(
+                !has_entropy,
+                "entropy fired during warm-up at turn {} (health={:?})",
+                turn, r.health
+            );
+        }
     }
 
     #[test]
@@ -515,6 +767,7 @@ mod tests {
             let r = mon.tick(
                 turn,
                 &[ToolObservation { fingerprint: 7, failed: false }],
+            &[],
                 None,
                 &quiet_guard_state(),
             );
@@ -530,18 +783,21 @@ mod tests {
     #[test]
     fn error_burst_fires_when_window_full_of_errors() {
         let mut mon = TrajectoryMonitor::new(cfg());
-        // Default warn_count = 5: tick 5 turns each with one error.
-        for turn in 1..=5 {
+        // Default warn_count = 8, window_size = 8: tick 8 turns each with one error.
+        for turn in 1..=7 {
             let _ = mon.tick(
                 turn,
                 &[ToolObservation { fingerprint: turn, failed: true }],
+            &[],
                 None,
                 &quiet_guard_state(),
             );
         }
+        // 8th tick: window has 7 ones, this pushes an 8th → total = 8 ≥ warn_count.
         let r = mon.tick(
-            6,
-            &[ToolObservation { fingerprint: 99, failed: false }],
+            8,
+            &[ToolObservation { fingerprint: 8, failed: true }],
+            &[],
             None,
             &quiet_guard_state(),
         );
@@ -552,7 +808,7 @@ mod tests {
             .any(|s| s.kind == DivergenceSignalKind::ErrorBurst);
         assert!(
             has_burst,
-            "expected error_burst signal after 5 error turns, got {:?}",
+            "expected error_burst signal after 8 error turns, got {:?}",
             r.health
         );
     }
@@ -562,7 +818,7 @@ mod tests {
         // No fingerprint ever observed → stall must not fire even when
         // the turn_counter is high.
         let mut mon = TrajectoryMonitor::new(cfg());
-        let r = mon.tick(100, &[], None, &quiet_guard_state());
+        let r = mon.tick(100, &[], &[], None, &quiet_guard_state());
         let has_stall = r
             .health
             .signals()
@@ -578,6 +834,7 @@ mod tests {
         let _ = mon.tick(
             1,
             &[ToolObservation { fingerprint: 1, failed: false }],
+            &[],
             None,
             &quiet_guard_state(),
         );
@@ -586,6 +843,7 @@ mod tests {
             let _ = mon.tick(
                 turn,
                 &[ToolObservation { fingerprint: 1, failed: false }],
+            &[],
                 None,
                 &quiet_guard_state(),
             );
@@ -593,6 +851,7 @@ mod tests {
         let r = mon.tick(
             7,
             &[ToolObservation { fingerprint: 1, failed: false }],
+            &[],
             None,
             &quiet_guard_state(),
         );
@@ -600,14 +859,14 @@ mod tests {
             .health
             .signals()
             .iter()
-            .find(|s| s.kind == DivergenceSignalKind::DigestStall);
-        assert!(stall.is_some(), "expected stall signal, got {:?}", r.health);
+            .find(|s| s.kind == DivergenceSignalKind::RepetitionEntropy);
+        assert!(stall.is_some(), "expected repetition_entropy signal (stall logic subsumed by entropy), got {:?}", r.health);
     }
 
     #[test]
     fn context_pressure_signal_skipped_when_no_utilization() {
         let mut mon = TrajectoryMonitor::new(cfg());
-        let r = mon.tick(1, &[], None, &quiet_guard_state());
+        let r = mon.tick(1, &[], &[], None, &quiet_guard_state());
         let has_ctx = r
             .health
             .signals()
@@ -619,7 +878,7 @@ mod tests {
     #[test]
     fn context_pressure_signal_fires_at_warn_threshold() {
         let mut mon = TrajectoryMonitor::new(cfg());
-        let r = mon.tick(1, &[], Some(0.81), &quiet_guard_state());
+        let r = mon.tick(1, &[], &[], Some(0.81), &quiet_guard_state());
         let s = r
             .health
             .signals()
@@ -640,11 +899,12 @@ mod tests {
             let _ = mon.tick(
                 turn,
                 &[ToolObservation { fingerprint: turn, failed: true }],
+            &[],
                 None,
                 &quiet_guard_state(),
             );
         }
-        let r = mon.tick(7, &[], None, &quiet_guard_state());
+        let r = mon.tick(7, &[], &[], None, &quiet_guard_state());
         assert!(
             !r.health
                 .signals()
@@ -715,25 +975,27 @@ mod tests {
         // critical signal (Critical/escalated).
         let mut mon = TrajectoryMonitor::new(cfg());
         let mut state = quiet_guard_state();
+        state.max_loops_without_progress = 5;
+        state.max_tool_failures = 5;
 
         // Turn 1: healthy, first tick → level_changed = true but Healthy
         // (caller emits only for non-Healthy).
         state.current_loops = 1;
-        let r = mon.tick(1, &[], None, &state);
+        let r = mon.tick(1, &[], &[], None, &state);
         assert!(matches!(r.health, TrajectoryHealth::Healthy));
         assert!(r.level_changed);
 
         // Turn 2-3: still healthy, no level change.
         for turn in 2u64..=3 {
             state.current_loops = turn as u32;
-            let r = mon.tick(turn, &[], None, &state);
+            let r = mon.tick(turn, &[], &[], None, &state);
             assert!(matches!(r.health, TrajectoryHealth::Healthy));
             assert!(!r.level_changed);
         }
 
         // Turn 4: loop pressure at 4/5 = 0.80 (warn) → Watching.
         state.current_loops = 4;
-        let r = mon.tick(4, &[], None, &state);
+        let r = mon.tick(4, &[], &[], None, &state);
         assert!(
             matches!(r.health, TrajectoryHealth::Watching { .. }),
             "expected Watching at turn 4, got {:?}",
@@ -745,7 +1007,7 @@ mod tests {
         // Turn 5: loop pressure still warn (4/5, no new loops added since
         // tick only reads state, does not modify it) → same level, no
         // re-trigger.
-        let r = mon.tick(5, &[], None, &state);
+        let r = mon.tick(5, &[], &[], None, &state);
         assert!(
             matches!(r.health, TrajectoryHealth::Watching { .. }),
             "expected Watching at turn 5, got {:?}",
@@ -755,35 +1017,84 @@ mod tests {
 
         // Turn 6: keep loop pressure at warn (4/5) and add failure
         // pressure (worst tool at 4/5 = 0.80 warn). Two warn signals →
-        // Diverging (detected).
+        // Watching under RFC D.6 (only FeedbackIgnored may drive Diverging).
         state.current_loops = 4;
         state.tool_failure_counts.insert("sandbox.exec".into(), 4);
-        let r = mon.tick(6, &[], None, &state);
+        let r = mon.tick(6, &[], &[], None, &state);
+        assert!(
+            matches!(r.health, TrajectoryHealth::Watching { .. }),
+            "expected Watching at turn 6 under D.6, got {:?}",
+            r.health
+        );
+        // Still Watching — level does not change from turn 5.
+        assert!(!r.level_changed, "still watching must not re-trigger");
+        assert_eq!(r.health.causal_action(), Some("observed"));
+
+        // Turn 7: introduce FeedbackIgnored. This is the only signal that
+        // may drive Diverging/Critical.
+        mon.record_feedback(6, &[FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        }]);
+        let r = mon.tick(
+            7,
+            &[],
+            &[FeedbackEvent::Validation {
+                rule: "output_schema".into(),
+                field_path: None,
+            }],
+            None,
+            &state,
+        );
         assert!(
             matches!(r.health, TrajectoryHealth::Diverging { .. }),
-            "expected Diverging at turn 6, got {:?}",
+            "expected Diverging at turn 7 with feedback ignored, got {:?}",
             r.health
         );
         assert!(r.level_changed);
         assert_eq!(r.health.causal_action(), Some("detected"));
 
-        // Turn 7: increase to critical loop pressure (5/5 = 1.0 ≥ 0.95).
-        // At least one critical signal → Critical (escalated).
-        state.current_loops = 5;
-        let r = mon.tick(7, &[], None, &state);
+        // Turn 8: repeat the same ignored feedback twice more → Critical.
+        mon.record_feedback(7, &[FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        }]);
+        mon.record_feedback(8, &[FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        }]);
+        let r = mon.tick(
+            9,
+            &[],
+            &[FeedbackEvent::Validation {
+                rule: "output_schema".into(),
+                field_path: None,
+            }],
+            None,
+            &state,
+        );
         assert!(
             matches!(r.health, TrajectoryHealth::Critical { .. }),
-            "expected Critical at turn 7, got {:?}",
+            "expected Critical after repeated feedback ignored, got {:?}",
             r.health
         );
         assert!(r.level_changed);
         assert_eq!(r.health.causal_action(), Some("escalated"));
 
-        // Turn 8: same critical → no re-trigger.
-        let r = mon.tick(8, &[], None, &state);
+        // Turn 10: same critical → no re-trigger.
+        let r = mon.tick(
+            10,
+            &[],
+            &[FeedbackEvent::Validation {
+                rule: "output_schema".into(),
+                field_path: None,
+            }],
+            None,
+            &state,
+        );
         assert!(
             matches!(r.health, TrajectoryHealth::Critical { .. }),
-            "expected Critical at turn 8, got {:?}",
+            "expected Critical at turn 10, got {:?}",
             r.health
         );
         assert!(!r.level_changed, "same critical must not re-trigger");
@@ -795,9 +1106,201 @@ mod tests {
         let mut mon = TrajectoryMonitor::new(cfg());
         let state = quiet_guard_state();
         for turn in 1..=20 {
-            let r = mon.tick(turn, &[], None, &state);
+            let r = mon.tick(turn, &[], &[], None, &state);
             assert!(matches!(r.health, TrajectoryHealth::Healthy));
             assert_eq!(r.health.causal_action(), None);
         }
+    }
+
+    #[test]
+    fn feedback_incorporated_does_not_fire_same_turn_as_first_feedback() {
+        let mut mon = TrajectoryMonitor::new(cfg());
+        let state = quiet_guard_state();
+        let fb = FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        };
+
+        // Record feedback and supply a *different* current error on the same
+        // turn. This should NOT emit FeedbackIncorporated because the agent
+        // has not yet had a chance to act on the feedback.
+        mon.record_feedback(5, &[fb.clone()]);
+        let r = mon.tick(
+            5,
+            &[],
+            &[FeedbackEvent::ToolError {
+                tool: "content.write".into(),
+                error_type: ToolErrorType::Validation,
+                message_signature: "missing field".into(),
+            }],
+            None,
+            &state,
+        );
+        assert!(
+            matches!(r.health, TrajectoryHealth::Healthy),
+            "same-turn feedback must not produce FeedbackIncorporated: {:?}",
+            r.health
+        );
+
+        // On the next turn, a different error after prior feedback is
+        // incorporated (advisory).
+        let r = mon.tick(
+            6,
+            &[],
+            &[FeedbackEvent::ToolError {
+                tool: "content.write".into(),
+                error_type: ToolErrorType::Validation,
+                message_signature: "missing field".into(),
+            }],
+            None,
+            &state,
+        );
+        assert!(
+            matches!(r.health, TrajectoryHealth::Watching { .. }),
+            "FeedbackIncorporated should be advisory Watching: {:?}",
+            r.health
+        );
+        let signals = r.health.signals();
+        assert!(
+            signals.iter().any(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated),
+            "expected FeedbackIncorporated signal: {:?}",
+            signals
+        );
+    }
+
+    #[test]
+    fn feedback_snapshot_and_restore_preserve_turn_counters() {
+        let mut mon = TrajectoryMonitor::new(cfg());
+        mon.record_feedback(
+            3,
+            &[
+                FeedbackEvent::Validation {
+                    rule: "output_schema".into(),
+                    field_path: None,
+                },
+                FeedbackEvent::ToolError {
+                    tool: "content.write".into(),
+                    error_type: ToolErrorType::Validation,
+                    message_signature: "missing field".into(),
+                },
+            ],
+        );
+        mon.record_feedback(
+            5,
+            &[FeedbackEvent::Validation {
+                rule: "required_artifacts".into(),
+                field_path: None,
+            }],
+        );
+
+        let snap = mon.feedback_snapshot();
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[0].0, 3);
+        assert_eq!(snap[2].0, 5);
+
+        let mut restored = TrajectoryMonitor::new(cfg());
+        restored.restore_feedback(snap);
+        // The restored monitor should detect ignored feedback if the same
+        // signature appears on a subsequent turn.
+        let r = restored.tick(
+            6,
+            &[],
+            &[FeedbackEvent::Validation {
+                rule: "output_schema".into(),
+                field_path: None,
+            }],
+            None,
+            &quiet_guard_state(),
+        );
+        assert!(
+            matches!(r.health, TrajectoryHealth::Diverging { .. }),
+            "restored monitor should detect ignored validation feedback: {:?}",
+            r.health
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // RFC D.5 — suppress-on-progress grace
+    // ──────────────────────────────────────────────────────────────────────
+
+    fn progress_cfg(window: u32, turns: u32) -> TrajectoryConfig {
+        let mut c = cfg();
+        c.progress_grace_window = window;
+        c.progress_grace_turns = turns;
+        c
+    }
+
+    #[test]
+    fn progress_grace_earns_suppression_after_window() {
+        // Feedback given on turn 1, then two turns of distinct errors earn
+        // suppression for the next 3 turns.
+        let prior = FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        };
+        let different = FeedbackEvent::ToolError {
+            tool: "content.write".into(),
+            error_type: ToolErrorType::Validation,
+            message_signature: "missing field".into(),
+        };
+
+        let mut mon = TrajectoryMonitor::new(progress_cfg(2, 3));
+        mon.record_feedback(1, &[prior]);
+
+        let r1 = mon.tick(2, &[], &[different.clone()], None, &quiet_guard_state());
+        assert!(
+            r1.health
+                .signals()
+                .iter()
+                .any(|s| s.kind == DivergenceSignalKind::FeedbackIncorporated),
+            "turn 2 should show FeedbackIncorporated"
+        );
+        assert!(r1.suppress_until_turn.is_none(), "one progress turn is not enough");
+
+        let r2 = mon.tick(3, &[], &[different.clone()], None, &quiet_guard_state());
+        assert_eq!(
+            r2.suppress_until_turn,
+            Some(6),
+            "two consecutive progress turns should earn suppression until turn 6"
+        );
+    }
+
+    #[test]
+    fn progress_grace_resets_on_non_progress_turn() {
+        let prior = FeedbackEvent::Validation {
+            rule: "output_schema".into(),
+            field_path: None,
+        };
+        let different = FeedbackEvent::ToolError {
+            tool: "content.write".into(),
+            error_type: ToolErrorType::Validation,
+            message_signature: "missing field".into(),
+        };
+
+        let mut mon = TrajectoryMonitor::new(progress_cfg(2, 3));
+        mon.record_feedback(1, &[prior]);
+
+        let _ = mon.tick(2, &[], &[different.clone()], None, &quiet_guard_state());
+        // Turn 3 has no feedback and no errors → not progress.
+        let _ = mon.tick(3, &[], &[], None, &quiet_guard_state());
+        // Turn 4 is progress again, but the streak was broken.
+        let r = mon.tick(4, &[], &[different], None, &quiet_guard_state());
+        assert!(
+            r.suppress_until_turn.is_none(),
+            "streak reset should prevent grace from a single progress turn"
+        );
+    }
+}
+
+/// Map a level string back to the internal &'static str.
+/// Used by `restore_last_level` on session resume.
+fn restore_level(s: &str) -> Option<&'static str> {
+    match s {
+        "healthy" => Some("healthy"),
+        "watching" => Some("watching"),
+        "blocked" => Some("blocked"),
+        "diverging" => Some("diverging"),
+        "critical" => Some("critical"),
+        _ => None,
     }
 }

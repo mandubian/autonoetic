@@ -274,6 +274,25 @@ These are tagged and stored in the `memories` table for cross-session retrieval.
 
 ---
 
+## Automatic Wake-Time Priming
+
+The tools above are **pull-based** — the agent has to think to call them. The gateway also **pushes** a bounded "Prior Knowledge (from past sessions)" block into the system prompt at every turn, no tool call required, built from the agent's own tagged digest/quality-signal memories.
+
+This priming is **task-matched**, not merely the most recent memories: a candidate pool (deduped, up to 50) is scored against the incoming task text by token-overlap relevance, with error lessons (`digest.error_pattern` / `digest.lesson` scopes) winning ties; unmatched slots are filled by recency so the block is never empty just because nothing scored. Each line carries provenance so the agent can weigh it:
+
+```
+Prior Knowledge (from past sessions)
+
+- (error lesson) weather api requires retry on 429 rate limit responses [from session sess-abc1]
+- unrelated database schema migration notes [from session sess-def2]
+```
+
+How many memories are injected is controlled by `Profile::memory_priming_limit()` (Starter=3, Standard=5, Expert=10). The `auto_learning.task_matched_recall` config flag (default `true`) gates the relevance ranking; set it `false` to fall back to pure recency, matching the block's original behavior before task-matching was added.
+
+Push (this section) and pull (`execution_search`/`knowledge_search`/`digest_query` above) are complementary: priming surfaces what's *likely* relevant without being asked; the query tools let an agent dig further once it has a specific question the priming block didn't answer.
+
+---
+
 ## Retention
 
 - **execution_traces**: Default 30 days (configurable via `retention.execution_traces_days`)

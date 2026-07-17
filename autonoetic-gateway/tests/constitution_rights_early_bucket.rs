@@ -27,6 +27,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDe
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::{EntryStatus, PublishedSessionReportRecord};
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -46,6 +47,7 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,
@@ -62,8 +64,10 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -222,6 +226,7 @@ fn ri_0_7_manifest() -> AgentManifest {
             id: "ri07.tester".to_string(),
             name: "ri07.tester".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -250,8 +255,10 @@ fn ri_0_7_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -293,7 +300,7 @@ async fn ri_0_7_session_close_commits_causal_event() {
         .await
         .expect("execute should succeed");
 
-    let close_result = runtime.close_session("agent_initiated");
+    let close_result = runtime.close_session(SessionCloseOutcome::ExecuteLoopComplete);
     assert!(
         close_result.is_ok(),
         "close_session must not be refused — Ri-0.7: {:?}",
@@ -315,9 +322,11 @@ async fn ri_0_7_session_close_commits_causal_event() {
     let payload = end.payload.as_ref().expect("end event should have payload");
     let reason = payload.get("reason").and_then(|r| r.as_str());
     assert!(
-        reason.unwrap_or("").contains("agent_initiated"),
-        "end event should record the termination reason: {:?}",
         reason
+            .unwrap_or("")
+            .contains(SessionCloseOutcome::ExecuteLoopComplete.as_str()),
+        "end event should record the termination reason: {:?}",
+        end_events
     );
     assert_eq!(
         end.actor_id, "ri07.tester",
@@ -362,7 +371,7 @@ async fn ri_0_7_session_close_cannot_be_refused() {
         .await
         .expect("execute should succeed");
 
-    let result = runtime.close_session("agent_exit");
+    let result = runtime.close_session(SessionCloseOutcome::ExecuteLoopComplete);
     assert!(
         result.is_ok(),
         "close_session must never be refused — Ri-0.7: {:?}",

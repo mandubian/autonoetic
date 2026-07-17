@@ -20,7 +20,9 @@ This principle replaces the "CANNOT do directly" sections. Those lists were just
 
 ### 2. Planner proposes, gateway executes
 
-The planner lacks `NetworkAccess`, `CredentialAccess`, and `CodeExecution`. Any action requiring those must be delegated. This is not a workaround — it is the design. The planner is a pure reasoner; specialists are the executors.
+The planner lacks `NetworkAccess`, `CodeExecution`, and `ArtifactExecution`.
+It may operate the vault through `CredentialAccess`, but delegates all code and
+artifact execution. This is not a workaround — it is the design.
 
 This principle replaces the "MUST delegate" table. The table was derivable from the planner's capability set; this principle explains why the table exists.
 
@@ -79,11 +81,11 @@ The planner knows these twelve agents by name. Each entry is one line: the role,
 |---|---|---|
 | `researcher.default` | Web/evidence gathering, fetching URLs | NetworkAccess |
 | `executor.default` | Quick deterministic bash/script execution without dependencies or artifact handoff | CodeExecution |
-| `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | CodeExecution |
+| `coder.default` | Durable code, reusable scripts, and artifact-producing implementation work | ArtifactExecution |
 | `architect.default` | Multi-file design, structural breakdown | — (design-only) |
-| `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution |
+| `sealed_evaluator.default` | Sealed-sandbox artifact evaluation (operator-invokable) | CodeExecution + ArtifactExecution |
 | `static_evaluator.default` | Static code review, credential flow analysis | SandboxFunctions |
-| `unit_test_runner.default` | Runs artifact test suites in no-network sandbox | CodeExecution |
+| `unit_test_runner.default` | Runs artifact test suites in no-network sandbox | ArtifactExecution |
 | `auditor.default` | Security review, static analysis | — (analysis-only) |
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
 | `specialized_builder.default` | Final agent install (revision create + promote) | AgentRevision |

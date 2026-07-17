@@ -16,11 +16,27 @@
 /// Read-only and cheap: scans `PATH` entries for a file with the execute bit,
 /// without spawning the tool (so it can't have side effects or hang).
 pub fn tool_on_path(tool: &str) -> bool {
-    tool_on_given_path(std::env::var_os("PATH").as_deref(), tool)
+    cached_path_dirs()
+        .iter()
+        .any(|dir| is_executable(&dir.join(tool)))
+}
+
+/// Process-lifetime cache of the `PATH` directory list (#591). `PATH` does not
+/// change during a gateway run, so we split it once instead of on every
+/// `tool_on_path` check. Only the directory list is cached; executable presence
+/// is still probed per call so a tool installed mid-run is still discovered.
+fn cached_path_dirs() -> &'static [std::path::PathBuf] {
+    static PATH_DIRS: std::sync::OnceLock<Vec<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH_DIRS.get_or_init(|| {
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default()
+    })
 }
 
 /// `tool_on_path` against an explicit `PATH` value — the testable core, so tests
 /// never mutate the process-global `PATH` (which would race the rest of the suite).
+#[cfg(test)]
 fn tool_on_given_path(path: Option<&std::ffi::OsStr>, tool: &str) -> bool {
     let Some(path) = path else {
         return false;

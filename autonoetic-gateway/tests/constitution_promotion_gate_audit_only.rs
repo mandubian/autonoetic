@@ -173,6 +173,7 @@ fn proposer_manifest() -> AgentManifest {
             id: "specialized_builder.default".to_string(),
             name: "specialized_builder.default".to_string(),
             description: "Proposer".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -191,8 +192,10 @@ fn proposer_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -212,6 +215,7 @@ fn auditor_manifest(id: &str) -> AgentManifest {
             id: id.to_string(),
             name: id.to_string(),
             description: "Auditor".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
@@ -230,8 +234,10 @@ fn auditor_manifest(id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -295,17 +301,19 @@ fn record_promotion(
     agent_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
+    session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} test record — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -314,10 +322,10 @@ fn record_promotion(
             agent_dir,
             Some(gateway_dir),
             &serde_json::to_string(&args).unwrap(),
-            Some(&format!("session-{role}")),
+            Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion_record should succeed");
@@ -361,6 +369,17 @@ fn try_promote(
     ) {
         Ok(result) => Ok(serde_json::from_str(&result).unwrap()),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the failure match arms below read naturally; a genuine success stays `Ok`.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
     }
 }
 
@@ -462,7 +481,7 @@ fn audit_only_promote_fails_without_auditor_record() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => {
             assert!(
                 msg.contains("Promotion gate") && msg.contains("no auditor promotion.record"),
@@ -494,9 +513,11 @@ fn audit_only_promote_succeeds_with_auditor_pass() {
         &f.proposer_dir,
         &f.gateway_dir,
         &f.config,
+        &f.store,
         &f.artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -543,9 +564,11 @@ fn audit_only_promote_fails_with_auditor_record_pass_false() {
         &f.proposer_dir,
         &f.gateway_dir,
         &f.config,
+        &f.store,
         &f.artifact_id,
         "auditor",
         false, // auditor explicitly rejected the install
+        "session-auditor-fail",
     );
 
     let result = try_promote(
@@ -560,7 +583,7 @@ fn audit_only_promote_fails_with_auditor_record_pass_false() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => assert!(
             msg.contains("Promotion gate") && msg.contains("auditor did not pass"),
             "expected auditor-fail rejection, got: {}",
@@ -611,6 +634,7 @@ fn audit_only_promote_fails_when_auditor_is_proposer_self_approval() {
             true,
             vec![],
             Some("Self-approval test".to_string()),
+            None,
         )
         .expect("write self-audit record");
 
@@ -626,7 +650,7 @@ fn audit_only_promote_fails_when_auditor_is_proposer_self_approval() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => {
             assert!(
                 msg.contains("P-2.17") && msg.contains("same identity that proposed"),
@@ -662,9 +686,11 @@ fn high_risk_intent_only_artifact_still_requires_full_gate() {
         &f.proposer_dir,
         &f.gateway_dir,
         &f.config,
+        &f.store,
         &f.artifact_id,
         "auditor",
         true,
+        "session-auditor",
     );
 
     let result = try_promote(
@@ -679,7 +705,7 @@ fn high_risk_intent_only_artifact_still_requires_full_gate() {
         &f.revision_id,
     );
 
-    match result {
+    match as_outcome(result) {
         Err(msg) => {
             assert!(
                 msg.contains("no evaluator role passed") || msg.contains("no promotion.record"),

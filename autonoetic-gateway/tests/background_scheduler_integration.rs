@@ -113,6 +113,8 @@ fn register_revision_mirror(
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "background_scheduler_integration".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -120,6 +122,7 @@ fn register_revision_mirror(
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -132,6 +135,9 @@ fn register_revision_mirror(
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "background_scheduler_integration".to_string(),
         reason: Some("integration test seed".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(())

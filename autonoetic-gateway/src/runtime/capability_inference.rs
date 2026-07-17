@@ -252,6 +252,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::ReadAccess { .. } => "ReadAccess",
         Capability::WriteAccess { .. } => "WriteAccess",
         Capability::CodeExecution { .. } => "CodeExecution",
+        Capability::ArtifactExecution => "ArtifactExecution",
         Capability::AgentSpawn { .. } => "AgentSpawn",
         Capability::AgentMessage { .. } => "AgentMessage",
         Capability::SandboxFunctions { .. } => "SandboxFunctions",
@@ -271,8 +272,11 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
+        Capability::SelfCapsuleExport => "SelfCapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
+        Capability::PromoteWith { .. } => "PromoteWith",
+        Capability::GateDecider { .. } => "GateDecider",
     }
 }
 

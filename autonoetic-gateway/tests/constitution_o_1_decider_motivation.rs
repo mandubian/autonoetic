@@ -20,6 +20,7 @@ fn pending_sandbox_approval(id: &str) -> ApprovalRequest {
             requires_approval: true,
             evidence_ref: None,
             detected_hosts: None,
+            intent: None,
         },
         created_at: "2026-06-01T00:00:00Z".to_string(),
         reason: None,
@@ -32,19 +33,21 @@ fn pending_sandbox_approval(id: &str) -> ApprovalRequest {
         decided_by: None,
         decision_reason: None,
         approval_level: ApprovalLevel::Operator,
-        similar_to_request_id: None,
-        similarity_score: None,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
         risk_summary: None,
+        expires_at: None,
     }
 }
 
 fn config_with_obligations(agents_dir: std::path::PathBuf, enabled: bool) -> GatewayConfig {
     GatewayConfig {
         agents_dir,
-        decider_obligations: DeciderObligationsConfig { enabled },
+        decider_obligations: DeciderObligationsConfig {
+            enabled,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }

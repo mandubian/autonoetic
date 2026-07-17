@@ -12,7 +12,7 @@ use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, Message, StopReason, TokenUsage,
 };
 use autonoetic_gateway::runtime::checkpoint::{save_checkpoint, SessionCheckpoint, YieldReason};
-use autonoetic_gateway::runtime::guard::LoopGuardState;
+use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -51,7 +51,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
             Message::user("hello".to_string()),
         ],
         turn_counter: 1,
-        loop_guard_state: LoopGuardState {
+        loop_guard_state: LoopGuard {
             max_loops_without_progress: 5,
             max_tool_failures: 5,
             max_consecutive_same_progress: 1,
@@ -66,12 +66,15 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         session_state: SessionState::Normal,
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
+        blocked_state_event_emitted: false,
         agent_id: "planner.default".to_string(),
         session_id: session_id.to_string(),
         turn_id: "turn-000001".to_string(),
         workflow_id: None,
         task_id: None,
         runtime_lock_hash: None,
+        constitution_version: None,
+        constitution_digest: None,
         llm_config_snapshot: None,
         tool_registry_version: None,
         yield_reason: YieldReason::Hibernation,
@@ -87,6 +90,9 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         assistant_message: None,
         pending_action: None,
         suspended_at: None,
+        suppress_until_turn: 0,
+        trajectory_last_level: None,
+            feedback_events: vec![],
     };
     save_checkpoint(config, &cp).unwrap();
 }
@@ -242,6 +248,7 @@ fn manifest_simple(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -258,8 +265,10 @@ fn manifest_simple(agent_id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

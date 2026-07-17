@@ -1,0 +1,44 @@
+name: ci
+
+# Per-PR gate: focused on global health, kept fast. Compilation + the
+# in-process unit tests across every crate (~1.6k tests, parallel, no daemon
+# spawning). The slow integration suites (autonoetic-gateway/tests/**, the
+# cli_e2e chat tests) and the #[ignore]'d full-stack e2e run once a day in the
+# `nightly` workflow instead — see .github/workflows/nightly.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --workspace
+
+  unit:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Unit tests only (lib + bin targets) — no daemons, no integration suites.
+      # Single-threaded: several gateway unit tests share process-global state
+      # (router/server/trajectory) and must not run concurrently. Integration
+      # tests in tests/ are intentionally excluded here; they run in the daily
+      # `nightly` workflow.
+      - run: cargo test --workspace --lib --bins -- --test-threads=1

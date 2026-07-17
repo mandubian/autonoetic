@@ -3,17 +3,19 @@
 //! At every turn boundary the gateway composes a small JSON block
 //! describing the agent's *current* operational state — remaining budget,
 //! active capabilities, pending approvals, spawn depth, session ids, turn
-//! counter — signs it with the per-gateway Ed25519 identity key, and
-//! injects the wrapper as a system-prompt tail. The agent's foundation
-//! prompt teaches it that this block is authoritative; its own memory of
-//! these facts is not.
+//! counter, **and the constitution version + digest the session runs under**
+//! — signs it with the per-gateway Ed25519 identity key, and injects the
+//! wrapper as a system-prompt tail. The agent's foundation prompt teaches it
+//! that this block is authoritative; its own memory of these facts is not.
 //!
 //! Threat addressed: LLM reasoning state diverges from gateway ground
 //! truth. The model's sense of what's true comes from its conversation
 //! history, which it also shapes; an agent can plan coherently on false
 //! premises for many turns before contradiction. The attestation is a
 //! signed fact-of-the-moment the model can re-read without trusting the
-//! transcript.
+//! transcript. Binding the constitution digest in (P-6.23 / Ri-0.10,
+//! non-retroactivity) means the agent knows *which law* it runs under as a
+//! verified per-turn fact, not only on demand via `constitution_read`.
 //!
 //! Verification: see `crypto::verify_attestation_signature`. The wrapper
 //! includes a short `key_fingerprint` (first 8 bytes of the public key,
@@ -42,11 +44,38 @@ pub struct AttestationInputs<'a> {
     pub pending_user_interaction_ids: Vec<String>,
     /// Pending escalation IDs (GateKind::Escalation).
     pub pending_escalation_ids: Vec<String>,
+    /// Non-terminal constitutional proposal IDs filed by this agent (#772
+    /// A.2 — "voice with amnesia is no voice"). Lets the agent see, every
+    /// turn, that its own proposals are still awaiting a decision.
+    pub pending_proposal_ids: Vec<String>,
+    /// Non-terminal anomaly flag IDs filed by this agent (#772 A.2).
+    pub pending_flag_ids: Vec<String>,
+    /// Open amendment invitations addressed to this agent (#771 D.2):
+    /// repeated denials of the same rule crossed the pre-committed
+    /// threshold, so the gateway invites the agent to draft an amendment
+    /// (Ri-0.8). Carried as one-line summaries (not bare ids) because the
+    /// agent did not file these — the rule and the friction evidence ARE
+    /// the message. Bounded by the caller like the other civic items.
+    pub pending_invitations: Vec<InvitationSummary>,
     /// Named budget meters from the session registry. `limit` is `None`
     /// when no cap is configured for that meter (e.g. price tracking
     /// without a ceiling). Empty when budgets are disabled or the
     /// session has not yet recorded any usage.
     pub budget_meters: Vec<BudgetMeter>,
+    /// RFC #778 Part D — pre-computed burn-rate forecast. The caller computes
+    /// this from `budget_meters` + `turn_counter` so this module stays pure
+    /// (no budget-registry dependency). `None` on turn 0 or when no token
+    /// budget is configured.
+    pub burn_rate: Option<BurnRateForecast>,
+    /// Active constitution version label (e.g. `"2026.07.02"`). Bound into
+    /// the signed block so non-retroactivity (Ri-0.10) is a verified per-turn
+    /// fact, not an on-demand lookup. Fetched by the caller from
+    /// `constitution_digest::constitution_version()` so this module stays
+    /// free of upward dependencies.
+    pub constitution_version: &'a str,
+    /// SHA-256 digest of the canonical constitution text the session runs
+    /// under. See [`AttestationInputs::constitution_version`].
+    pub constitution_digest: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,10 +85,51 @@ pub struct BudgetMeter {
     pub limit: Option<f64>,
 }
 
+/// One open amendment invitation in the signed attestation (#771 D.2).
+/// Compact by design: the rule under friction, how often it was denied in
+/// the window, and the invitation id for lookup. The agent acts through the
+/// ordinary Ri-0.8 proposal path; the invitation itself carries no
+/// authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InvitationSummary {
+    pub invitation_id: String,
+    pub rule_id: String,
+    pub denial_count: u64,
+}
+
 impl BudgetMeter {
     pub fn remaining(&self) -> Option<f64> {
         self.limit.map(|lim| (lim - self.used).max(0.0))
     }
+}
+
+/// RFC #778 Part D — burn-rate forecast line in the P-6.23 attestation.
+///
+/// Pre-committed formula (no gateway judgment):
+/// - `tokens_per_turn` = `llm_tokens.used / turn_counter` (0.0 when turn=0
+///   or no tokens used yet)
+/// - `remaining_tokens` = `limit - used` (when a token limit is configured)
+/// - `projected_turns_remaining` = `remaining_tokens / tokens_per_turn`
+///   (None when `tokens_per_turn` is 0 or no limit is configured)
+///
+/// Converts budget exhaustion from a cliff (P-7.18 degraded mode) into a
+/// re-planning trigger **while the agent still has tokens to re-plan with**.
+/// Refinement (RFC open question 5): per-role step-cost priors for
+/// heterogeneous plans — priors are config, the formula stays pre-committed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BurnRateForecast {
+    /// Average tokens consumed per turn so far. 0.0 when no tokens have been
+    /// used yet (early turns or metering delay).
+    pub tokens_per_turn: f64,
+    /// Remaining token budget (when a limit is configured). None when no
+    /// token cap is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_tokens: Option<f64>,
+    /// How many more turns the agent can afford at the current burn rate.
+    /// None when `tokens_per_turn` is 0 (no burn rate data yet) or when no
+    /// token limit is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projected_turns_remaining: Option<f64>,
 }
 
 /// The signed payload itself (the JSON object that gets hashed).
@@ -80,9 +150,37 @@ pub struct StateAttestationPayload {
     pub pending_user_interaction_ids: Vec<String>,
     pub pending_escalation_count: usize,
     pub pending_escalation_ids: Vec<String>,
+    /// Non-terminal constitutional proposals filed by this agent (#772 A.2).
+    /// `#[serde(default)]` keeps older persisted payloads deserializable.
+    #[serde(default)]
+    pub pending_proposal_count: usize,
+    #[serde(default)]
+    pub pending_proposal_ids: Vec<String>,
+    /// Non-terminal anomaly flags filed by this agent (#772 A.2).
+    #[serde(default)]
+    pub pending_flag_count: usize,
+    #[serde(default)]
+    pub pending_flag_ids: Vec<String>,
+    /// Open amendment invitations addressed to this agent (#771 D.2).
+    #[serde(default)]
+    pub pending_invitation_count: usize,
+    #[serde(default)]
+    pub pending_invitations: Vec<InvitationSummary>,
     pub spawn_depth: u32,
     pub budget: Vec<BudgetMeter>,
+    /// RFC #778 Part D — burn-rate forecast computed from budget meters and
+    /// turn counter. `None` when there is not enough data (turn 0, no token
+    /// budget, or budgets disabled).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub burn_rate: Option<BurnRateForecast>,
     pub gateway_node_id: String,
+    /// Active constitution version label (e.g. `"2026.07.02"`).
+    pub constitution_version: String,
+    /// SHA-256 digest of the canonical constitution text. Bound into the
+    /// signed payload so an agent knows which law it runs under as a
+    /// verified fact (P-6.23 / Ri-0.10 non-retroactivity), not only via
+    /// `constitution_read`.
+    pub constitution_digest: String,
     pub attested_at: String,
 }
 
@@ -101,6 +199,11 @@ pub struct StateAttestation {
 /// truncate and emit a count — the goal is to keep the per-turn tail
 /// bounded.
 pub const MAX_PENDING_APPROVALS_INLINE: usize = 32;
+
+/// Maximum number of civic (proposal/flag) IDs surfaced inline — same
+/// bounding idiom as `MAX_PENDING_APPROVALS_INLINE`, smaller ceiling since
+/// civic items are expected to be rarer.
+pub const MAX_CIVIC_ITEMS_INLINE: usize = 16;
 
 /// Compose, sign, and return the wrapper.
 pub fn compose_and_sign(
@@ -128,6 +231,27 @@ pub fn compose_and_sign(
         .take(MAX_PENDING_APPROVALS_INLINE)
         .collect();
 
+    let pending_proposal_count = inputs.pending_proposal_ids.len();
+    let pending_proposal_ids: Vec<String> = inputs
+        .pending_proposal_ids
+        .into_iter()
+        .take(MAX_CIVIC_ITEMS_INLINE)
+        .collect();
+
+    let pending_flag_count = inputs.pending_flag_ids.len();
+    let pending_flag_ids: Vec<String> = inputs
+        .pending_flag_ids
+        .into_iter()
+        .take(MAX_CIVIC_ITEMS_INLINE)
+        .collect();
+
+    let pending_invitation_count = inputs.pending_invitations.len();
+    let pending_invitations: Vec<InvitationSummary> = inputs
+        .pending_invitations
+        .into_iter()
+        .take(MAX_CIVIC_ITEMS_INLINE)
+        .collect();
+
     let active_capabilities = inputs
         .manifest
         .capabilities
@@ -152,9 +276,18 @@ pub fn compose_and_sign(
         pending_user_interaction_ids: pending_ui_inline,
         pending_escalation_count: pending_esc_total,
         pending_escalation_ids: pending_esc_inline,
+        pending_proposal_count,
+        pending_proposal_ids,
+        pending_flag_count,
+        pending_flag_ids,
+        pending_invitation_count,
+        pending_invitations,
         spawn_depth,
         budget: inputs.budget_meters,
+        burn_rate: inputs.burn_rate,
         gateway_node_id: inputs.gateway_node_id.to_string(),
+        constitution_version: inputs.constitution_version.to_string(),
+        constitution_digest: inputs.constitution_digest.to_string(),
         attested_at: chrono::Utc::now().to_rfc3339(),
     };
 
@@ -182,11 +315,21 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
     Ok(format!(
         "---\n\nGateway State Attestation (R++1)\n\n\
          The block below is signed by the gateway's identity key. It is the \
-         **authoritative** statement of your remaining budget, active \
+          **authoritative** statement of your remaining budget, active \
          capabilities, pending gates (approvals, user interactions, \
-         escalations), spawn depth, session ids, and turn counter. If your \
-         own memory of these facts disagrees with the block, the block is \
-         correct.\n\n\
+         escalations), any constitutional proposals or anomaly flags you \
+         filed that are still awaiting a decision, any amendment \
+         invitations issued to you from repeated rule denials (each naming \
+         the rule and the denial count — you may answer by filing a \
+         proposal through the ordinary Ri-0.8 path), spawn depth, session \
+          ids, turn counter, burn-rate forecast, and the constitution \
+          version + digest you are running under. If your own memory of \
+          these facts disagrees with the block, \
+          the block is correct. The constitution digest pins the exact law \
+          in force for this session; if it changes mid-session, the law \
+          under you changed.           The burn_rate field tells you your current spending pace and, when a \
+          token limit is configured, how many turns you can afford at that \
+          rate — re-plan before you hit the cliff.\n\n\
          <gateway_state_attestation>\n{body}\n</gateway_state_attestation>\n",
     ))
 }
@@ -233,6 +376,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::AgentMessage { .. } => "AgentMessage",
         Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation",
         Capability::CodeExecution { .. } => "CodeExecution",
+        Capability::ArtifactExecution => "ArtifactExecution",
         Capability::EmergencyStop => "EmergencyStop",
         Capability::AgentRevision { .. } => "AgentRevision",
         Capability::Evaluation { .. } => "Evaluation",
@@ -248,8 +392,11 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow",
         Capability::SecurityRedTeam => "SecurityRedTeam",
         Capability::CapsuleExport => "CapsuleExport",
+        Capability::SelfCapsuleExport => "SelfCapsuleExport",
         Capability::PlanFrameAccess { .. } => "PlanFrameAccess",
         Capability::WikiContribute => "WikiContribute",
+        Capability::PromoteWith { .. } => "PromoteWith",
+        Capability::GateDecider { .. } => "GateDecider",
     }
     .to_string()
 }
@@ -274,7 +421,8 @@ mod tests {
                 id: "agent-1".to_string(),
                 name: "agent-1".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: caps,
             llm_overrides: None,
             llm_preset: None,
@@ -290,8 +438,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -314,11 +464,17 @@ mod tests {
                 pending_approval_ids: vec!["apr-aaa".to_string(), "apr-bbb".to_string()],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![BudgetMeter {
                     name: "llm_rounds".to_string(),
                     used: 3.0,
                     limit: Some(20.0),
                 }],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -333,6 +489,10 @@ mod tests {
         assert_eq!(payload.pending_approval_count, 2);
         assert_eq!(payload.budget[0].remaining(), Some(17.0));
         assert_eq!(att.key_fingerprint, key.fingerprint());
+        // The constitution the session runs under is bound into the signed
+        // block (P-6.23 / Ri-0.10 non-retroactivity), not just on-demand.
+        assert_eq!(payload.constitution_version, "2026.07.02");
+        assert_eq!(payload.constitution_digest, "deadbeef");
     }
 
     #[test]
@@ -351,7 +511,13 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -382,7 +548,13 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -415,7 +587,13 @@ mod tests {
                 pending_approval_ids: lots,
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -425,6 +603,135 @@ mod tests {
             att.payload.pending_approval_ids.len(),
             MAX_PENDING_APPROVALS_INLINE
         );
+    }
+
+    /// #772 A.2 — "voice with amnesia is no voice": an agent's own pending
+    /// proposals/flags are bounded inline the same way pending approvals are.
+    #[test]
+    fn pending_proposals_truncated_with_count_preserved() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let lots_proposals: Vec<String> = (0..40).map(|i| format!("prop-{:03}", i)).collect();
+        let lots_flags: Vec<String> = (0..40).map(|i| format!("flag-{:03}", i)).collect();
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: lots_proposals,
+                pending_flag_ids: lots_flags,
+                pending_invitations: vec![],
+                budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(att.payload.pending_proposal_count, 40);
+        assert_eq!(
+            att.payload.pending_proposal_ids.len(),
+            MAX_CIVIC_ITEMS_INLINE
+        );
+        assert_eq!(att.payload.pending_flag_count, 40);
+        assert_eq!(att.payload.pending_flag_ids.len(), MAX_CIVIC_ITEMS_INLINE);
+    }
+
+    /// Civic ids are part of the signed payload — verify roundtrips them
+    /// unchanged (and would reject tampering, per the same mechanism as
+    /// `tampered_payload_fails_verify`).
+    #[test]
+    fn civic_ids_roundtrip_through_sign_and_verify() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: vec!["prop-aaa".to_string()],
+                pending_flag_ids: vec!["flag-bbb".to_string()],
+                pending_invitations: vec![],
+                budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+
+        let pub_bytes = key.public_key_bytes();
+        let payload = verify(&pub_bytes, &att).expect("verify");
+        assert_eq!(payload.pending_proposal_ids, vec!["prop-aaa"]);
+        assert_eq!(payload.pending_proposal_count, 1);
+        assert_eq!(payload.pending_flag_ids, vec!["flag-bbb"]);
+        assert_eq!(payload.pending_flag_count, 1);
+    }
+
+    /// #771 D.2 — open amendment invitations ride the same signed civic
+    /// line: bounded inline, count preserved, and roundtripped through
+    /// sign/verify (tampering would reject, per the shared mechanism).
+    #[test]
+    fn invitations_bounded_and_roundtrip_through_sign_and_verify() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let lots: Vec<InvitationSummary> = (0..40)
+            .map(|i| InvitationSummary {
+                invitation_id: format!("ainv-{:03}", i),
+                rule_id: "P-1.5".to_string(),
+                denial_count: 3,
+            })
+            .collect();
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "a",
+                session_id: Some("s"),
+                root_session_id: Some("s"),
+                turn_counter: 0,
+                manifest: &manifest,
+                gateway_node_id: "node",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: lots,
+                budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+        assert_eq!(att.payload.pending_invitation_count, 40);
+        assert_eq!(
+            att.payload.pending_invitations.len(),
+            MAX_CIVIC_ITEMS_INLINE
+        );
+        assert_eq!(att.payload.pending_invitations[0].rule_id, "P-1.5");
+
+        let pub_bytes = key.public_key_bytes();
+        let payload = verify(&pub_bytes, &att).expect("verify");
+        assert_eq!(payload.pending_invitation_count, 40);
+        assert_eq!(payload.pending_invitations[0].invitation_id, "ainv-000");
     }
 
     #[test]
@@ -443,7 +750,13 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -472,7 +785,13 @@ mod tests {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -481,5 +800,58 @@ mod tests {
         let pub_bytes = key.public_key_bytes();
         let err = verify(&pub_bytes, &att).expect_err("tampered fingerprint must reject");
         assert!(err.to_string().contains("fingerprint mismatch"), "{}", err);
+    }
+
+    #[test]
+    fn burn_rate_forecast_included_in_signed_payload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let key = GatewayIdentityKey::load_or_generate(temp.path()).unwrap();
+        let manifest = manifest_with_caps(vec![]);
+        let forecast = BurnRateForecast {
+            tokens_per_turn: 500.0,
+            remaining_tokens: Some(5000.0),
+            projected_turns_remaining: Some(10.0),
+        };
+        let att = compose_and_sign(
+            AttestationInputs {
+                agent_id: "agent-1",
+                session_id: Some("root"),
+                root_session_id: Some("root"),
+                turn_counter: 10,
+                manifest: &manifest,
+                gateway_node_id: "node-a",
+                pending_approval_ids: vec![],
+                pending_user_interaction_ids: vec![],
+                pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
+                budget_meters: vec![BudgetMeter {
+                    name: "llm_tokens".to_string(),
+                    used: 5000.0,
+                    limit: Some(10000.0),
+                }],
+                burn_rate: Some(forecast.clone()),
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
+            },
+            &key,
+        )
+        .unwrap();
+
+        // The forecast is inside the signed payload — tampering invalidates the sig.
+        assert_eq!(
+            att.payload.burn_rate.as_ref().unwrap().tokens_per_turn,
+            500.0
+        );
+        assert_eq!(
+            att.payload.burn_rate.as_ref().unwrap().projected_turns_remaining,
+            Some(10.0)
+        );
+
+        // Verify roundtrip preserves the forecast.
+        let pub_bytes = key.public_key_bytes();
+        let payload = verify(&pub_bytes, &att).expect("verify");
+        assert_eq!(payload.burn_rate, Some(forecast));
     }
 }

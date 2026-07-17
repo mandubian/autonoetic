@@ -16,6 +16,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
             .canonicalize()
             .unwrap_or_else(|_| config.agents_dir.clone());
         apply_role_mapping_fallbacks(&mut config);
+        config.apply_profile_defaults();
         apply_prompt_budget_overrides(&config);
         Ok(config)
     } else {
@@ -172,5 +173,23 @@ mod tests {
             config.context_compression.model.as_deref(),
             Some("claude-haiku-3")
         );
+    }
+
+    #[test]
+    fn starter_profile_defaults_evidence_mode_errors() {
+        let mut config = GatewayConfig::default();
+        config.profile = autonoetic_types::config::Profile::Starter;
+        config.apply_profile_defaults();
+        assert_eq!(config.evidence_mode, "errors");
+        assert!(!config.session_report.live_html_on_update);
+    }
+
+    #[test]
+    fn starter_profile_does_not_override_non_default_evidence_mode() {
+        let mut config = GatewayConfig::default();
+        config.profile = autonoetic_types::config::Profile::Starter;
+        config.evidence_mode = "off".to_string();
+        config.apply_profile_defaults();
+        assert_eq!(config.evidence_mode, "off");
     }
 }

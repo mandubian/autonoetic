@@ -21,6 +21,7 @@ fn manifest_with(caps: Vec<Capability>) -> AgentManifest {
             id: "test".to_string(),
             name: "test".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,
@@ -37,8 +38,10 @@ fn manifest_with(caps: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -63,7 +66,7 @@ fn tool_available_with_capsule_export_capability() {
 #[test]
 fn tool_definitions_advertise_required_fields() {
     let exp = CapsuleExportTool.definition();
-    assert_eq!(exp.name, "capsule.export");
+    assert_eq!(exp.name, "capsule_export");
     let required = exp.input_schema["required"].as_array().unwrap();
     assert!(
         required.iter().any(|v| v == "agent_id"),
@@ -71,7 +74,7 @@ fn tool_definitions_advertise_required_fields() {
     );
 
     let imp = CapsuleImportTool.definition();
-    assert_eq!(imp.name, "capsule.import");
+    assert_eq!(imp.name, "capsule_import");
     let required = imp.input_schema["required"].as_array().unwrap();
     assert!(
         required.iter().any(|v| v == "archive"),

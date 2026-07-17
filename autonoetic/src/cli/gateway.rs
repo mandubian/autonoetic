@@ -1,11 +1,131 @@
-use std::io::Write;
-use std::path::Path;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use super::common::{
     activate_registered_mcp_servers, load_mcp_servers, mcp_registry_path, McpClient, McpTool,
     McpTransportConfig,
 };
+
+/// Files and subdirectories inside the gateway directory that are safe to remove
+/// when resetting the environment. We preserve the directory itself (and any
+/// files we do not explicitly recognize) so the reset is conservative.
+const RESET_EPHIMERAL_PATHS: &[&str] = &[
+    "gateway.db",
+    "gateway.db-shm",
+    "gateway.db-wal",
+    "history",
+    "logs",
+    "artifacts",
+    "checkpoints",
+    "content",
+    "revisions",
+    "recordings",
+    "scheduler",
+    "sessions",
+    "vault.key",
+    "constitution",
+    "sdk",
+    "wiki",
+];
+
+/// Stop any running daemon, delete the gateway database and derived state, refresh
+/// reference agent bundles from the repo, and re-bootstrap gateway revisions.
+/// The operator config (`config.yaml`, `persona.md`) is left untouched and no
+/// model-selection prompts are shown.
+pub async fn handle_gateway_reset(
+    config_path: &Path,
+    yes: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config_path.exists(),
+        "Config file not found at {}. Create it first (or pass a valid --config path) before running 'gateway reset'.",
+        config_path.display()
+    );
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+
+    if !yes && !json {
+        let mut stderr = std::io::stderr();
+        writeln!(
+            stderr,
+            "This will delete the gateway environment at:",
+        )?;
+        writeln!(stderr, "  {}", gateway_dir.display())?;
+        writeln!(
+            stderr,
+            "Sessions, approvals, scheduled jobs, workflow runs, traces, artifacts, and credentials will be lost.",
+        )?;
+        writeln!(
+            stderr,
+            "Reference agent bundles in {} will be refreshed from the latest repo copies.",
+            config.agents_dir.display()
+        )?;
+        write!(stderr, "Type 'yes' to continue: ")?;
+        stderr.flush()?;
+
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        if line.trim() != "yes" {
+            anyhow::bail!("Reset cancelled.");
+        }
+    }
+
+    // Best-effort stop of a running daemon.
+    handle_gateway_stop();
+
+    if gateway_dir.exists() {
+        for rel in RESET_EPHIMERAL_PATHS {
+            let path = gateway_dir.join(rel);
+            if path.exists() {
+                if path.is_dir() {
+                    std::fs::remove_dir_all(&path)?;
+                } else {
+                    std::fs::remove_file(&path)?;
+                }
+            }
+        }
+    }
+
+    // Refresh operator agent bundles (creates agents_dir when missing) and
+    // re-bootstrap gateway revisions from the latest on-disk bundles.
+    let install = super::agent::install_reference_agents(&config, None, true)?;
+    std::fs::create_dir_all(&gateway_dir)?;
+    if autonoetic_gateway::bootstrap::ensure_vault_key_for_bootstrap_workspace(&config)? {
+        tracing::info!(
+            target: "bootstrap",
+            path = %gateway_dir.join("vault.key").display(),
+            "Created default vault master key during gateway reset"
+        );
+    }
+    let activated = autonoetic_gateway::bootstrap_agents(&config, &gateway_dir)?;
+
+    if json {
+        // Emit JSON on stdout; route informational logs to stderr so the
+        // output is machine-parseable.
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "gateway_dir": gateway_dir,
+                "activated_agents": activated,
+                "agents_installed": install.copied,
+                "agents_overwritten": install.overwritten,
+                "agents_skipped": install.skipped,
+            })
+        );
+    } else {
+        eprintln!("Gateway environment reset.");
+        eprintln!("  Gateway dir: {}", gateway_dir.display());
+        eprintln!(
+            "  Agent bundles: {} installed, {} overwritten, {} skipped",
+            install.copied, install.overwritten, install.skipped
+        );
+        eprintln!("  Activated agents: {activated}");
+    }
+    Ok(())
+}
 pub async fn handle_gateway_start(
     config_path: &Path,
     daemon: bool,
@@ -58,8 +178,8 @@ pub fn handle_gateway_stop() {
     info!("Stopping Gateway");
 }
 
-/// Probe and report host capabilities (sandbox tiers + language toolchains).
-/// Exit code is non-zero when no sandbox tier is runnable at all.
+    /// Probe and report host capabilities (sandbox tiers + language toolchains).
+    /// Exit code is non-zero when no sandbox tier is runnable at all.
 pub fn handle_gateway_preflight(json: bool) -> anyhow::Result<()> {
     let caps = autonoetic_gateway::host_capabilities::HostCapabilities::gather();
     if json {
@@ -272,18 +392,11 @@ pub async fn handle_gateway_approvals(
                     other => format!("{}", other.kind()),
                 };
                 println!(
-                    "{:<38} {:<20} {:<14} {}{}",
+                    "{:<38} {:<20} {:<14} {}",
                     approval.request_id,
                     approval.agent_id,
                     approval.action.kind(),
-                    details,
-                    if let (Some(ref sim_id), Some(ref score)) =
-                        (approval.similar_to_request_id, approval.similarity_score)
-                    {
-                        format!(" ~{} ({:.0}%)", &sim_id[..sim_id.len().min(12)], score * 100.0)
-                    } else {
-                        String::new()
-                    }
+                    details
                 );
             }
         }
@@ -341,6 +454,7 @@ pub async fn handle_gateway_approvals(
                     grant_expires_at: expires_at,
                     acknowledged_capabilities: acknowledge_capabilities.clone(),
                     confirm_phrase: confirm_phrase.clone(),
+                    ..Default::default()
                 },
             )?;
             println!(
@@ -388,6 +502,7 @@ pub async fn handle_gateway_approvals(
                         autonoetic_types::background::ApprovalStatus::Approved => "approved",
                         autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
                         autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
+                        autonoetic_types::background::ApprovalStatus::Stale => "stale",
                     }).unwrap_or("pending"));
                     println!("Created:       {}", a.created_at);
                     if let Some(ref at) = a.decided_at { println!("Decided at:    {}", at); }
@@ -442,21 +557,6 @@ pub async fn handle_gateway_approvals(
                             );
                         }
                         other => println!("\nAction: {}", other.kind()),
-                    }
-
-                    if let (Some(ref sim_id), Some(ref score)) =
-                        (a.similar_to_request_id, a.similarity_score)
-                    {
-                        println!("\nSimilar to: ~{} ({:.0}%)", sim_id, score * 100.0);
-                        let sim_approval = gateway_store.get_approval(sim_id)?;
-                        if let Some(sa) = &sim_approval {
-                            let status_str = sa.status.as_ref().map(|s| match s {
-                                autonoetic_types::background::ApprovalStatus::Approved => "approved",
-                                autonoetic_types::background::ApprovalStatus::Rejected => "rejected",
-                                autonoetic_types::background::ApprovalStatus::Cancelled => "cancelled",
-                            }).unwrap_or("pending");
-                            println!("  Similar approval was: {}", status_str);
-                        }
                     }
 
                     if let Some(dwell) = a.min_dwell_ms {
@@ -669,6 +769,7 @@ pub async fn handle_gateway_grants(
                     "ID", "SESSION", "AGENT", "SCOPE", "EXPIRES", "TARGETS");
                 for g in &grants {
                     let targets_str: Vec<String> = g.targets.iter().map(|t| match t {
+                        autonoetic_types::background::GrantTarget::Any => "*".to_string(),
                         autonoetic_types::background::GrantTarget::ExactHost(h) => h.clone(),
                         autonoetic_types::background::GrantTarget::HostSuffix(s) => format!("*.{}", s),
                         autonoetic_types::background::GrantTarget::HostAndPort { host, port } => format!("{}:{}", host, port),
@@ -733,6 +834,144 @@ pub async fn handle_gateway_grants(
                 evidence_ref: None,
                 reason: reason.clone(),
             })?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_gateway_exec_cache(
+    config_path: &Path,
+    command: &super::common::GatewayExecCacheCommands,
+) -> anyhow::Result<()> {
+    use super::common::GatewayExecCacheCommands;
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let cache =
+        autonoetic_gateway::runtime::approved_exec_cache::ApprovedExecCache::new(&gateway_dir)?;
+
+    match command {
+        GatewayExecCacheCommands::List { json } => {
+            let entries = cache.all();
+            if *json {
+                // Curated view: omit `code_content` (potentially large/sensitive
+                // approved source) so it isn't leaked into logs/pipelines.
+                let view: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "fingerprint": e.fingerprint,
+                            "agent_id": e.agent_id,
+                            "remote_targets": e.remote_targets,
+                            "approval_request_id": e.approval_request_id,
+                            "approved_at": e.approved_at,
+                            "approved_by": e.approved_by,
+                            "last_used_at": e.last_used_at,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else if entries.is_empty() {
+                println!("No cached exec approvals.");
+            } else {
+                println!(
+                    "{:<22} {:<18} {:<26} {:<12} {}",
+                    "FINGERPRINT", "AGENT", "APPROVED_AT", "BY", "TARGETS"
+                );
+                for e in &entries {
+                    // Short, copyable prefix of the fingerprint; full RFC3339
+                    // timestamp (keep the timezone — this is audit tooling).
+                    let short_fp = e.fingerprint.chars().take(21).collect::<String>();
+                    println!(
+                        "{:<22} {:<18} {:<26} {:<12} {}",
+                        short_fp,
+                        e.agent_id,
+                        e.approved_at,
+                        e.approved_by,
+                        e.remote_targets.join(", ")
+                    );
+                }
+                println!(
+                    "\n{} entr{}. Revoke with: autonoetic gateway exec-cache revoke <fingerprint>",
+                    entries.len(),
+                    if entries.len() == 1 { "y" } else { "ies" }
+                );
+            }
+        }
+        GatewayExecCacheCommands::Revoke {
+            fingerprint,
+            all,
+            reason,
+        } => {
+            if fingerprint.is_none() && !all {
+                anyhow::bail!("Specify a <fingerprint> or --all to revoke exec-cache approvals");
+            }
+            let reason_text = reason.as_deref().unwrap_or("Revoked by operator");
+
+            let (count, target) = if *all {
+                (cache.clear()?, None)
+            } else {
+                let fp = fingerprint.as_deref().unwrap();
+                // Accept a full `sha256:…` or a unique prefix copied from `list`.
+                let matches: Vec<String> = cache
+                    .all()
+                    .into_iter()
+                    .map(|e| e.fingerprint)
+                    .filter(|f| f == fp || f.starts_with(fp))
+                    .collect();
+                match matches.len() {
+                    0 => {
+                        println!("No cached exec approval matching '{}'.", fp);
+                        return Ok(());
+                    }
+                    1 => {
+                        let full = &matches[0];
+                        let removed = cache.remove(full)?;
+                        (usize::from(removed), Some(full.clone()))
+                    }
+                    n => {
+                        anyhow::bail!(
+                            "'{}' matches {} entries — use the full fingerprint from `exec-cache list`",
+                            fp,
+                            n
+                        );
+                    }
+                }
+            };
+
+            if count == 0 {
+                println!("No matching exec-cache approvals revoked.");
+                return Ok(());
+            }
+            println!(
+                "Revoked {} cached exec approval(s) (reason: {}). The next matching exec will require fresh approval.",
+                count, reason_text
+            );
+
+            // Best-effort audit event.
+            if let Ok(store) =
+                autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            {
+                let _ = store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
+                    event_id: format!("exec-cache-revoke-{}", uuid::Uuid::new_v4()),
+                    agent_id: "gateway".to_string(),
+                    session_id: "operator".to_string(),
+                    turn_id: None,
+                    event_seq: 0,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    category: "exec_cache_revocation".to_string(),
+                    action: if *all { "revoke_all" } else { "revoke" }.to_string(),
+                    status: "completed".to_string(),
+                    enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                    target: target.clone(),
+                    payload: Some(
+                        serde_json::json!({ "reason": reason_text, "count": count }).to_string(),
+                    ),
+                    payload_ref: None,
+                    evidence_ref: None,
+                    reason: reason.clone(),
+                });
+            }
         }
     }
     Ok(())
@@ -1846,6 +2085,77 @@ async fn ask_approval_question_llm(
     Ok(response.text)
 }
 
+/// Unified pending-decisions list for one root session (#722 Stage 3).
+///
+/// Aggregates approvals, user interactions, escalations, and plan frames into a
+/// single oldest-first view (the CLI form of the `operator.pending` RPC) so a
+/// headless operator sees everything awaiting them in one place, each row
+/// annotated with the command that resolves it.
+pub async fn handle_gateway_pending(
+    config_path: &Path,
+    root_session: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let now = chrono::Utc::now();
+    let pending = autonoetic_gateway::runtime::operator_pending::collect_pending_for_root(
+        &gateway_store,
+        root_session,
+        now,
+    )?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+        return Ok(());
+    }
+
+    if pending.is_empty() {
+        println!("No pending operator decisions for root session '{root_session}'.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<12} {:<40} {:>8}  {:<28} {}",
+        "KIND", "ID", "AGE", "RESOLVE WITH", "SUMMARY"
+    );
+    for p in &pending {
+        // PendingKind serializes snake_case; render the tag for the column.
+        let kind = serde_json::to_value(p.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "decision".to_string());
+        let age = match p.age_secs {
+            Some(s) if s >= 3600 => format!("{}h", s / 3600),
+            Some(s) if s >= 60 => format!("{}m", s / 60),
+            Some(s) => format!("{s}s"),
+            None => "-".to_string(),
+        };
+        // Collapse control whitespace (a free-form summary such as an
+        // escalation's planner_synthesis may contain newlines/tabs) so each
+        // decision stays on one row, and mark truncation with an ellipsis.
+        let flat = p.summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let summary = if flat.chars().count() > 60 {
+            let head: String = flat.chars().take(59).collect();
+            format!("{head}\u{2026}")
+        } else {
+            flat
+        };
+        println!(
+            "{:<12} {:<40} {:>8}  {:<28} {}",
+            kind, p.id, age, p.answer.method, summary
+        );
+    }
+    println!(
+        "\n{} pending. Resolve with the listed command, e.g. `autonoetic gateway approvals approve <ID>`.",
+        pending.len()
+    );
+    Ok(())
+}
+
 pub async fn handle_gateway_interactions(
     config_path: &Path,
     command: &super::common::GatewayInteractionCommands,
@@ -2200,7 +2510,11 @@ fn truncate_field(s: &str, max: usize) -> String {
 // Constitution amendment proposals — R+++1 (issue #92)
 // ---------------------------------------------------------------------------
 
-const PROPOSAL_DECISION_STATES: &[&str] = &["approved", "rejected", "deferred"];
+// Single source of truth lives in the gateway store module so the CLI and the
+// `constitution.resolve_proposal` JSON-RPC method share one vocabulary (O-6).
+// The CLI only issues terminal decisions (approve/reject/defer); the broader
+// set including `under_review` is the RPC's.
+use autonoetic_gateway::scheduler::gateway_store::constitutional_proposals::PROPOSAL_TERMINAL_DECISION_STATUSES as PROPOSAL_DECISION_STATES;
 
 pub async fn handle_gateway_constitution(
     config_path: &Path,
@@ -2493,6 +2807,232 @@ pub async fn handle_gateway_wiki(
                 }
             );
         }
+    }
+    Ok(())
+}
+
+pub async fn handle_gateway_escalations(
+    config_path: &Path,
+    command: &super::common::GatewayEscalationCommands,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    match command {
+        super::common::GatewayEscalationCommands::List { json } => {
+            let pending = gateway_store.list_pending_escalations()?;
+            let stale = {
+                let mut all_stale = Vec::new();
+                let root_ids: std::collections::HashSet<String> = pending
+                    .iter()
+                    .map(|e| e.root_session_id.clone())
+                    .collect();
+                for rid in &root_ids {
+                    all_stale.extend(gateway_store.get_stale_escalations_for_root(rid)?);
+                }
+                all_stale
+            };
+            let mut all = pending;
+            all.extend(stale);
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+                return Ok(());
+            }
+
+            if all.is_empty() {
+                println!("No pending escalations.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<12} {:<20} {:<15} {:<10} {}",
+                "ID", "TYPE", "AGENT", "AGE", "SYNTHESIS"
+            );
+            let now = chrono::Utc::now();
+            for e in &all {
+                let age = chrono::DateTime::parse_from_rfc3339(&e.created_at)
+                    .ok()
+                    .map(|t| {
+                        let secs = (now - t.with_timezone(&chrono::Utc)).num_seconds();
+                        if secs >= 3600 {
+                            format!("{}h", secs / 3600)
+                        } else if secs >= 60 {
+                            format!("{}m", secs / 60)
+                        } else {
+                            format!("{}s", secs)
+                        }
+                    })
+                    .unwrap_or_else(|| "?".to_string());
+                let status_tag = match e.status {
+                    autonoetic_types::escalation::EscalationStatus::Stale => " (stale)",
+                    _ => "",
+                };
+                let synthesis = if e.planner_synthesis.len() > 40 {
+                    format!("{}…", &e.planner_synthesis[..39])
+                } else {
+                    e.planner_synthesis.clone()
+                };
+                println!(
+                    "{:<12} {:<20} {:<15} {:<10} {}{}",
+                    e.escalation_id,
+                    e.escalation_type.as_str(),
+                    e.agent_id,
+                    age,
+                    synthesis,
+                    status_tag,
+                );
+            }
+            println!("\n{} escalation(s)", all.len());
+        }
+        super::common::GatewayEscalationCommands::Show { escalation_id } => {
+            let escalation = gateway_store
+                .get_escalation(escalation_id)?
+                .ok_or_else(|| anyhow::anyhow!("Escalation '{}' not found", escalation_id))?;
+            println!("{}", serde_json::to_string_pretty(&escalation)?);
+        }
+        super::common::GatewayEscalationCommands::Resolve {
+            escalation_id,
+            approve,
+            reject,
+            reason,
+        } => {
+            if !approve && !reject {
+                anyhow::bail!("Specify --approve or --reject");
+            }
+            let escalation = gateway_store
+                .get_escalation(escalation_id)?
+                .ok_or_else(|| anyhow::anyhow!("Escalation '{}' not found", escalation_id))?;
+
+            // #739 Part C item 2: when an escalation is a *projection* of an
+            // approval row (post-#735 federation promotion reviews carry
+            // `approval_request_id`), resolve the **approval** as the source of
+            // truth — resolving only the escalation row would orphan the
+            // linked approval (the bidirectional hazard #735/#744 removed).
+            // The approval path fans out to the escalation projection itself.
+            // `hook_executor = None`: a CLI invocation has no live gateway to
+            // fire hooks; the running gateway re-derives state on its own ticks.
+            if let Some(request_id) = escalation.approval_request_id.as_deref() {
+                let approved = *approve;
+                let result = if approved {
+                    autonoetic_gateway::scheduler::approval::approve_request(
+                        &config,
+                        Some(&gateway_store),
+                        request_id,
+                        "cli",
+                        reason.clone(),
+                        None,
+                        None,
+                        None,
+                    )
+                } else {
+                    autonoetic_gateway::scheduler::approval::reject_request(
+                        &config,
+                        Some(&gateway_store),
+                        request_id,
+                        "cli",
+                        reason.clone(),
+                        None,
+                    )
+                };
+                result?;
+                println!(
+                    "Escalation {} resolved as {} via linked approval {} \
+                     (escalation projection resolved by the approval path)",
+                    escalation_id,
+                    if approved { "approved" } else { "rejected" },
+                    request_id,
+                );
+                return Ok(());
+            }
+
+            // Standalone escalation (e.g. guidance request without an approval
+            // link): resolve the escalation row directly.
+            let status = if *approve {
+                autonoetic_types::escalation::EscalationStatus::Approved
+            } else {
+                autonoetic_types::escalation::EscalationStatus::Rejected
+            };
+            gateway_store.resolve_escalation(
+                escalation_id,
+                status,
+                "cli",
+                reason.as_deref(),
+            )?;
+            println!(
+                "Escalation {} resolved as {}",
+                escalation_id,
+                status.as_str(),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_gateway_workflow(
+    config_path: &Path,
+    command: &super::common::GatewayWorkflowCommands,
+) -> anyhow::Result<()> {
+    use autonoetic_types::workflow::TaskRunStatus;
+
+    match command {
+        super::common::GatewayWorkflowCommands::Task { command } => match command {
+            super::common::GatewayTaskCommands::Retry {
+                task_id,
+                workflow_id,
+                root_session,
+                note,
+                json,
+            } => {
+                let config = autonoetic_gateway::config::load_config(config_path)?;
+                let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+                let gateway_store =
+                    autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
+                        &gateway_dir,
+                    )?;
+
+                // Resolve the workflow id with the shared helper so the
+                // (explicit workflow_id > root_session > error) ladder and the
+                // trim/empty-as-None normalization stay identical to the RPC arm.
+                let wf_id =
+                    autonoetic_gateway::scheduler::workflow_store::resolve_workflow_id_for_operator_retry(
+                        &config,
+                        workflow_id.as_deref(),
+                        root_session.as_deref(),
+                    )?;
+
+                let task =
+                    autonoetic_gateway::scheduler::workflow_store::retry_workflow_task(
+                        &config,
+                        Some(&gateway_store),
+                        &wf_id,
+                        task_id,
+                        note.as_deref(),
+                    )?;
+
+                if *json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "task_id": task.task_id,
+                            "workflow_id": task.workflow_id,
+                            "agent_id": task.agent_id,
+                            "status": TaskRunStatus::Runnable,
+                            "retry_count": task.retry_count,
+                            "result_summary": task.result_summary,
+                        }))?
+                    );
+                    return Ok(());
+                }
+
+                println!(
+                    "Task {} in workflow {} moved back to Runnable (retry #{}). The scheduler will re-queue it.",
+                    task_id, wf_id, task.retry_count
+                );
+            }
+        },
     }
     Ok(())
 }

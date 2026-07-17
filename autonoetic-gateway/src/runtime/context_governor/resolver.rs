@@ -17,9 +17,7 @@ pub fn resolve_context_window_tokens(manifest: &AgentManifest) -> Option<u32> {
             return Some(w);
         }
     }
-    std::env::var("AUTONOETIC_LLM_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
+    crate::runtime::budget_tracker::llm_context_window_env_tokens()
 }
 
 /// Manifest/env first, then gateway `llm_presets` via `llm_preset_mapping`.
@@ -171,7 +169,8 @@ mod tests {
                 id: agent_id.to_string(),
                 name: agent_id.to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -199,8 +198,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: SandboxNetworkPolicy::default(),
         }
     }

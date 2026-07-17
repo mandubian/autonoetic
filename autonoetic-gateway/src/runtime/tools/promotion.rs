@@ -4,6 +4,7 @@ use crate::policy::PolicyEngine;
 use crate::runtime::promotion_store::PromotionStore;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
+use autonoetic_types::capability::Capability;
 use autonoetic_types::tool_error::ToolError;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::promotion::{
@@ -30,6 +31,42 @@ pub fn manifest_may_record_promotion_verdicts(manifest: &AgentManifest) -> bool 
             | "static_evaluator.default"
             | "unit_test_runner.default"
     )
+}
+
+/// Manifest explicitly lists a native tool id under [`Capability::SandboxFunctions`]
+/// (same prefix rules as [`PolicyEngine::can_invoke_tool`]).
+pub fn manifest_sandbox_allows_tool(manifest: &AgentManifest, tool_name: &str) -> bool {
+    manifest.capabilities.iter().any(|cap| {
+        if let Capability::SandboxFunctions { allowed } = cap {
+            allowed.iter().any(|pattern| {
+                let prefix = pattern.trim_end_matches('*');
+                tool_name.starts_with(prefix)
+            })
+        } else {
+            false
+        }
+    })
+}
+
+fn manifest_has_broad_artifact_exec_cap(manifest: &AgentManifest) -> bool {
+    manifest.capabilities.iter().any(|cap| {
+        matches!(
+            cap,
+            Capability::ArtifactExecution | Capability::Evaluation { .. }
+        )
+    })
+}
+
+/// Federation exec gates may run artifact entrypoints via [`artifact_exec`] without
+/// declaring broad `ArtifactExecution` or `Evaluation` capabilities.
+///
+/// Declared in SKILL frontmatter: list `artifact_exec` and `promotion_` under
+/// `SandboxFunctions.allowed`. Static reviewers keep `promotion_` only (no exec).
+/// Agents with `CodeExecution` / `Evaluation` use the standard exec gates instead.
+pub fn manifest_may_exec_artifact_in_promotion_gate(manifest: &AgentManifest) -> bool {
+    !manifest_has_broad_artifact_exec_cap(manifest)
+        && manifest_sandbox_allows_tool(manifest, "artifact_exec")
+        && manifest_sandbox_allows_tool(manifest, "promotion_record")
 }
 
 fn is_promotion_agent(manifest: &AgentManifest) -> bool {
@@ -67,9 +104,13 @@ impl NativeTool for PromotionRecordTool {
                         "description": "Role recording this promotion",
                         "enum": ["evaluator", "auditor", "static_evaluator", "unit_test_runner", "sealed_evaluator"]
                     },
+                    "execution_trace_id": {
+                        "type": "string",
+                        "description": "UUID returned as execution_trace_id on the artifact_exec or sandbox_exec result for this run. Required for unit_test_runner, static_evaluator, sealed_evaluator, and evaluator roles. pass is derived from exit_code=0."
+                    },
                     "pass": {
                         "type": "boolean",
-                        "description": "Whether this validation passed (true) or failed (false)"
+                        "description": "Whether this validation passed. Required for auditor only; ignored for execution roles (pass is trace-derived)."
                     },
                     "findings": {
                         "type": "array",
@@ -92,7 +133,7 @@ impl NativeTool for PromotionRecordTool {
                         "description": "Human-readable summary of the validation result"
                     }
                 },
-                "required": ["role", "pass"],
+                "required": ["role"],
                 "additionalProperties": false
             }),
         }
@@ -114,11 +155,14 @@ impl NativeTool for PromotionRecordTool {
             when: GuidanceCondition::ToolPresent("promotion_record"),
             priority: 10,
             prose: "**Recording your verdict.** When your evaluation/audit reaches a verdict, call \
-`promotion_record` with the `artifact_ref` you reviewed. Only `role` and `pass` are required; include \
-`findings` and `summary` too. Use those exact field names — not alternates like `outcome`. `pass` is \
-the boolean equivalent of your verdict (`evaluator_pass` / `auditor_pass`); record a failing verdict \
-as well, with `pass: false`. (Your role may define cases where the gate is inapplicable and you should \
-NOT call this — e.g. no tests found; follow that role-specific guidance.)"
+`promotion_record` with the `artifact_ref` you reviewed. Execution roles (`unit_test_runner`, \
+`sealed_evaluator`) must attach `execution_trace_id` from the run — copy the UUID from the \
+`artifact_exec` / `sandbox_exec` tool result (`execution_trace_id` field); the gateway \
+derives `pass` from `exit_code=0`; do not declare success without a trace. The `auditor` and \
+`static_evaluator` roles set `pass` explicitly; only `critical` findings can veto an otherwise-passing \
+audit. Include `findings` and `summary` as advisory annotation. Use those exact field names — not \
+alternates like `outcome`. (Your role may define cases where the gate is inapplicable and you should NOT \
+call this — e.g. no tests found; follow that role-specific guidance.)"
                 .to_string(),
         }]
     }
@@ -223,58 +267,76 @@ NOT call this — e.g. no tests found; follow that role-specific guidance.)"
             ).to_error_response());
         }
 
-        let has_error_or_critical = args.findings.iter().any(|f| {
-            matches!(
-                f.severity,
-                autonoetic_types::promotion::FindingSeverity::Error
-                    | autonoetic_types::promotion::FindingSeverity::Critical
-            )
-        });
-
-        if args.pass && has_error_or_critical {
-            return Ok(ToolError::validation(
-                "Cannot set pass=true when findings contain 'error' or 'critical' severity. Fix the issues and re-evaluate, or set pass=false.",
-                None::<String>,
-            ).to_error_response());
-        }
-
-        if args.pass {
-            let warnings_without_evidence: Vec<String> = args
-                .findings
-                .iter()
-                .filter(|f| {
-                    matches!(
-                        f.severity,
-                        autonoetic_types::promotion::FindingSeverity::Warning
-                    ) && f.evidence.as_ref().map_or(true, |e| e.trim().is_empty())
-                })
-                .map(|f| {
-                    let desc = &f.description;
-                    if desc.len() > 80 {
-                        let end = desc.floor_char_boundary(80);
-                        format!("{}...", &desc[..end])
-                    } else {
-                        desc.clone()
-                    }
-                })
-                .collect();
-            if !warnings_without_evidence.is_empty() {
+        let (pass, execution_trace_id) =
+            if crate::runtime::promotion_evidence::role_requires_execution_trace(&args.role) {
+                let Some(trace_id) = args
+                    .execution_trace_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
+                    return Ok(
+                        ToolError::validation(
+                            format!(
+                                "role '{}' requires execution_trace_id from a completed run",
+                                args.role.as_str()
+                            ),
+                            None::<String>,
+                        )
+                        .with_code("missing_execution_evidence")
+                        .with_repair_hint(
+                            "Run the evaluation in sandbox/artifact_exec, then attach the execution_trace_id UUID from that tool result.",
+                        )
+                        .to_error_response(),
+                    );
+                };
+                let Some(gs) = gateway_store.as_ref() else {
+                    return Ok(ToolError::resource(
+                        "GatewayStore required to verify execution_trace_id",
+                        None::<String>,
+                    )
+                    .to_error_response());
+                };
+                let Some(trace) = gs.get_execution_trace(trace_id)? else {
+                    return Ok(ToolError::validation(
+                        format!("execution trace '{}' not found", trace_id),
+                        None::<String>,
+                    )
+                    .with_code("execution_trace_not_found")
+                    .with_repair_hint(
+                        "Copy the execution_trace_id UUID from your artifact_exec or sandbox_exec \
+                         tool result. Do not use artifact_ref, session_id, file paths, or digests.",
+                    )
+                    .to_error_response());
+                };
+                let pass = crate::runtime::promotion_evidence::trace_indicates_pass(&trace);
+                (pass, Some(trace_id.to_string()))
+            } else if matches!(args.role, autonoetic_types::promotion::PromotionRole::Auditor) {
+                let mut pass = args.pass.unwrap_or(false);
+                if crate::runtime::promotion_evidence::auditor_critical_veto(&args.findings) {
+                    pass = false;
+                }
+                (pass, None)
+            } else if matches!(args.role, autonoetic_types::promotion::PromotionRole::StaticEvaluator) {
+                let mut pass = args.pass.unwrap_or(false);
+                if crate::runtime::promotion_evidence::findings_block_explicit_pass(&args.findings) {
+                    pass = false;
+                }
+                (pass, None)
+            } else {
                 return Ok(ToolError::validation(
-                    format!(
-                        "Cannot set pass=true when warning findings lack evidence. \
-                         The following warnings need concrete evidence (e.g., sandbox output, test results) \
-                         to prove the issue was investigated:\n  - {}",
-                        warnings_without_evidence.join("\n  - ")
-                    ),
+                    format!("unsupported promotion role '{}'", args.role.as_str()),
                     None::<String>,
-                ).to_error_response());
-            }
-        }
+                )
+                .to_error_response());
+            };
 
         let causal_log_path = gw_dir.join("history").join("causal_chain.jsonl");
         if let Some(parent) = causal_log_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        let trace_id_for_log = execution_trace_id.clone();
 
         // Enforce audit-first ordering: no promotion DB mutation without a durable causal append.
         let logger = CausalLogger::new(&causal_log_path)?;
@@ -291,7 +353,8 @@ NOT call this — e.g. no tests found; follow that role-specific guidance.)"
                     "arguments": {
                         "artifact_id": artifact_id,
                         "role": args.role.as_str(),
-                        "pass": args.pass,
+                        "pass": pass,
+                        "execution_trace_id": trace_id_for_log,
                     }
                 }),
             )),
@@ -305,9 +368,10 @@ NOT call this — e.g. no tests found; follow that role-specific guidance.)"
             None,
             args.role.clone(),
             &manifest.agent.id,
-            args.pass,
+            pass,
             args.findings.clone(),
             args.summary.clone(),
+            execution_trace_id,
         )?;
 
         // Bless-on-promotion (determinism inc 3): on a passing verdict, freeze
@@ -315,7 +379,7 @@ NOT call this — e.g. no tests found; follow that role-specific guidance.)"
         // provenance recorded *after* the gate decision — it never alters the
         // gate and never fails the promotion. Idempotent across role verdicts
         // (the artifact's layers don't change between them).
-        if args.pass {
+        if pass {
             match bless_resolved_closure(gw_dir, &artifact_id, &store) {
                 Ok(true) => {
                     // Re-read so the response reflects the freshly-blessed set.
@@ -335,6 +399,8 @@ NOT call this — e.g. no tests found; follow that role-specific guidance.)"
 
         let response = serde_json::json!({
             "ok": true,
+            "pass": pass,
+            "execution_trace_id": trace_id_for_log,
             "promotion_record": {
                 "content_digest": record.content_digest,
                 "artifact_digest": record.artifact_digest,
@@ -495,12 +561,38 @@ impl NativeTool for PromotionQueryTool {
 
         let store = PromotionStore::new(gw_dir)?;
 
+        let waived_validations: Vec<serde_json::Value> =
+            if let Some(ref gs) = _gateway_store {
+                match gs.list_waivers_for_artifact(&artifact_id) {
+                    Ok(waivers) => waivers
+                        .into_iter()
+                        .map(|w| {
+                            serde_json::json!({
+                                "waiver_id": w.waiver_id,
+                                "validation_id": w.validation_id,
+                                "validation_class": w.validation_class.as_str(),
+                                "waived_by": w.waived_by,
+                                "reason": w.reason,
+                                "created_at": w.created_at,
+                            })
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(target: "promotion", artifact_id = %artifact_id, error = %e, "failed to load waivers");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
         match store.get_promotion(&artifact_id) {
             Some(record) => {
                 let response = serde_json::json!({
                     "artifact_canonical_digest": artifact_canonical_digest,
                     "artifact_ref": user_ref,
                     "content_digest": record.content_digest,
+                    "waived_validations": waived_validations,
                     "evaluator_pass": record.evaluator_pass,
                     "auditor_pass": record.auditor_pass,
                     "evaluator_id": record.evaluator_id,
@@ -526,12 +618,9 @@ impl NativeTool for PromotionQueryTool {
                 serde_json::to_string(&response).map_err(Into::into)
             }
             None => {
-                serde_json::to_string(&serde_json::json!({
-                    "error": "No promotion record found for this artifact",
-                    "artifact_canonical_digest": artifact_canonical_digest,
-                    "artifact_ref": user_ref,
-                }))
-                .map_err(Into::into)
+                Ok(ToolError::not_found("Promotion record", Some("Ensure a promotion record exists for this artifact before querying."))
+                    .with_code("promotion_record_not_found")
+                    .to_error_response())
             }
         }
     }
@@ -553,5 +642,103 @@ mod guidance_tests {
 
         // Absent when promotion_record isn't in the advertised tool set.
         assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()), "");
+    }
+}
+
+#[cfg(test)]
+mod promotion_gate_exec_tests {
+    use super::*;
+    use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
+
+    fn base_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: agent_id.to_string(),
+                name: agent_id.to_string(),
+                description: "test".to_string(),
+            singleton: false,
+        },
+            capabilities,
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        }
+    }
+
+    fn promotion_exec_sandbox() -> Capability {
+        Capability::SandboxFunctions {
+            allowed: vec![
+                "artifact_inspect".to_string(),
+                "artifact_exec".to_string(),
+                "promotion_".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn promotion_gate_exec_any_agent_id_with_declared_tools() {
+        let manifest = base_manifest(
+            "acme.custom_unit_test_runner",
+            vec![
+                promotion_exec_sandbox(),
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ],
+        );
+        assert!(manifest_may_exec_artifact_in_promotion_gate(&manifest));
+    }
+
+    #[test]
+    fn static_evaluator_promotion_only_not_exec_gate() {
+        let manifest = base_manifest(
+            "static_evaluator.default",
+            vec![
+                Capability::SandboxFunctions {
+                    allowed: vec!["knowledge_".to_string(), "promotion_".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ],
+        );
+        assert!(!manifest_may_exec_artifact_in_promotion_gate(&manifest));
+    }
+
+    #[test]
+    fn artifact_execution_agent_uses_standard_exec_path() {
+        let manifest = base_manifest(
+            "sealed_evaluator.default",
+            vec![
+                promotion_exec_sandbox(),
+                Capability::ArtifactExecution,
+            ],
+        );
+        assert!(!manifest_may_exec_artifact_in_promotion_gate(&manifest));
     }
 }

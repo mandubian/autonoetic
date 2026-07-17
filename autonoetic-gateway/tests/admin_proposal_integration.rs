@@ -28,6 +28,7 @@ fn test_manifest_with_approval_queue() -> AgentManifest {
             id: "evolution-orchestrator.default".to_string(),
             name: "Evolution Orchestrator".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ApprovalQueue {
             patterns: vec!["admin.proposal.*".to_string()],
@@ -46,8 +47,10 @@ fn test_manifest_with_approval_queue() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -67,6 +70,7 @@ fn test_manifest_with_read_access() -> AgentManifest {
             id: "admin-agent".to_string(),
             name: "Admin Agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
@@ -85,8 +89,10 @@ fn test_manifest_with_read_access() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -106,6 +112,7 @@ fn test_manifest_no_caps() -> AgentManifest {
             id: "bare-agent".to_string(),
             name: "Bare Agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -122,8 +129,10 @@ fn test_manifest_no_caps() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

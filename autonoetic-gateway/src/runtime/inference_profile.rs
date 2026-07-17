@@ -70,7 +70,11 @@ pub fn resolve_inference_profile(
     let (preset_name, preset_source) = if let Some(ref name) = session_override {
         (Some(name.clone()), PresetSource::SessionOverride)
     } else if let Some(ref name) = manifest.llm_preset {
-        (Some(name.clone()), PresetSource::AgentManifest)
+        let remapped = config
+            .llm_preset_mapping
+            .get(name.as_str())
+            .cloned();
+        (Some(remapped.unwrap_or_else(|| name.clone())), PresetSource::AgentManifest)
     } else if let Some(name) = resolve_preset_name_for_agent(agent_id, &config.llm_preset_mapping) {
         (Some(name.to_string()), PresetSource::Mapping)
     } else if manifest.llm_config.is_some() {
@@ -189,6 +193,7 @@ pub fn agent_requires_tool_capable_llm(manifest: &AgentManifest) -> bool {
             Capability::SandboxFunctions { .. }
                 | Capability::AgentSpawn { .. }
                 | Capability::CodeExecution { .. }
+                | Capability::ArtifactExecution
         )
     }) || !manifest.allowed_tool_tiers.is_empty()
 }
@@ -256,7 +261,8 @@ mod tests {
                 id: "coder.default".to_string(),
                 name: "Coder".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![Capability::SandboxFunctions {
                 allowed: vec!["content.".to_string()],
             }],
@@ -274,8 +280,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: Default::default(),
         }
     }

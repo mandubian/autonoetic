@@ -1,10 +1,14 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::content_store::ContentStore;
+use crate::runtime::promotion_store::PromotionStore;
 use crate::runtime::tools::{NativeTool, NativeToolRegistry, ToolMetadata};
 use autonoetic_types::agent::{AgentManifest, ToolTier};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::tool_error::ToolError;
+use autonoetic_types::workflow::TaskRun;
 use serde::Deserialize;
 use serde::de;
 use std::collections::HashMap;
@@ -16,6 +20,87 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WorkflowStateTool));
     registry.register(Box::new(WorkflowCancelTaskTool));
     registry.register(Box::new(WorkflowForceCompleteTool));
+}
+
+/// Resolve an artifact ref or canonical id to a canonical `art_*` id.
+fn resolve_artifact_ref_to_id(
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: Option<&str>,
+    ref_id: &str,
+) -> Option<String> {
+    if ref_id.starts_with("art_") {
+        return Some(ref_id.to_string());
+    }
+    if !ref_id.starts_with("ar.") {
+        return None;
+    }
+    let store = gateway_store?;
+    let sid = session_id?;
+    store
+        .resolve_artifact_ref_any_scope(ref_id, sid)
+        .ok()
+        .flatten()
+        .map(|r| r.artifact_id)
+}
+
+/// Determine the primary artifact being evaluated by federation roles.
+/// The `workflow.revision.created` builder candidate is authoritative: it points
+/// at the exact revision under review. The coder-task fallback is best-effort;
+/// it may diverge if the builder promoted a non-latest coder iteration or if
+/// another specialist produced the artifact under review.
+fn resolve_primary_artifact_id(
+    gw_dir: &Path,
+    gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
+    session_id: Option<&str>,
+    builder_candidate: Option<&serde_json::Value>,
+    tasks: &[TaskRun],
+) -> Option<String> {
+    // 1. Builder candidate revision already points at the artifact under review.
+    if let Some(bc) = builder_candidate {
+        if let Some(id) = bc.get("artifact_id").and_then(|v| v.as_str()) {
+            if id.starts_with("art_") {
+                return Some(id.to_string());
+            }
+        }
+        if let Some(ref_id) = bc.get("artifact_ref").and_then(|v| v.as_str()) {
+            if let Some(id) = resolve_artifact_ref_to_id(gateway_store, session_id, ref_id) {
+                return Some(id);
+            }
+        }
+    }
+
+    // 2. Latest coder task's implicit artifact carries the built artifacts.
+    let coder_task = tasks
+        .iter()
+        .filter(|t| t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded)
+        .filter(|t| t.agent_id.split('.').next() == Some("coder"))
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    if let Some(task) = coder_task {
+        let implicit_name = format!("impl_{}", task.task_id);
+        let content_store = ContentStore::new(gw_dir).ok()?;
+        let bytes = content_store
+            .read_by_name(&task.parent_session_id, &implicit_name)
+            .ok()?;
+        let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let artifacts = json
+            .get("content")
+            .and_then(|c| c.get("artifacts"))
+            .and_then(|a| a.as_array())?;
+        for artifact in artifacts {
+            if let Some(id) = artifact.get("artifact_id").and_then(|v| v.as_str()) {
+                if id.starts_with("art_") {
+                    return Some(id.to_string());
+                }
+            }
+            if let Some(ref_id) = artifact.get("artifact_ref").and_then(|v| v.as_str()) {
+                if let Some(id) = resolve_artifact_ref_to_id(gateway_store, session_id, ref_id) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -116,12 +201,13 @@ impl NativeTool for ApprovalStatusTool {
                 serde_json::to_string(&response).map_err(Into::into)
             }
             Err(e) => {
-                let response = serde_json::json!({
-                    "ok": false,
-                    "approval_id": args.approval_id,
-                    "error": e.to_string()
-                });
-                serde_json::to_string(&response).map_err(Into::into)
+                let response = ToolError::execution(
+                    e.to_string(),
+                    Some("Check the approval request and retry."),
+                )
+                .with_code("workflow_task_failed")
+                .to_json_string();
+                Ok(response)
             }
         }
     }
@@ -171,15 +257,13 @@ fn check_task_statuses(
         let task = crate::scheduler::load_task_run(config, store, workflow_id, task_id)
             .ok()
             .flatten();
-        match task {
+            match task {
             Some(t) => {
-                let is_terminal = matches!(
-                    t.status,
-                    autonoetic_types::workflow::TaskRunStatus::Succeeded
-                        | autonoetic_types::workflow::TaskRunStatus::Failed
-                        | autonoetic_types::workflow::TaskRunStatus::Cancelled
-                        | autonoetic_types::workflow::TaskRunStatus::Aborted
-                );
+                // #722 Stage 2: a Stale task (approval timed out, checkpoint
+                // preserved) is terminal for waiting purposes, matching
+                // check_join_condition. Without this, a parent in workflow_wait
+                // blocks its full budget on a task the join already treats as done.
+                let is_terminal = t.status.is_terminal_for_join();
                 if !is_terminal {
                     all_done = false;
                 }
@@ -223,6 +307,22 @@ fn check_task_statuses(
                         entry["checkpoint_state"] = cp.state;
                     }
                 }
+                // RFC C — advisory claim reconciliation on the child→parent
+                // result path (non-blocking).
+                if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
+                    if let Some(gw_dir) = gateway_dir {
+                        let _ = crate::runtime::response_validation::advisory_reconcile_child_result_summary(
+                            t.result_summary.as_deref(),
+                            &t.session_id,
+                            session_id.unwrap_or_else(|| t.parent_session_id.as_str()),
+                            &t.agent_id,
+                            gw_dir,
+                            store,
+                            Some(config),
+                        );
+                    }
+                }
+
                 // Check for implicit artifact created for this task
                 if t.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
                     if let (Some(gw_dir), Some(sid)) = (gateway_dir, session_id) {
@@ -336,7 +436,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Suspends until watched task_ids reach terminal state (Succeeded, Failed, Cancelled, Aborted). Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. By default, blocks for up to default_workflow_wait_secs (configurable, default 30s), waking immediately on child-state transitions. Pass timeout_secs=0 to probe current status without waiting. When task_ids is empty or omitted, waits for all tasks in the current workflow.".to_string(),
+            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -353,7 +453,13 @@ impl NativeTool for WorkflowWaitTool {
                         "type": "integer",
                         "minimum": 0,
                         "maximum": 300,
-                        "description": "Max seconds to block. Omit to use default_workflow_wait_secs (default 30s). 0 = probe once and return immediately (no blocking)."
+                        "description": "Legacy: only 0 is meaningful. 0 = probe once and return immediately (no suspension). Non-zero values are ignored; the session hibernates until the children finish."
+                    },
+                    "max_wait_secs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1800,
+                        "description": "Legacy: ignored. The gateway suspends and resumes automatically instead of blocking for a fixed budget."
                     }
                 },
                 "additionalProperties": false
@@ -382,10 +488,14 @@ impl NativeTool for WorkflowWaitTool {
             workflow_id: Option<String>,
             #[serde(default)]
             timeout_secs: Option<u64>,
+            #[serde(default)]
+            max_wait_secs: Option<u64>,
         }
 
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let _ = args.max_wait_secs;
 
         let agents_dir = agent_dir
             .parent()
@@ -425,25 +535,25 @@ impl NativeTool for WorkflowWaitTool {
             .unwrap_or(gw_config.default_workflow_wait_secs)
             .min(300);
 
-        // Non-blocking mode: check once and return
-        if timeout_secs == 0 {
-            let (
-                tasks_status,
-                all_done,
-                any_failed,
-                any_not_found,
-                failed_task_count,
-                failure_summary,
-            ) = check_task_statuses(
-                gw_config,
-                gateway_store.as_deref(),
-                &workflow_id,
-                &task_ids,
-                _gateway_dir,
-                session_id,
-            );
-            let any_gate_fail =
-                autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
+        let (
+            tasks_status,
+            all_done,
+            any_failed,
+            any_not_found,
+            failed_task_count,
+            failure_summary,
+        ) = check_task_statuses(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+            &task_ids,
+            _gateway_dir,
+            session_id,
+        );
+        let any_gate_fail =
+            autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
+
+        if timeout_secs == 0 || all_done {
             return serde_json::to_string(&serde_json::json!({
                 "ok": true,
                 "workflow_id": workflow_id,
@@ -466,202 +576,27 @@ impl NativeTool for WorkflowWaitTool {
             .map_err(Into::into);
         }
 
-        // Blocking mode: wait for signal-driven wake or deadline
-        let task_ids_clone = task_ids.clone();
-        let wf_id = workflow_id.clone();
-        let gw_config_arc = std::sync::Arc::new(gw_config.clone());
-        let notify = match (gateway_store.as_ref(), session_id) {
-            (Some(s), Some(sid)) => Some(s.task_notify.get_or_create(sid)),
-            _ => None,
-        };
-
-        let (
-            tasks_status,
-            all_done,
-            any_failed,
-            any_not_found,
-            waited_secs,
-            failed_task_count,
-            failure_summary,
-        ) = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tokio::task::block_in_place(|| {
-                handle.block_on(async {
-                    signal_driven_wait(
-                        gw_config_arc.as_ref(),
-                        gateway_store.as_deref(),
-                        &wf_id,
-                        &task_ids_clone,
-                        timeout_secs,
-                        notify.as_ref(),
-                        _gateway_dir,
-                        session_id,
-                    )
-                    .await
-                })
-            })
-        } else {
-            tokio::runtime::Runtime::new()?.block_on(async {
-                signal_driven_wait(
-                    gw_config_arc.as_ref(),
-                    gateway_store.as_deref(),
-                    &wf_id,
-                    &task_ids_clone,
-                    timeout_secs,
-                    notify.as_ref(),
-                    _gateway_dir,
-                    session_id,
-                )
-                .await
-            })
-        };
-
-        let any_gate_fail =
-            autonoetic_types::task_completion::any_gate_unsatisfied(&tasks_status);
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "workflow_id": workflow_id,
             "tasks": tasks_status,
-            "join_satisfied": all_done,
+            "join_satisfied": false,
             "any_failed": any_failed,
             "any_not_found": any_not_found,
             "any_gate_unsatisfied": any_gate_fail,
             "failed_task_count": failed_task_count,
             "failure_summary": failure_summary,
-            "waited_secs": waited_secs,
+            "waited_secs": 0,
+            "waiting_for_child": true,
             "message": autonoetic_types::task_completion::workflow_wait_join_message(
-                all_done,
+                false,
                 any_failed,
                 any_not_found,
                 any_gate_fail,
-                waited_secs,
+                0,
             ),
         }))
         .map_err(Into::into)
-    }
-}
-
-const STALL_GRACE_SECS: i64 = 30;
-const FALLBACK_POLL_SECS: u64 = 5;
-
-async fn signal_driven_wait(
-    config: &GatewayConfig,
-    store: Option<&crate::scheduler::gateway_store::GatewayStore>,
-    workflow_id: &str,
-    task_ids: &[String],
-    timeout_secs: u64,
-    notify: Option<&std::sync::Arc<tokio::sync::Notify>>,
-    gateway_dir: Option<&Path>,
-    session_id: Option<&str>,
-) -> (
-    Vec<serde_json::Value>,
-    bool,
-    bool,
-    bool,
-    u64,
-    usize,
-    Vec<serde_json::Value>,
-) {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let start = std::time::Instant::now();
-    let mut last_waited_report = 0u64;
-
-    loop {
-        let (tasks_status, all_done, any_failed, any_not_found, failed_task_count, failure_summary) =
-            check_task_statuses(
-                config,
-                store,
-                workflow_id,
-                task_ids,
-                gateway_dir,
-                session_id,
-            );
-        let waited_secs = start.elapsed().as_secs();
-
-        if all_done {
-            return (
-                tasks_status,
-                true,
-                any_failed,
-                any_not_found,
-                waited_secs,
-                failed_task_count,
-                failure_summary,
-            );
-        }
-        if any_not_found {
-            return (
-                tasks_status,
-                false,
-                any_failed,
-                true,
-                waited_secs,
-                failed_task_count,
-                failure_summary,
-            );
-        }
-
-        if waited_secs >= STALL_GRACE_SECS as u64 && waited_secs != last_waited_report {
-            last_waited_report = waited_secs;
-            if let Some(gw_store) = store {
-                let mut stall_detected = false;
-                let mut enriched_status = tasks_status.clone();
-                for entry in enriched_status.iter_mut() {
-                    let status_str = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                    let task_session = entry.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
-                    if status_str == "Running" && !task_session.is_empty() {
-                        let has_transcript = gw_store
-                            .find_transcript_by_session_id(task_session)
-                            .ok()
-                            .flatten()
-                            .is_some();
-                        if !has_transcript {
-                            stall_detected = true;
-                            entry["stall_detected"] = serde_json::json!(true);
-                            entry["stall_reason"] = serde_json::json!(
-                                "Task is Running but has no transcript after grace period — child session may have failed to start"
-                            );
-                        }
-                    }
-                }
-                if stall_detected {
-                    return (
-                        enriched_status,
-                        false,
-                        any_failed,
-                        any_not_found,
-                        waited_secs,
-                        failed_task_count,
-                        failure_summary,
-                    );
-                }
-            }
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return (
-                tasks_status,
-                false,
-                any_failed,
-                any_not_found,
-                waited_secs,
-                failed_task_count,
-                failure_summary,
-            );
-        }
-
-        let fallback = tokio::time::sleep(std::time::Duration::from_secs(FALLBACK_POLL_SECS));
-        tokio::pin!(fallback);
-
-        if let Some(n) = notify {
-            let notified = n.notified();
-            tokio::pin!(notified);
-            tokio::select! {
-                _ = &mut notified => {}
-                _ = &mut fallback => {}
-            }
-        } else {
-            fallback.await;
-        }
     }
 }
 
@@ -725,7 +660,7 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
         agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -773,6 +708,15 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
             &workflow_id,
         )?;
 
+        // Load workflow events so orchestrators can discover durable artifacts
+        // produced outside of task results (e.g. candidate revisions).
+        let workflow_events = crate::scheduler::workflow_store::load_workflow_events(
+            gw_config,
+            gateway_store.as_deref(),
+            &workflow_id,
+        )
+        .unwrap_or_default();
+
         // Load pending approvals for this workflow to enrich pending_approvals entries
         let pending_approvals_map: HashMap<String, String> = {
             let root = workflow
@@ -817,6 +761,22 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
 
             match task.status {
                 autonoetic_types::workflow::TaskRunStatus::Succeeded => {
+                    // RFC C — advisory claim reconciliation on the child→parent
+                    // result path. This is intentionally non-blocking: the full
+                    // child `SpawnResult` was already validated against
+                    // `io.returns` before the task was marked complete. We
+                    // re-check the summary that crosses to the parent to catch
+                    // any fabricated claim that survived truncation.
+                    let _ = crate::runtime::response_validation::advisory_reconcile_child_result_summary(
+                        task.result_summary.as_deref(),
+                        &task.session_id,
+                        session_id.unwrap_or_else(|| task.parent_session_id.as_str()),
+                        &task.agent_id,
+                        &agents_dir.join(".gateway"),
+                        gateway_store.as_deref(),
+                        Some(gw_config),
+                    );
+
                     completed_tasks.push(entry.clone());
                     if let Some(ref summary) = task.result_summary {
                         let role = task.agent_id.split('.').next().unwrap_or("unknown");
@@ -831,7 +791,12 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                         );
                     }
                 }
-                autonoetic_types::workflow::TaskRunStatus::AwaitingApproval => {
+                // A Stale task is a timed-out approval whose row is still
+                // pending (#722 Stage 2), so it remains approvable — surface it
+                // alongside AwaitingApproval rather than letting it vanish into
+                // the catch-all below.
+                autonoetic_types::workflow::TaskRunStatus::AwaitingApproval
+                | autonoetic_types::workflow::TaskRunStatus::Stale => {
                     let mut entry = entry.clone();
                     if let Some(req_id) = pending_approvals_map.get(&task.task_id) {
                         entry.as_object_mut().unwrap().insert(
@@ -897,15 +862,89 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 })
             });
 
+        let builder_candidate = workflow_events
+            .iter()
+            .filter(|e| e.event_type == "workflow.revision.created")
+            .filter_map(|e| {
+                let payload = e.payload.as_object()?;
+                Some(serde_json::json!({
+                    "agent_id": payload.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "revision_id": payload.get("revision_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "artifact_id": payload.get("artifact_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "artifact_ref": payload.get("artifact_ref").cloned().unwrap_or(serde_json::Value::Null),
+                    "content_digest": payload.get("content_digest").cloned().unwrap_or(serde_json::Value::Null),
+                }))
+            })
+            .last();
+
+        // The federation/evaluation completion predicates must be sourced from
+        // the promotion store (recorded verdicts), not merely artifact presence.
+        // A role can produce an artifact without ever calling promotion.record,
+        // which would falsely satisfy the old artifact-presence guards.
+        let primary_artifact_id = gateway_dir.and_then(|gw_dir| {
+            resolve_primary_artifact_id(
+                gw_dir,
+                gateway_store.as_deref(),
+                session_id,
+                builder_candidate.as_ref(),
+                &tasks,
+            )
+        });
+        let promotion_record = gateway_dir
+            .zip(primary_artifact_id.as_ref())
+            .and_then(|(gw_dir, artifact_id)| {
+                PromotionStore::new(gw_dir)
+                    .ok()
+                    .and_then(|store| store.get_promotion(artifact_id))
+            });
+
+        // reuse_guards: when we can resolve the promotion record for the primary
+        // artifact, verdicts are authoritative. When no record is resolvable, we
+        // fall back to artifact presence as a non-breaking diagnostic hint; the
+        // actual completion decision below does NOT fall back.
+        let has_evaluator_result = promotion_record
+            .as_ref()
+            .map(|r| r.evaluator_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("evaluator"));
+        let has_auditor_result = promotion_record
+            .as_ref()
+            .map(|r| r.auditor_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("auditor"));
+        let has_static_evaluator_result = promotion_record
+            .as_ref()
+            .map(|r| r.static_evaluator_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("static_evaluator"));
+        let has_unit_test_runner_result = promotion_record
+            .as_ref()
+            .map(|r| r.unit_test_runner_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("unit_test_runner"));
+        let has_sealed_evaluator_result = promotion_record
+            .as_ref()
+            .map(|r| r.sealed_evaluator_id.is_some())
+            .unwrap_or(latest_artifact_by_role.contains_key("sealed_evaluator"));
+
+        // Completion predicates (resume hints) must NOT fall back to artifact
+        // presence; only recorded promotion-store verdicts can satisfy a gate.
+        let evaluation_verdict_complete = promotion_record.as_ref().map_or(false, |r| {
+            (r.evaluator_id.is_some() || r.sealed_evaluator_id.is_some())
+                && r.auditor_id.is_some()
+        });
+        let federation_verdict_complete = promotion_record.as_ref().map_or(false, |r| {
+            r.static_evaluator_id.is_some() && r.auditor_id.is_some()
+        });
+
         let reuse_guards = serde_json::json!({
             "has_coder_artifact": latest_artifact_by_role.contains_key("coder"),
-            "has_evaluator_result": latest_artifact_by_role.contains_key("evaluator"),
-            "has_auditor_result": latest_artifact_by_role.contains_key("auditor"),
-            "has_static_evaluator_result": latest_artifact_by_role.contains_key("static_evaluator"),
-            "has_unit_test_runner_result": latest_artifact_by_role.contains_key("unit_test_runner"),
-            "has_sealed_evaluator_result": latest_artifact_by_role.contains_key("sealed_evaluator"),
+            "has_evaluator_result": has_evaluator_result,
+            "has_auditor_result": has_auditor_result,
+            "has_static_evaluator_result": has_static_evaluator_result,
+            "has_unit_test_runner_result": has_unit_test_runner_result,
+            "has_sealed_evaluator_result": has_sealed_evaluator_result,
+            "has_builder_candidate": builder_candidate.is_some(),
+            "builder_candidate": builder_candidate,
             "pending_approvals": !pending_approvals.is_empty(),
             "active_tasks_running": !active_tasks.is_empty(),
+            "primary_artifact_id": primary_artifact_id,
         });
 
         let state = serde_json::json!({
@@ -922,13 +961,11 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 "approval_pending — do not spawn new tasks, wait for approval"
             } else if !active_tasks.is_empty() {
                 "tasks_running — wait for completion or proceed with partial results"
-            } else if (latest_artifact_by_role.contains_key("evaluator") || latest_artifact_by_role.contains_key("sealed_evaluator"))
-                && latest_artifact_by_role.contains_key("auditor")
-            {
+            } else if builder_candidate.is_some() {
+                "builder_candidate_exists — use install_mode:\"promote\" with the existing revision_id; do not create a new revision"
+            } else if evaluation_verdict_complete {
                 "evaluation_complete — proceed to specialized_builder or coder iteration"
-            } else if latest_artifact_by_role.contains_key("static_evaluator")
-                && latest_artifact_by_role.contains_key("auditor")
-            {
+            } else if federation_verdict_complete {
                 "federation_complete — collect all verdicts and escalate to operator"
             } else if latest_artifact_by_role.contains_key("coder") && !latest_artifact_by_role.contains_key("evaluator") {
                 "coder_done — proceed to evaluator/auditor or federation"
@@ -1025,17 +1062,13 @@ impl NativeTool for WorkflowCancelTaskTool {
                 | autonoetic_types::workflow::TaskRunStatus::Runnable
         );
         if !cancellable {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "task_id": task_id,
-                "status": format!("{:?}", task.status),
-                "error": format!("Task is {:?} and cannot be cancelled. Only AwaitingApproval, Pending, and Runnable tasks can be cancelled.", task.status)
-            })
-            .to_string());
+            return Ok(ToolError::conflict(
+                format!("Task is {:?} and cannot be cancelled. Only AwaitingApproval, Pending, and Runnable tasks can be cancelled.", task.status),
+                Some("Cancel is only allowed for tasks in AwaitingApproval, Pending, or Runnable status."),
+            )
+            .with_code("task_cannot_be_cancelled")
+            .to_error_response());
         }
-
-        // Delete any saved continuation file.
-        let _ = crate::runtime::continuation::delete_continuation(config, task_id);
 
         // Mark as Cancelled (triggers join condition check).
         crate::scheduler::workflow_store::update_task_run_status(
@@ -1144,6 +1177,23 @@ impl NativeTool for WorkflowForceCompleteTool {
         let task_id = args["task_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("task_id is required"))?;
+
+        if crate::scheduler::workflow_store::is_workflow_terminal(
+            config,
+            gateway_store.as_deref(),
+            workflow_id,
+        )? {
+            return Ok(ToolError::conflict(
+                format!(
+                    "Workflow '{}' is already terminal. Force-complete is not allowed after completion.",
+                    workflow_id
+                ),
+                Some("The workflow has already reached a terminal state; no further mutations are permitted."),
+            )
+            .with_code("workflow_already_completed")
+            .to_error_response());
+        }
+
         let target_status_str = args["status"].as_str().unwrap_or("succeeded");
         let summary = args["summary"].as_str().map(str::to_string);
 
@@ -1154,25 +1204,24 @@ impl NativeTool for WorkflowForceCompleteTool {
             })?;
 
         if task.status != autonoetic_types::workflow::TaskRunStatus::Running {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "task_id": task_id,
-                "current_status": format!("{:?}", task.status),
-                "error": "Task is not in Running state. Only stuck Running tasks can be force-completed."
-            })
-            .to_string());
+            return Ok(ToolError::conflict(
+                "Task is not in Running state. Only stuck Running tasks can be force-completed.",
+                Some("Ensure the task is in Running state before force-completing."),
+            )
+            .with_code("task_not_running")
+            .to_error_response());
         }
 
         let target_status = match target_status_str {
             "succeeded" => autonoetic_types::workflow::TaskRunStatus::Succeeded,
             "failed" => autonoetic_types::workflow::TaskRunStatus::Failed,
             other => {
-                return Ok(serde_json::json!({
-                    "ok": false,
-                    "task_id": task_id,
-                    "error": format!("Invalid status '{}'. Must be 'succeeded' or 'failed'.", other)
-                })
-                .to_string());
+                return Ok(ToolError::validation(
+                    format!("Invalid status '{}'. Must be 'succeeded' or 'failed'.", other),
+                    Some("Use 'succeeded' or 'failed' as the status value."),
+                )
+                .with_code("invalid_force_complete_status")
+                .to_error_response());
             }
         };
 
@@ -1215,7 +1264,9 @@ impl NativeTool for WorkflowForceCompleteTool {
                     if has_digest {
                         if let Ok(digest) = std::fs::read_to_string(session_dir.join("digest.md")) {
                             if digest.contains("Session summary")
-                                || digest.contains("jsonrpc_spawn_complete")
+                                || digest.contains(
+                                    autonoetic_types::session_outcome::SessionCloseOutcome::JsonRpcSpawnComplete.as_str(),
+                                )
                             {
                                 session_completed = true;
                                 evidence
@@ -1268,14 +1319,12 @@ impl NativeTool for WorkflowForceCompleteTool {
         if target_status == autonoetic_types::workflow::TaskRunStatus::Succeeded
             && !session_completed
         {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "task_id": task_id,
-                "workflow_id": workflow_id,
-                "error": "Cannot force-complete as 'succeeded': no evidence of child session completion.",
-                "evidence_gathered": evidence,
-                "hint": "Use status 'failed' if the child session is stuck, or wait for it to produce a manifest/digest/implicit artifact."
-            }).to_string());
+            return Ok(ToolError::conflict(
+                "Cannot force-complete as 'succeeded': no evidence of child session completion.",
+                Some("Use status 'failed' if the child session is stuck, or wait for it to produce a manifest/digest/implicit artifact."),
+            )
+            .with_code("force_complete_no_evidence")
+            .to_error_response());
         }
 
         let result_summary = summary.unwrap_or_else(|| {
@@ -1378,5 +1427,90 @@ mod force_complete_gate_tests {
             false,
             "Gate should NOT trigger: succeeded with evidence is fine"
         );
+    }
+}
+
+#[cfg(test)]
+mod stale_terminal_tests {
+    use super::*;
+    use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+    use crate::scheduler::workflow_store::{
+        ensure_workflow_for_root_session, new_task_id, save_task_run,
+    };
+    use tempfile::tempdir;
+
+    fn config_in(agents_dir: &std::path::Path) -> autonoetic_types::config::GatewayConfig {
+        autonoetic_types::config::GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            ..Default::default()
+        }
+    }
+
+    fn task_with_status(
+        workflow_id: &str,
+        status: TaskRunStatus,
+    ) -> TaskRun {
+        let ts = chrono::Utc::now().to_rfc3339();
+        TaskRun {
+            task_id: new_task_id(),
+            workflow_id: workflow_id.to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "r1/coder-abc".to_string(),
+            parent_session_id: "r1".to_string(),
+            status,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        }
+    }
+
+    /// #722 Stage 2: a Stale task (approval timed out, checkpoint preserved)
+    /// must count as terminal in `check_task_statuses`, matching
+    /// `check_join_condition`. Otherwise a parent in `workflow_wait` blocks its
+    /// whole budget on a task the join already treats as done.
+    #[test]
+    fn stale_task_counts_as_done_in_workflow_wait() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = config_in(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "r1", None).unwrap();
+
+        let task = task_with_status(&wf.workflow_id, TaskRunStatus::Stale);
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let (_statuses, all_done, any_failed, _any_not_found, _failed_count, _failures) =
+            check_task_statuses(&cfg, None, &wf.workflow_id, &[task.task_id.clone()], None, None);
+
+        assert!(all_done, "a Stale task must be reported terminal (all_done)");
+        assert!(!any_failed, "Stale is terminal-but-not-failed");
+    }
+
+    /// A still-parked (AwaitingApproval) task is NOT done — the parent should
+    /// keep waiting until the operator decides or the approval times out.
+    #[test]
+    fn awaiting_approval_task_is_not_done() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = config_in(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "r1", None).unwrap();
+
+        let task = task_with_status(&wf.workflow_id, TaskRunStatus::AwaitingApproval);
+        save_task_run(&cfg, None, &task).unwrap();
+
+        let (_s, all_done, _af, _anf, _fc, _f) =
+            check_task_statuses(&cfg, None, &wf.workflow_id, &[task.task_id.clone()], None, None);
+
+        assert!(!all_done, "an AwaitingApproval task is not terminal");
     }
 }

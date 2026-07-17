@@ -1,13 +1,17 @@
 pub mod admin_proposals;
 mod agent_registry;
+pub mod amendment_invitations;
+pub mod anomaly_flags;
 mod approvals;
 mod artifacts;
 pub mod attack_patterns;
+mod channel_bindings;
 pub mod constitutional_proposals;
 mod credentials;
 mod escalations;
 mod evaluations;
-mod channel_bindings;
+mod fork_lineage;
+pub use fork_lineage::ForkLineageRecord;
 mod gate_messages;
 mod hook_deliveries;
 mod improvement_cycles;
@@ -17,8 +21,10 @@ mod migrate;
 mod notifications;
 mod operator_activity;
 pub use operator_activity::OperatorActivityInsert;
+pub use agent_registry::PromotedAgent;
+pub use workflow_tasks::TaskExecutionClaim;
 mod observability;
-mod session_timeline;
+pub use observability::{CivicHealth, CivicHealthEntry};
 pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;
@@ -28,21 +34,30 @@ mod runtime_control;
 mod scheduled_jobs;
 pub mod security_findings;
 pub mod sentinel_disagreements;
+pub mod session_envelopes;
 pub mod session_inference;
 mod session_outcomes;
+mod session_spawn_lineage;
+mod session_timeline;
+pub mod singleton_index;
 mod user_interactions;
 mod user_profiles;
 mod util;
-mod workflow;
-mod workbenches;
 mod validation_waivers;
+mod workbenches;
+pub mod workflow_tasks;
+mod workflow;
 
 use anyhow::Result;
+use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::notification::NotificationStatus;
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
+
+/// Maximum buffered timeline events before an automatic flush.
+const LIVE_DIGEST_BUFFER_CAPACITY: usize = 32;
 
 pub use messages::AgentMessageRecord;
 pub(crate) use row_decode::memory_object_from_row;
@@ -124,12 +139,30 @@ pub struct GatewayStore {
     conn: std::sync::Mutex<Connection>,
     approval_flood_cap: std::sync::atomic::AtomicUsize,
     escalation_flood_cap: std::sync::atomic::AtomicUsize,
+    anomaly_flag_flood_cap: std::sync::atomic::AtomicUsize,
     /// Weak ref avoids an `Arc` cycle with [`crate::scheduler::hooks::HookExecutor`], which may
     /// hold an `Arc<GatewayStore>` for other hooks.
     policy_hook_executor: Mutex<Option<Weak<crate::scheduler::hooks::HookExecutor>>>,
     pub task_notify: crate::scheduler::task_notify::TaskNotifyRegistry,
     /// Session-scoped result cache for pure read tools (issue #289).
     pub session_read_cache: crate::runtime::session_read_cache::SessionReadCacheRegistry,
+    /// Buffered live-digest timeline inserts. Flushed when the buffer is full,
+    /// before reads of the timeline, or on drop. This batches high-frequency
+    /// observability writes (turn/tool/agent events) into fewer transactions.
+    live_digest_buffer: Mutex<Vec<LiveDigestEventRecord>>,
+    /// Runtime config used to compute approval/interaction TTLs. Set once at
+    /// daemon startup; tests that open the store directly use default values.
+    config: Mutex<Option<Arc<GatewayConfig>>>,
+    /// Root sessions currently at the approval-flood cap that have already had
+    /// an `operator_alert` emitted (#723). Prevents re-emitting the alert on
+    /// every rejected create while a root stays flooded; a root is removed when
+    /// a create for it next succeeds (the window reset).
+    flood_alerted_roots: Mutex<std::collections::HashSet<String>>,
+    /// Reporters currently at the anomaly-flag flood cap that have already had
+    /// an operator notification emitted (#770). Mirrors `flood_alerted_roots`:
+    /// the alert fires once per flood window, and a reporter is removed when
+    /// one of its filings next succeeds (capacity freed by adjudication).
+    flood_alerted_flag_reporters: Mutex<std::collections::HashSet<String>>,
 }
 
 impl GatewayStore {
@@ -152,10 +185,15 @@ impl GatewayStore {
             conn: std::sync::Mutex::new(conn),
             approval_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             escalation_flood_cap: std::sync::atomic::AtomicUsize::new(0),
+            anomaly_flag_flood_cap: std::sync::atomic::AtomicUsize::new(0),
             policy_hook_executor: Mutex::new(None),
             task_notify: crate::scheduler::task_notify::TaskNotifyRegistry::new(),
             session_read_cache:
                 crate::runtime::session_read_cache::SessionReadCacheRegistry::default(),
+            live_digest_buffer: Mutex::new(Vec::with_capacity(LIVE_DIGEST_BUFFER_CAPACITY)),
+            config: Mutex::new(None),
+            flood_alerted_roots: Mutex::new(std::collections::HashSet::new()),
+            flood_alerted_flag_reporters: Mutex::new(std::collections::HashSet::new()),
         };
         {
             let mut conn = store.conn.lock().unwrap();
@@ -176,6 +214,17 @@ impl GatewayStore {
             migrate::backfill_workflow_index(&conn, gateway_dir)?;
         }
         Ok(store)
+    }
+
+    /// Runtime config used to compute approval/interaction TTLs. Set once at
+    /// daemon startup; tests that open the store directly use default values.
+    pub fn set_config(&self, config: Arc<GatewayConfig>) {
+        let mut g = self.config.lock().expect("config mutex poisoned");
+        *g = Some(config);
+    }
+
+    pub fn config(&self) -> Option<Arc<GatewayConfig>> {
+        self.config.lock().expect("config mutex poisoned").clone()
     }
 
     /// Wire the gateway hook executor for [`autonoetic_types::hooks::HookEvent::PolicyDecision`].
@@ -200,6 +249,7 @@ impl GatewayStore {
     where
         F: FnOnce(&Connection) -> Result<T>,
     {
+        self.flush_live_digest_events()?;
         let conn = self.conn.lock().unwrap();
         f(&conn)
     }
@@ -410,7 +460,14 @@ impl GatewayStore {
         approved_at: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        plan_frames::update_plan_frame_status(&conn, plan_id, version, status, approved_by, approved_at)
+        plan_frames::update_plan_frame_status(
+            &conn,
+            plan_id,
+            version,
+            status,
+            approved_by,
+            approved_at,
+        )
     }
 
     pub fn load_active_plan_for_workflow(
@@ -445,11 +502,37 @@ impl GatewayStore {
         plan_frames::list_pending_plan_frames_for_root(&conn, root_session_id)
     }
 
+    pub fn expire_timed_out_plan_frames(&self) -> Result<Vec<(String, u32)>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::expire_timed_out_plan_frames(&conn)
+    }
+
+    pub fn get_stale_plan_frames_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::get_stale_plan_frames_for_root(&conn, root_session_id)
+    }
+
+    /// List the latest **approved** revision of each plan for a root session.
+    /// Used by the agent_spawn depends_on enforcement to find the active plan.
+    pub fn list_latest_plan_frames_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::plan_frame::PlanFrame>> {
+        let conn = self.conn.lock().unwrap();
+        plan_frames::list_latest_plan_frames_for_root(&conn, root_session_id)
+    }
+
     // -------------------------------------------------------------------------
     // Workbenches
     // -------------------------------------------------------------------------
 
-    pub fn save_workbench(&self, wb: &autonoetic_types::workbench::WorkbenchProjection) -> Result<()> {
+    pub fn save_workbench(
+        &self,
+        wb: &autonoetic_types::workbench::WorkbenchProjection,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         workbenches::save_workbench(&conn, wb)
     }
@@ -497,7 +580,10 @@ impl GatewayStore {
         workbenches::update_workbench_last_checkpoint(&conn, workbench_id, timestamp)
     }
 
-    pub fn save_checkpoint(&self, cp: &autonoetic_types::workbench::WorkbenchCheckpoint) -> Result<()> {
+    pub fn save_checkpoint(
+        &self,
+        cp: &autonoetic_types::workbench::WorkbenchCheckpoint,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         workbenches::save_checkpoint(&conn, cp)
     }
@@ -545,6 +631,55 @@ impl GatewayStore {
     ) -> Result<Vec<autonoetic_types::plan_frame::ValidationWaiver>> {
         let conn = self.conn.lock().unwrap();
         validation_waivers::list_waivers_for_workflow(&conn, workflow_id)
+    }
+
+    /// Persist all buffered timeline events in a single transaction.
+    pub fn flush_live_digest_events(&self) -> Result<()> {
+        let mut buf = self.live_digest_buffer.lock().unwrap();
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let drained: Vec<LiveDigestEventRecord> = buf.drain(..).collect();
+        drop(buf);
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO live_digest_events (
+                    event_id, root_session_id, source_session_id, turn_id, source_agent_id,
+                    source_node_id, event_type, payload, created_at,
+                    principal_kind, principal_id, role, altitude, refs_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            )?;
+            for event in &drained {
+                stmt.execute(params![
+                    &event.event_id,
+                    &event.root_session_id,
+                    &event.source_session_id,
+                    event.turn_id.as_deref(),
+                    event.source_agent_id.as_deref(),
+                    &event.source_node_id,
+                    &event.event_type,
+                    event.payload.as_deref(),
+                    &event.created_at,
+                    event.principal_kind.as_deref(),
+                    event.principal_id.as_deref(),
+                    event.role.as_deref(),
+                    event.altitude.as_deref(),
+                    event.refs_json.as_deref(),
+                ])?;
+            }
+            stmt.finalize()?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+impl Drop for GatewayStore {
+    fn drop(&mut self) {
+        let _ = self.flush_live_digest_events();
     }
 }
 
@@ -1034,7 +1169,8 @@ mod tests {
             origin_node_id: None,
         })?;
 
-        let results = store.search_session_transcripts(None, None, None, Some("completed"), None, 10)?;
+        let results =
+            store.search_session_transcripts(None, None, None, Some("completed"), None, 10)?;
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, "completed");
         assert_eq!(results[0].ended_at.as_deref(), Some(ended.as_str()));
@@ -1086,10 +1222,7 @@ mod tests {
         assert_eq!(fetched.artifact_id, "art_artifact123");
         assert_eq!(fetched.agent_id, "my.agent");
         assert_eq!(fetched.role_verdicts.len(), 2);
-        assert_eq!(
-            fetched.role_verdicts[0].role.as_str(),
-            "static_evaluator"
-        );
+        assert_eq!(fetched.role_verdicts[0].role.as_str(), "static_evaluator");
         assert!(fetched.role_verdicts[0].passed);
         assert_eq!(
             fetched.role_verdicts[1].findings_summary,
@@ -1119,7 +1252,10 @@ mod tests {
         );
         assert!(resolved.resolved_at.is_some());
         assert_eq!(resolved.decided_by.as_deref(), Some("cli-operator"));
-        assert_eq!(resolved.decision_reason.as_deref(), Some("Looks good, promote"));
+        assert_eq!(
+            resolved.decision_reason.as_deref(),
+            Some("Looks good, promote")
+        );
 
         Ok(())
     }

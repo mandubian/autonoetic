@@ -33,6 +33,10 @@ pub enum Signal {
         workflow_id: String,
         join_task_ids: Vec<String>,
         message: String,
+        /// Structured summaries of the completed child tasks, so the planner
+        /// doesn't need a separate `workflow_state` or artifact inspect round.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        child_summaries: Vec<ChildStateNotification>,
         timestamp: String,
     },
     /// Typed child-state update for parent wake-up / resume.
@@ -127,7 +131,7 @@ pub async fn deliver_signal(
     Ok(())
 }
 
-fn build_delivery_request(
+pub fn build_delivery_request(
     pending: &PendingSignal,
     session_id: &str,
 ) -> crate::router::JsonRpcRequest {
@@ -160,6 +164,7 @@ fn build_delivery_request(
             workflow_id,
             join_task_ids,
             message,
+            child_summaries,
             ..
         } => (
             serde_json::json!({
@@ -167,6 +172,7 @@ fn build_delivery_request(
                 "workflow_id": workflow_id,
                 "join_task_ids": join_task_ids,
                 "message": message,
+                "child_summaries": child_summaries,
             })
             .to_string(),
             None,
@@ -271,21 +277,33 @@ pub fn send_workflow_join_satisfied(
     root_session_id: &str,
     workflow_id: &str,
     join_task_ids: Vec<String>,
+    child_summaries: Vec<ChildStateNotification>,
 ) -> anyhow::Result<()> {
     if workflow_id.starts_with("sched-") {
         return Ok(());
     }
     let signal_id = format!("wf-join-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let summary_count = child_summaries.len();
     let signal = Signal::WorkflowJoinSatisfied {
         workflow_id: workflow_id.to_string(),
         join_task_ids: join_task_ids.clone(),
         message: format!(
-            "Workflow join satisfied: all {} tasks completed. You may resume planning.",
-            join_task_ids.len()
+            "Workflow join satisfied: all {} tasks completed ({} child summaries attached). You may resume planning.",
+            join_task_ids.len(),
+            summary_count,
         ),
+        child_summaries,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     write_signal(store, root_session_id, &signal_id, &signal)?;
+    // Ring the notifier so a parent blocked in `workflow.wait` wakes via its
+    // signal-driven path. The per-child notification is intentionally skipped
+    // when the join is satisfied in the same update (to avoid a double wake),
+    // so this is the only wake for the task that completes the join — without
+    // it the parent only resumes on its 5-second fallback poll.
+    if let Some(s) = store {
+        s.task_notify.notify_session(root_session_id);
+    }
     Ok(())
 }
 
@@ -324,6 +342,7 @@ mod tests {
                 workflow_id: "wf-123".to_string(),
                 join_task_ids: vec!["task-a".to_string()],
                 message: "ready".to_string(),
+                child_summaries: Vec::new(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             filename: "wf-join-test.json".to_string(),
@@ -377,6 +396,7 @@ mod tests {
                     install_conflict_detail: None,
                     retry_advice: Some(RetryAdvice::Wait),
                     side_effect_state: Some(SideEffectState::NoSideEffect),
+                    agent_outcome: None,
                     summary: Some("awaiting approval apr-123".to_string()),
                 },
                 message: "child waiting".to_string(),
@@ -452,6 +472,7 @@ mod tests {
                 workflow_id: "wf-123".to_string(),
                 join_task_ids: vec!["task-a".to_string()],
                 message: "ready".to_string(),
+                child_summaries: Vec::new(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             },
             filename: "wf-join-test.json".to_string(),

@@ -25,6 +25,7 @@ fn manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "test agent".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,
@@ -41,8 +42,10 @@ fn manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -162,7 +165,8 @@ fn test_impl_artifact_and_cnt_handle_guards() -> anyhow::Result<()> {
         None,
     )?;
     let cnt_misuse_json: serde_json::Value = serde_json::from_str(&cnt_misuse)?;
-    assert_eq!(cnt_misuse_json["ok"], false);
+    assert_eq!(cnt_misuse_json["ok"], true);
+    assert_eq!(cnt_misuse_json["command_succeeded"], false);
     let stderr = cnt_misuse_json["stderr"].as_str().unwrap_or_default();
     assert!(
         stderr.contains("cnt_deadbeef"),

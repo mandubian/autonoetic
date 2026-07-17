@@ -46,8 +46,16 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
         matches!(
             c,
             autonoetic_types::capability::Capability::CodeExecution { .. }
+                | autonoetic_types::capability::Capability::ArtifactExecution
         )
     });
+
+    // SDK reference: executable-code roles, delegators (AgentSpawn), and
+    // federation roles that statically review script code (architect, static_evaluator).
+    let role = role_from_manifest(manifest);
+    let needs_sdk_reference = has_code_execution
+        || has_workflow_caps
+        || matches!(role, Some("architect") | Some("static_evaluator"));
 
     if has_workflow_caps || !is_script_mode {
         parts.push(FOUNDATION_WORKFLOW.trim());
@@ -67,7 +75,7 @@ pub(crate) fn compose_foundation(manifest: &AgentManifest) -> String {
         parts.push(FOUNDATION_DIGEST.trim());
     }
 
-    if has_code_execution {
+    if needs_sdk_reference {
         parts.push(FOUNDATION_SDK.trim());
     }
 
@@ -123,33 +131,96 @@ pub(crate) fn compose_system_instructions_with_metadata(
     compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None, None)
 }
 
+/// Candidate pool size for task-matched recall: wider than `max_memories` so
+/// the relevance scorer has something to rank before truncating down.
+const MEMORY_CANDIDATE_POOL: usize = 50;
+
+/// Jaccard token-overlap relevance score between the incoming task text and a
+/// candidate memory's content. Mirrors
+/// `runtime::tools::agent_revision::description_token_overlap` — kept as a
+/// local copy rather than a cross-module dependency since the two call sites
+/// score conceptually different things (description drift vs. task/memory
+/// relevance) and shouldn't be coupled by a shared signature change.
+pub(crate) fn score_task_relevance(task_text: &str, memory_content: &str) -> f64 {
+    use std::collections::BTreeSet;
+    let tokenize = |s: &str| -> BTreeSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .map(|t| t.to_string())
+            .collect()
+    };
+    let ta = tokenize(task_text);
+    let tb = tokenize(memory_content);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f64;
+    let union = ta.union(&tb).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Scopes treated as "error lessons" for prioritization/labeling purposes.
+fn is_error_lesson_scope(scope: &str) -> bool {
+    matches!(scope, "digest.error_pattern" | "digest.lesson")
+}
+
 /// Build a "Prior knowledge" block from Tier-2 global memories relevant to this agent.
+///
+/// When `task_text` is `Some` and non-empty, candidates are scored against it
+/// (Jaccard token overlap) and re-ranked so task-relevant memories — error
+/// lessons prioritized on ties — surface first; remaining slots are filled
+/// with the most recent unscored candidates so recency value is preserved
+/// when nothing matches. When `task_text` is `None`/empty, behavior is pure
+/// recency, unchanged from before task-matched recall.
 ///
 /// Returns `None` if no memories are found or the store is unavailable.
 pub(crate) fn build_memory_context_snippet(
     store: &crate::scheduler::gateway_store::GatewayStore,
     agent_id: &str,
     max_memories: usize,
+    task_text: Option<&str>,
 ) -> Option<String> {
     let agent_tag = format!("agent:{agent_id}");
 
-    let agent_digests = store.search_memories_by_tags(
+    // `search_memories_by_tags` ORs its tags, so the two-tag queries below
+    // can return other agents' rows and crowd this agent's older-but-relevant
+    // memories out of the candidate pool — re-require the conjunction here.
+    let has_both = |m: &autonoetic_types::memory::MemoryObject, source_tag: &str| {
+        m.tags.iter().any(|t| t == agent_tag.as_str())
+            && m.tags.iter().any(|t| t == source_tag)
+    };
+
+    let agent_digests: Vec<_> = store.search_memories_by_tags(
         &[agent_tag.as_str(), "source:post_session_digest"],
-        max_memories,
-    ).ok().unwrap_or_default();
+        MEMORY_CANDIDATE_POOL,
+    ).ok().unwrap_or_default()
+        .into_iter()
+        .filter(|m| has_both(m, "source:post_session_digest"))
+        .collect();
 
-    let agent_signals = store.search_memories_by_tags(
+    let agent_signals: Vec<_> = store.search_memories_by_tags(
         &[agent_tag.as_str(), "source:quality_signal"],
-        max_memories,
-    ).ok().unwrap_or_default();
+        MEMORY_CANDIDATE_POOL,
+    ).ok().unwrap_or_default()
+        .into_iter()
+        .filter(|m| has_both(m, "source:quality_signal"))
+        .collect();
 
-    let mut memories: Vec<_> = agent_digests;
-    memories.extend(agent_signals);
-    memories.truncate(max_memories);
+    let mut seen = std::collections::HashSet::new();
+    let mut memories: Vec<_> = agent_digests
+        .into_iter()
+        .chain(agent_signals)
+        .filter(|m| seen.insert(m.memory_id.clone()))
+        .collect();
 
     if memories.is_empty() {
         memories = store
-            .search_memories_by_tags(&["source:post_session_digest"], max_memories)
+            .search_memories_by_tags(&["source:post_session_digest"], MEMORY_CANDIDATE_POOL)
             .ok()
             .unwrap_or_default();
     }
@@ -158,10 +229,58 @@ pub(crate) fn build_memory_context_snippet(
         return None;
     }
 
+    let task_text = task_text.filter(|t| !t.trim().is_empty());
+    let selected: Vec<_> = match task_text {
+        Some(task) => {
+            let mut scored: Vec<(f64, bool, _)> = memories
+                .into_iter()
+                .map(|m| {
+                    let score = score_task_relevance(task, &m.content);
+                    let error_lesson = is_error_lesson_scope(&m.scope);
+                    (score, error_lesson, m)
+                })
+                .collect();
+            // Score DESC, error-lesson-first tiebreak, updated_at DESC.
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.1.cmp(&a.1))
+                    .then_with(|| b.2.updated_at.cmp(&a.2.updated_at))
+            });
+
+            let (matched, unscored): (Vec<_>, Vec<_>) =
+                scored.into_iter().partition(|(score, _, _)| *score > 0.0);
+            matched
+                .into_iter()
+                .chain(unscored)
+                .take(max_memories)
+                .map(|(_, _, m)| m)
+                .collect()
+        }
+        None => memories.into_iter().take(max_memories).collect(),
+    };
+
+    if selected.is_empty() {
+        return None;
+    }
+
     let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
-    for mem in memories.iter().take(max_memories) {
+    for mem in &selected {
         let truncated: String = mem.content.chars().take(500).collect();
-        parts.push(format!("- {}", truncated));
+        let session_ref = mem
+            .tags
+            .iter()
+            .find_map(|t| t.strip_prefix("session:"))
+            .map(|sid| sid.chars().take(8).collect::<String>());
+        let prefix = if is_error_lesson_scope(&mem.scope) {
+            "(error lesson) "
+        } else {
+            ""
+        };
+        match session_ref {
+            Some(sid) => parts.push(format!("- {prefix}{truncated} [from session {sid}]")),
+            None => parts.push(format!("- {prefix}{truncated}")),
+        }
     }
     Some(parts.join("\n"))
 }
@@ -278,6 +397,15 @@ pub(crate) fn compose_system_instructions_full(
                     lines.push(format!(
                         "- **io.returns** — your ENTIRE final reply must be a single raw JSON object matching this schema. No prose before or after the JSON, and no markdown code fences (no ```json blocks).\n  Schema: `{compact}`\n  Template:\n  ```json\n  {template}\n  ```"
                     ));
+                    let has_anomalies = schema
+                        .get("properties")
+                        .and_then(|p| p.as_object())
+                        .map_or(false, |o| o.contains_key("anomalies"));
+                    if has_anomalies {
+                        lines.push(
+                            "  The `anomalies` field is a standing witness contract — report anything unexpected you observed, or [] if nothing.".to_string()
+                        );
+                    }
                 } else {
                     lines.push(format!(
                         "- **io.returns** — your final reply should be a single raw JSON object matching this schema, with no markdown code fences. Schema: `{compact}`"
@@ -445,7 +573,14 @@ impl AgentExecutor {
         let config = self.config.as_ref()?;
         let agent_id = &self.manifest.agent.id;
         let limit = config.profile.memory_priming_limit();
-        build_memory_context_snippet(store, agent_id, limit)
+        // No config means no memory priming at all (early return above).
+        // With config present, `task_matched_recall` (default true) gates
+        // relevance ranking; an explicit `false` preserves pure recency.
+        let task_matched = config.auto_learning.task_matched_recall;
+        let task_text = task_matched
+            .then_some(self.initial_user_message.as_str())
+            .filter(|t| !t.trim().is_empty());
+        build_memory_context_snippet(store, agent_id, limit, task_text)
     }
 
     /// Compose, sign, and render the R++1 state-attestation tail for the
@@ -518,9 +653,67 @@ impl AgentExecutor {
             .transpose()?
             .unwrap_or_default();
 
+        // #772 A.2: surface this agent's own still-pending constitutional
+        // proposals and anomaly flags in its signed per-turn block —
+        // "voice with amnesia is no voice". Mirrors the pending_escalation_ids
+        // gathering above. The store queries filter to non-terminal statuses
+        // in SQL (before the LIMIT) so terminal decisions can't displace
+        // still-pending items from the bounded window, and errors propagate:
+        // a signed "authoritative" attestation must not silently omit civic
+        // items because a query failed.
+        let (pending_proposal_ids, pending_flag_ids) = match self.gateway_store.as_deref() {
+            Some(store) => {
+                let proposals = store.list_pending_constitutional_proposals(
+                    Some(&self.manifest.agent.id),
+                    64,
+                )?;
+                let flags =
+                    store.list_pending_anomaly_flags(Some(&self.manifest.agent.id), 64)?;
+                (
+                    proposals.into_iter().map(|p| p.proposal_id).collect(),
+                    flags.into_iter().map(|f| f.flag_id).collect(),
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+
+        // #771 D.2: surface open amendment invitations addressed to this
+        // agent in the same signed civic line. Carried as one-line
+        // summaries (rule + denial count) rather than bare ids — the agent
+        // did not file these, so the friction evidence IS the message.
+        // Same error-propagation contract as proposals/flags above: a
+        // signed attestation must not silently omit civic items.
+        let pending_invitations = match self.gateway_store.as_deref() {
+            Some(store) => store
+                .list_amendment_invitations(Some("open"), Some(&self.manifest.agent.id), 64)?
+                .into_iter()
+                .map(|inv| crate::runtime::state_attestation::InvitationSummary {
+                    invitation_id: inv.invitation_id,
+                    rule_id: inv.rule_id,
+                    denial_count: inv.denial_count,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         let budget_meters = self.snapshot_budget_meters();
-        let gateway_node_id =
-            std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string());
+
+        // RFC #778 Part D: compute burn-rate forecast from the budget meters
+        // and turn counter. Pre-committed formula, no gateway judgment:
+        // tokens_per_turn = used_tokens / turn_counter (turn > 0)
+        // projected_turns_remaining = remaining_tokens / tokens_per_turn
+        let burn_rate = compute_burn_rate(&budget_meters, self.turn_counter);
+
+        let gateway_node_id = crate::execution::gateway_actor_id();
+
+        // Bind the active constitution (version + digest) into the signed
+        // per-turn block so non-retroactivity (Ri-0.10) is a verified fact,
+        // not an on-demand lookup. The constitution is initialized at gateway
+        // startup before any turn runs, so these accessors are always live
+        // here. Fetched in the caller to keep `state_attestation` free of
+        // upward dependencies.
+        let constitution_version = crate::constitution_digest::constitution_version();
+        let constitution_digest = crate::constitution_digest::constitution_digest();
 
         let attestation = crate::runtime::state_attestation::compose_and_sign(
             crate::runtime::state_attestation::AttestationInputs {
@@ -533,7 +726,13 @@ impl AgentExecutor {
                 pending_approval_ids,
                 pending_user_interaction_ids,
                 pending_escalation_ids,
+                pending_proposal_ids,
+                pending_flag_ids,
+                pending_invitations,
                 budget_meters,
+                burn_rate,
+                constitution_version: &constitution_version,
+                constitution_digest: &constitution_digest,
             },
             &key,
         )?;
@@ -661,6 +860,7 @@ mod agentskills_bridging_tests {
             compatibility: Some("claude-code".to_string()),
             allowed_tools: vec!["Bash(*)".to_string(), "Read".to_string()],
             needs_tool_bridging: true,
+            capabilities_inferred: true,
         });
 
         let output = compose_system_instructions_with_metadata(
@@ -720,6 +920,101 @@ mod agentskills_bridging_tests {
         );
     }
 
+    #[test]
+    fn output_contract_states_anomalies_witness_line_when_present() {
+        // RFC C.2 (#770): when the (gateway-augmented) io.returns schema
+        // carries an `anomalies` property, the Output Contract renders the
+        // standing-witness doctrine line once, in addition to the schema.
+        let mut manifest = default_test_manifest();
+        manifest.io = Some(autonoetic_types::agent::AgentIO {
+            accepts: None,
+            returns: Some(serde_json::json!({
+                "type": "object",
+                "required": ["status", "anomalies"],
+                "properties": {
+                    "status": { "type": "string" },
+                    "anomalies": { "type": "array" }
+                }
+            })),
+            returns_enforcement: None,
+            output_policy: None,
+        });
+        let output = compose_system_instructions_with_metadata("Do things.", &manifest, None);
+        assert!(output.contains("Your Output Contract"));
+        assert!(output.contains("anomalies"));
+        assert!(
+            output.contains("standing witness contract"),
+            "expected the anomalies witness-contract doctrine line: {output}"
+        );
+    }
+
+    #[test]
+    fn output_contract_omits_anomalies_line_when_absent() {
+        let mut manifest = default_test_manifest();
+        manifest.io = Some(autonoetic_types::agent::AgentIO {
+            accepts: None,
+            returns: Some(serde_json::json!({
+                "type": "object",
+                "required": ["status"],
+                "properties": { "status": { "type": "string" } }
+            })),
+            returns_enforcement: None,
+            output_policy: None,
+        });
+        let output = compose_system_instructions_with_metadata("Do things.", &manifest, None);
+        assert!(
+            !output.contains("standing witness contract"),
+            "no anomalies property declared; witness line must not appear: {output}"
+        );
+    }
+
+    #[test]
+    fn planner_system_prompt_includes_sentinel_self_correction_guidance() {
+        // D.7b: planner role must receive the Sentinel self-correction builtin
+        // guidance block so it treats sentinel_notice as an advisory signal
+        // rather than bouncing to the operator.
+        use crate::runtime::guidance::{builtin_blocks, compose_guidance, GuidanceContext};
+        use autonoetic_types::capability::Capability;
+
+        let caps = vec![Capability::AgentSpawn {
+            max_children: 5,
+            max_spawn_depth: 0,
+        }];
+        let ctx = GuidanceContext {
+            capabilities: &caps,
+            active_tool_names: &[],
+            model_family: None,
+            role: Some("planner"),
+        };
+        let guidance = compose_guidance(&builtin_blocks(), &ctx);
+        assert!(
+            guidance.contains("Sentinel notices are advisory"),
+            "planner guidance must include Sentinel self-correction doctrine: {guidance}"
+        );
+        assert!(
+            guidance.contains("self-correct, don't ask"),
+            "planner guidance must direct self-correction rather than operator escalation: {guidance}"
+        );
+    }
+
+    #[test]
+    fn non_planner_system_prompt_excludes_sentinel_self_correction_guidance() {
+        // D.7b: the planner-specific Sentinel guidance must not leak to other roles.
+        use crate::runtime::guidance::{builtin_blocks, compose_guidance, GuidanceContext};
+
+        let ctx = GuidanceContext {
+            capabilities: &[],
+            active_tool_names: &[],
+            model_family: None,
+            role: Some("coder"),
+        };
+        let guidance = compose_guidance(&builtin_blocks(), &ctx);
+        assert!(
+            !guidance.contains("Sentinel notices are advisory"),
+            "coder should not receive planner Sentinel guidance: {guidance}"
+        );
+    }
+
     fn default_test_manifest() -> AgentManifest {
         AgentManifest {
             version: "1.0".to_string(),
@@ -735,7 +1030,8 @@ mod agentskills_bridging_tests {
                 id: "test".to_string(),
                 name: "Test".to_string(),
                 description: "Test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -751,8 +1047,10 @@ mod agentskills_bridging_tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -846,5 +1144,309 @@ mod workflow_status_chat_tests {
         let schema = serde_json::json!({"type": "object"});
         let tmpl = generate_json_template(&schema);
         assert_eq!(tmpl, "{}");
+    }
+
+    #[test]
+    fn burn_rate_none_on_turn_zero() {
+        assert!(compute_burn_rate(&[], 0).is_none());
+    }
+
+    #[test]
+    fn burn_rate_none_without_token_meter() {
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_rounds".to_string(),
+            used: 5.0,
+            limit: Some(20.0),
+        }];
+        assert!(compute_burn_rate(&meters, 5).is_none());
+    }
+
+    #[test]
+    fn burn_rate_shows_remaining_even_when_no_usage() {
+        // On turn 1 with no tokens used yet, the forecast still shows
+        // remaining_tokens so the agent knows its ceiling.
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_tokens".to_string(),
+            used: 0.0,
+            limit: Some(10000.0),
+        }];
+        let forecast = compute_burn_rate(&meters, 1).expect("forecast");
+        assert_eq!(forecast.tokens_per_turn, 0.0);
+        assert_eq!(forecast.remaining_tokens, Some(10000.0));
+        assert!(forecast.projected_turns_remaining.is_none());
+    }
+
+    #[test]
+    fn burn_rate_computes_projected_turns() {
+        use crate::runtime::state_attestation::BudgetMeter;
+        // 5000 tokens used over 10 turns = 500 tokens/turn.
+        // Limit 10000, used 5000 → remaining 5000.
+        // Projected turns = 5000 / 500 = 10.
+        let meters = vec![
+            BudgetMeter {
+                name: "llm_rounds".to_string(),
+                used: 10.0,
+                limit: Some(20.0),
+            },
+            BudgetMeter {
+                name: "llm_tokens".to_string(),
+                used: 5000.0,
+                limit: Some(10000.0),
+            },
+        ];
+        let forecast = compute_burn_rate(&meters, 10).expect("forecast");
+        assert!((forecast.tokens_per_turn - 500.0).abs() < 0.01);
+        assert_eq!(forecast.remaining_tokens, Some(5000.0));
+        assert_eq!(forecast.projected_turns_remaining, Some(10.0));
+    }
+
+    #[test]
+    fn burn_rate_no_projection_without_limit() {
+        use crate::runtime::state_attestation::BudgetMeter;
+        let meters = vec![BudgetMeter {
+            name: "llm_tokens".to_string(),
+            used: 5000.0,
+            limit: None,
+        }];
+        let forecast = compute_burn_rate(&meters, 10).expect("forecast");
+        assert!((forecast.tokens_per_turn - 500.0).abs() < 0.01);
+        assert!(forecast.remaining_tokens.is_none());
+        assert!(forecast.projected_turns_remaining.is_none());
+    }
+}
+
+/// RFC #778 Part D — compute the burn-rate forecast from budget meters and
+/// the current turn counter.
+///
+/// Pre-committed formula (no gateway judgment):
+/// - `tokens_per_turn` = `llm_tokens.used / turn_counter` (when turn > 0)
+/// - `remaining_tokens` = `llm_tokens.limit - llm_tokens.used`
+/// - `projected_turns_remaining` = `remaining_tokens / tokens_per_turn`
+///
+/// Returns `None` when there is not enough data (turn 0, no token budget, or
+/// budgets disabled).
+fn compute_burn_rate(
+    budget_meters: &[crate::runtime::state_attestation::BudgetMeter],
+    turn_counter: u64,
+) -> Option<crate::runtime::state_attestation::BurnRateForecast> {
+    use crate::runtime::state_attestation::BurnRateForecast;
+
+    if turn_counter == 0 {
+        return None;
+    }
+
+    let token_meter = budget_meters
+        .iter()
+        .find(|m| m.name == "llm_tokens")?;
+
+    // tokens_per_turn is 0.0 when no tokens have been used yet — the forecast
+    // still carries remaining_tokens so the agent can see its budget ceiling.
+    let tokens_per_turn = token_meter.used / turn_counter as f64;
+    let remaining_tokens = token_meter.remaining();
+    let projected_turns_remaining = match remaining_tokens {
+        Some(rem) if tokens_per_turn > 0.0 => Some(rem / tokens_per_turn),
+        _ => None,
+    };
+
+    Some(BurnRateForecast {
+        tokens_per_turn,
+        remaining_tokens,
+        projected_turns_remaining,
+    })
+}
+
+#[cfg(test)]
+mod injected_recall_tests {
+    use super::*;
+    use crate::scheduler::gateway_store::GatewayStore;
+    use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
+
+    #[test]
+    fn scorer_matches_related_memory_and_zero_for_unrelated() {
+        let task = "fetch weather data from api";
+        let related = score_task_relevance(task, "weather api requires retry on 429");
+        let unrelated = score_task_relevance(task, "unrelated database migration note");
+        assert!(related > 0.0, "expected positive score, got {related}");
+        assert_eq!(unrelated, 0.0, "expected zero score, got {unrelated}");
+    }
+
+    fn seed_memory(
+        store: &GatewayStore,
+        id: &str,
+        agent_id: &str,
+        scope: &str,
+        content: &str,
+        session: &str,
+        updated_at: &str,
+    ) {
+        let mut mem = MemoryObject::new(
+            id.to_string(),
+            scope.to_string(),
+            agent_id.to_string(),
+            agent_id.to_string(),
+            format!("session:{session}:post_digest"),
+            content.to_string(),
+        );
+        mem.source_type = MemorySourceType::SessionDigest;
+        mem.tags = vec![
+            "source:post_session_digest".to_string(),
+            format!("session:{session}"),
+            format!("agent:{agent_id}"),
+        ];
+        mem.visibility = MemoryVisibility::Global;
+        mem.created_at = updated_at.to_string();
+        mem.updated_at = updated_at.to_string();
+        store.memory_upsert(&mem).unwrap();
+    }
+
+    #[test]
+    fn task_matched_recall_prefers_relevant_over_recent() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        seed_memory(
+            &store,
+            "mem-relevant",
+            agent_id,
+            "digest.lesson",
+            "weather api requires retry on 429 rate limits",
+            "sess-relevant-aaaaaaaa",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_memory(
+            &store,
+            "mem-recent-irrelevant",
+            agent_id,
+            "digest.fact",
+            "unrelated database migration note about schema versions",
+            "sess-recent-bbbbbbbb",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let snippet = build_memory_context_snippet(
+            &store,
+            agent_id,
+            1,
+            Some("fetch weather data from api"),
+        )
+        .expect("expected snippet");
+
+        assert!(
+            snippet.contains("weather api requires retry"),
+            "expected relevant memory to be selected: {snippet}"
+        );
+        assert!(
+            !snippet.contains("database migration"),
+            "irrelevant, more recent memory should not have been selected: {snippet}"
+        );
+    }
+
+    #[test]
+    fn snippet_includes_provenance_and_error_lesson_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        seed_memory(
+            &store,
+            "mem-error",
+            agent_id,
+            "digest.error_pattern",
+            "weather api call failed with 429 without retry",
+            "sess-errsession",
+            "2026-01-01T00:00:00Z",
+        );
+
+        let snippet = build_memory_context_snippet(
+            &store,
+            agent_id,
+            1,
+            Some("fetch weather data from api"),
+        )
+        .expect("expected snippet");
+
+        assert!(
+            snippet.contains("[from session sess-err"),
+            "expected provenance suffix: {snippet}"
+        );
+        assert!(
+            snippet.contains("(error lesson)"),
+            "expected error-lesson prefix: {snippet}"
+        );
+    }
+
+    #[test]
+    fn other_agents_digests_are_excluded_when_agent_has_own_memories() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+
+        seed_memory(
+            &store,
+            "mem-own",
+            "coder.default",
+            "digest.lesson",
+            "own lesson about api retries",
+            "sess-own-1",
+            "2026-01-01T00:00:00Z",
+        );
+        // search_memories_by_tags ORs its tags, so without the conjunction
+        // re-filter this newer foreign row would enter the candidate pool.
+        seed_memory(
+            &store,
+            "mem-foreign",
+            "researcher.default",
+            "digest.lesson",
+            "foreign lesson about api retries",
+            "sess-foreign-1",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let snippet =
+            build_memory_context_snippet(&store, "coder.default", 5, Some("api retries"))
+                .expect("expected snippet");
+        assert!(snippet.contains("own lesson"), "own memory expected: {snippet}");
+        assert!(
+            !snippet.contains("foreign lesson"),
+            "another agent's digest must not appear: {snippet}"
+        );
+    }
+
+    #[test]
+    fn no_task_text_preserves_recency_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(temp.path()).unwrap();
+        let agent_id = "coder.default";
+
+        seed_memory(
+            &store,
+            "mem-older",
+            agent_id,
+            "digest.fact",
+            "older fact about unrelated topic",
+            "sess-older-1",
+            "2026-01-01T00:00:00Z",
+        );
+        seed_memory(
+            &store,
+            "mem-newer",
+            agent_id,
+            "digest.fact",
+            "newer fact about unrelated topic",
+            "sess-newer-2",
+            "2026-06-01T00:00:00Z",
+        );
+
+        let snippet = build_memory_context_snippet(&store, agent_id, 2, None)
+            .expect("expected snippet");
+
+        let lines: Vec<&str> = snippet.lines().filter(|l| l.starts_with("- ")).collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("newer fact") && lines[1].contains("older fact"),
+            "expected recency (newest first) order preserved when task_text is None: {snippet}"
+        );
     }
 }

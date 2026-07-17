@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod agents;
+pub mod promotion_trace;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
 use autonoetic_gateway::scheduler::{
@@ -339,6 +340,8 @@ pub fn seed_agent_revision(
         created_at: chrono::Utc::now().to_rfc3339(),
         created_by_type: PrincipalKind::Human.tag().to_string(),
         created_by_id: "support".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
         source_kind: "test".to_string(),
         source_ref: None,
         origin_node_id: "gateway".to_string(),
@@ -346,6 +349,7 @@ pub fn seed_agent_revision(
         status: AgentRevisionStatus::Ready,
         metadata_json: serde_json::json!({}),
         short_id: String::new(),
+        detected_network_hosts: None,
         signature: None,
         signer_id: None,
     };
@@ -358,6 +362,9 @@ pub fn seed_agent_revision(
         updated_by_type: PrincipalKind::Human.tag().to_string(),
         updated_by_id: "support".to_string(),
         reason: Some("test seed".to_string()),
+        suspended_at: None,
+        suspended_reason: None,
+        suspended_by: None,
     };
     store.upsert_agent_alias(&alias)?;
     Ok(revision_id)

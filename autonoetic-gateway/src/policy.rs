@@ -100,6 +100,30 @@ Fix: widen the agent's CodeExecution patterns or `commands` list, wrap with an a
     }
 }
 
+/// Strip `#` line comments when the `#` is outside single/double quotes.
+fn strip_shell_line_comments_outside_quotes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in s.chars() {
+        if !in_single && !in_double && c == '#' {
+            break;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+        } else if c == '"' && !in_single {
+            in_double = !in_double;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// First whitespace-delimited token of a shell segment (lowercased input expected).
+fn first_shell_token(cmd_lower: &str) -> Option<&str> {
+    cmd_lower.split_whitespace().next()
+}
+
 /// Analyzes shell commands for security threats.
 pub struct SecurityAnalyzer;
 
@@ -135,8 +159,9 @@ impl SecurityAnalyzer {
                 threats.push(SecurityThreat::EnvironmentDisclosure);
             }
 
-            // Check for sandbox escape attempts
-            if Self::is_sandbox_escape(trimmed) {
+            // Check for sandbox escape attempts (ignore `#` line comments outside quotes)
+            let without_comments = strip_shell_line_comments_outside_quotes(trimmed);
+            if Self::is_sandbox_escape(&without_comments) {
                 threats.push(SecurityThreat::SandboxEscape);
             }
 
@@ -256,24 +281,26 @@ impl SecurityAnalyzer {
 
     /// Check for sandbox escape attempts.
     fn is_sandbox_escape(cmd: &str) -> bool {
-        let escape_patterns = &[
+        let path_patterns = [
             "cat /proc/",
             "ls /proc/",
             "cat /sys/",
             "ls /sys/",
-            "mount",
-            "umount",
-            "chroot",
-            "nsenter",
-            "unshare",
-            "docker ",
-            "lxc-",
-            "systemctl",
-            "service ",
         ];
-
         let cmd_lower = cmd.to_lowercase();
-        escape_patterns.iter().any(|p| cmd_lower.contains(p))
+        if path_patterns.iter().any(|p| cmd_lower.contains(p)) {
+            return true;
+        }
+        if cmd_lower.contains("lxc-") {
+            return true;
+        }
+        matches!(
+            first_shell_token(&cmd_lower),
+            Some(
+                "mount" | "umount" | "chroot" | "nsenter" | "unshare" | "systemctl" | "service"
+                    | "docker"
+            )
+        )
     }
 
     /// Check for shell injection patterns.
@@ -819,6 +846,26 @@ impl PolicyEngine {
         PolicyDecision::deny("P-1.1")
     }
 
+    /// Gate self-export of an agent's own cognitive capsule on the
+    /// `SelfCapsuleExport` capability (Ri-0.17: emigration). Unlike the broad
+    /// [`can_use_capsule`](Self::can_use_capsule), this is scoped: the agent
+    /// may export only the capsule whose `agent_id` equals its own identity
+    /// (`manifest.agent.id`). Returns `allow` only when the capability is held
+    /// *and* `requested_agent_id` matches the caller's own id; otherwise
+    /// `deny` carrying rule `Ri-0.17`.
+    pub fn can_use_capsule_self(&self, requested_agent_id: &str) -> PolicyDecision {
+        let has_self = self
+            .manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::SelfCapsuleExport));
+        if has_self && requested_agent_id == self.manifest.agent.id {
+            PolicyDecision::allow("Ri-0.17")
+        } else {
+            PolicyDecision::deny("Ri-0.17")
+        }
+    }
+
     pub fn can_audit_reasoning(&self, target_agent_id: &str) -> PolicyDecision {
         for cap in &self.manifest.capabilities {
             if let Capability::ReasoningAudit { targets } = cap {
@@ -831,6 +878,21 @@ impl PolicyEngine {
             }
         }
         PolicyDecision::deny("Ri-0.13")
+    }
+
+    /// Check if the agent is allowed to resolve a gate of the given kind.
+    /// `kind` is the gate kind label, e.g. "approval" or "escalation".
+    pub fn can_decide_gate(&self, kind: &str) -> PolicyDecision {
+        for cap in &self.manifest.capabilities {
+            if let Capability::GateDecider { kinds } = cap {
+                for pattern in kinds {
+                    if pattern == "*" || pattern == kind {
+                        return PolicyDecision::allow("P-2.20");
+                    }
+                }
+            }
+        }
+        PolicyDecision::deny("P-2.20")
     }
 }
 
@@ -854,7 +916,8 @@ mod tests {
                 id: "policy-test".to_string(),
                 name: "policy-test".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities,
             llm_overrides: None,
             llm_preset: None,
@@ -870,8 +933,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -973,6 +1038,18 @@ mod tests {
         assert!(analysis
             .threats
             .contains(&SecurityThreat::EnvironmentDisclosure));
+    }
+
+    #[test]
+    fn test_security_analyzer_sandbox_escape_weather_service_comment() {
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 -c 'import json  # National Weather Service API'",
+        );
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::SandboxEscape),
+            "comment mentioning 'Service' must not trip sandbox escape: {:?}",
+            analysis.threats
+        );
     }
 
     #[test]
@@ -1177,5 +1254,34 @@ mod tests {
         }]);
         let policy = PolicyEngine::new(manifest);
         assert!(!policy.can_create_github_issue("").is_allowed());
+    }
+
+    #[test]
+    fn test_can_decide_gate_requires_capability() {
+        let manifest = manifest_with_caps(vec![Capability::GateDecider {
+            kinds: vec!["approval".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_decide_gate("approval").is_allowed());
+        assert!(!policy.can_decide_gate("escalation").is_allowed());
+    }
+
+    #[test]
+    fn test_can_decide_gate_wildcard_allows_any_kind() {
+        let manifest = manifest_with_caps(vec![Capability::GateDecider {
+            kinds: vec!["*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(policy.can_decide_gate("approval").is_allowed());
+        assert!(policy.can_decide_gate("escalation").is_allowed());
+    }
+
+    #[test]
+    fn test_can_decide_gate_denied_without_capability() {
+        let manifest = manifest_with_caps(vec![Capability::ReadAccess {
+            scopes: vec!["*".to_string()],
+        }]);
+        let policy = PolicyEngine::new(manifest);
+        assert!(!policy.can_decide_gate("approval").is_allowed());
     }
 }

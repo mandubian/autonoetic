@@ -7,45 +7,15 @@
 //! `agents/**/SKILL.md` re-introduces a migrated doctrine phrase.
 //!
 //! When you centralize a new doctrine block, add its distinctive fingerprint
-//! here. Keep fingerprints specific enough that they only match the migrated
-//! prose, not legitimately-kept role-specific wording.
+//! to `MIGRATED_DOCTRINE_FINGERPRINTS` in `runtime::guidance` (the doctrine's
+//! home module — also consulted by the create-time scan, RFC #799 F.4b). Keep
+//! fingerprints specific enough that they only match the migrated prose, not
+//! legitimately-kept role-specific wording.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// `(fingerprint, owning guidance block — where the doctrine lives now)`.
-/// Each phrase was verified absent from every `SKILL.md` at migration time.
-const MIGRATED_DOCTRINE_FINGERPRINTS: &[(&str, &str)] = &[
-    ("Forbidden shell commands", "sandbox.forbidden_commands (sandbox_exec.guidance)"),
-    (
-        "requires both `name` and `content`",
-        "content.write_protocol (content_write.guidance)",
-    ),
-    (
-        "alternate names like `outcome`",
-        "promotion.record_protocol (promotion_record.guidance)",
-    ),
-    (
-        "do not invent or guess",
-        "exec.approval_continuation (sandbox_exec/artifact_exec.guidance)",
-    ),
-    (
-        "never restart from scratch",
-        "resumption.workflow_state_first (workflow_state.guidance)",
-    ),
-    (
-        "warrant a round-trip",
-        "clarification.ask_or_default (builtin block)",
-    ),
-    (
-        "wrap JSON in markdown code fences",
-        "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
-    ),
-    (
-        "Return a single raw JSON object",
-        "the io.returns Output Contract renderer (context.rs) — declare io.returns instead",
-    ),
-];
+use autonoetic_gateway::runtime::guidance::MIGRATED_DOCTRINE_FINGERPRINTS;
 
 fn agents_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("agents")

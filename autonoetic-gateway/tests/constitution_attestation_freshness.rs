@@ -36,6 +36,7 @@ fn manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
             id: "freshness-agent".to_string(),
             name: "freshness-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: caps,
         llm_overrides: None,
@@ -52,8 +53,10 @@ fn manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -77,7 +80,13 @@ fn turn_counter_monotonic_across_attestations() {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -118,11 +127,17 @@ fn budget_meters_reflect_consumption() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![BudgetMeter {
                 name: "llm_rounds".to_string(),
                 used: 0.0,
                 limit: Some(10.0),
             }],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -153,6 +168,9 @@ fn budget_meters_reflect_consumption() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![
                 BudgetMeter {
                     name: "llm_rounds".to_string(),
@@ -165,6 +183,9 @@ fn budget_meters_reflect_consumption() {
                     limit: Some(1000.0),
                 },
             ],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -205,7 +226,13 @@ fn capability_changes_appear_immediately() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -232,7 +259,13 @@ fn capability_changes_appear_immediately() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -263,7 +296,13 @@ fn pending_approval_ids_are_current() {
             pending_approval_ids: vec!["apr-aaa".to_string()],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -283,7 +322,13 @@ fn pending_approval_ids_are_current() {
             pending_approval_ids: vec!["apr-aaa".to_string(), "apr-bbb".to_string()],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -303,7 +348,13 @@ fn pending_approval_ids_are_current() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -330,7 +381,13 @@ fn attested_at_advances_across_turns() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -347,7 +404,13 @@ fn attested_at_advances_across_turns() {
             pending_approval_ids: vec![],
             pending_user_interaction_ids: vec![],
             pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -384,7 +447,13 @@ fn spawn_depth_tracks_session_path() {
                 pending_approval_ids: vec![],
                 pending_user_interaction_ids: vec![],
                 pending_escalation_ids: vec![],
+                pending_proposal_ids: vec![],
+                pending_flag_ids: vec![],
+                pending_invitations: vec![],
                 budget_meters: vec![],
+                burn_rate: None,
+                constitution_version: "2026.07.02",
+                constitution_digest: "deadbeef",
             },
             &key,
         )
@@ -416,7 +485,13 @@ fn pending_gate_ids_include_all_gate_kinds() {
             pending_approval_ids: vec!["apr-001".to_string()],
             pending_user_interaction_ids: vec!["ui-001".to_string(), "ui-002".to_string()],
             pending_escalation_ids: vec!["apr-esc-001".to_string()],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
             budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "deadbeef",
         },
         &key,
     )
@@ -434,4 +509,73 @@ fn pending_gate_ids_include_all_gate_kinds() {
 
     assert_eq!(payload.pending_escalation_count, 1);
     assert_eq!(payload.pending_escalation_ids, vec!["apr-esc-001"]);
+}
+
+/// P-6.23 / Ri-0.10: the constitution version + digest the session runs
+/// under is bound into the signed block and reflects the active law — so a
+/// mid-session amendment is visible to the agent as a changed, re-signed
+/// fact, not a silent swap.
+#[test]
+fn constitution_digest_reflects_active_law() {
+    let dir = tempdir().expect("tempdir");
+    let key = GatewayIdentityKey::load_or_generate(dir.path()).expect("key");
+    let manifest = manifest_with_caps(vec![]);
+
+    let att_before = compose_and_sign(
+        AttestationInputs {
+            agent_id: &manifest.agent.id,
+            session_id: Some("root"),
+            root_session_id: Some("root"),
+            turn_counter: 1,
+            manifest: &manifest,
+            gateway_node_id: "node",
+            pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
+            budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.02",
+            constitution_digest: "aaaa1111",
+        },
+        &key,
+    )
+    .expect("compose before amendment");
+
+    // The constitution is amended mid-session: version + digest both change.
+    let att_after = compose_and_sign(
+        AttestationInputs {
+            agent_id: &manifest.agent.id,
+            session_id: Some("root"),
+            root_session_id: Some("root"),
+            turn_counter: 2,
+            manifest: &manifest,
+            gateway_node_id: "node",
+            pending_approval_ids: vec![],
+            pending_user_interaction_ids: vec![],
+            pending_escalation_ids: vec![],
+            pending_proposal_ids: vec![],
+            pending_flag_ids: vec![],
+            pending_invitations: vec![],
+            budget_meters: vec![],
+            burn_rate: None,
+            constitution_version: "2026.07.08",
+            constitution_digest: "bbbb2222",
+        },
+        &key,
+    )
+    .expect("compose after amendment");
+
+    let p_before = verify(&key.public_key_bytes(), &att_before).expect("verify before");
+    let p_after = verify(&key.public_key_bytes(), &att_after).expect("verify after");
+    assert_eq!(p_before.constitution_version, "2026.07.02");
+    assert_eq!(p_before.constitution_digest, "aaaa1111");
+    assert_eq!(p_after.constitution_version, "2026.07.08");
+    assert_eq!(p_after.constitution_digest, "bbbb2222");
+    assert_ne!(
+        p_before.constitution_digest, p_after.constitution_digest,
+        "a mid-session amendment must surface as a changed digest"
+    );
 }

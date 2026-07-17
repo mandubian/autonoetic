@@ -13,11 +13,14 @@
 //! - `/session resume` — switch to the most recent session
 //! - `/cron` / `/cron list` — list scheduled jobs for the current session
 //! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
+//! - `/return [--force] [note...]` — return the active workbench to the orchestrator
 //! - `/quit` / `/q` — exit the TUI
-//! - `/help` / `/?` — show a one-line help summary
+//! - `/help` / `/?` — full command reference in the detail pane
+//! - `/model` — show current inference profile
+//! - `/model <preset>` — set session-level model override
+//! - `/model clear` — clear the override
 //!
-//! Anything else returns [`SlashCommand::Unknown`]; the caller surfaces a
-//! `✗ unknown command` status rather than executing.
+//! See [`help_lines()`] for the complete key map and slash-command list.
 
 /// Parsed slash-command. Variants carry their arguments so the dispatcher
 /// doesn't re-parse strings.
@@ -41,6 +44,8 @@ pub enum SlashCommand {
     ListPlans,
     /// Approve a plan (`None` = latest pending).
     ApprovePlan { plan_id: Option<String> },
+    /// Return the active workbench to the orchestrator.
+    ReturnToAgent { force: bool, message: Option<String> },
     /// Fork the current session into a new branch and switch to it.
     /// `at_turn` = `None` forks from the latest checkpoint; `message` is an
     /// optional branch message appended to the forked history.
@@ -50,12 +55,21 @@ pub enum SlashCommand {
     },
     /// List pending wiki proposals for this session.
     ListWikiProposals,
+    /// Emergency-stop the current session and optionally redirect with a message.
+    EmergencyStopAndRedirect { message: Option<String> },
+    /// Show resolved inference profile for the current session.
+    ModelShow,
+    /// Override the session inference preset until cleared.
+    ModelSet { preset: String },
+    /// Remove the session inference override.
+    ModelClear,
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
-pub const HELP_TEXT: &str = "/help for commands · /session · /fork · /plan · /cron · /wiki · /test · /quit";
+pub const HELP_TEXT: &str =
+    "/help all keys · /session · /fork · /plan · /return · /cron · /wiki · /test · /model · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -65,12 +79,16 @@ pub fn help_lines() -> Vec<String> {
         "Navigation".to_string(),
         "  j / ↓        scroll down".to_string(),
         "  k / ↑        scroll up".to_string(),
+        "  PgDn / PgUp  page down / up (timeline or detail pane)".to_string(),
         "  g / Home     jump to oldest row".to_string(),
-        "  G / End      jump to newest row".to_string(),
+        "  G / End      jump to newest row (enable follow)".to_string(),
+        "  [ / ]        jump to previous / next checkpoint row".to_string(),
         "  f / Space    toggle follow (pin to newest)".to_string(),
         "  Enter        event detail · plan review on plan row · answer pending question".to_string(),
-        "  Esc          close detail pane · cancel quit prompt".to_string(),
+        "  Esc          close detail / overlay · cancel quit · peek timeline from gate modal".to_string(),
+        "               double-Esc (nothing open) = interrupt session".to_string(),
         "  h / l        horizontal scroll in detail pane".to_string(),
+        "  ?            session info panel (stats, toggles, active gates)".to_string(),
         String::new(),
         "View".to_string(),
         "  a            cycle altitude floor (detail → normal → attention → error)".to_string(),
@@ -78,11 +96,19 @@ pub fn help_lines() -> Vec<String> {
         "  R            toggle 💭 reasoning prefix on agent rows".to_string(),
         "  F            fork from selected row's turn & switch to the branch".to_string(),
         String::new(),
-        "Gates".to_string(),
-        "  y / n        approve/reject approval · approve/request plan changes".to_string(),
+        "Content & artifacts".to_string(),
+        "  c            toggle live content tree (content.list)".to_string(),
+        "  Enter/o      open selected content · artifact file list · view file".to_string(),
+        "  m            comment on open content (prefix L12: or L12-14: for line hint)".to_string(),
+        String::new(),
+        "Gates (approval · wiki · escalation · plan · user.ask)".to_string(),
+        "  y / n        approve/reject approval · wiki · escalation · plan (n = revision request)"
+            .to_string(),
         "  p            open plan review for selected plan.pending row".to_string(),
         "  Enter/i/r    answer a pending user.ask (any row; newest ask wins)".to_string(),
-        "  1–9          pick a numbered option while answering".to_string(),
+        "  1–9          pick numbered option (interaction) · session from list · wiki proposal"
+            .to_string(),
+        "  g (modal)    leave timeline peek · return to gate resolve overlay".to_string(),
         String::new(),
         "Messaging".to_string(),
         "  i            compose operator message (multi-line editor)".to_string(),
@@ -90,18 +116,24 @@ pub fn help_lines() -> Vec<String> {
         "               ←→↑↓ edit · Ctrl+V / Shift+Insert paste (multi-line) · Ctrl+C copy"
             .to_string(),
         String::new(),
-        "Slash commands  (press / then type, Enter to run)".to_string(),
+        "Slash commands  (press / or : then type, Enter to run)".to_string(),
         "  /help  /?    this guide".to_string(),
         "  /quit  /q    exit (press q twice to confirm)".to_string(),
-        "  /session <id>           switch to a root session".to_string(),
-        "  /session list [agent]   list recent sessions (1–9 to pick)".to_string(),
-        "  /session resume [agent] jump to most recent session".to_string(),
+        "  /session <id>              switch to a root session".to_string(),
+        "  /session list|ls [agent]   list recent sessions (1–9 to pick)".to_string(),
+        "  /session resume|latest|last [agent]  jump to most recent session".to_string(),
         "  /fork [--at-turn N] [msg]  branch this session and switch to it".to_string(),
-        "  /cron  /cron list       scheduled jobs for this session".to_string(),
-        "  /plan  /plan approve [id]  list or approve pending PlanFrames".to_string(),
-        "  /wiki proposals         list pending wiki proposals".to_string(),
-        "  /test <scenario>        inject synthetic events (dev)".to_string(),
-        "  /test help              list test scenarios".to_string(),
+        "  /cron  /cron list|ls       scheduled jobs for this session".to_string(),
+        "  /plan  /plan list          list pending PlanFrames".to_string(),
+        "  /plan approve|a|ok [id]    approve a plan frame".to_string(),
+        "  /return [--force] [note]   return the active workbench to the orchestrator".to_string(),
+        "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
+        "  /test <scenario>           inject synthetic events (dev)".to_string(),
+        "  /test help                 list test scenarios".to_string(),
+        "  /estop [redirect message]  emergency-stop session · optionally re-send a message to redirect it".to_string(),
+        "  /model                     show current inference profile".to_string(),
+        "  /model <preset>            override model until cleared".to_string(),
+        "  /model clear               remove the session override".to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -131,13 +163,21 @@ pub fn parse(input: &str) -> SlashCommand {
         "fork" => parse_fork(tail),
         "cron" => parse_cron(tail),
         "plan" => parse_plan(tail),
+        "return" => parse_return(tail),
         "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
             SlashCommand::Test { name }
         }
+        "model" => parse_model(tail),
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
+        "estop" | "emergency-stop" => {
+            let msg = tail.trim();
+            SlashCommand::EmergencyStopAndRedirect {
+                message: if msg.is_empty() { None } else { Some(msg.to_string()) },
+            }
+        }
         other => SlashCommand::Unknown(other.to_string()),
     }
 }
@@ -213,6 +253,23 @@ fn parse_wiki(tail: &str) -> SlashCommand {
     }
 }
 
+fn parse_return(tail: &str) -> SlashCommand {
+    // `/return`                         — return active workbench
+    // `/return --force`                 — force return, dropping unsaved edits
+    // `/return -f`                      — short force flag
+    // `/return some note here`          — return with operator note
+    // `/return --force ship it`         — force return with note
+    let trimmed = tail.trim();
+    let mut rest = trimmed;
+    let mut force = false;
+    if let Some(after) = rest.strip_prefix("--force").or_else(|| rest.strip_prefix("-f")) {
+        force = true;
+        rest = after.trim();
+    }
+    let message = if rest.is_empty() { None } else { Some(rest.to_string()) };
+    SlashCommand::ReturnToAgent { force, message }
+}
+
 fn parse_session(tail: &str) -> SlashCommand {
     // `/session <id>` and `/session list [agent]` and `/session resume [agent]`
     // — split on whitespace to peel off the sub-verb, then take the rest as a
@@ -255,6 +312,19 @@ fn parse_session(tail: &str) -> SlashCommand {
     }
 }
 
+fn parse_model(tail: &str) -> SlashCommand {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        return SlashCommand::ModelShow;
+    }
+    if trimmed.eq_ignore_ascii_case("clear") || trimmed.eq_ignore_ascii_case("reset") {
+        return SlashCommand::ModelClear;
+    }
+    SlashCommand::ModelSet {
+        preset: trimmed.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,11 +353,25 @@ mod tests {
     #[test]
     fn help_lines_covers_slash_commands_and_navigation() {
         let text = help_lines().join("\n");
-        assert!(text.contains("/session list"));
-        assert!(text.contains("/cron"));
-        assert!(text.contains("user.ask"));
-        assert!(text.contains("i            compose"));
-        assert!(text.contains("j / ↓"));
+        for needle in [
+            "/session list",
+            "/session resume|latest|last",
+            "/cron",
+            "/wiki",
+            "/plan approve",
+            "user.ask",
+            "i            compose",
+            "j / ↓",
+            "PgDn / PgUp",
+            "[ / ]",
+            "?            session info",
+            "c            toggle",
+            "Enter/o      open",
+            "g (modal)",
+            "press / or :",
+        ] {
+            assert!(text.contains(needle), "help_lines missing {needle:?}");
+        }
     }
 
     #[test]
@@ -500,6 +584,74 @@ mod tests {
             parse("/test"),
             SlashCommand::Test {
                 name: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_model_show() {
+        assert_eq!(parse("/model"), SlashCommand::ModelShow);
+        assert_eq!(parse("/model  "), SlashCommand::ModelShow);
+    }
+
+    #[test]
+    fn parse_model_set() {
+        assert_eq!(
+            parse("/model gpt-4o"),
+            SlashCommand::ModelSet {
+                preset: "gpt-4o".into()
+            }
+        );
+        assert_eq!(
+            parse("/model  default  "),
+            SlashCommand::ModelSet {
+                preset: "default".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_model_clear() {
+        assert_eq!(parse("/model clear"), SlashCommand::ModelClear);
+        assert_eq!(parse("/model reset"), SlashCommand::ModelClear);
+        assert_eq!(parse("/model  clear  "), SlashCommand::ModelClear);
+    }
+
+    #[test]
+    fn parse_return_variants() {
+        assert_eq!(
+            parse("/return"),
+            SlashCommand::ReturnToAgent {
+                force: false,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/return --force"),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/return -f"),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: None
+            }
+        );
+        assert_eq!(
+            parse("/return please review auth flow"),
+            SlashCommand::ReturnToAgent {
+                force: false,
+                message: Some("please review auth flow".into())
+            }
+        );
+        assert_eq!(
+            parse("/return --force ship it"),
+            SlashCommand::ReturnToAgent {
+                force: true,
+                message: Some("ship it".into())
             }
         );
     }

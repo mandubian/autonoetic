@@ -78,7 +78,7 @@ impl AnthropicDriver {
         });
 
         if !system_text.is_empty() {
-            body["system"] = json!(system_text.trim());
+            body["system"] = build_system_with_cache(&system_text, req.system_cache_prefix_bytes);
         }
 
         let t = req.temperature.or(self.provider.temperature);
@@ -89,15 +89,7 @@ impl AnthropicDriver {
         }
 
         if !req.tools.is_empty() {
-            body["tools"] = json!(req
-                .tools
-                .iter()
-                .map(|t| json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.input_schema,
-                }))
-                .collect::<Vec<_>>());
+            body["tools"] = build_tools_with_cache(&req.tools, req.system_cache_prefix_bytes);
         }
 
         if let Some(ref thinking) = req.thinking {
@@ -114,46 +106,120 @@ impl AnthropicDriver {
     }
 }
 
+/// Build the Anthropic `system` field, optionally splitting it at
+/// `prefix_bytes` and attaching `cache_control: {type: ephemeral}` to the
+/// stable leading block. Anthropic caches the prompt prefix (tools + the marked
+/// system block) so repeated turns re-read it at cache rates. Falls back to a
+/// plain trimmed string when no valid boundary is supplied.
+fn build_system_with_cache(system_text: &str, prefix_bytes: Option<usize>) -> serde_json::Value {
+    let ephemeral = || json!({ "type": "ephemeral" });
+    match prefix_bytes {
+        // Whole system is stable (no volatile tail this turn) → one cached block.
+        Some(n) if n >= system_text.len() && !system_text.trim().is_empty() => {
+            json!([{ "type": "text", "text": system_text.trim(), "cache_control": ephemeral() }])
+        }
+        // Stable prefix + volatile suffix → cache the prefix only.
+        // Preserve the boundary whitespace inserted by lifecycle.rs; only trim
+        // overall leading/trailing whitespace so the two blocks concatenate
+        // identically to the original prompt.
+        Some(n) if n > 0 && n < system_text.len() && system_text.is_char_boundary(n) => {
+            let (prefix, suffix) = system_text.split_at(n);
+            let mut blocks = vec![json!({
+                "type": "text",
+                "text": prefix,
+                "cache_control": ephemeral(),
+            })];
+            if !suffix.trim().is_empty() {
+                blocks.push(json!({ "type": "text", "text": suffix }));
+            }
+            json!(blocks)
+        }
+        // No / invalid boundary → legacy plain string.
+        _ => json!(system_text.trim()),
+    }
+}
+
+/// Build the Anthropic `tools` array. When `prefix_bytes` indicates the
+/// session has a stable system prefix (i.e. prompt caching is active), attach
+/// `cache_control: {type: ephemeral}` to the **last** tool so Anthropic caches
+/// the whole tool catalog. The tool set + schemas are byte-identical across
+/// turns, so this is a large, cacheable block. Anthropic allows up to 4 cache
+/// breakpoints; this uses one (plus optionally one on the system block = 2).
+///
+/// Without a prefix boundary the tools are emitted plainly (legacy path).
+fn build_tools_with_cache(
+    tools: &[super::ToolDefinition],
+    prefix_bytes: Option<usize>,
+) -> serde_json::Value {
+    let mark_cache = prefix_bytes.is_some();
+    let cached = tools.len().saturating_sub(1);
+    tools
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut entry = json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            });
+            if mark_cache && i == cached {
+                entry["cache_control"] = json!({ "type": "ephemeral" });
+            }
+            entry
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
 #[async_trait::async_trait]
 impl LlmDriver for AnthropicDriver {
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let body = self.build_body(req, false);
 
-        const MAX_RETRIES: u32 = 3;
-        const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-        for attempt in 0..=MAX_RETRIES {
+        let complete_timeout = crate::llm::request_timeout();
+        // Bound total wall-clock so a slow endpoint can't multiply the
+        // per-request timeout across retries.
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
-                    .timeout(COMPLETE_TIMEOUT)
+                    .timeout(complete_timeout)
                     .header("Content-Type", "application/json")
                     .json(&body),
             );
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
-                    let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
-                    tracing::warn!(
+                Err(e) => {
+                    if let Some(wait_ms) = crate::llm::next_connection_retry_wait(
+                        &e,
                         attempt,
-                        wait_ms,
-                        error = %e,
-                        "Anthropic connection error, retrying"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
-                    continue;
+                        loop_start.elapsed(),
+                        retry_deadline,
+                    ) {
+                        tracing::warn!(
+                            attempt,
+                            wait_ms,
+                            error = %e,
+                            "Anthropic connection error, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(e.into());
                 }
-                Err(e) => return Err(e.into()),
             };
             let status = response.status().as_u16();
 
             if status == 429 || status == 529 {
-                if attempt < MAX_RETRIES {
+                if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                     let wait_ms = (attempt + 1) as u64 * 2000;
                     tracing::warn!(status, attempt, wait_ms, "Anthropic rate limited, retrying");
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                anyhow::bail!("Anthropic rate limited after {} retries", MAX_RETRIES);
+                anyhow::bail!("Anthropic rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
             }
 
             if !reqwest::StatusCode::from_u16(status)
@@ -165,6 +231,22 @@ impl LlmDriver for AnthropicDriver {
                     anyhow::bail!(
                         "context_overflow: provider=anthropic status={} detail={}", status, text
                     );
+                }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status,
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status,
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
                 }
                 tracing::warn!(
                     target: "autonoetic::llm::anthropic",
@@ -213,8 +295,11 @@ impl LlmDriver for AnthropicDriver {
         use futures::StreamExt;
 
         let body = self.build_body(req, true);
-        const MAX_RETRIES: u32 = 3;
-        for attempt in 0..=MAX_RETRIES {
+
+        let complete_timeout = crate::llm::request_timeout();
+        let retry_deadline = complete_timeout.saturating_mul(2);
+        let loop_start = std::time::Instant::now();
+        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
@@ -223,7 +308,7 @@ impl LlmDriver for AnthropicDriver {
             );
             let response = match builder.send().await {
                 Ok(r) => r,
-                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < MAX_RETRIES => {
+                Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < crate::llm::MAX_CONNECTION_RETRIES => {
                     let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
                     tracing::warn!(
                         attempt,
@@ -239,7 +324,7 @@ impl LlmDriver for AnthropicDriver {
             let status = response.status().as_u16();
 
             if status == 429 || status == 529 {
-                if attempt < MAX_RETRIES {
+                if attempt < crate::llm::MAX_CONNECTION_RETRIES {
                     let wait_ms = (attempt + 1) as u64 * 2000;
                     tracing::warn!(
                         status,
@@ -250,7 +335,7 @@ impl LlmDriver for AnthropicDriver {
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
                 }
-                anyhow::bail!("Anthropic rate limited after {} retries", MAX_RETRIES);
+                anyhow::bail!("Anthropic rate limited after {} retries", crate::llm::MAX_CONNECTION_RETRIES);
             }
 
             if !reqwest::StatusCode::from_u16(status)
@@ -258,6 +343,27 @@ impl LlmDriver for AnthropicDriver {
                 .unwrap_or(false)
             {
                 let text = response.text().await.unwrap_or_default();
+                if crate::llm::is_context_overflow_error(status, &text) {
+                    anyhow::bail!(
+                        "context_overflow: provider=anthropic status={} detail={}", status, text
+                    );
+                }
+                if let Some(wait_ms) = crate::llm::next_server_error_retry_wait(
+                    status,
+                    &text,
+                    attempt,
+                    loop_start.elapsed(),
+                    retry_deadline,
+                ) {
+                    tracing::warn!(
+                        status,
+                        attempt,
+                        wait_ms,
+                        "LLM transient server error in stream, retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    continue;
+                }
                 tracing::warn!(
                     target: "autonoetic::llm::anthropic",
                     status,
@@ -460,5 +566,123 @@ fn parse_stop_reason(s: &str) -> StopReason {
         "max_tokens" => StopReason::MaxTokens,
         "tool_use" => StopReason::ToolUse,
         other => StopReason::Other(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_system_with_cache, build_tools_with_cache};
+    use crate::llm::ToolDefinition;
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("desc for {name}"),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn splits_system_and_caches_stable_preserving_whitespace() {
+        // lifecycle.rs inserts \n\n between the stable prefix and volatile tails
+        // (memory/degradation/attestation). The boundary whitespace must be
+        // preserved so the two blocks concatenate identically to the original.
+        let system = "STABLE DOCTRINE\n\n[state attestation] turn=7";
+        let prefix = "STABLE DOCTRINE\n\n".len();
+        let v = build_system_with_cache(system, Some(prefix));
+        let arr = v.as_array().expect("structured system");
+        assert_eq!(arr[0]["text"], "STABLE DOCTRINE\n\n");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert!(arr[1]["cache_control"].is_null());
+        assert_eq!(arr[1]["text"], "[state attestation] turn=7");
+
+        // Concatenation reproduces the original exactly.
+        let joined = format!(
+            "{}{}",
+            arr[0]["text"].as_str().unwrap(),
+            arr[1]["text"].as_str().unwrap()
+        );
+        assert_eq!(joined, system);
+    }
+
+    #[test]
+    fn splits_system_and_caches_stable_prefix() {
+        let system = "STABLE DOCTRINE\n\n[state attestation] turn=7";
+        let prefix = "STABLE DOCTRINE".len();
+        let v = build_system_with_cache(system, Some(prefix));
+        let arr = v.as_array().expect("structured system");
+        assert_eq!(arr[0]["text"], "STABLE DOCTRINE");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+        assert!(arr[1]["cache_control"].is_null());
+        assert!(arr[1]["text"].as_str().unwrap().contains("turn=7"));
+    }
+
+    #[test]
+    fn whole_stable_system_is_one_cached_block() {
+        let system = "ALL STABLE";
+        let v = build_system_with_cache(system, Some(system.len()));
+        let arr = v.as_array().expect("structured system");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["text"], "ALL STABLE");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn no_boundary_falls_back_to_plain_string() {
+        let v = build_system_with_cache("plain system", None);
+        assert_eq!(v, serde_json::json!("plain system"));
+    }
+
+    #[test]
+    fn invalid_boundary_falls_back_to_plain_string() {
+        // A byte offset that isn't a char boundary must not panic — fall back.
+        let system = "héllo world"; // 'é' is 2 bytes at index 1..3
+        let v = build_system_with_cache(system, Some(2));
+        assert!(v.is_string(), "non-char-boundary must fall back to string");
+    }
+
+    #[test]
+    fn tools_mark_last_with_cache_control_when_prefix_present() {
+        let tools = vec![tool("alpha"), tool("beta"), tool("gamma")];
+        let v = build_tools_with_cache(&tools, Some(64));
+        let arr = v.as_array().expect("tools array");
+        assert_eq!(arr.len(), 3);
+        // Only the last tool gets the cache breakpoint.
+        assert!(
+            arr[0]["cache_control"].is_null(),
+            "first tool must not be marked"
+        );
+        assert!(
+            arr[1]["cache_control"].is_null(),
+            "middle tool must not be marked"
+        );
+        assert_eq!(arr[2]["cache_control"]["type"], "ephemeral");
+        // Schemas are preserved (no compression).
+        assert_eq!(arr[2]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn tools_leave_plain_when_no_prefix() {
+        // No system_cache_prefix_bytes → prompt caching off → tools unmarked.
+        let tools = vec![tool("alpha"), tool("beta")];
+        let v = build_tools_with_cache(&tools, None);
+        let arr = v.as_array().expect("tools array");
+        assert!(arr[0]["cache_control"].is_null());
+        assert!(arr[1]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn tools_single_tool_marked_when_prefix_present() {
+        let tools = vec![tool("solo")];
+        let v = build_tools_with_cache(&tools, Some(10));
+        let arr = v.as_array().expect("tools array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn tools_empty_returns_empty_array() {
+        let v = build_tools_with_cache(&[], Some(10));
+        assert!(v.as_array().unwrap().is_empty());
     }
 }

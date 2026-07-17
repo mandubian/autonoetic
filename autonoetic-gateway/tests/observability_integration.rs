@@ -25,6 +25,7 @@ fn test_manifest() -> AgentManifest {
             id: "coder.default".to_string(),
             name: "coder".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
@@ -43,8 +44,10 @@ fn test_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

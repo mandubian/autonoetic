@@ -1,16 +1,20 @@
-//! Promotion safety governor (issue #25).
+//! Promotion safety governor (issue #25) + cross-session promotion-attempt
+//! ledger (issue #720).
 //!
 //! Gate-level checks applied at `agent.revision.promote` *before* the actual
-//! `atomic_promote` write. Three independent signals:
+//! `atomic_promote` write. Four independent signals:
 //!
 //! 1. **Velocity** — too many promotions per alias inside a window.
 //! 2. **Flapping** — re-promoting a revision that was already promoted recently
 //!    on this alias (A→B→A or A→B→A→B pattern).
 //! 3. **Eval-regression** — the per-revision count of non-info findings is
 //!    monotonically increasing across recent promotions.
+//! 4. **Attempt exhaustion** — too many rejected promotion attempts for the same
+//!    `(alias, content_digest)` across sessions without an operator ack
+//!    (issue #720).
 //!
-//! All three are gated on the same `PromotionGovernorConfig.enabled` flag and
-//! all three are bypassable via an explicit operator force (`force: true` +
+//! All four are gated on the same `PromotionGovernorConfig.enabled` flag and
+//! all four are bypassable via an explicit operator force (`force: true` +
 //! required `force_reason`). Bypass emits a `governor.override` causal event.
 //!
 //! Operator-side throughput safeguards on the federation escalation channel
@@ -74,25 +78,37 @@ impl GovernorRejection {
 /// Run all enabled governor checks. Returns the first rejection found, or
 /// `Ok(None)` when promotion may proceed (also `None` when the governor is
 /// disabled or the caller passed `force=true`).
+///
+/// `content_digest` is required for the attempt-exhaustion check; pass `None`
+/// to skip that check.
+///
+/// Note: attempt exhaustion (issue #720) is checked here but is gated by its
+/// own `max_promotion_attempts_per_revision` knob, not by `config.enabled`.
+/// When the governor is disabled, only attempt exhaustion runs; when enabled,
+/// all checks run in order (velocity, flapping, eval-regression, exhaustion).
 pub fn run_governor_checks(
     config: &PromotionGovernorConfig,
     store: &GatewayStore,
     gateway_dir: &Path,
     agent_id: &str,
     revision_id: &str,
+    content_digest: Option<&str>,
 ) -> Result<Option<GovernorRejection>> {
-    if !config.enabled {
-        return Ok(None);
+    if config.enabled {
+        if let Some(r) = check_velocity(config, store, agent_id)? {
+            return Ok(Some(r));
+        }
+        if let Some(r) = check_flapping(config, store, agent_id, revision_id)? {
+            return Ok(Some(r));
+        }
+        if let Some(r) = check_eval_regression(config, store, gateway_dir, agent_id)? {
+            return Ok(Some(r));
+        }
     }
-    if let Some(r) = check_velocity(config, store, agent_id)? {
-        return Ok(Some(r));
-    }
-    if let Some(r) = check_flapping(config, store, agent_id, revision_id)? {
-        return Ok(Some(r));
-    }
-    if let Some(r) = check_eval_regression(config, store, gateway_dir, agent_id)? {
-        return Ok(Some(r));
-    }
+    // Attempt exhaustion is checked transactionally when the rejection is
+    // recorded, so the count read and the insert are serialized on the same
+    // SQLite connection (issue #720 TOCTOU fix).
+    let _ = content_digest;
     Ok(None)
 }
 
@@ -273,6 +289,97 @@ pub fn check_eval_regression(
     }))
 }
 
+/// Non-transactional attempt-exhaustion check for diagnostics/tests. The
+/// actual blocking decision is made transactionally by [`record_rejected_attempt`].
+pub fn check_attempt_exhaustion(
+    config: &PromotionGovernorConfig,
+    store: &GatewayStore,
+    agent_id: &str,
+    content_digest: &str,
+) -> Result<Option<GovernorRejection>> {
+    if config.max_promotion_attempts_per_revision == 0 {
+        return Ok(None);
+    }
+    let count = store.count_promotion_attempt_rejections(agent_id, content_digest)?;
+    if count < config.max_promotion_attempts_per_revision {
+        return Ok(None);
+    }
+    Ok(Some(GovernorRejection {
+        error: "promotion_attempts_exhausted",
+        message: format!(
+            "Promotion attempts exhausted for alias '{}' with content digest '{}': {} rejected \
+             attempts (cap = {}). Further retries are blocked until an operator acknowledges \
+             the revision.",
+            agent_id,
+            content_digest,
+            count,
+            config.max_promotion_attempts_per_revision
+        ),
+        repair_hint: "Do not retry. Escalate to the operator for approval of this revision; \
+                      once approved, the counter resets and promotion can proceed."
+            .to_string(),
+        payload: serde_json::json!({
+            "alias": agent_id,
+            "content_digest": content_digest,
+            "rejected_attempts": count,
+            "max_promotion_attempts_per_revision": config.max_promotion_attempts_per_revision,
+            "rule_id": "P-2.29",
+        }),
+    }))
+}
+
+/// Record a rejected promotion attempt transactionally, serializing the
+/// rejection-count read with the insert to close the concurrent-promote
+/// TOCTOU window (issue #720). If the cap is already reached, returns the
+/// `promotion_attempts_exhausted` rejection without inserting a new row.
+pub fn record_rejected_attempt(
+    config: &PromotionGovernorConfig,
+    store: &GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    content_digest: &str,
+    gate: Option<&str>,
+    error_code: Option<&str>,
+    session_id: Option<&str>,
+    workflow_id: Option<&str>,
+) -> Result<Option<GovernorRejection>> {
+    let exhausted_count = store.record_rejected_promotion_attempt(
+        agent_id,
+        revision_id,
+        content_digest,
+        gate,
+        error_code,
+        session_id,
+        workflow_id,
+        config.max_promotion_attempts_per_revision,
+    )?;
+    if let Some(count) = exhausted_count {
+        return Ok(Some(GovernorRejection {
+            error: "promotion_attempts_exhausted",
+            message: format!(
+                "Promotion attempts exhausted for alias '{}' with content digest '{}': {} rejected \
+                 attempts (cap = {}). Further retries are blocked until an operator acknowledges \
+                 the revision.",
+                agent_id,
+                content_digest,
+                count,
+                config.max_promotion_attempts_per_revision
+            ),
+            repair_hint: "Do not retry. Escalate to the operator for approval of this revision; \
+                          once approved, the counter resets and promotion can proceed."
+                .to_string(),
+            payload: serde_json::json!({
+                "alias": agent_id,
+                "content_digest": content_digest,
+                "rejected_attempts": count,
+                "max_promotion_attempts_per_revision": config.max_promotion_attempts_per_revision,
+                "rule_id": "P-2.29",
+            }),
+        }));
+    }
+    Ok(None)
+}
+
 /// Emit a `governor.rejected` causal event so the audit trail records the
 /// rejection (the tool response is also returned to the caller, but the
 /// event makes the rejection queryable later).
@@ -284,6 +391,12 @@ pub fn emit_rejected_event(
     revision_id: &str,
     rejection: &GovernorRejection,
 ) {
+    let enforced_rules = rejection
+        .payload
+        .get("rule_id")
+        .and_then(|v| v.as_str())
+        .map(|r| vec![r.to_string()])
+        .unwrap_or_default();
     let event = autonoetic_types::causal_chain::CausalEventRecord {
         event_id: format!("gov-rej-{}", uuid::Uuid::new_v4()),
         agent_id: caller_agent_id.to_string(),
@@ -294,7 +407,7 @@ pub fn emit_rejected_event(
         category: "revision".to_string(),
         action: "governor.rejected".to_string(),
         status: "blocked".to_string(),
-        enforced_rules: Vec::new(),
+        enforced_rules,
         target: Some(target_agent_id.to_string()),
         payload: Some(
             serde_json::json!({

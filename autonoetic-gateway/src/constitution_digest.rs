@@ -125,7 +125,26 @@ pub fn initialize_constitution(config: &GatewayConfig) -> anyhow::Result<()> {
             *guard = Some(loaded);
             Ok(())
         }
-        Some(existing) => ensure_same_runtime_config(existing.as_ref(), loaded.as_ref()),
+        Some(existing) => {
+            // Production keeps the strict single-process drift guard. In the
+            // gateway crate's own unit tests, however, each test constructs a
+            // router/store with its own tempdir `gateway_dir`, so the guard
+            // (which compares gateway_dir) would fail the 2nd router built in
+            // the shared lib-test process. Allow re-init to replace the global
+            // under test — the unit suite runs single-threaded, so no two tests
+            // race on it. Integration tests run as separate processes (fresh
+            // global each), so they exercise the production path below.
+            #[cfg(test)]
+            {
+                let _ = existing;
+                *guard = Some(loaded);
+                Ok(())
+            }
+            #[cfg(not(test))]
+            {
+                ensure_same_runtime_config(existing.as_ref(), loaded.as_ref())
+            }
+        }
     }
 }
 
@@ -183,6 +202,21 @@ pub fn constitution_format_version() -> u32 {
 
 pub fn constitution_digest() -> Arc<str> {
     runtime_arc().digest.clone()
+}
+
+/// Best-effort `(version, digest)` pair for session-level pinning (#821).
+///
+/// Unlike the strict getters above, this never panics: it returns `None`
+/// when the constitution runtime has not been initialized (common in unit
+/// tests that construct a router/executor without calling
+/// `initialize_constitution`) or if the lock has been poisoned. Callers that
+/// capture a per-session constitution pin should use this instead of the
+/// panicking getters, since a session must be able to start even when no
+/// constitution config is wired up.
+pub fn try_constitution_pin() -> Option<(String, String)> {
+    let guard = RUNTIME.read().ok()?;
+    let rt = guard.as_ref()?;
+    Some((rt.lock.constitution_version.clone(), rt.digest.to_string()))
 }
 
 pub fn canonical_right_enforcement_table() -> BTreeMap<String, String> {
@@ -726,7 +760,10 @@ mod tests {
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
 
-        let rel = Path::new("docs/constitution/versions/2026.06.08");
+        let rel_buf = autonoetic_types::config::default_constitution_source_path();
+        let rel = rel_buf
+            .parent()
+            .expect("default constitution source path has a version-dir parent");
         let parent_docs = tmp.path().join(rel);
         std::fs::create_dir_all(&parent_docs).unwrap();
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -783,7 +820,30 @@ mod tests {
         );
         assert_eq!(
             lock.constitution_source,
-            "docs/constitution/versions/2026.06.08/constitution.md"
+            autonoetic_types::config::default_constitution_source_path()
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn current_file_matches_active_constitution_version() {
+        // `docs/constitution/CURRENT` is the human-facing pointer to the active
+        // version; `recompute_lock.py` rewrites it on every signing run. It must
+        // match `ACTIVE_CONSTITUTION_VERSION` so the constant and the pointer
+        // cannot silently drift.
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("CARGO_MANIFEST_DIR parent");
+        let current =
+            std::fs::read_to_string(workspace_root.join("docs/constitution/CURRENT"))
+                .expect("docs/constitution/CURRENT should exist in the repo");
+        assert_eq!(
+            current.trim(),
+            autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
+            "docs/constitution/CURRENT is out of sync with ACTIVE_CONSTITUTION_VERSION; \
+             re-run `python3 docs/constitution/recompute_lock.py --version {}`",
+            autonoetic_types::config::ACTIVE_CONSTITUTION_VERSION,
         );
     }
 }

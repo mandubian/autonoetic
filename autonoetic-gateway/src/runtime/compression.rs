@@ -12,7 +12,7 @@ use autonoetic_types::config::{ContextCompressionConfig, LlmPreset};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::prompt_budget::estimate_tokens;
+use super::prompt_budget::estimate_message_tokens;
 
 /// Metadata about a compression operation, stored in checkpoints so
 /// restored sessions know what was already summarized.
@@ -274,7 +274,7 @@ pub async fn compress_context(
     let conv_tokens: usize = history
         .iter()
         .filter(|m| !matches!(m.role, Role::System))
-        .map(|m| estimate_tokens(&m.content))
+        .map(|m| estimate_message_tokens(m))
         .sum();
 
     let effective_limit = context_window.unwrap_or(128_000);
@@ -353,6 +353,7 @@ pub async fn compress_context(
         )])),
         thinking: None,
         prompt_cache_key: None,
+        system_cache_prefix_bytes: None,
     };
 
     let summary_text = match driver.complete(&req).await {
@@ -537,7 +538,7 @@ mod tests {
             Message::user("Hello world"),
             Message::assistant("Hi there!"),
         ];
-        let tokens: usize = msgs.iter().map(|m| estimate_tokens(&m.content)).sum();
+        let tokens: usize = msgs.iter().map(|m| estimate_message_tokens(m)).sum();
         assert!(tokens > 0);
     }
 

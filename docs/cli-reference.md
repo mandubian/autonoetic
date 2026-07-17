@@ -527,6 +527,68 @@ autonoetic trace history session-123 --json
 
 ---
 
+## Session
+
+Inspect session outcomes and export session archives.
+
+### `autonoetic session show`
+
+Print the `SessionOutcome` row for a session as JSON.
+
+```bash
+autonoetic session show session-123
+```
+
+| Argument | Description |
+|----------|-------------|
+| `session_id` | Session identifier |
+
+### `autonoetic session rate`
+
+Attach an operator rating to a session's `SessionOutcome` row.
+
+```bash
+autonoetic session rate session-123 --thumbs-up
+autonoetic session rate session-123 --thumbs-down --note "reason..."
+```
+
+| Argument | Description |
+|----------|-------------|
+| `session_id` | Session identifier |
+
+| Option | Description |
+|--------|-------------|
+| `--thumbs-up` | Positive rating |
+| `--thumbs-down` | Negative rating |
+| `--note` | Optional note (max 500 chars) |
+
+### `autonoetic session export`
+
+Export a full session (root session tree) to a single file or a structured archive directory.
+
+```bash
+# Single-file export (default: <session-id>.room.md)
+autonoetic session export session-123
+autonoetic session export session-123 --format json --output session-123.json
+
+# Structured archive directory
+autonoetic session export session-123 --output-dir ./archives
+```
+
+| Argument | Description |
+|----------|-------------|
+| `session_id` | Session identifier |
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output` | Output file path (mutually exclusive with `--output-dir`) |
+| `-f, --format` | Export format: `room` (default), `room-raw`, `json` |
+| `--with-checkpoints` | Include full checkpoint files (large) |
+| `--min-altitude` | Drop `detail` events: `normal`, `attention`, or `error` |
+| `--output-dir` | Export structured archive directory containing `wiki/`, `json`, and `MANIFEST.json` |
+
+---
+
 ## Skill
 
 Manage AgentSkills.io ecosystem and skills.

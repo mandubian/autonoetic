@@ -27,6 +27,7 @@ fn planner_manifest() -> AgentManifest {
             id: "planner.default".to_string(),
             name: "planner.default".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentSpawn {
             max_children: 4,
@@ -46,8 +47,10 @@ fn planner_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -85,6 +88,7 @@ fn seed_task(
         join_policy: Default::default(),
         join_task_ids: vec![task_id.to_string()],
         active_plan_ref: None,
+        reactivated_for_root_spawn: false,
     };
     save_workflow_run(config, Some(store), &workflow)?;
 

@@ -4,7 +4,8 @@ use crate::runtime::parser::SkillParser;
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::{AgentManifest, AgentMeta};
 use autonoetic_types::agent_revision::{
-    parse_agent_target, AgentRef, AgentRevisionRecord, ParsedAgentTarget, SessionAgentBinding,
+    parse_agent_target, AgentRef, AgentRevisionRecord, AgentRevisionStatus, ParsedAgentTarget,
+    SessionAgentBinding,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -332,11 +333,41 @@ impl AgentRepository {
                 // Plain agent_id — resolve via alias
                 let alias = match gateway_store.resolve_alias(&alias_id)? {
                     Some(a) => a,
-                    None => anyhow::bail!(
-                        "No alias '{}' found. Create a revision and promote it first.",
-                        alias_id
-                    ),
+                    None => {
+                        // Check if a Candidate revision exists — suggest revision_id for smoke testing.
+                        let candidate_hint = match gateway_store.list_agent_revisions(&alias_id) {
+                            Ok(revs) => revs
+                                .iter()
+                                .find(|r| r.status == AgentRevisionStatus::Candidate)
+                                .map(|r| r.revision_id.clone()),
+                            Err(e) => {
+                                tracing::warn!(
+                    target: "agent_repository",
+                    agent_id = %alias_id,
+                    error = %e,
+                    "Failed to list revisions for candidate hint while reporting missing alias"
+                                );
+                                None
+                            }
+                        };
+                        match candidate_hint {
+                            Some(rev_id) => anyhow::bail!(
+                                "No alias '{}' found — the agent has not been promoted yet. A candidate revision exists ({}). To smoke-test it before promotion, use agent_spawn(agent_id=\"{}\", revision_id=\"{}\"). To install it, call agent_revision_promote.",
+                                alias_id, rev_id, alias_id, rev_id
+                            ),
+                            None => anyhow::bail!(
+                                "No alias '{}' found. Create a revision and promote it first.",
+                                alias_id
+                            ),
+                        }
+                    }
                 };
+
+                // NOTE: suspension is intentionally NOT checked here. Resolving
+                // an agent is read-only (evaluation/diff of a suspended agent
+                // must remain possible so an operator can decide whether to
+                // lift the suspension). The "no new session" gate lives at the
+                // session-start boundary in `resolve_and_pin_session`.
 
                 let rev = match gateway_store.get_agent_revision(&alias.revision_id)? {
                     Some(r) => r,
@@ -369,6 +400,30 @@ impl AgentRepository {
         gateway_store: Option<&GatewayStore>,
         home_node_id: &str,
     ) -> anyhow::Result<(AgentRef, AgentRevisionRecord, SessionAgentBinding)> {
+        self.resolve_and_pin_session_with_revision(
+            session_id,
+            root_session_id,
+            target,
+            None,
+            gateway_store,
+            home_node_id,
+        )
+    }
+
+    /// Resolve and pin a session to a specific revision.
+    ///
+    /// If `revision_id` is `Some`, the target is resolved to an agent_id but the
+    /// supplied revision is used directly. This allows smoke-testing a Candidate
+    /// revision before it is promoted to the active alias.
+    pub fn resolve_and_pin_session_with_revision(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        target: &str,
+        revision_id: Option<&str>,
+        gateway_store: Option<&GatewayStore>,
+        home_node_id: &str,
+    ) -> anyhow::Result<(AgentRef, AgentRevisionRecord, SessionAgentBinding)> {
         if let Some(gs) = gateway_store {
             if let Some(existing) = gs.get_session_agent_binding(session_id)? {
                 let rev = gs
@@ -386,13 +441,76 @@ impl AgentRepository {
             }
         }
 
-        let (agent_ref, rev) = self.resolve_agent(target, gateway_store)?;
+        let (agent_ref, rev) = if let Some(rev_id) = revision_id {
+            let Some(gs) = gateway_store else {
+                anyhow::bail!("GatewayStore is required for revision-based resolution");
+            };
+
+            // Resolve the caller's target to the underlying agent_id. For aliases,
+            // use the alias record when one exists; otherwise fall back to the raw
+            // alias id (this allows smoke-testing a Candidate revision before it
+            // has been promoted to an active alias). Explicit refs already carry
+            // the agent id directly.
+            let agent_id = match parse_agent_target(target) {
+                Some(ParsedAgentTarget::AliasId(alias_id)) => gs
+                    .resolve_alias(&alias_id)?
+                    .map(|a| a.agent_id)
+                    .unwrap_or(alias_id),
+                Some(ParsedAgentTarget::ExplicitRef { agent_id, .. }) => agent_id,
+                None => target.to_string(),
+            };
+
+            let rev = match gs.get_agent_revision(rev_id)? {
+                Some(r) => r,
+                None => anyhow::bail!("Revision '{}' not found in store", rev_id),
+            };
+            anyhow::ensure!(
+                rev.agent_id == agent_id,
+                "Revision '{}' belongs to agent '{}', not '{}'",
+                rev_id,
+                rev.agent_id,
+                agent_id
+            );
+            (AgentRef::new(agent_id, rev_id.to_string()), rev)
+        } else {
+            self.resolve_agent(target, gateway_store)?
+        };
+
+        // No-new-session gate: a suspended agent must not start a *new* session,
+        // regardless of how it was addressed (alias OR explicit `agent@rev_…`
+        // ref). Already-running sessions are unaffected — they returned above
+        // via the existing-binding grace period. Keyed on the resolved
+        // agent_id's alias, so suspending the agent blocks spawning any of its
+        // revisions. (Read-only resolution in `resolve_agent` stays open.)
+        if let Some(gs) = gateway_store {
+            if let Some(alias) = gs.resolve_alias(&agent_ref.agent_id)? {
+                if let Some(ref suspended_at) = alias.suspended_at {
+                    let reason = alias.suspended_reason.as_deref().unwrap_or("no reason given");
+                    let by = alias.suspended_by.as_deref().unwrap_or("unknown");
+                    anyhow::bail!(
+                        "Agent '{}' is suspended (since {}) by {}: {}. \
+                         No new session can be started; unsuspend or re-promote \
+                         the agent first.",
+                        agent_ref.agent_id, suspended_at, by, reason,
+                    );
+                }
+            }
+        }
 
         // Determine alias_id from shared target parsing: explicit refs bypass aliases.
         let alias_id = match parse_agent_target(target) {
             Some(ParsedAgentTarget::AliasId(alias_id)) => Some(alias_id),
             Some(ParsedAgentTarget::ExplicitRef { .. }) | None => None,
         };
+
+        // #821: pin the constitution (version + digest) that admitted this
+        // session, mirroring runtime_lock_hash above. `None` when the
+        // constitution runtime was never initialized (e.g. some tests).
+        let (constitution_version, constitution_digest) =
+            match crate::constitution_digest::try_constitution_pin() {
+                Some((version, digest)) => (Some(version), Some(digest)),
+                None => (None, None),
+            };
 
         let binding = SessionAgentBinding {
             session_id: session_id.to_string(),
@@ -401,6 +519,8 @@ impl AgentRepository {
             agent_id: agent_ref.agent_id.clone(),
             revision_id: agent_ref.revision_id.clone(),
             runtime_lock_hash: rev.runtime_lock_hash.clone(),
+            constitution_version,
+            constitution_digest,
             home_node_id: home_node_id.to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
             requested_target: target.to_string(),
@@ -717,6 +837,8 @@ Test instructions.
             created_at: chrono::Utc::now().to_rfc3339(),
             created_by_type: PrincipalKind::Human.tag().to_string(),
             created_by_id: "admin".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
             source_kind: "artifact".to_string(),
             source_ref: None,
             origin_node_id: "gateway".to_string(),
@@ -724,6 +846,7 @@ Test instructions.
             status: autonoetic_types::agent_revision::AgentRevisionStatus::Ready,
             metadata_json: serde_json::Value::Null,
             short_id: "abcd1234".to_string(),
+        detected_network_hosts: None,
             signature: None,
             signer_id: None,
         };

@@ -102,6 +102,29 @@ def load_signing_key(args: argparse.Namespace) -> tuple[SigningKey, bool]:
     )
 
 
+def find_template_lock(versions_root: Path, current_version: str) -> Path | None:
+    """Newest sibling version's lock, used to seed a brand-new version's lock.
+
+    A freshly-prepared version dir ships `constitution.md` only (the operator
+    signs the lock). The fields this script does NOT recompute — `format_version`,
+    `constitution_id`, `canonicalization` — are stable across versions, so they
+    are inherited from the most recent prior version that has a lock. Version dirs
+    are date-named (`YYYY.MM.DD`), so lexical sort == chronological.
+    """
+    if not versions_root.is_dir():
+        return None
+    siblings = sorted(
+        (d for d in versions_root.iterdir() if d.is_dir() and d.name != current_version),
+        key=lambda d: d.name,
+        reverse=True,
+    )
+    for d in siblings:
+        candidate = d / "gateway-constitution.lock.json"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def main() -> None:
     args = parse_args()
     repo_root = args.repo_root.resolve()
@@ -111,8 +134,20 @@ def main() -> None:
 
     if not constitution_path.exists():
         raise SystemExit(f"Constitution markdown not found: {constitution_path}")
-    if not lock_path.exists():
-        raise SystemExit(f"Constitution lock not found: {lock_path}")
+
+    # A freshly-prepared version dir may ship constitution.md only. Seed the lock
+    # structure from the most recent prior version (stable fields), then recompute.
+    if lock_path.exists():
+        lock = json.loads(lock_path.read_text())
+    else:
+        template = find_template_lock(version_dir.parent, args.version)
+        if template is None:
+            raise SystemExit(
+                f"Constitution lock not found and no prior version lock to seed from: {lock_path}"
+            )
+        print(f"No lock at {lock_path}; seeding structure from {template}")
+        lock = json.loads(template.read_text())
+        lock.pop("signature", None)  # inherited signature is invalid here; this run re-signs
 
     text = constitution_path.read_text()
     rights = extract_enforcement_table(text, "Ri-")
@@ -125,7 +160,6 @@ def main() -> None:
     }
     constitution_digest = hashlib.sha256(compact_json_bytes(digest_payload)).hexdigest()
 
-    lock = json.loads(lock_path.read_text())
     lock["constitution_version"] = args.version
     lock["constitution_source"] = f"docs/constitution/versions/{args.version}/constitution.md"
     lock["constitution_digest"] = constitution_digest
@@ -159,7 +193,15 @@ def main() -> None:
 
     lock_path.write_text(json.dumps(lock, indent=2, ensure_ascii=False) + "\n")
 
+    # Keep the human-facing `CURRENT` pointer in lockstep with the signed
+    # version. `ACTIVE_CONSTITUTION_VERSION` in autonoetic-types/src/config.rs
+    # is the other half of this contract; the
+    # `current_file_matches_active_constitution_version` test enforces they match.
+    current_path = repo_root / "docs" / "constitution" / "CURRENT"
+    current_path.write_text(f"{args.version}\n")
+
     print(f"Updated: {lock_path}")
+    print(f"Updated: {current_path}")
     print(f"constitution_digest: {constitution_digest}")
     print(f"rule_enforcement_count: {len(rules)}")
     print(f"right_enforcement_count: {len(rights)}")

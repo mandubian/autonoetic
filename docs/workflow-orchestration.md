@@ -79,12 +79,12 @@ resolved_at       RFC3339 timestamp (when resolved)
 resume_target     Task(s) to unblock on resolution
 ```
 
-### TurnContinuation
+### TurnCheckpoint (Approval-Gated Turns)
 
-Approval-gated tool calls use a durable turn checkpoint so the child task can resume without synthetic "retry" instructions:
+Approval-gated tool calls use a durable, signed session checkpoint so the child task can resume without synthetic "retry" instructions:
 
 ```
-task_id            Continuation file key
+task_id            Task run key for the blocked task
 approval_request_id Bound apr-* request in GatewayStore
 history            Full conversation history at suspension point
 assistant_message  Tool-call assistant message that triggered approval
@@ -94,7 +94,7 @@ suspended_at       RFC3339 timestamp used for timeout enforcement
 loop_guard_state   Guard counters restored on resume
 ```
 
-Storage: `.gateway/continuations/<task_id>.json`
+Storage: `.gateway/checkpoints/<session_id>/<turn_id>.checkpoint.json` (HMAC-signed).
 
 ## Execution Semantics
 
@@ -154,8 +154,8 @@ The planner is not "done" when it delegates:
 2. Gateway checkpoints planner state
 3. Planner enters `WaitingChildren`
 4. Child tasks execute independently
-5. On approval: child turn is suspended to `TurnContinuation`, task becomes `AwaitingApproval`, and resources are released
-6. On approval resolution: task becomes `Runnable`; on next execution the gateway loads continuation, executes approved action, and resumes turn history
+5. On approval: child turn is suspended to a signed `SessionCheckpoint`, task becomes `AwaitingApproval`, and resources are released
+6. On approval resolution: task becomes `Runnable`; on next execution the gateway loads the signed checkpoint, verifies checkpoint/approval action-equality, injects `approval_ref` into the suspended tool call, resumes the reasoning loop, and lets the agent re-issue the tool call with `approval_ref`
 7. On child waiting/terminal transitions: the gateway records workflow events and targets the parent session with structured child-state delivery
 8. When join condition is satisfied: workflow becomes `Resumable`
 9. The parent resumes from `WaitingForChild` with structured child-state context; `workflow_wait` remains available for explicit inspection/debugging when desired
@@ -286,8 +286,8 @@ Approval tracking is now unified through workflow events only:
 3. **User approves via CLI** → `autonoetic gateway approve apr-xxx`
 4. **Task status updated** → Status changed to `Runnable` → `task.approved` event emitted
 5. **Chat CLI polls events** → Shows "✅ Approval approved: task-xxx"
-6. **Scheduler re-queues task** → Next execution loads `TurnContinuation`
-7. **Gateway executes approved action** → Real tool result is injected into resumed history
+6. **Scheduler re-queues task** → Next execution loads the `SessionCheckpoint`, verifies checkpoint/approval action-equality, injects `approval_ref` into the suspended tool call, and resumes the reasoning loop
+7. **Agent re-issues tool call with `approval_ref`** → Gateway executes it normally and injects the real tool result into resumed history
 8. **Task executes** → Returns to `Running` → Eventually completes
 
 This unified approach means:
@@ -345,7 +345,7 @@ The system has three layers of protection against runaway execution loops:
 
 ### Hard Gateway Guard
 
-**`max_session_turns`** (default: 12) in `GatewayConfig` acts as a circuit breaker. When an agent session reaches this turn count, the gateway:
+**`max_session_turns`** (default: 25) in `GatewayConfig` acts as a circuit breaker. When an agent session reaches this turn count, the gateway:
 1. Saves a checkpoint with `YieldReason::MaxTurnsReached`
 2. Returns `TurnOutcome::Completed(None)` to suspend the session
 3. Allows the session to be inspected and manually resumed

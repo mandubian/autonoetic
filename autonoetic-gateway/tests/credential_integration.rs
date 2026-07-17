@@ -31,6 +31,7 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities,
         llm_overrides: None,
@@ -47,8 +48,10 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -370,10 +373,7 @@ fn test_credential_request_denied_wrong_service() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Credential access denied for service: stripe"));
+    assert!(parsed["message"].as_str().unwrap().contains("Credential access denied for service: stripe"));
 }
 
 #[test]
@@ -854,10 +854,7 @@ fn test_credential_request_denied_network_policy() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Network access denied for host: evil.com"));
+    assert_eq!(parsed["approval_required"].as_bool(), Some(true), "network policy should block pending approval");
 }
 
 #[test]
@@ -969,10 +966,7 @@ fn test_credential_setup_denied_network_policy() {
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("Network access denied for host: evil.com"));
+    assert_eq!(parsed["approval_required"].as_bool(), Some(true), "network policy should block pending approval");
 }
 
 #[test]
@@ -1206,9 +1200,18 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
         .as_str()
         .expect("request_id should be present");
 
-    // Step 2: Approve the request with secrets (simulating operator action)
-    autonoetic_gateway::scheduler::approve_request(
-        &autonoetic_types::config::GatewayConfig::default(),
+    // Step 2: Approve the request with secrets (simulating operator action).
+    // CredentialPrompt is classified as Critical and normally requires a dwell
+    // period and a confirmation phrase; set the multiplier to 0 and provide the
+    // phrase for this deterministic test.
+    let mut approve_config = autonoetic_types::config::GatewayConfig::default();
+    approve_config.approval_dwell_multiplier = 0.0;
+    let credential_id = suspended["credential_id"]
+        .as_str()
+        .expect("credential_id should be present");
+    let confirm_phrase = format!("register github {}", credential_id);
+    autonoetic_gateway::scheduler::approve_request_with_options(
+        &approve_config,
         Some(&store),
         request_id,
         "test",
@@ -1219,6 +1222,14 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
         )]),
         None,
         None,
+        autonoetic_gateway::scheduler::ApproveOptions {
+            grant_scope: None,
+            grant_targets: Vec::new(),
+            grant_expires_at: None,
+            acknowledged_capabilities: Vec::new(),
+            confirm_phrase: Some(confirm_phrase),
+            decider_session_id: None,
+        },
     )
     .expect("approval should succeed");
 
@@ -1327,9 +1338,17 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
         .as_str()
         .expect("request_id should be present");
 
-    // Approve with only one of two required secrets — should fail
-    let approval_result = autonoetic_gateway::scheduler::approve_request(
-        &autonoetic_types::config::GatewayConfig::default(),
+    // Approve with only one of two required secrets — should fail.
+    // CredentialPrompt is Critical, so disable dwell and provide the required
+    // confirmation phrase so the missing-secret check is reached.
+    let mut approve_config = autonoetic_types::config::GatewayConfig::default();
+    approve_config.approval_dwell_multiplier = 0.0;
+    let credential_id = suspended["credential_id"]
+        .as_str()
+        .expect("credential_id should be present");
+    let confirm_phrase = format!("register github {}", credential_id);
+    let approval_result = autonoetic_gateway::scheduler::approve_request_with_options(
+        &approve_config,
         Some(&store),
         request_id,
         "test",
@@ -1337,6 +1356,14 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
         Some(vec![("GITHUB_TOKEN".to_string(), "ghp_test".to_string())]),
         None,
         None,
+        autonoetic_gateway::scheduler::ApproveOptions {
+            grant_scope: None,
+            grant_targets: Vec::new(),
+            grant_expires_at: None,
+            acknowledged_capabilities: Vec::new(),
+            confirm_phrase: Some(confirm_phrase),
+            decider_session_id: None,
+        },
     );
     assert!(approval_result.is_err());
     assert!(approval_result

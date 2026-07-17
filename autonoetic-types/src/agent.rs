@@ -1,6 +1,6 @@
 //! Agent Manifest types — the Rust representation of `SKILL.md` frontmatter.
 
-use crate::background::BackgroundPolicy;
+use crate::background::{BackgroundPolicy, GrantTarget};
 use crate::disclosure::DisclosurePolicy;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +36,8 @@ pub struct AgentIdentity {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub singleton: bool,
 }
 
 /// LLM configuration for the agent.
@@ -133,6 +135,10 @@ fn is_zero_u64(v: &u64) -> bool {
     *v == 0
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// Per-agent overrides merged onto a resolved `llm_preset` at runtime.
 /// Must not carry `provider` / `model` — those live in gateway `llm_presets`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -199,6 +205,13 @@ pub struct AgentManifest {
     /// When set, tools outside these tiers are excluded from the agent's tool set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_tool_tiers: Vec<ToolTier>,
+    /// Tool name patterns to exclude from this agent's tool set, applied
+    /// after capability gating (`is_available`) and before tier filtering.
+    /// Supports glob wildcards: `workbench_*`, `scheduler_*`, `eval_*`.
+    /// Useful for trimming the tool surface when an agent's capabilities
+    /// unlock tools it never needs (e.g., a coder doesn't need `planframe_*`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_tools: Vec<String>,
     /// Metadata from AgentSkills.io import. Set when the agent was imported
     /// from an external AgentSkills-compatible SKILL.md. Used for tool name
     /// bridging, resource mounting, and trust mode enforcement.
@@ -208,6 +221,10 @@ pub struct AgentManifest {
     /// for this agent with optional overrides for threshold and LLM preset.
     #[serde(default)]
     pub compression: Option<CompressionConfig>,
+    /// When true, the agent is a genuine open-web agent and may declare
+    /// `NetworkAccess.hosts: ["*"]` at install time.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub open_web: bool,
     /// Sandbox network egress policy (RFC scope 5.1). Default `Normal`.
     ///
     /// `Sealed` routes HTTP through a fixture-driven proxy (scope 5.2
@@ -240,7 +257,7 @@ pub struct RemoteAccessDeclaration {
     /// Declarative network targets for outbound access.
     /// Supports any-host, exact host, host suffix, host+port, and URL prefix rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub targets: Vec<RemoteAccessTarget>,
+    pub targets: Vec<GrantTarget>,
     /// Optional language-detector allowlist for import scanning.
     /// Empty means all registered language detectors are enabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -268,10 +285,13 @@ pub struct RemoteAccessDeclaration {
     pub package_manager_commands: Vec<String>,
 }
 
-/// Optional per-agent LoopGuard limits declared in SKILL metadata.
+/// Optional per-agent circuit-breaker limits declared in SKILL metadata, or
+/// derived from the agent's execution shape.
 ///
-/// Gateway applies these as stricter bounds within system ceilings.
-/// Any declared value above system config is capped to the system value.
+/// Explicit manifest declarations are applied as stricter bounds within system
+/// ceilings (operator-controlled safety). Role-aware defaults derived from
+/// `execution_mode` are applied directly, so deterministic executors can be
+/// granted more headroom than the global reasoning defaults.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LoopGuardDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +302,24 @@ pub struct LoopGuardDeclaration {
     pub max_consecutive_same_progress: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_child_failures: Option<u32>,
+    /// Per-agent session turn limit override (clamped to system ceiling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_turns: Option<u32>,
+}
+
+impl LoopGuardDeclaration {
+    pub fn for_execution_mode(mode: ExecutionMode) -> Self {
+        match mode {
+            ExecutionMode::Reasoning => Self::default(),
+            ExecutionMode::Script => Self {
+                max_loops_without_progress: Some(15),
+                max_tool_failures: Some(12),
+                max_consecutive_same_progress: Some(1),
+                max_child_failures: Some(5),
+                max_session_turns: None,
+            },
+        }
+    }
 }
 
 /// Language detector identifier for remote-access import scanning.
@@ -303,23 +341,6 @@ pub enum RemoteAccessApprovalMode {
     Required,
     /// Remote execution can auto-proceed when coarse capability allows network use.
     Preapproved,
-}
-
-/// Typed target declarations for `remote_access`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum RemoteAccessTarget {
-    /// Match any outbound host/URL target.
-    Any,
-    /// Exact hostname match, e.g. `"api.github.com"`.
-    ExactHost(String),
-    /// Matches any subdomain of the suffix, e.g. `"*.github.com"`.
-    HostSuffix(String),
-    /// Exact host + port, e.g. `{"host":"api.github.com","port":443}`.
-    HostAndPort { host: String, port: u16 },
-    /// Matches URLs starting with this prefix, e.g.
-    /// `"https://api.github.com/public/"`.
-    UrlPrefix(String),
 }
 
 /// Per-agent context compression configuration (opt-in via SKILL.md).
@@ -431,6 +452,71 @@ pub enum SessionState {
     Normal,
     Degraded,
     Clarification,
+}
+
+/// Explicit session lifecycle state (issue #742).
+///
+/// Replaces the overloaded transcript `status = "completed"` which conflated
+/// "session terminated normally" with "session hibernated between turns".
+/// The orphan reaper (R+12) and `try_complete_workflow` read this single field
+/// instead of inferring lifecycle position from transcript status plus auxiliary
+/// heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleState {
+    /// Session is actively executing a turn.
+    Active,
+    /// Session completed its turn and is hibernated (between turns, will resume).
+    Hibernated,
+    /// Session is suspended awaiting a gate (approval, user input, escalation).
+    AwaitingGate,
+    /// Session has terminated (completed / failed / suspended terminal).
+    Terminated(TerminatedReason),
+}
+
+impl SessionLifecycleState {
+    pub fn is_terminated(&self) -> bool {
+        matches!(self, Self::Terminated(_))
+    }
+}
+
+impl std::fmt::Display for SessionLifecycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Hibernated => write!(f, "hibernated"),
+            Self::AwaitingGate => write!(f, "awaiting_gate"),
+            Self::Terminated(reason) => match reason {
+                TerminatedReason::Completed => write!(f, "terminated:completed"),
+                TerminatedReason::Failed => write!(f, "terminated:failed"),
+                TerminatedReason::Suspended => write!(f, "terminated:suspended"),
+            },
+        }
+    }
+}
+
+impl std::str::FromStr for SessionLifecycleState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "hibernated" => Ok(Self::Hibernated),
+            "awaiting_gate" => Ok(Self::AwaitingGate),
+            "terminated:completed" => Ok(Self::Terminated(TerminatedReason::Completed)),
+            "terminated:failed" => Ok(Self::Terminated(TerminatedReason::Failed)),
+            "terminated:suspended" => Ok(Self::Terminated(TerminatedReason::Suspended)),
+            _ => Err(format!("invalid SessionLifecycleState: {s}")),
+        }
+    }
+}
+
+/// The reason a terminated session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminatedReason {
+    Completed,
+    Failed,
+    Suspended,
 }
 
 /// A stored credential record for agent-to-service authentication.
@@ -766,4 +852,50 @@ pub struct AgentSkillsImportMetadata {
     pub allowed_tools: Vec<String>,
     /// Whether tool name bridging should be injected into the system prompt.
     pub needs_tool_bridging: bool,
+    /// True when `manifest.capabilities` was *inferred* from `allowed-tools`
+    /// rather than explicitly declared under
+    /// `metadata.autonoetic.capabilities`. Recorded at the single place that
+    /// knows (the parser), so downstream trust decisions (e.g.
+    /// `skill_install`'s strict-mode high-risk clamp) never have to guess
+    /// from the shape of the capability set.
+    #[serde(default)]
+    pub capabilities_inferred: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_state_display_and_parse() {
+        let cases = vec![
+            (SessionLifecycleState::Active, "active"),
+            (SessionLifecycleState::Hibernated, "hibernated"),
+            (SessionLifecycleState::AwaitingGate, "awaiting_gate"),
+            (SessionLifecycleState::Terminated(TerminatedReason::Completed), "terminated:completed"),
+            (SessionLifecycleState::Terminated(TerminatedReason::Failed), "terminated:failed"),
+            (SessionLifecycleState::Terminated(TerminatedReason::Suspended), "terminated:suspended"),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(state.to_string(), expected);
+            let parsed: SessionLifecycleState = expected.parse().unwrap();
+            assert_eq!(parsed, state);
+        }
+    }
+
+    #[test]
+    fn lifecycle_state_is_terminated() {
+        assert!(!SessionLifecycleState::Active.is_terminated());
+        assert!(!SessionLifecycleState::Hibernated.is_terminated());
+        assert!(!SessionLifecycleState::AwaitingGate.is_terminated());
+        assert!(SessionLifecycleState::Terminated(TerminatedReason::Completed).is_terminated());
+        assert!(SessionLifecycleState::Terminated(TerminatedReason::Failed).is_terminated());
+        assert!(SessionLifecycleState::Terminated(TerminatedReason::Suspended).is_terminated());
+    }
+
+    #[test]
+    fn lifecycle_state_invalid_parse_fails() {
+        let result: Result<SessionLifecycleState, String> = "bogus".parse();
+        assert!(result.is_err());
+    }
 }

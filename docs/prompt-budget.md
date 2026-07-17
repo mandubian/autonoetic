@@ -30,8 +30,9 @@ prompt_budget:
   warn_at_pct: 80
   # Safety margin subtracted from context window before enforcement
   margin_tokens: 1024
-  # Whether to compress tool schemas to {} on turns after turn 0
-  compress_tool_schemas_after_turn_0: true
+  # DEPRECATED (no-op). Tool schemas are never compressed; tool tokens are
+  # saved losslessly via provider tool-array caching (prompt_cache_enabled).
+  compress_tool_schemas_after_turn_0: false
 ```
 
 ### Reduction Cascade (Context Governor)
@@ -43,13 +44,17 @@ classifies the turn as `context_overflow`.
 
 | Strategy | Behavior |
 |----------|----------|
-| `tool_schema_compression` | Replace tool JSON schemas with `{}` placeholders. |
-| `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
 | `trim_history` | Remove oldest message groups, preserving tool-call/result pairs. |
+| `capsule` | Hierarchical state-capsule summarization of old turns (LLM call). |
 | `demote_tools` | Drop Specialized-tier tools, keep Core + Workflow. |
 
 Strategy names match those emitted in `GovernorAction` diagnostics and
-causal events.
+causal events. (A `tool_schema_compression` strategy previously appeared
+here but was removed: stripping tool schemas to a minimal `{"type": "object"}` placeholder corrupted tool-calling
+on turn 1+ — the model needs the full schema on every turn, and prompt
+caching is a billing optimization, not a "remember the tools" mechanism.
+Tool tokens are now saved losslessly via provider tool-array caching; see
+`prompt_cache_enabled`.)
 
 ### Section Caps
 
@@ -58,9 +63,62 @@ causal events.
 - **System prompt over cap**: Fails for all actions except `warn` (no action can reduce system prompt size at runtime)
 - **Tool definitions over cap**: Fails for all actions except `warn` and `demote_tools` (which can reduce tool count)
 
-## Tool Tiers
+## Wire-Format History Sanitization
 
-Tools are classified into three tiers for progressive disclosure and budget enforcement:
+Before a `CompletionRequest` is sent to the LLM, the gateway can cheaply reduce
+tokens in the wire-format copy of the conversation history while keeping the
+full messages in storage (checkpoints, exports, timeline events):
+
+- **Strip reasoning content**: Remove `reasoning_content` / `reasoning_details`
+  from assistant messages. The model does not need to re-read its own
+  chain-of-thought on subsequent turns.
+- **Truncate tool results**: Cap tool-result message content to a configured
+  character budget. JSON results have their large string *values* shortened
+  in-place (`content`, `stdout`, `result`…) so the JSON structure and all
+  small metadata fields (`ok`, `offset`, `next_offset`, `total_bytes`,
+  `truncated`, `error_type`) remain intact and parseable. This is critical
+  for pagination: the agent can still read `next_offset` / `total_bytes` to
+  page through large content even when the current chunk was truncated.
+  Non-JSON results fall back to a whole-string `head + "[... N chars truncated ...]" + tail`
+  so status/summary remains visible.
+- **Deduplicate tool results**: Collapse duplicate tool-result
+  messages to a short marker after the first occurrence. Re-reading artifacts,
+  polling status tools, or repeated workflow snapshots often produce identical
+  output across turns.
+
+All three are controlled under `prompt_budget`:
+
+```yaml
+prompt_budget:
+  strip_reasoning_from_request: false  # default; enable only if your model
+                                       # does not require reasoning replay
+  max_tool_result_chars: 4000          # default; set 0 to disable
+  dedup_tool_results: true             # default
+```
+
+These reductions apply only to the request sent to the provider; stored history
+remains complete for audit, replay, and compression strategies.
+
+## Soft Budget (Proactive Governor)
+
+By default, the context governor only runs when the prompt exceeds
+`context_window - margin_tokens`. For large context-window models (e.g. 200K
+tokens), this means the context can grow to ~196K before any summarization
+happens, wasting tokens on every round.
+
+Set `prompt_budget.soft_budget_tokens` to trigger the governor earlier:
+
+```yaml
+prompt_budget:
+  soft_budget_tokens: 40000
+```
+
+When `total_tokens` exceeds `soft_budget_tokens`, the governor runs the same
+reduction pipeline but targets the soft budget instead of the hard window
+limit. This caps context growth before it becomes expensive. The hard limit
+remains the safety backstop.
+
+## Tool Tiers
 
 | Tier | Tools | When included |
 |------|-------|---------------|
@@ -93,11 +151,33 @@ When unset (default), the tier filter is determined by runtime state:
 
 The approval-exception ensures that `approval_status`, `approval_withdraw`, and other approval-prefixed tools are always available when approvals are pending, so the agent can check and respond to approval decisions.
 
-## Tool Schema Compression
+## Tool Tokens & Prompt Caching
 
-When `compress_tool_schemas_after_turn_0` is `true`, tool definitions on turn 1+ have their JSON schemas replaced with `{}`. The model already knows the tools from turn 0, so the full schema is redundant. This saves significant tokens for agents with many tools.
+Tool definitions are sent in full on every turn — the model needs the
+complete schema (property names, types, required fields) to call tools
+correctly, and there is no "the model remembers turn-0 tools" mechanism
+in any provider's tools API. A previous `compress_tool_schemas_after_turn_0`
+option stripped schemas to `{"type": "object"}` on turn 1+ to save tokens;
+it has been **removed** because it corrupted tool-calling (hallucinated
+parameters, missing required fields).
 
-**Empirically validated** with real LLMs (see `openrouter_integration::test_openrouter_tool_compression`): models correctly call tools with compressed schemas on subsequent turns.
+Token cost for the (large, byte-stable) tool catalog is instead recovered
+**losslessly** via provider prompt caching. When `prompt_cache_enabled` is
+`true` (default), cache-capable drivers attach `cache_control: {type: ephemeral}`
+to both the stable system prefix and the last tool definition:
+
+- **Anthropic** — caches the tools block + the system prefix (2 of the 4
+  allowed breakpoints).
+- **OpenRouter** routing a **Claude/Gemini** model — same `cache_control`
+  passthrough on tools and system.
+- **OpenAI** / **llama.cpp** / plain OpenAI-compatible — cache automatically
+  by prefix; no markers are emitted (they would be ignored or rejected).
+- **Gemini direct API** — no wire-format `cache_control` field (caching is a
+  separate explicit Cached Content resource, out of scope here).
+
+Repeated turns re-read the full tool catalog at cache rates. The
+`compress_tool_schemas_after_turn_0` config field is retained only for
+backward-compat and is a no-op.
 
 ## Foundation Layering
 

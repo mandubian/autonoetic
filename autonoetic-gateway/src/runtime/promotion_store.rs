@@ -21,6 +21,7 @@ impl PromotionStore {
         record.evaluator_pass = false;
         record.evaluator_findings.clear();
         record.evaluator_timestamp = None;
+        record.evaluator_execution_trace_id = None;
         record.auditor_id = None;
         record.auditor_pass = false;
         record.auditor_findings.clear();
@@ -29,14 +30,17 @@ impl PromotionStore {
         record.static_evaluator_pass = false;
         record.static_evaluator_findings.clear();
         record.static_evaluator_timestamp = None;
+        record.static_evaluator_execution_trace_id = None;
         record.unit_test_runner_id = None;
         record.unit_test_runner_pass = false;
         record.unit_test_runner_findings.clear();
         record.unit_test_runner_timestamp = None;
+        record.unit_test_runner_execution_trace_id = None;
         record.sealed_evaluator_id = None;
         record.sealed_evaluator_pass = false;
         record.sealed_evaluator_findings.clear();
         record.sealed_evaluator_timestamp = None;
+        record.sealed_evaluator_execution_trace_id = None;
     }
 
     /// Creates a new PromotionStore, loading existing records from disk.
@@ -75,6 +79,7 @@ impl PromotionStore {
         pass: bool,
         findings: Vec<Finding>,
         summary: Option<String>,
+        execution_trace_id: Option<String>,
     ) -> anyhow::Result<PromotionRecord> {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
@@ -90,6 +95,7 @@ impl PromotionStore {
                 evaluator_pass: false,
                 evaluator_findings: vec![],
                 evaluator_timestamp: None,
+                evaluator_execution_trace_id: None,
                 auditor_id: None,
                 auditor_pass: false,
                 auditor_findings: vec![],
@@ -98,15 +104,18 @@ impl PromotionStore {
                 static_evaluator_pass: false,
                 static_evaluator_findings: vec![],
                 static_evaluator_timestamp: None,
+                static_evaluator_execution_trace_id: None,
                 unit_test_runner_id: None,
                 unit_test_runner_pass: false,
                 unit_test_runner_findings: vec![],
                 unit_test_runner_timestamp: None,
+                unit_test_runner_execution_trace_id: None,
                 sealed_evaluator_id: None,
                 sealed_evaluator_pass: false,
                 sealed_evaluator_findings: vec![],
                 sealed_evaluator_timestamp: None,
-                promotion_gate_version: "2.1".to_string(),
+                sealed_evaluator_execution_trace_id: None,
+                promotion_gate_version: "2.2".to_string(),
                 blessed_packages: vec![],
             });
 
@@ -134,6 +143,7 @@ impl PromotionStore {
                 record.evaluator_pass = pass;
                 record.evaluator_findings = findings;
                 record.evaluator_timestamp = Some(timestamp);
+                record.evaluator_execution_trace_id = execution_trace_id;
             }
             PromotionRole::Auditor => {
                 record.auditor_id = Some(agent_id.to_string());
@@ -146,18 +156,21 @@ impl PromotionStore {
                 record.static_evaluator_pass = pass;
                 record.static_evaluator_findings = findings;
                 record.static_evaluator_timestamp = Some(timestamp);
+                record.static_evaluator_execution_trace_id = execution_trace_id;
             }
             PromotionRole::UnitTestRunner => {
                 record.unit_test_runner_id = Some(agent_id.to_string());
                 record.unit_test_runner_pass = pass;
                 record.unit_test_runner_findings = findings;
                 record.unit_test_runner_timestamp = Some(timestamp);
+                record.unit_test_runner_execution_trace_id = execution_trace_id;
             }
             PromotionRole::SealedEvaluator => {
                 record.sealed_evaluator_id = Some(agent_id.to_string());
                 record.sealed_evaluator_pass = pass;
                 record.sealed_evaluator_findings = findings;
                 record.sealed_evaluator_timestamp = Some(timestamp);
+                record.sealed_evaluator_execution_trace_id = execution_trace_id;
             }
         }
 
@@ -374,6 +387,7 @@ mod tests {
                 true,
                 vec![test_finding()],
                 Some("All tests passed".to_string()),
+                Some("trace-eval-001".to_string()),
             )
             .unwrap();
 
@@ -408,6 +422,7 @@ mod tests {
                 true,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -420,6 +435,7 @@ mod tests {
                 "auditor.default",
                 true,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -450,6 +466,7 @@ mod tests {
                     evidence: None,
                 }],
                 None,
+                None,
             )
             .unwrap();
 
@@ -474,6 +491,7 @@ mod tests {
                 false,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
 
@@ -486,6 +504,7 @@ mod tests {
                 "evaluator.default",
                 true,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -512,6 +531,7 @@ mod tests {
                     "evaluator.default",
                     true,
                     vec![],
+                    None,
                     None,
                 )
                 .unwrap();
@@ -546,6 +566,7 @@ mod tests {
                 "evaluator.default",
                 true,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -591,6 +612,7 @@ mod tests {
                 true,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         store
@@ -602,6 +624,7 @@ mod tests {
                 "auditor.default",
                 true,
                 vec![],
+                None,
                 None,
             )
             .unwrap();
@@ -633,6 +656,7 @@ mod tests {
                 true,
                 vec![],
                 None,
+                None,
             )
             .unwrap();
         store
@@ -644,6 +668,7 @@ mod tests {
                 "auditor.default",
                 true,
                 vec![],
+                None,
                 None,
             )
             .unwrap();

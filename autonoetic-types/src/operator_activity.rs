@@ -46,6 +46,9 @@ pub enum OperatorActivityKind {
     /// Synthetic marker emitted when the per-root activity rate limit is hit,
     /// so suppression of subsequent rows in the window is visible.
     RateLimited,
+    /// Passive advisory from the divergence Sentinel. Replaces the pushed
+    /// DivergenceSentinel UserInteraction popup (Phase 2 D.7a).
+    SentinelNotice,
 }
 
 impl OperatorActivityKind {
@@ -60,6 +63,23 @@ impl OperatorActivityKind {
             Self::HumanGate => "human_gate",
             Self::SessionLifecycle => "session_lifecycle",
             Self::RateLimited => "rate_limited",
+            Self::SentinelNotice => "sentinel_notice",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "tool_completed" => Some(Self::ToolCompleted),
+            "tool_failed" => Some(Self::ToolFailed),
+            "delegation" => Some(Self::Delegation),
+            "workflow_join" => Some(Self::WorkflowJoin),
+            "approval_required" => Some(Self::ApprovalRequired),
+            "plan_proposal" => Some(Self::PlanProposal),
+            "human_gate" => Some(Self::HumanGate),
+            "session_lifecycle" => Some(Self::SessionLifecycle),
+            "rate_limited" => Some(Self::RateLimited),
+            "sentinel_notice" => Some(Self::SentinelNotice),
+            _ => None,
         }
     }
 }

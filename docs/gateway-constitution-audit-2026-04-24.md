@@ -4,8 +4,10 @@
 > enforcement against the architectural constitution.
 >
 > This document is **historical** — it records findings at a point in
-> time. The living rule list is `docs/constitution/versions/2026.05.30/constitution.md`; the
-> active backlog is `docs/gateway-constitution-roadmap.md`.
+> time (2026-04-24). The active constitution is now
+> `docs/constitution/versions/2026.07.08/constitution.md` (also reachable via
+> `docs/constitution/CURRENT`); the active backlog is
+> `docs/gateway-constitution-roadmap.md`.
 
 ## Purpose
 

@@ -60,6 +60,7 @@ fn manifest_for(agent_id: &str) -> AgentManifest {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
             description: "Test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -78,8 +79,10 @@ fn manifest_for(agent_id: &str) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -142,18 +145,19 @@ fn record_promotion(
     builder_dir: &Path,
     gateway_dir: &Path,
     config: &GatewayConfig,
+    gw_store: &Arc<GatewayStore>,
     artifact_id: &str,
     role: &str,
     pass: bool,
     session_id: &str,
 ) {
-    let args = serde_json::json!({
-        "artifact_id": artifact_id,
-        "role": role,
-        "pass": pass,
-        "findings": [],
-        "summary": format!("{role} check — pass={pass}"),
-    });
+    let args = support::promotion_trace::build_promotion_record_args(
+        gw_store.as_ref(),
+        artifact_id,
+        role,
+        pass,
+        session_id,
+    );
     let result = registry
         .execute(
             "promotion_record",
@@ -165,7 +169,7 @@ fn record_promotion(
             Some(session_id),
             None,
             Some(config),
-            None,
+            Some(gw_store.clone()),
             None,
         )
         .expect("promotion.record should succeed");
@@ -251,6 +255,17 @@ fn try_promote(
     }
 }
 
+/// Re-present a structured P-5.11 gate *block* (`Ok(ok:false)`) as `Err(message)`
+/// so the `unwrap_err` failure assertions below read naturally.
+fn as_outcome(result: Result<serde_json::Value, String>) -> Result<serde_json::Value, String> {
+    match result {
+        Ok(v) if v["ok"] == serde_json::Value::Bool(false) => {
+            Err(v["message"].as_str().unwrap_or_default().to_string())
+        }
+        other => other,
+    }
+}
+
 #[test]
 fn same_agent_identity_rejected_even_if_both_passed() {
     let agent_id = "rpp3.test.agent";
@@ -297,6 +312,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
@@ -309,6 +325,7 @@ fn same_agent_identity_rejected_even_if_both_passed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "auditor",
         true,
@@ -328,10 +345,10 @@ fn same_agent_identity_rejected_even_if_both_passed() {
     );
 
     assert!(
-        result.is_err(),
+        as_outcome(result.clone()).is_err(),
         "promote should fail when evaluator and auditor share identity"
     );
-    let err = result.unwrap_err();
+    let err = as_outcome(result).unwrap_err();
     assert!(
         err.contains("P-2.17"),
         "error should reference P-2.17: {err}"
@@ -390,6 +407,7 @@ fn distinct_identities_allowed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "sealed_evaluator",
         true,
@@ -405,6 +423,7 @@ fn distinct_identities_allowed() {
         &builder_dir,
         &gateway_dir,
         &config,
+        &store,
         &artifact_id,
         "auditor",
         true,
@@ -426,7 +445,7 @@ fn distinct_identities_allowed() {
     assert!(
         result.is_ok(),
         "promote should succeed with distinct identities, got err: {:?}",
-        result.unwrap_err()
+        as_outcome(result).unwrap_err()
     );
     let promoted = result.unwrap();
     assert_eq!(promoted["ok"], true);

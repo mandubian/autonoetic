@@ -27,6 +27,7 @@ fn planner_manifest() -> AgentManifest {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
             description: "Test planner".to_string(),
+            singleton: false,
         },
         capabilities: vec![
             Capability::WriteAccess {
@@ -57,8 +58,10 @@ fn planner_manifest() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -804,7 +807,7 @@ fn workbench_reconcile_rejects_non_active() {
 
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("discard"));
+    assert!(v["message"].as_str().unwrap().contains("discard"));
 }
 
 #[test]
@@ -959,7 +962,7 @@ fn workbench_discard_rejects_already_discarded() {
 
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("discard"));
+    assert!(v["message"].as_str().unwrap().contains("discard"));
 }
 
 // Issue #332: reconcile must produce a semantic_summary that flags
@@ -1369,7 +1372,7 @@ fn workbench_cleanup_rejects_active() {
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
-    assert!(v["error"].as_str().unwrap().contains("Cannot clean up an active"));
+    assert!(v["message"].as_str().unwrap().contains("Cannot clean up an active"));
 }
 
 // Issue #330 (c): cleanup succeeds on reconciled workbench.

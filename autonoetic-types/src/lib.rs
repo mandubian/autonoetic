@@ -38,6 +38,7 @@ pub mod session_timeline;
 pub mod task_board;
 pub mod task_completion;
 pub mod tool_error;
+pub mod trajectory;
 pub mod workbench;
 pub mod workflow;
 pub mod wiki;

@@ -9,9 +9,11 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::tools::{
     block_on_memory, extract_host, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry,
 };
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, LlmConfig};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::memory::{MemoryObject, MemoryVisibility};
+use autonoetic_types::principal::PrincipalKind;
+use autonoetic_types::tool_error::ToolError;
 use gray_matter::Matter;
 use regex::Regex;
 use serde::Deserialize;
@@ -48,13 +50,26 @@ impl NativeTool for SkillInstallTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Fetch a remote SKILL.md and register it as a new local agent. \
-                Requires the SkillInstall capability. The agent directory is created under \
-                agents_dir, the skill is parsed and a runtime.lock is generated, then the \
-                agent is immediately bootstrapped and promoted to active. \
-                trust_mode controls how original capabilities are treated: \
-                generous (keep as-is), strict (add approval gate, default), \
-                audit (read-only + approval)."
+            description: "Fetch a remote SKILL.md and register it as a Candidate revision of a \
+                new local agent (one door — every install faces the same promotion gates as an \
+                agent built in-house). Requires the SkillInstall capability. The agent directory \
+                is created under agents_dir, the skill is parsed, a runtime.lock is generated, \
+                and the bundle is bootstrapped as a Candidate revision — it is NOT activated. \
+                Promote it with agent_revision_promote, which applies the standard risk-graduated \
+                evidence gates (P-9.9) and the P-2.25 operator approval of the capability delta. \
+                Rejects execution_mode: script skills up front (skill_install fetches only the \
+                SKILL.md; a script entrypoint would never be fetched). trust_mode controls which \
+                capabilities the Candidate carries into the gate: generous (declared/inferred \
+                capabilities as-is), strict (default: drops any high-risk capability that was \
+                inferred rather than explicitly declared, then adds ApprovalQueue, which enables \
+                admin-proposal filing and the Workflow tool tier — it does not gate declared \
+                capabilities), audit (ReadAccess(self.*) + ApprovalQueue only, declared \
+                capabilities ignored). Inference from allowed-tools never mints wildcard power: \
+                Bash proposes SandboxFunctions prefixes only (never CodeExecution), and \
+                WebSearch/WebFetch/Fetch propose NetworkAccess with an empty hosts list — shell \
+                execution and concrete network hosts require an explicit \
+                metadata.autonoetic.capabilities declaration. See the response's `warnings` \
+                field for what was clamped."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -71,10 +86,11 @@ impl NativeTool for SkillInstallTool {
                     "trust_mode": {
                         "type": "string",
                         "enum": ["generous", "strict", "audit"],
-                        "description": "How to treat the imported capabilities. \
-                            generous: use as declared; \
-                            strict (default): add approval requirement to all actions; \
-                            audit: drop to read-only + approval gate."
+                        "description": "Which capabilities the Candidate carries into the promotion gate. \
+                            generous: declared/inferred capabilities as-is; \
+                            strict (default): drops any high-risk capability that was inferred \
+                            (not explicitly declared) and adds ApprovalQueue; \
+                            audit: drop to read-only + approval gate, declared capabilities ignored."
                     }
                 },
                 "required": ["url", "agent_id"],
@@ -92,15 +108,15 @@ impl NativeTool for SkillInstallTool {
 
     fn execute(
         &self,
-        _manifest: &AgentManifest,
+        manifest: &AgentManifest,
         policy: &PolicyEngine,
         _agent_dir: &Path,
         gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: SkillInstallArgs = serde_json::from_str(arguments_json)
@@ -109,17 +125,25 @@ impl NativeTool for SkillInstallTool {
         // ── 1. Validate agent_id ──────────────────────────────────────────────
         crate::runtime::tools::validate_agent_id(&args.agent_id)?;
 
-        // ── 2. Policy: SkillInstall capability must permit this URL host ──────
+        // ── 2. Transport: HTTPS only beyond loopback ──────────────────────────
+        // A remote SKILL.md is a whole agent definition — fetched over
+        // plaintext HTTP, a network MITM could substitute it wholesale
+        // (#802 review). Plain HTTP is accepted only for loopback hosts
+        // (local dev / tests). Checked before the capability gate: request
+        // shape validation precedes authorization.
+        if !url_scheme_is_fetch_safe(&args.url) {
+            return Ok(ToolError::validation(
+                format!("skill_install fetches SKILL.md over HTTPS only (got '{}') — plain HTTP is accepted only for loopback hosts", args.url),
+                Some("Serve the skill over HTTPS, or use a loopback address for local development."),
+            )
+            .with_code("skill_install_insecure_scheme")
+            .to_error_response());
+        }
+
+        // ── 2b. Policy: SkillInstall capability must permit this URL host ─────
         let url_host = extract_host(&args.url)?;
         if !policy.can_install_skill(&url_host).is_allowed() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": format!(
-                    "SkillInstall capability does not permit fetching from host '{}'",
-                    url_host
-                ),
-            })
-            .to_string());
+            return Ok(ToolError::permission(format!("SkillInstall capability does not permit fetching from host '{}'", url_host)).with_code("skill_install_host_denied").to_error_response());
         }
 
         // ── 3. Resolve config and paths ───────────────────────────────────────
@@ -139,30 +163,42 @@ impl NativeTool for SkillInstallTool {
 
         // ── 4. Fetch the remote SKILL.md ──────────────────────────────────────
         let url_clone = args.url.clone();
-        let (http_status, skill_content) = {
-            let result: anyhow::Result<(u16, String)> = (|| {
+        let (http_status, fetched_bytes) = {
+            let result: anyhow::Result<(u16, Vec<u8>)> = (|| {
                 let client = reqwest::blocking::Client::builder()
                     .timeout(std::time::Duration::from_secs(15))
                     .build()?;
                 let resp = client.get(url_clone.as_str()).send()?;
                 let status = resp.status().as_u16();
                 if !resp.status().is_success() {
-                    let _ = resp.text()?;
-                    return Ok((status, String::new()));
+                    let _ = resp.bytes()?;
+                    return Ok((status, Vec::new()));
                 }
-                let content = resp.text()?;
-                Ok((status, content))
+                let content = resp.bytes()?;
+                Ok((status, content.to_vec()))
             })();
             result?
         };
 
         if !(200..300).contains(&(http_status as i32)) {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error": format!("HTTP {} fetching SKILL.md from {}", http_status, args.url),
-            })
-            .to_string());
+            return Ok(ToolError::execution(format!("HTTP {} fetching SKILL.md from {}", http_status, args.url), Some("Ensure the URL is accessible and retry.")).with_code("skill_fetch_failed").to_error_response());
         }
+
+        // Provenance (RFC Part D): digest the exact fetched bytes, reusing the
+        // content store's own SHA-256 helper rather than hashing ad hoc.
+        let fetched_sha256_hex = crate::runtime::content_store::ContentStore::compute_handle(
+            &fetched_bytes,
+        )
+        .trim_start_matches("sha256:")
+        .to_string();
+
+        // Decode the SKILL.md text from the same byte buffer the provenance
+        // digest was computed over — hashing already-decoded text instead
+        // could diverge from the exact fetched bytes (charset decoding /
+        // invalid-byte replacement), weakening the provenance guarantee.
+        let skill_content = String::from_utf8(fetched_bytes).map_err(|_| {
+            anyhow::anyhow!("SKILL.md from {} is not valid UTF-8", args.url)
+        })?;
 
         // ── 5. Parse the SKILL.md ─────────────────────────────────────────────
         let (parsed_manifest, body) = crate::runtime::parser::SkillParser::parse(&skill_content)
@@ -170,9 +206,41 @@ impl NativeTool for SkillInstallTool {
                 anyhow::anyhow!("Failed to parse remote SKILL.md from {}: {}", args.url, e)
             })?;
 
+        // ── 5b. Reject script-mode imports before writing anything to disk ────
+        // skill_install fetches exactly one file (the SKILL.md); a script-mode
+        // manifest names an entrypoint that was never fetched, which would
+        // silently produce a broken agent (RFC Part E.1).
+        if matches!(parsed_manifest.execution_mode, ExecutionMode::Script) {
+            return Ok(ToolError::validation(
+                "skill_install fetches only the SKILL.md — a script-mode skill's entrypoint \
+                 would never be fetched, producing a broken agent. Package the skill as an \
+                 artifact and use the revision pipeline (agent_revision_create_from_intent), \
+                 or import a reasoning-mode skill.",
+                None::<String>,
+            )
+            .with_code("skill_install_script_mode_rejected")
+            .to_error_response());
+        }
+
         // ── 6. Apply trust mode ───────────────────────────────────────────────
         let trust_mode = args.trust_mode.as_deref().unwrap_or("strict");
-        let capabilities = apply_trust_mode(trust_mode, &parsed_manifest)?;
+        let (capabilities, capabilities_source) = apply_trust_mode(trust_mode, &parsed_manifest)?;
+
+        // Install-time warnings (RFC Part C): when the applied set came from
+        // allowed-tools inference rather than an explicit declaration, tell
+        // the operator which power was clamped, so the gap is visible at
+        // install rather than discovered later as "why can't this agent run
+        // shell / reach the network".
+        let inference_warnings = if capabilities_source == "inferred" {
+            let allowed_tools: Vec<String> = parsed_manifest
+                .agentskills_import
+                .as_ref()
+                .map(|m| m.allowed_tools.clone())
+                .unwrap_or_default();
+            capability_inference_warnings(&allowed_tools, trust_mode)
+        } else {
+            Vec::new()
+        };
 
         // ── 7. Build target manifest ──────────────────────────────────────────
         let llm_config = parsed_manifest.llm_config.clone().or_else(|| {
@@ -209,6 +277,7 @@ impl NativeTool for SkillInstallTool {
                 id: args.agent_id.clone(),
                 name: parsed_manifest.agent.name.clone(),
                 description: parsed_manifest.agent.description.clone(),
+                singleton: parsed_manifest.agent.singleton,
             },
             capabilities,
             llm_overrides: parsed_manifest.llm_overrides.clone(),
@@ -225,8 +294,10 @@ impl NativeTool for SkillInstallTool {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: parsed_manifest.allowed_tool_tiers.clone(),
+            excluded_tools: parsed_manifest.excluded_tools.clone(),
             agentskills_import: parsed_manifest.agentskills_import.clone(),
             compression: parsed_manifest.compression.clone(),
+            open_web: parsed_manifest.open_web,
             sandbox_network: parsed_manifest.sandbox_network,
         };
 
@@ -248,14 +319,30 @@ impl NativeTool for SkillInstallTool {
             "Wrote agent bundle to disk"
         );
 
-        // ── 9. Bootstrap and auto-promote the new agent ───────────────────────
-        let activated = crate::bootstrap::bootstrap_single_agent(config, gateway_dir, &dir_name)?;
+        // ── 9. Bootstrap as a Candidate revision — one door (RFC Part A) ──────
+        // skill_install never promotes; activation flows through the standard
+        // agent_revision_promote gates. Provenance (RFC Part D) is carried on
+        // the revision instead of the generic "cli"/"bootstrap" bootstrap uses
+        // for the repo's own reference bundles.
+        let source_ref = format!("{}#sha256={}", args.url, fetched_sha256_hex);
+        let outcome = crate::bootstrap::bootstrap_single_agent_candidate_only(
+            config,
+            gateway_dir,
+            &dir_name,
+            PrincipalKind::AutonoeticAgent.tag(),
+            &manifest.agent.id,
+            "skill_install",
+            Some(&source_ref),
+        )?;
 
-        let message = if activated {
-            format!("Skill installed and promoted as agent '{}'", args.agent_id)
+        let message = if outcome.created {
+            format!(
+                "Skill '{}' installed as a candidate revision; it is NOT active.",
+                args.agent_id
+            )
         } else {
             format!(
-                "Skill written to disk as agent '{}' but a matching revision already existed — no new promotion",
+                "Skill written to disk as agent '{}' but a matching revision already existed — no new revision created",
                 args.agent_id
             )
         };
@@ -263,16 +350,62 @@ impl NativeTool for SkillInstallTool {
         tracing::info!(
             target: "skill_install",
             agent_id = %args.agent_id,
-            activated = activated,
-            "Bootstrap complete"
+            revision_id = %outcome.revision_id,
+            created = outcome.created,
+            trust_mode = %trust_mode,
+            "Bootstrap complete (candidate, not promoted)"
         );
+
+        // Causal event (RFC Part D): best-effort — the durable revision row
+        // above is the source of truth, so a logging failure here must not
+        // fail the install.
+        if let Some(store) = gateway_store.as_ref() {
+            let event = autonoetic_types::causal_chain::CausalEventRecord {
+                event_id: format!("skill-install-{}", uuid::Uuid::new_v4()),
+                agent_id: manifest.agent.id.clone(),
+                session_id: session_id.unwrap_or("").to_string(),
+                turn_id: turn_id.map(|s| s.to_string()),
+                event_seq: 0,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                category: "agent_install".to_string(),
+                action: "skill_imported".to_string(),
+                status: "SUCCESS".to_string(),
+                enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                target: Some(args.agent_id.clone()),
+                payload: Some(
+                    serde_json::json!({
+                        "url": args.url,
+                        "sha256": fetched_sha256_hex,
+                        "trust_mode": trust_mode,
+                        "agent_id": args.agent_id,
+                        "capabilities_source": capabilities_source,
+                    })
+                    .to_string(),
+                ),
+                payload_ref: None,
+                evidence_ref: None,
+                reason: None,
+            };
+            if let Err(e) = store.create_causal_event(&event) {
+                tracing::warn!(
+                    target: "skill_install",
+                    agent_id = %args.agent_id,
+                    error = %e,
+                    "Failed to record skill_imported causal event"
+                );
+            }
+        }
 
         Ok(serde_json::json!({
             "ok": true,
             "agent_id": args.agent_id,
             "trust_mode": trust_mode,
-            "activated": activated,
+            "activated": false,
+            "status": "candidate",
+            "revision_id": outcome.revision_id,
             "message": message,
+            "warnings": inference_warnings,
+            "next": "Promote via agent_revision_promote — declared capabilities will face the standard gates (P-9.9 evidence for high-risk capabilities; P-2.25 operator approval of the capability delta for a new agent).",
         })
         .to_string())
     }
@@ -759,17 +892,7 @@ impl NativeTool for SkillNormalizeTool {
                     }
                 }
                 Err(msg) => {
-                    let error_type = if msg.contains("NetworkAccess") {
-                        "policy"
-                    } else {
-                        "fetch"
-                    };
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "error_type": error_type,
-                        "error": msg,
-                    })
-                    .to_string());
+                    return Ok(ToolError::execution(msg, None::<String>).to_error_response());
                 }
             }
         }
@@ -780,15 +903,7 @@ impl NativeTool for SkillNormalizeTool {
             .unwrap_or_else(|| format!("skills/{slug}/SKILL.md"));
         validate_rel_store_path(&rel)?;
         if !policy.can_write_path(&rel).is_allowed() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "permission",
-                "error": format!(
-                    "WriteAccess denied for normalized skill path '{}' (policy P-1.4)",
-                    rel
-                ),
-            })
-            .to_string());
+            return Ok(ToolError::permission(format!("WriteAccess denied for normalized skill path '{}' (policy P-1.4)", rel)).with_code("skill_write_access_denied").to_error_response());
         }
 
         if autonoetic_onboarding_present(&markdown) {
@@ -846,13 +961,7 @@ impl NativeTool for SkillNormalizeTool {
 
         let (step_values, fragments) = extract_api_steps_from_markdown(&markdown);
         if step_values.is_empty() {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "partial": true,
-                "error": "No HTTP API endpoints could be extracted from the markdown",
-                "fragments": fragments,
-            })
-            .to_string());
+            return Ok(ToolError::validation("No HTTP API endpoints could be extracted from the markdown", Some("Ensure the markdown contains valid HTTP API endpoint documentation.")).with_code("no_api_endpoints_found").to_error_response());
         }
 
         let steps_count = step_values.len();
@@ -937,8 +1046,96 @@ impl NativeTool for SkillNormalizeTool {
     }
 }
 
-/// Map a trust_mode string to the correct capability set.
-fn apply_trust_mode(trust_mode: &str, parsed: &AgentManifest) -> anyhow::Result<Vec<Capability>> {
+/// `true` when a SKILL.md URL may be fetched: always `https://`, or
+/// `http://` only for loopback hosts (local dev / tests). Any other scheme
+/// (`file:`, `ftp:`, …) is rejected as well.
+fn url_scheme_is_fetch_safe(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => true,
+        "http" => matches!(
+            parsed.host_str(),
+            Some("127.0.0.1") | Some("::1") | Some("localhost")
+        ),
+        _ => false,
+    }
+}
+
+/// Structured install-time warnings for the RFC Part C inference clamp: when
+/// `allowed-tools` asked for shell or network tools but the capability set
+/// was *inferred* (not declared), the operator gets told exactly what was
+/// clamped rather than silently granted a narrower power than the tool name
+/// suggests. `trust_mode` is threaded in because the network wording differs:
+/// `strict` drops the inferred (high-risk) `NetworkAccess` entirely, whereas
+/// `generous` keeps it with an empty hosts list — the warning must not imply
+/// the Candidate carries network access it doesn't. (`SandboxFunctions` is not
+/// high-risk, so the shell wording holds for both modes.)
+fn capability_inference_warnings(allowed_tools: &[String], trust_mode: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let wants_bash = allowed_tools
+        .iter()
+        .any(|t| t.trim() == "Bash" || t.trim().starts_with("Bash("));
+    let wants_network = allowed_tools
+        .iter()
+        .any(|t| matches!(t.trim(), "WebSearch" | "WebFetch" | "Fetch"));
+    if wants_bash {
+        warnings.push(
+            "allowed-tools requested Bash: shell execution requires an explicit CodeExecution \
+             declaration; granted SandboxFunctions prefixes only."
+                .to_string(),
+        );
+    }
+    if wants_network {
+        warnings.push(if trust_mode == "strict" {
+            "allowed-tools requested network tools, but strict trust_mode dropped the inferred \
+             NetworkAccess entirely; declare NetworkAccess with concrete hosts in \
+             metadata.autonoetic.capabilities to grant it."
+                .to_string()
+        } else {
+            "allowed-tools requested network tools: NetworkAccess inferred with an empty hosts \
+             list — declare concrete hosts in metadata.autonoetic.capabilities to enable network \
+             access."
+                .to_string()
+        });
+    }
+    warnings
+}
+
+/// Map a trust_mode string to the capability set the Candidate carries into
+/// the promotion gate, plus which source produced it (`"declared"` — explicit
+/// `metadata.autonoetic.capabilities`; `"inferred"` — derived from
+/// `allowed-tools`; `"defaults"` — neither present) for the causal-event
+/// payload (RFC Part D) and the `strict` inference clamp (RFC Part B): with
+/// one door in place (promotion gate = the real protection), `strict` no
+/// longer claims to gate every action — it drops any *inferred* high-risk
+/// capability (untrusted text should not be able to mint a review-worthy
+/// capability nobody explicitly declared) and keeps `ApprovalQueue` for what
+/// it actually does (admin-proposal filing + the Workflow tool tier).
+fn apply_trust_mode(
+    trust_mode: &str,
+    parsed: &AgentManifest,
+) -> anyhow::Result<(Vec<Capability>, &'static str)> {
+    // The standard-frontmatter parser pre-infers capabilities from
+    // `allowed-tools` INTO `parsed.capabilities` and records that fact on the
+    // import metadata — so a non-empty capability set is NOT proof of an
+    // explicit declaration. Trust the recorded bit first; the emptiness
+    // branches below only cover manifests the parser did not pre-infer for.
+    let parser_inferred = parsed
+        .agentskills_import
+        .as_ref()
+        .is_some_and(|m| m.capabilities_inferred);
+    if parser_inferred && matches!(trust_mode, "generous" | "strict") {
+        let mut caps = parsed.capabilities.clone();
+        if trust_mode == "strict" {
+            caps.retain(|c| !crate::runtime::install_contract::is_high_risk_capability(c));
+            caps.push(Capability::ApprovalQueue {
+                patterns: vec!["*".to_string()],
+            });
+        }
+        return Ok((caps, "inferred"));
+    }
     match trust_mode {
         "generous" => {
             // Use capabilities declared in the remote SKILL.md as-is.
@@ -950,54 +1147,74 @@ fn apply_trust_mode(trust_mode: &str, parsed: &AgentManifest) -> anyhow::Result<
                     .map(|m| m.allowed_tools.clone())
                     .unwrap_or_default();
                 if allowed_tools.is_empty() {
-                    Ok(vec![
-                        Capability::ReadAccess {
-                            scopes: vec!["self.*".to_string()],
-                        },
-                        Capability::WriteAccess {
-                            scopes: vec!["self.*".to_string()],
-                        },
-                    ])
+                    Ok((
+                        vec![
+                            Capability::ReadAccess {
+                                scopes: vec!["self.*".to_string()],
+                            },
+                            Capability::WriteAccess {
+                                scopes: vec!["self.*".to_string()],
+                            },
+                        ],
+                        "defaults",
+                    ))
                 } else {
-                    Ok(crate::runtime::parser::infer_capabilities(&allowed_tools))
+                    Ok((
+                        crate::runtime::parser::infer_capabilities(&allowed_tools),
+                        "inferred",
+                    ))
                 }
             } else {
-                Ok(parsed.capabilities.clone())
+                Ok((parsed.capabilities.clone(), "declared"))
             }
         }
         "strict" => {
-            // Preserve capabilities but add an approval gate.
-            let mut caps = if parsed.capabilities.is_empty() {
+            // Preserve capabilities, but drop any high-risk capability that
+            // was inferred rather than explicitly declared, then add the
+            // approval-queue gate.
+            let (mut caps, source) = if parsed.capabilities.is_empty() {
                 let allowed_tools: Vec<String> = parsed
                     .agentskills_import
                     .as_ref()
                     .map(|m| m.allowed_tools.clone())
                     .unwrap_or_default();
                 if allowed_tools.is_empty() {
-                    vec![Capability::ReadAccess {
-                        scopes: vec!["self.*".to_string()],
-                    }]
+                    (
+                        vec![Capability::ReadAccess {
+                            scopes: vec!["self.*".to_string()],
+                        }],
+                        "defaults",
+                    )
                 } else {
-                    crate::runtime::parser::infer_capabilities(&allowed_tools)
+                    (
+                        crate::runtime::parser::infer_capabilities(&allowed_tools),
+                        "inferred",
+                    )
                 }
             } else {
-                parsed.capabilities.clone()
+                (parsed.capabilities.clone(), "declared")
             };
+            if source == "inferred" {
+                caps.retain(|c| !crate::runtime::install_contract::is_high_risk_capability(c));
+            }
             caps.push(Capability::ApprovalQueue {
                 patterns: vec!["*".to_string()],
             });
-            Ok(caps)
+            Ok((caps, source))
         }
         "audit" => {
             // Read-only + approval gate — ignores declared capabilities.
-            Ok(vec![
-                Capability::ReadAccess {
-                    scopes: vec!["self.*".to_string()],
-                },
-                Capability::ApprovalQueue {
-                    patterns: vec!["*".to_string()],
-                },
-            ])
+            Ok((
+                vec![
+                    Capability::ReadAccess {
+                        scopes: vec!["self.*".to_string()],
+                    },
+                    Capability::ApprovalQueue {
+                        patterns: vec!["*".to_string()],
+                    },
+                ],
+                "defaults",
+            ))
         }
         other => {
             return Err(autonoetic_types::tool_error::tagged::Tagged::validation(anyhow::anyhow!(

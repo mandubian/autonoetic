@@ -59,7 +59,7 @@ pub struct AbReplayTool;
 
 impl NativeTool for AbReplayTool {
     fn name(&self) -> &'static str {
-        "improvement.ab_replay"
+        "improvement_ab_replay"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -390,7 +390,7 @@ impl NativeTool for AbReplayTool {
                 &args.agent_id,
                 &rev_a.revision_id,
                 None,
-                "improvement.ab_replay",
+                "improvement_ab_replay",
             )?;
             queued_ids.push(run.eval_run_id);
         }
@@ -406,7 +406,7 @@ impl NativeTool for AbReplayTool {
                 &args.agent_id,
                 &rev_b.revision_id,
                 Some(rev_a.revision_id.clone()),
-                "improvement.ab_replay",
+                "improvement_ab_replay",
             )?;
             queued_ids.push(run.eval_run_id);
         }
@@ -601,7 +601,13 @@ fn build_ab_stats(
     let config = crate::runtime::eval_stats::CompareConfig::default();
     match crate::runtime::eval_stats::compare(&a, &b, &config) {
         Ok(rec) => serde_json::to_value(rec).ok(),
-        Err(e) => Some(serde_json::json!({"error": e})),
+        Err(e) => Some(serde_json::json!({
+            "ok": false,
+            "error_type": "execution",
+            "error": "improvement_ab_comparison_failed",
+            "message": format!("{}", e),
+            "repair_hint": "Check the evaluation data and retry."
+        })),
     }
 }
 
@@ -817,7 +823,8 @@ mod surface_drift_tests {
                 id: "test.default".into(),
                 name: "test".into(),
                 description: "test".into(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -833,8 +840,10 @@ mod surface_drift_tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: SandboxNetworkPolicy::default(),
         }
     }

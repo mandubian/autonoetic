@@ -30,6 +30,7 @@ fn manifest_with_sandbox(allowed: Vec<&str>) -> AgentManifest {
             id: "test.agent".to_string(),
             name: "Test Agent".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: allowed.iter().map(|s| s.to_string()).collect(),
@@ -48,8 +49,10 @@ fn manifest_with_sandbox(allowed: Vec<&str>) -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }
@@ -69,6 +72,7 @@ fn manifest_no_capabilities() -> AgentManifest {
             id: "no.cap".to_string(),
             name: "No Cap".to_string(),
             description: "test".to_string(),
+            singleton: false,
         },
         capabilities: vec![],
         llm_overrides: None,
@@ -85,8 +89,10 @@ fn manifest_no_capabilities() -> AgentManifest {
         gateway_url: None,
         gateway_token: None,
         allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
         agentskills_import: None,
         compression: None,
+            open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
     }
 }

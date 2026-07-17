@@ -28,13 +28,19 @@ pub fn build_timeline_event(
     refs: TimelineRefs,
 ) -> LiveDigestEventRecord {
     let altitude = altitude.unwrap_or_else(|| altitude_for(event_type, role));
+    // NOTE: an explicit `altitude` arg is used AS-IS and can undercut the
+    // seat floor (`role_floor`). This is intentional for a few plumbing
+    // emitters (e.g. `workflow.signal` pins to Detail regardless of seat),
+    // but most callers should pass `None` and let `altitude_for` apply the
+    // floor. For a raise-only override, use the session_tracer's
+    // `append_live_digest_event_at(.., Some(alt))`, which takes `max`.
     LiveDigestEventRecord {
         event_id: uuid::Uuid::new_v4().to_string(),
         root_session_id,
         source_session_id: session_id,
         turn_id,
         source_agent_id: Some(principal.id.clone()),
-        source_node_id: std::env::var("AUTONOETIC_NODE_ID").unwrap_or_else(|_| "gateway".to_string()),
+        source_node_id: crate::execution::gateway_actor_id(),
         event_type: event_type.to_string(),
         payload: payload.and_then(|v| serde_json::to_string(&v).ok()),
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -52,6 +58,11 @@ pub fn build_timeline_event(
 
 /// Optional structured fields for an `approval.pending` timeline payload, derived
 /// from the persisted `ScheduledAction`.
+pub fn looks_like_content_ref_command(command: &str) -> bool {
+    let t = command.trim();
+    t.starts_with("cnt_") && t.len() > 4 && t[4..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 pub fn approval_timeline_extra_from_action(
     action: &autonoetic_types::background::ScheduledAction,
 ) -> Option<serde_json::Value> {
@@ -72,11 +83,32 @@ pub fn approval_timeline_extra_from_action(
         ScheduledAction::SandboxExec {
             command,
             detected_hosts,
+            intent,
             ..
-        } => Some(serde_json::json!({
-            "command": command,
-            "host_patterns": detected_hosts,
-        })),
+        } => {
+            let mut extra = serde_json::json!({
+                "command": command,
+                "host_patterns": detected_hosts,
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                if let Some(i) = intent.as_ref().filter(|s| !s.trim().is_empty()) {
+                    obj.insert("intent".into(), serde_json::Value::String(i.clone()));
+                }
+                if looks_like_content_ref_command(command) {
+                    obj.insert(
+                        "command_kind".into(),
+                        serde_json::Value::String("content_ref".into()),
+                    );
+                    obj.insert(
+                        "command_hint".into(),
+                        serde_json::Value::String(
+                            "Content handle — not a shell command. Use python3 /tmp/<name> with the file's sandbox_path from content.write.".into(),
+                        ),
+                    );
+                }
+            }
+            Some(extra)
+        }
         ScheduledAction::SessionEscalate {
             session_id,
             root_session_id,
@@ -107,11 +139,7 @@ pub fn approval_timeline_extra_from_action(
             "added_capabilities": added_capabilities,
             "broadened_capabilities": broadened_capabilities,
         })),
-        ScheduledAction::ProfileShare {
-            user_id,
-            scope,
-            ..
-        } => Some(serde_json::json!({
+        ScheduledAction::ProfileShare { user_id, scope, .. } => Some(serde_json::json!({
             "user_id": user_id,
             "scope": scope,
         })),
@@ -170,7 +198,21 @@ pub fn emit_approval_pending_timeline_event(
     }
     if let Some(phrase) = approval.confirm_phrase.as_ref().filter(|p| !p.is_empty()) {
         if let Some(obj) = payload.as_object_mut() {
-            obj.insert("confirm_phrase".into(), serde_json::Value::String(phrase.clone()));
+            obj.insert(
+                "confirm_phrase".into(),
+                serde_json::Value::String(phrase.clone()),
+            );
+        }
+    }
+    if let Some(root) = approval.root_session_id.as_deref() {
+        if let Some(targets) = approval.action.detected_hosts() {
+            if let Some(hint) =
+                crate::runtime::session_envelope::envelope_expansion_hint(store, root, &targets)
+            {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("envelope_expansion_hint".into(), hint);
+                }
+            }
         }
     }
     let event = build_timeline_event(
@@ -223,7 +265,7 @@ pub fn emit_user_ask_pending_timeline_event(
             })
         })
         .collect();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "interaction_id": interaction.interaction_id,
         "question": crate::log_redaction::redact_text_for_logs(&interaction.question),
         "kind": interaction.kind.as_str(),
@@ -231,6 +273,13 @@ pub fn emit_user_ask_pending_timeline_event(
         "options": options_for_event,
         "allow_freeform": interaction.allow_freeform,
     });
+    if let Some(ctx) = interaction
+        .context
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
+        payload["context"] = serde_json::json!(crate::log_redaction::redact_text_for_logs(ctx));
+    }
     let event = build_timeline_event(
         root,
         interaction.session_id.clone(),
@@ -286,11 +335,7 @@ pub fn ingest_chat_timeline_event(
     if is_signal_delivered_chat(metadata) {
         return workflow_signal_timeline_event(session_id, message);
     }
-    Some(operator_message_event(
-        session_id,
-        source_agent_id,
-        message,
-    ))
+    Some(operator_message_event(session_id, source_agent_id, message))
 }
 
 fn workflow_signal_timeline_event(
@@ -382,30 +427,176 @@ pub fn operator_message_event(
     )
 }
 
+/// Build the `operator.comment` timeline event — an operator comment anchored to
+/// a live content file (file-level + optional line hint). Attention altitude:
+/// the operator is flagging something they want addressed, so it must clear the
+/// default (Normal) floor. The `payload` carries the anchor + redacted body
+/// (built by the caller, which has the content handles). See
+/// `docs/design/operator-live-comments.md`.
+pub fn operator_comment_event(
+    session_id: &str,
+    commented_by: &str,
+    payload: serde_json::Value,
+) -> LiveDigestEventRecord {
+    let by = if commented_by.is_empty() {
+        "operator"
+    } else {
+        commented_by
+    };
+    let principal = Principal::human(by);
+    let role = SessionRole::Operator;
+    let root = crate::runtime::content_store::root_session_id(session_id);
+    build_timeline_event(
+        root.to_string(),
+        session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "operator.comment",
+        None, // derive: max(base=Attention, role_floor(Operator))
+        Some(payload),
+        TimelineRefs::default(),
+    )
+}
+
 /// Base importance of a digest event type, before any role refinement.
+/// Base importance for a timeline event type. The effective altitude written
+/// to a row is normally `max(base_altitude(et), role_floor(role))` (see
+/// [`altitude_for`]).
+///
+/// # Explicit altitude — two contracts
+///
+/// Emitters can pass an explicit altitude, but the contract depends on the
+/// helper used — they are NOT the same:
+///
+/// - **`build_timeline_event(.., Some(alt))`** uses the explicit value AS-IS
+///   (it REPLACES `altitude_for`, and can undercut `role_floor`). This is
+///   relied on by a few plumbing emitters that pin to `Detail` regardless of
+///   seat (e.g. `workflow.signal`). Callers that should not undercut the
+///   floor must pass `None`.
+/// - **`session_tracer::append_live_digest_event_at(.., Some(alt))`** is
+///   **raise-only**: it takes `max(altitude_for(et, role), alt)`, so a caller
+///   can never undercut the floor. Used by `tool.completed` to bump failures
+///   (`ok:false`) from `Detail` up to `Attention`.
+///
+/// Most emitters pass `None` and let `base_altitude` + the seat floor decide.
+///
+/// # Altitude policy
+///
+/// The four altitudes (`Detail < Normal < Attention < Error`) partition events
+/// by what the operator needs to see:
+///
+/// - **Error** — failures and integrity breaches. Always visible; the operator
+///   must know these happened.
+/// - **Attention** — operator **gates**: the full lifecycle of a decision that
+///   suspends for, or records, operator input. Both the *request* (`*.pending`,
+///   `*.proposed`) and the *decision* (`*.approved`, `*.rejected`, `*.promoted`)
+///   share this altitude so each gate reads as a paired ask↔resolution.
+///   Abandonments (`*.cancelled`, `*.withdrawn`) are NOT decisions → Normal.
+/// - **Normal** — visible progress: agent/operator narrative, session
+///   boundaries, workbench creation (a milestone), audits, retries, and gate
+///   abandonments. The default floor.
+/// - **Detail** — hidable plumbing: turns, LLM rounds, reasoning, tool
+///   requests *and* successful tool completions, workflow bookkeeping,
+///   scheduled jobs, workbench reconcile/discard.
+///
+/// # Per-event rationale
+///
+/// | Event type | Altitude | Why |
+/// |---|---|---|
+/// | `turn.start` / `turn.end` | Detail | turn plumbing |
+/// | `llm.round` | Detail | per-round token accounting |
+/// | `agent.reasoning` | Detail | verbose "why"; surfaced on dial-down |
+/// | `tool.requested` | Detail | the request is plumbing; the agent's message carries intent |
+/// | `tool.completed` | Detail | success completion pairs with the request; **failures** (`ok:false`) are bumped to Attention at the emit site so they aren't hidden |
+/// | `workbench.created` | Normal | milestone — content becomes reviewable (NOT plumbing) |
+/// | `workbench.reconciled` / `workbench.discarded` | Detail | edit/discard mechanics around the real work |
+/// | `workflow.child_state` / `workflow.join_satisfied` / `workflow.signal` | Detail | workflow bookkeeping |
+/// | `scheduled_job.*` | Detail | cron plumbing |
+/// | `agent.message` | Normal | primary agent narrative — the thing to read |
+/// | `operator.message` | Normal | operator input — primary |
+/// | `session.start` / `session.end` | Normal | session boundaries a new agent joins/leaves |
+/// | `digest_annotate` | Normal | auditor/evaluator annotation — output worth seeing |
+/// | `llm.retry` | Normal | a retry is notable (transient trouble) but not a failure |
+/// | `plan.pending` / `plan.approved` | Attention | plan gate lifecycle (request + decision) |
+/// | `approval.pending` / `approval.approved` / `approval.rejected` | Attention | approval gate lifecycle |
+/// | `approval.cancelled` | Normal | abandonment, not a decision |
+/// | `escalation.pending` | Attention | escalation gate request |
+/// | `user.ask.pending` | Attention | conversational clarification gate |
+/// | `operator.comment` | Attention | operator comment anchored to a live file — an issue the agent should address |
+/// | `wiki.proposed` / `wiki.promoted` / `wiki.rejected` | Attention | wiki-contribution gate lifecycle |
+/// | `wiki.withdrawn` | Normal | abandonment, not a decision |
+/// | `divergence.intervention` | Attention | sentinel intervention (emit site raises to Error when critical) |
+/// | `runtime.lock_drift` | Attention | integrity event (emit site stores Error when rejected) |
+/// | `security.escape_threshold` | Attention | escape-probability threshold reached |
+/// | `llm.request_failed` / `llm.empty_response` | Error | LLM failures |
+/// | `guard.tripped` | Error | LoopGuard circuit breaker |
+/// | `session.emergency_stop` | Error | emergency stop fired |
+/// | `security.sandbox_escape` | Error | sandbox breach |
+/// | `tool.failed` | Error | reserved — no emitter today (failures use `tool.completed` with `ok:false`, bumped to Attention at the emit site). Kept so a future dedicated failure event lands at Error. |
+///
+/// This match is **exhaustive over every event type the gateway emits**; the
+/// `_ => Normal` arm is a safe fallback for forward-compat (a new event type
+/// defaults to visible progress until consciously classified here).
 pub fn base_altitude(event_type: &str) -> Altitude {
     match event_type {
-        // Mechanics / poll-ish / infra — hidden at the normal floor. Workbench
-        // lifecycle is plumbing around the real work (edits/artifacts), so it
-        // stays Detail and surfaces only when the operator dials down.
-        // Extended-thinking "why" is verbose; hidable by default, surfaced on dial-down.
-        "turn.start" | "turn.end" | "llm.round" | "tool.requested" | "agent.reasoning"
-        | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
-        | "workflow.child_state" | "workflow.join_satisfied" | "workflow.signal"
-        | "scheduled_job.triggered" | "scheduled_job.completed" | "scheduled_job.failed" => {
-            Altitude::Detail
-        }
-        "llm.request_failed" | "llm.empty_response" | "tool.failed" | "session.emergency_stop"
-        | "security.sandbox_escape" | "guard.tripped" => Altitude::Error,
-        // Gates awaiting the operator (conversational asks, RFC §3.5) and
-        // integrity events. `runtime.lock_drift` stores an explicit altitude
-        // (Error when rejected, Attention when overridden); this is just the
-        // safe floor for any NULL-altitude fallback.
-        "user.ask.pending" | "approval.pending" | "plan.pending" | "divergence.intervention"
-        | "runtime.lock_drift" | "escalation.pending" | "security.escape_threshold" => {
-            Altitude::Attention
-        }
-        // Everything else is normal progress.
+        // ─── Error: failures and integrity breaches. ───
+        "llm.request_failed"
+        | "llm.empty_response"
+        | "guard.tripped"
+        | "session.emergency_stop"
+        | "security.sandbox_escape"
+        | "tool.failed" => Altitude::Error,
+
+        // ─── Attention: operator gates — requests AND decisions. ───
+        // The full lifecycle of a gate shares one altitude so each ask reads
+        // paired with its resolution. Abandonments (cancelled/withdrawn) are
+        // NOT decisions → Normal below.
+        "plan.pending"
+        | "plan.approved"
+        | "envelope.proposed"
+        | "envelope.locked"
+        | "approval.pending"
+        | "approval.approved"
+        | "approval.rejected"
+        | "escalation.pending"
+        | "user.ask.pending"
+        | "operator.comment"
+        | "wiki.proposed"
+        | "wiki.promoted"
+        | "wiki.rejected"
+        | "divergence.intervention"
+        | "runtime.lock_drift"
+        | "security.escape_threshold" => Altitude::Attention,
+
+        // ─── Normal: visible progress (the default floor). ───
+        // Agent/operator narrative, session boundaries, the workbench-CREATED
+        // milestone, audits, retries, and gate abandonments.
+        "agent.message" | "operator.message" | "session.start" | "session.end"
+        | "workbench.created" | "digest_annotate" | "llm.retry" | "approval.cancelled"
+        | "wiki.withdrawn" => Altitude::Normal,
+
+        // ─── Detail: hidable plumbing. ───
+        // Turns, LLM rounds, reasoning, tool requests AND successful tool
+        // completions (failures are bumped to Attention at the emit site),
+        // workflow bookkeeping, scheduled jobs, workbench reconcile/discard.
+        "turn.start"
+        | "turn.end"
+        | "llm.round"
+        | "agent.reasoning"
+        | "tool.requested"
+        | "tool.completed"
+        | "workbench.reconciled"
+        | "workbench.discarded"
+        | "workflow.child_state"
+        | "workflow.join_satisfied"
+        | "workflow.signal"
+        | "scheduled_job.triggered"
+        | "scheduled_job.completed"
+        | "scheduled_job.failed" => Altitude::Detail,
+
+        // Unknown event type: Normal is the safe default (visible). New event
+        // types surface until consciously classified above.
         _ => Altitude::Normal,
     }
 }
@@ -418,7 +609,10 @@ pub fn role_floor(role: &SessionRole) -> Altitude {
     role_floor_with_config(role, None)
 }
 
-pub fn role_floor_with_config(role: &SessionRole, config_floors: Option<&std::collections::HashMap<String, String>>) -> Altitude {
+pub fn role_floor_with_config(
+    role: &SessionRole,
+    config_floors: Option<&std::collections::HashMap<String, String>>,
+) -> Altitude {
     if let Some(floors) = config_floors {
         let key = match role {
             SessionRole::Operator => "operator",
@@ -449,7 +643,11 @@ pub fn altitude_for(event_type: &str, role: &SessionRole) -> Altitude {
     base_altitude(event_type).max(role_floor(role))
 }
 
-pub fn altitude_for_with_config(event_type: &str, role: &SessionRole, config_floors: Option<&std::collections::HashMap<String, String>>) -> Altitude {
+pub fn altitude_for_with_config(
+    event_type: &str,
+    role: &SessionRole,
+    config_floors: Option<&std::collections::HashMap<String, String>>,
+) -> Altitude {
     base_altitude(event_type).max(role_floor_with_config(role, config_floors))
 }
 
@@ -463,7 +661,9 @@ pub fn derive_role(agent_id: &str) -> SessionRole {
         "curator" => SessionRole::Curator,
         "auditor" => SessionRole::Auditor,
         "runtime" | "gateway" => SessionRole::Runtime,
-        other => SessionRole::Specialist { kind: other.to_string() },
+        other => SessionRole::Specialist {
+            kind: other.to_string(),
+        },
     }
 }
 
@@ -472,13 +672,19 @@ pub fn derive_role(agent_id: &str) -> SessionRole {
 /// a `decided_by` string. `user`/`operator`/`human` ⇒ Operator seat (the
 /// emergency-stop API/CLI uses `"user"`); `agent` ⇒ that agent's seat; anything
 /// else (`system`, `security_policy`, …) ⇒ Runtime.
-pub fn actor_from_kind_id(kind: &str, id: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
+pub fn actor_from_kind_id(
+    kind: &str,
+    id: &str,
+) -> (autonoetic_types::principal::Principal, SessionRole) {
     use autonoetic_types::principal::{Principal, PrincipalKind};
     match kind {
         "user" | "operator" | "human" => (Principal::human(id), SessionRole::Operator),
         "agent" | "autonoetic_agent" => (Principal::agent(id), derive_role(id)),
         _ => (
-            Principal { kind: PrincipalKind::Script, id: id.to_string() },
+            Principal {
+                kind: PrincipalKind::Script,
+                id: id.to_string(),
+            },
             SessionRole::Runtime,
         ),
     }
@@ -487,8 +693,11 @@ pub fn actor_from_kind_id(kind: &str, id: &str) -> (autonoetic_types::principal:
 /// Attribute a gate decision to a `(principal, seat)` from its recorded
 /// `decided_by` string. Operator (human) ⇒ Operator seat; an agent decider
 /// (`auditor.default` or `agent:auditor.default`) ⇒ that agent's seat (the
-/// `agent:` prefix is stripped first); a mechanical/unknown decider
-/// (`gateway`, `emergency_stop:<id>`, …) ⇒ the hidable Runtime seat.
+/// `agent:` prefix is stripped first); a served user (`user:<id>`) ⇒ its own
+/// distinct principal kind, never collapsed into `Human` or `Script` (the
+/// conflation `PrincipalKind::ServedUser` exists to prevent — see
+/// `docs/philosophy.md` §3.3); a mechanical/unknown decider (`gateway`,
+/// `emergency_stop:<id>`, …) ⇒ the hidable Runtime seat.
 pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal, SessionRole) {
     use autonoetic_types::principal::{Principal, PrincipalKind};
     match autonoetic_types::principal::decider_principal_kind(decided_by) {
@@ -497,8 +706,20 @@ pub fn decider_seat(decided_by: &str) -> (autonoetic_types::principal::Principal
             let id = decided_by.strip_prefix("agent:").unwrap_or(decided_by);
             (Principal::agent(id), derive_role(id))
         }
+        // A served user is an attribution kind, not a seat (§3.3): it carries
+        // no Specialist/Auditor role of its own. It is kept distinct from
+        // `Human` (the operator) by its principal kind — the thing every
+        // accountability check keys on — and from `Script` (mechanical) by
+        // getting its own arm rather than the `_` fallback.
+        Some(PrincipalKind::ServedUser) => {
+            let id = decided_by.strip_prefix("user:").unwrap_or(decided_by);
+            (Principal::served_user(id), SessionRole::Operator)
+        }
         _ => (
-            Principal { kind: PrincipalKind::Script, id: decided_by.to_string() },
+            Principal {
+                kind: PrincipalKind::Script,
+                id: decided_by.to_string(),
+            },
             SessionRole::Runtime,
         ),
     }
@@ -522,13 +743,8 @@ mod tests {
             }
         });
         let meta = serde_json::json!({ "signal_delivered": true });
-        let event = ingest_chat_timeline_event(
-            "session-1",
-            None,
-            &msg.to_string(),
-            Some(&meta),
-        )
-        .expect("signal should emit timeline row");
+        let event = ingest_chat_timeline_event("session-1", None, &msg.to_string(), Some(&meta))
+            .expect("signal should emit timeline row");
         assert_eq!(event.event_type, "workflow.child_state");
         assert_eq!(event.altitude.as_deref(), Some("detail"));
         assert_eq!(event.role, Some(SessionRole::Runtime.to_storage()));
@@ -615,6 +831,7 @@ mod tests {
                 requires_approval: true,
                 evidence_ref: None,
                 detected_hosts: None,
+                intent: None,
             },
             created_at: chrono::Utc::now().to_rfc3339(),
             status: None,
@@ -624,12 +841,12 @@ mod tests {
             evidence_ref: None,
             decision_reason: None,
             approval_level: ApprovalLevel::Operator,
-            similar_to_request_id: None,
-            similarity_score: None,
             min_dwell_ms: None,
             confirm_phrase: None,
             code_excerpts: None,
             risk_summary: None,
+
+            expires_at: None,
         };
         store.create_approval(&mut approval).unwrap();
         let page = store
@@ -661,7 +878,9 @@ mod tests {
             turn_id: "turn-000002".to_string(),
             kind: UserInteractionKind::Clarification,
             question: "Which API should I use?".to_string(),
-            context: None,
+            context: Some(
+                "Signals:\n- loop_pressure (critical): 10 cycles without progress".to_string(),
+            ),
             options: vec![],
             allow_freeform: true,
             status: UserInteractionStatus::Pending,
@@ -683,6 +902,13 @@ mod tests {
             page.entries[0].refs.interaction_id.as_deref(),
             Some("ui-test01")
         );
+        let payload: serde_json::Value =
+            serde_json::from_str(page.entries[0].payload.as_deref().unwrap_or("{}")).unwrap();
+        assert!(payload.get("context").is_some());
+        assert!(payload["context"]
+            .as_str()
+            .unwrap_or("")
+            .contains("loop_pressure"));
     }
 
     #[test]
@@ -724,6 +950,79 @@ mod tests {
             altitude_for("agent.reasoning", &SessionRole::Sentinel),
             Altitude::Attention
         );
+    }
+
+    #[test]
+    fn altitude_policy_gate_lifecycle_shares_attention() {
+        // A gate's request AND decision share Attention so each ask reads
+        // paired with its resolution. Abandonments (cancelled/withdrawn) are
+        // NOT decisions → Normal.
+        for approved in ["plan.approved", "approval.approved", "approval.rejected"] {
+            assert_eq!(base_altitude(approved), Altitude::Attention, "{approved}");
+        }
+        for pending in [
+            "plan.pending",
+            "approval.pending",
+            "escalation.pending",
+            "user.ask.pending",
+            "wiki.proposed",
+            "wiki.promoted",
+            "wiki.rejected",
+        ] {
+            assert_eq!(base_altitude(pending), Altitude::Attention, "{pending}");
+        }
+        // Abandonments — visible, but not decision checkpoints.
+        assert_eq!(base_altitude("approval.cancelled"), Altitude::Normal);
+        assert_eq!(base_altitude("wiki.withdrawn"), Altitude::Normal);
+    }
+
+    #[test]
+    fn altitude_policy_tool_completion_is_detail_success() {
+        // tool.requested and tool.completed are a matched pair at Detail
+        // (success = plumbing). Failures are bumped to Attention at the emit
+        // site (see session_tracer), not here.
+        assert_eq!(base_altitude("tool.requested"), Altitude::Detail);
+        assert_eq!(base_altitude("tool.completed"), Altitude::Detail);
+    }
+
+    #[test]
+    fn altitude_policy_workbench_created_is_normal_milestone() {
+        // Creation is a milestone (content becomes reviewable); reconcile/
+        // discard remain plumbing.
+        assert_eq!(base_altitude("workbench.created"), Altitude::Normal);
+        assert_eq!(base_altitude("workbench.reconciled"), Altitude::Detail);
+        assert_eq!(base_altitude("workbench.discarded"), Altitude::Detail);
+    }
+
+    #[test]
+    fn altitude_policy_explicit_normal_progress() {
+        for et in [
+            "agent.message",
+            "operator.message",
+            "session.start",
+            "session.end",
+            "digest_annotate",
+            "llm.retry",
+        ] {
+            assert_eq!(base_altitude(et), Altitude::Normal, "{et}");
+        }
+    }
+
+    #[test]
+    fn operator_comment_is_attention_and_attributed() {
+        // An anchored operator comment flags an issue the agent should address;
+        // it must clear the Normal floor so a channel showing normal-and-above
+        // does not hide it.
+        assert_eq!(base_altitude("operator.comment"), Altitude::Attention);
+
+        let event = operator_comment_event(
+            "root-x/agent.coder",
+            "operator",
+            serde_json::json!({ "name": "config.yaml", "body": "secret here" }),
+        );
+        assert_eq!(event.event_type, "operator.comment");
+        assert_eq!(event.role.as_deref(), Some("operator"));
+        assert_eq!(event.altitude.as_deref(), Some("attention"));
     }
 
     #[test]
@@ -790,13 +1089,27 @@ mod tests {
         assert_eq!(r, SessionRole::Auditor);
 
         let (_p, r) = decider_seat("coder.default");
-        assert_eq!(r, SessionRole::Specialist { kind: "coder".to_string() });
+        assert_eq!(
+            r,
+            SessionRole::Specialist {
+                kind: "coder".to_string()
+            }
+        );
 
         // Mechanical resolutions ⇒ hidable Runtime seat, never Specialist{emergency_stop:..}.
         let (_p, r) = decider_seat("emergency_stop:estop-1a2b3c4d");
         assert_eq!(r, SessionRole::Runtime);
         let (_p, r) = decider_seat("gateway");
         assert_eq!(r, SessionRole::Runtime);
+
+        // A served user is attributed as its own kind — never collapsed into
+        // Human (operator) or Script (mechanical). The `user:` prefix is
+        // stripped from the id, matching the `agent:` handling above.
+        let (p, _r) = decider_seat("user:alice.smith");
+        assert_eq!(p.kind, PrincipalKind::ServedUser);
+        assert_eq!(p.id, "alice.smith");
+        assert_ne!(p.kind, PrincipalKind::Human);
+        assert_ne!(p.kind, PrincipalKind::Script);
     }
 
     #[test]
@@ -805,7 +1118,9 @@ mod tests {
         assert_eq!(derive_role("sentinel.divergence"), SessionRole::Sentinel);
         assert_eq!(
             derive_role("coder.default"),
-            SessionRole::Specialist { kind: "coder".to_string() }
+            SessionRole::Specialist {
+                kind: "coder".to_string()
+            }
         );
     }
 

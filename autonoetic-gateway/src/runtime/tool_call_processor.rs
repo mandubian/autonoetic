@@ -2,6 +2,34 @@
 //!
 //! Handles tool execution, disclosure tracking, and secret store integration.
 //! Returns structured error responses for recoverable failures instead of aborting.
+//!
+//! ## LLM-normalization doctrine (RFC determinism §3 M1, #619)
+//!
+//! The gateway tolerates some model non-conformance by *normalizing* output
+//! (e.g. stripping vendor special-token artifacts, mapping tool-name
+//! shorthands). The doctrine governing such tolerances:
+//!
+//! 1. **Closed set.** A new model quirk is either absorbed by an *existing*
+//!    normalizer or rejected with a typed repair hint — never handled by adding
+//!    a new bespoke silent branch.
+//! 2. **Observable, never silent.** Every applied normalization emits a
+//!    structured trace via [`note_llm_normalization`] so the gateway "guessing"
+//!    around a model is visible in traces, not hidden corner-cutting.
+//!
+//! Instrumented here: `strip_gemma_token_artifacts` (vendor tokens),
+//! `canonical_tool_name` (tool-name aliases).
+//!
+//! Instrumented elsewhere through the same [`note_llm_normalization`] chokepoint:
+//! the lenient string coercions in `tools/mod.rs`, the non-exact `fuzzy_match`
+//! fallback (`runtime/fuzzy_match.rs`), and the shared markdown-fence stripper in
+//! `response_validation.rs`. Tool-name shorthands are still accepted but framed
+//! as a deprecation notice (`tool_name_alias_deprecated`).
+//!
+//! Deferred enforcement (tracked under #619, not in this change): move the
+//! Gemma stripping to the LLM driver boundary (the driver output is not a clean
+//! single chokepoint today — multiple drivers, streaming + non-streaming paths);
+//! replace tool-name aliasing with reject-with-repair-hint after a logged
+//! deprecation window.
 
 use crate::llm::ToolCall;
 use crate::runtime::disclosure::DisclosureState;
@@ -25,12 +53,21 @@ pub struct ToolCallProcessor<'a> {
     manifest: &'a AgentManifest,
     disclosure_state: &'a mut DisclosureState,
     secret_store: Option<&'a mut SecretStoreRuntime>,
+    /// Cached per-processor to avoid cloning the manifest for every tool call.
+    policy: crate::policy::PolicyEngine,
     session_id: Option<String>,
     turn_id: Option<String>,
     config: Option<&'a GatewayConfig>,
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
     session_state: autonoetic_types::agent::SessionState,
+}
+
+/// Result of executing a single tool call, including whether the payload was
+/// served from the session read cache.
+struct ToolCallOutput {
+    result: String,
+    cache_hit: bool,
 }
 
 pub fn is_degraded_mode_tool_blocked(
@@ -43,30 +80,62 @@ pub fn is_degraded_mode_tool_blocked(
     matches!(tool_name, "sandbox_exec" | "artifact_exec")
 }
 
+/// Emit a single structured trace whenever the gateway tolerates a model
+/// non-conformance by normalizing its output (M1 doctrine: tolerance must be
+/// *observable*, never silent). `kind` is a stable label; `detail` is a short,
+/// **redacted** summary of what was normalized — never include raw tool
+/// arguments or results (they can carry secrets). Emitted at `info` so it is
+/// visible under the default `EnvFilter` (global INFO), not only under DEBUG —
+/// observability is the whole point.
+///
+/// Since #771 D.3 this also feeds the DISCRETION LEAK register: when the
+/// executor's ambient [`discretion_leak::LeakScope`] is installed (tool-call
+/// processing, response validation), the normalization is recorded as a
+/// durable `discretion_leak` causal event attributed to P-5.2 — the
+/// constitutional site that names gateway-side reshaping of agent input.
+/// Outside a scope the trace line remains the record (never silent).
+pub(crate) fn note_llm_normalization(kind: &'static str, detail: &str) {
+    crate::runtime::discretion_leak::record_discretion_leak(kind, detail, &["P-5.2"]);
+}
+
 fn strip_gemma_token_artifacts(s: &str) -> String {
-    let re = regex::Regex::new(r"<\|[^>]*\|>").unwrap();
-    re.replace_all(s, |caps: &regex::Captures| -> String {
-        let token = &caps[0];
-        match token {
-            "<|\"|>" => "\"".to_string(),
-            "<|'|>" => "'".to_string(),
-            "<|_|>" => "_".to_string(),
-            _ => token.to_string(),
-        }
-    })
-    .to_string()
+    // Compile once: this runs on hot paths (every tool call's args/results).
+    static GEMMA_TOKEN_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = GEMMA_TOKEN_RE.get_or_init(|| regex::Regex::new(r"<\|[^>]*\|>").unwrap());
+    let out = re
+        .replace_all(s, |caps: &regex::Captures| -> String {
+            let token = &caps[0];
+            match token {
+                "<|\"|>" => "\"".to_string(),
+                "<|'|>" => "'".to_string(),
+                "<|_|>" => "_".to_string(),
+                _ => token.to_string(),
+            }
+        })
+        .to_string();
+    if out != s {
+        note_llm_normalization(
+            "gemma_token_artifacts",
+            "stripped vendor special-token artifacts from tool arguments",
+        );
+    }
+    out
+}
+
+pub(crate) fn canonical_tool_name(name: &str) -> &str {
+    match name {
+        "spawn" => "agent_spawn",
+        "message" => "agent_message",
+        "search" => "web_search",
+        "fetch" => "web_fetch",
+        "sandbox.exec" => "sandbox_exec",
+        "artifact.exec" => "artifact_exec",
+        "artifact.prepare" => "artifact_prepare",
+        _ => name,
+    }
 }
 
 impl<'a> ToolCallProcessor<'a> {
-    fn canonical_tool_name(name: &str) -> &str {
-        match name {
-            "spawn" => "agent_spawn",
-            "message" => "agent_message",
-            "search" => "web_search",
-            "fetch" => "web_fetch",
-            _ => name,
-        }
-    }
 
     pub fn new(
         mcp_runtime: &'a mut McpToolRuntime,
@@ -84,6 +153,7 @@ impl<'a> ToolCallProcessor<'a> {
             manifest,
             disclosure_state,
             secret_store,
+            policy: crate::policy::PolicyEngine::new(manifest.clone()),
             session_id: None,
             turn_id: None,
             config,
@@ -117,7 +187,44 @@ impl<'a> ToolCallProcessor<'a> {
     /// the execution loop uses this to decide whether to reset the loop-guard counter.
     /// Recoverable errors are returned as structured error JSON in the result.
     /// Only fatal errors cause the entire operation to fail.
+    ///
+    /// The whole batch runs inside the executor's ambient
+    /// [`crate::runtime::discretion_leak::LeakScope`] (#771 D.3): any
+    /// normalization tolerated downstream (argument coercion in serde
+    /// deserializers, fuzzy patch matching, vendor-token stripping, tool-name
+    /// aliasing) is recorded in the DISCRETION LEAK register with this
+    /// session's attribution, not just traced.
     pub async fn process_tool_calls(
+        &mut self,
+        tool_calls: &[ToolCall],
+        agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        tracer: &mut SessionTracer,
+    ) -> anyhow::Result<(bool, Vec<(String, String, String)>)> {
+        let leak_scope = self.gateway_store.as_ref().map(|store| {
+            crate::runtime::discretion_leak::LeakScope::new(
+                store.clone(),
+                self.manifest.agent.id.clone(),
+                self.session_id.clone().unwrap_or_default(),
+                self.turn_id.clone(),
+            )
+        });
+        match leak_scope {
+            Some(scope) => {
+                crate::runtime::discretion_leak::with_leak_scope(scope, async move {
+                    self.process_tool_calls_inner(tool_calls, agent_dir, gateway_dir, tracer)
+                        .await
+                })
+                .await
+            }
+            None => {
+                self.process_tool_calls_inner(tool_calls, agent_dir, gateway_dir, tracer)
+                    .await
+            }
+        }
+    }
+
+    async fn process_tool_calls_inner(
         &mut self,
         tool_calls: &[ToolCall],
         agent_dir: &Path,
@@ -130,7 +237,23 @@ impl<'a> ToolCallProcessor<'a> {
         for tc in tool_calls {
             let started_at = Instant::now();
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
-            let tool_name = Self::canonical_tool_name(&tc.name).to_string();
+            let tool_name = canonical_tool_name(&tc.name).to_string();
+            if tool_name != tc.name {
+                // C (#619): tool-name shorthands are STILL accepted here — a hard
+                // reject is a breaking change that requires a logged deprecation
+                // window first (the reject-with-repair-hint step is gated on that
+                // window, tracked in #619). For now we frame the tolerance as a
+                // deprecation notice so it is visible in traces without breaking
+                // agents that rely on the shorthand.
+                note_llm_normalization(
+                    "tool_name_alias_deprecated",
+                    &format!(
+                        "mapped deprecated tool-name shorthand '{}' -> '{}' (still accepted; \
+                         will be rejected in a future release)",
+                        tc.name, tool_name
+                    ),
+                );
+            }
 
             if self.is_degraded_blocked_tool(&tool_name) {
                 let tool_error = ToolError::permission(format!(
@@ -140,13 +263,14 @@ impl<'a> ToolCallProcessor<'a> {
                 ));
                 let error_json = tool_error.to_json_string();
                 let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
-                self.record_execution_trace(
+                let trace_id = self.record_execution_trace(
                     tc,
                     &error_json,
                     started_at.elapsed(),
                     Some(&tool_error),
                     Some(failure_event_id),
                 )?;
+                let error_json = inject_execution_trace_id(&error_json, trace_id.as_deref());
                 results.push((tc.id.clone(), tc.name.clone(), error_json));
                 continue;
             }
@@ -156,37 +280,40 @@ impl<'a> ToolCallProcessor<'a> {
                 Err(tool_error) => {
                     let error_json = tool_error.to_json_string();
                     let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
-                    self.record_execution_trace(
+                    let trace_id = self.record_execution_trace(
                         tc,
                         &error_json,
                         started_at.elapsed(),
                         Some(&tool_error),
                         Some(failure_event_id),
                     )?;
+                    let error_json = inject_execution_trace_id(&error_json, trace_id.as_deref());
                     results.push((tc.id.clone(), tc.name.clone(), error_json));
                     continue;
                 }
             };
-            let canonical_tool = Self::canonical_tool_name(&tc.name);
+            let canonical_tool = canonical_tool_name(&tc.name);
             tracer.log_tool_requested(canonical_tool, &tc.arguments, intent.as_deref())?;
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
-                Ok(res) => {
-                    let res = normalize_tool_result_json(&res);
+                Ok(output) => {
+                    let res = normalize_tool_result_json(&output.result);
                     let event_id = tracer.log_tool_completed_with_approval(
                         canonical_tool,
                         &res,
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
-                    self.record_execution_trace(
-                        tc,
-                        &res,
-                        started_at.elapsed(),
-                        None,
-                        Some(event_id.clone()),
-                    )?;
+                    if !output.cache_hit {
+                        self.record_execution_trace(
+                            tc,
+                            &res,
+                            started_at.elapsed(),
+                            None,
+                            Some(event_id.clone()),
+                        )?;
+                    }
                     self.record_operator_activity(tc, &res, Some(event_id));
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
@@ -196,19 +323,18 @@ impl<'a> ToolCallProcessor<'a> {
                     let tool_error = decorate_tool_error(e.into());
                     let error_json = tool_error.to_json_string();
                     let failure_event_id = self.log_tool_failure(tracer, tc, &tool_error)?;
+                    // Safety net: never let a single tool error kill the agent
+                    // session or the bound workflow. Surface the error as a
+                    // normal tool result so the agent can see it and decide how
+                    // to proceed. The LoopGuard will still trip if the agent
+                    // spirals on the same failure.
                     if !tool_error.is_recoverable() {
-                        self.record_execution_trace(
-                            tc,
-                            &error_json,
-                            started_at.elapsed(),
-                            Some(&tool_error),
-                            Some(failure_event_id),
-                        )?;
-                        return Err(anyhow::anyhow!(
-                            "Fatal tool error in {}: {}",
-                            tc.name,
-                            tool_error.message
-                        ));
+                        tracing::warn!(
+                            target: "tool_call_processor",
+                            tool = %tc.name,
+                            session_id = %self.session_id.as_deref().unwrap_or("unknown"),
+                            "Non-recoverable tool error surfaced as tool result instead of terminating session"
+                        );
                     }
                     let event_id = tracer.log_tool_completed_with_approval(
                         canonical_tool,
@@ -216,13 +342,14 @@ impl<'a> ToolCallProcessor<'a> {
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
                     )?;
-                    self.record_execution_trace(
+                    let trace_id = self.record_execution_trace(
                         tc,
                         &error_json,
                         started_at.elapsed(),
                         Some(&tool_error),
                         Some(event_id.clone()),
                     )?;
+                    let error_json = inject_execution_trace_id(&error_json, trace_id.as_deref());
                     self.record_operator_activity(tc, &error_json, Some(event_id));
                     error_json
                 }
@@ -234,6 +361,9 @@ impl<'a> ToolCallProcessor<'a> {
                 break;
             }
             if tool_result_requires_escalation(&results.last().expect("just pushed result").2) {
+                break;
+            }
+            if tool_result_requires_waiting_for_child(&results.last().expect("just pushed result").2) {
                 break;
             }
         }
@@ -248,16 +378,16 @@ impl<'a> ToolCallProcessor<'a> {
         duration: Duration,
         tool_error: Option<&ToolError>,
         event_id: Option<String>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let Some(store) = &self.gateway_store else {
-            return Ok(());
+            return Ok(None);
         };
         let session_id = self
             .session_id
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("session_id missing while recording execution trace"))?;
 
-        let canonical_tool_name = Self::canonical_tool_name(&tc.name).to_string();
+        let canonical_tool_name = canonical_tool_name(&tc.name).to_string();
         let parsed_result = serde_json::from_str::<serde_json::Value>(result_json).ok();
         let success = infer_trace_success(parsed_result.as_ref(), tool_error);
         let error_type = infer_trace_error_type(parsed_result.as_ref(), tool_error);
@@ -289,8 +419,18 @@ impl<'a> ToolCallProcessor<'a> {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
+        // If the tool result already carries a trace id (e.g. injected by
+        // `execute_tool_call` before caching), reuse it so the durable trace
+        // matches the id returned to the agent.
+        let trace_id = parsed_result
+            .as_ref()
+            .and_then(|v| v.get("execution_trace_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         let trace = ExecutionTraceRecord {
-            trace_id: uuid::Uuid::new_v4().to_string(),
+            trace_id,
             event_id,
             agent_id: self.manifest.agent.id.clone(),
             session_id: session_id.clone(),
@@ -310,7 +450,8 @@ impl<'a> ToolCallProcessor<'a> {
             arguments: Some(tc.arguments.clone()),
             result: Some(result_json.to_string()),
         };
-        store.create_execution_trace(&trace)
+        store.create_execution_trace(&trace)?;
+        Ok(Some(trace.trace_id))
     }
 
     fn record_operator_activity(
@@ -325,7 +466,7 @@ impl<'a> ToolCallProcessor<'a> {
         let Some(session_id) = &self.session_id else {
             return;
         };
-        let canonical_tool_name = Self::canonical_tool_name(&tc.name).to_string();
+        let canonical_tool_name = canonical_tool_name(&tc.name).to_string();
         let Some(draft) = crate::runtime::operator_activity::classify_tool_activity(
             &canonical_tool_name,
             &tc.arguments,
@@ -388,13 +529,20 @@ impl<'a> ToolCallProcessor<'a> {
         tc: &ToolCall,
         agent_dir: &Path,
         gateway_dir: Option<&Path>,
-    ) -> anyhow::Result<String> {
-        let tool_name = Self::canonical_tool_name(&tc.name);
-        let policy = crate::policy::PolicyEngine::new(self.manifest.clone());
+    ) -> anyhow::Result<ToolCallOutput> {
+        let tool_name = canonical_tool_name(&tc.name);
+        let policy = &self.policy;
 
+        // TODO(#619): hoist to driver boundary. Sanitizing here (and in
+        // `validate_tool_intent`) means the strip runs per call site rather than
+        // once where raw model output enters the gateway. The driver boundary is
+        // NOT a clean single point today: ToolCall is constructed at 6 sites
+        // across anthropic/gemini/openai/xml_tool_calls drivers, on both the
+        // streaming and non-streaming paths, and assistant text would need
+        // separate handling. Centralizing safely needs a dedicated change.
         let sanitized_args = strip_gemma_token_artifacts(&tc.arguments);
 
-        let mut result = if self.mcp_runtime.has_tool(tool_name) {
+        let (mut result, cache_hit) = if self.mcp_runtime.has_tool(tool_name) {
             let tool_policy = policy.can_invoke_tool(tool_name);
             if !tool_policy.is_allowed() {
                 return Err(anyhow::Error::from(
@@ -407,9 +555,11 @@ impl<'a> ToolCallProcessor<'a> {
                     ),
                 ));
             }
-            self.mcp_runtime
+            let r = self.mcp_runtime
                 .call_tool(tool_name, &sanitized_args)
-                .await?
+                .await?;
+            let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
+            (r, false)
         } else if self.registry.has_tool(tool_name) {
             // #289 session-scoped read cache: for pure read tools, return a
             // memoized result instead of re-executing (and re-injecting the
@@ -418,6 +568,10 @@ impl<'a> ToolCallProcessor<'a> {
             // still run on every hit, so this is transparent to those
             // invariants. The cache is consulted only when we have both a
             // session id and a gateway store to hold the per-session cache.
+            //
+            // We inject `execution_trace_id` before caching so the memoized
+            // payload already carries the durable trace handle; cache hits
+            // reuse that id and skip creating a duplicate execution trace.
             let cache_ctx = match (self.session_id.as_deref(), self.gateway_store.as_ref()) {
                 (Some(sid), Some(store)) => Some((sid.to_string(), store.clone())),
                 _ => None,
@@ -429,7 +583,7 @@ impl<'a> ToolCallProcessor<'a> {
                     .get(sid, tool_name, &sanitized_args)
                 {
                     self.emit_cache_hit_event(store, tool_name);
-                    hit
+                    (hit, true)
                 } else {
                     let r = self.registry.execute(
                         tool_name,
@@ -444,11 +598,12 @@ impl<'a> ToolCallProcessor<'a> {
                         self.gateway_store.clone(),
                         self.run_context.as_ref(),
                     )?;
+                    let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
                     self.maybe_cache_or_invalidate(store, sid, tool_name, &sanitized_args, &r);
-                    r
+                    (r, false)
                 }
             } else {
-                self.registry.execute(
+                let r = self.registry.execute(
                     tool_name,
                     self.manifest,
                     &policy,
@@ -460,7 +615,9 @@ impl<'a> ToolCallProcessor<'a> {
                     self.config,
                     self.gateway_store.clone(),
                     self.run_context.as_ref(),
-                )?
+                )?;
+                let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
+                (r, false)
             }
         } else {
             let agent_like_hint = if tc.name.contains('.') {
@@ -490,7 +647,7 @@ impl<'a> ToolCallProcessor<'a> {
             }
         }
 
-        Ok(result)
+        Ok(ToolCallOutput { result, cache_hit })
     }
 
     /// After a successful `registry.execute` for a tool with cache
@@ -621,10 +778,18 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn tool_result_requires_waiting_for_child(result: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|parsed| parsed.get("waiting_for_child").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
 fn validate_tool_intent(
     tool_name: &str,
     arguments_json: &str,
 ) -> Result<Option<String>, ToolError> {
+    // TODO(#619): hoist to driver boundary (see note in `execute_tool_call`).
     let sanitized_args = strip_gemma_token_artifacts(arguments_json);
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&sanitized_args) else {
         return Ok(None);
@@ -683,6 +848,19 @@ fn tool_result_requires_escalation(result: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn inject_execution_trace_id(result_json: &str, trace_id: Option<&str>) -> String {
+    let Some(id) = trace_id else {
+        return result_json.to_string();
+    };
+    match serde_json::from_str::<serde_json::Value>(result_json) {
+        Ok(Value::Object(mut obj)) => {
+            obj.insert("execution_trace_id".to_string(), Value::String(id.to_string()));
+            serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| result_json.to_string())
+        }
+        _ => result_json.to_string(),
+    }
+}
+
 fn infer_trace_success(
     parsed_result: Option<&serde_json::Value>,
     tool_error: Option<&ToolError>,
@@ -693,6 +871,15 @@ fn infer_trace_success(
     let Some(parsed) = parsed_result else {
         return true;
     };
+    // Prefer the explicit command outcome when present. For exec tools
+    // (`artifact_exec`) `ok` now means "the tool ran to completion" while
+    // `command_succeeded` is the exit-0 signal — so the recorded trace
+    // `success` (and operator-facing digests/overviews derived from it) must
+    // reflect the command result, not merely that the sandbox executed.
+    // (RFC: unit-test-runner-divergence-loop)
+    if let Some(cs) = parsed.get("command_succeeded").and_then(|v| v.as_bool()) {
+        return cs;
+    }
     if let Some(ok) = parsed.get("ok").and_then(|v| v.as_bool()) {
         return ok;
     }
@@ -726,6 +913,7 @@ fn infer_trace_error_type(
             ToolErrorType::QuotaExceeded => "quota_exceeded",
             ToolErrorType::NotFound => "not_found",
             ToolErrorType::Timeout => "timeout",
+            ToolErrorType::SandboxUnavailable => "sandbox_unavailable",
             ToolErrorType::Execution | ToolErrorType::Fatal => "runtime",
         };
         return Some(mapped.to_string());
@@ -810,7 +998,8 @@ mod tests {
                 id: "test-agent".to_string(),
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![
                 Capability::ReadAccess {
                     scopes: vec!["*".to_string()],
@@ -833,8 +1022,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
@@ -1267,6 +1458,9 @@ mod tests {
         let registry = default_registry();
         let mut disclosure_state = DisclosureState::default();
 
+        let gateway_store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap(),
+        );
         let mut processor = ToolCallProcessor::new(
             &mut mcp_runtime,
             &registry,
@@ -1274,7 +1468,7 @@ mod tests {
             &mut disclosure_state,
             None,
             None,
-            None,
+            Some(gateway_store),
             None,
         )
         .with_session_context(
@@ -1440,27 +1634,92 @@ mod tests {
             .contains("echo hi"));
     }
 
+    #[tokio::test]
+    async fn test_process_tool_calls_injects_execution_trace_id() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(TraceSuccessTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(
+            Some("trace-id-session".to_string()),
+            Some("turn-000001".to_string()),
+        );
+
+        let tool_calls = vec![ToolCall {
+            id: "tc1".to_string(),
+            name: "test.trace.success".to_string(),
+            arguments: r#"{"command":"echo hi"}"#.to_string(),
+        }];
+
+        let (_had_success, results) = processor
+            .process_tool_calls(
+                &tool_calls,
+                temp.path(),
+                Some(gateway_dir.as_path()),
+                &mut SessionTracer::test_tracer(),
+            )
+            .await
+            .unwrap();
+
+        let result_json = &results[0].2;
+        let parsed: serde_json::Value = serde_json::from_str(result_json).unwrap();
+        let trace_id = parsed
+            .get("execution_trace_id")
+            .and_then(|v| v.as_str())
+            .expect("execution_trace_id should be injected into tool result");
+
+        let trace = store
+            .get_execution_trace(trace_id)
+            .unwrap()
+            .expect("trace should exist for the returned execution_trace_id");
+        assert_eq!(trace.tool_name, "test.trace.success");
+        assert_eq!(trace.session_id, "trace-id-session");
+        assert_eq!(trace.trace_id, trace_id);
+    }
+
     #[test]
     fn test_canonical_tool_name_aliases() {
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("spawn"),
+            canonical_tool_name("spawn"),
             "agent_spawn"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("message"),
+            canonical_tool_name("message"),
             "agent_message"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("search"),
+            canonical_tool_name("search"),
             "web_search"
         );
-        assert_eq!(ToolCallProcessor::canonical_tool_name("fetch"), "web_fetch");
+        assert_eq!(canonical_tool_name("fetch"), "web_fetch");
+        assert_eq!(canonical_tool_name("sandbox.exec"), "sandbox_exec");
+        assert_eq!(canonical_tool_name("artifact.exec"), "artifact_exec");
+        assert_eq!(canonical_tool_name("artifact.prepare"), "artifact_prepare");
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("agent_spawn"),
+            canonical_tool_name("agent_spawn"),
             "agent_spawn"
         );
         assert_eq!(
-            ToolCallProcessor::canonical_tool_name("web_search"),
+            canonical_tool_name("web_search"),
             "web_search"
         );
     }
@@ -1746,6 +2005,88 @@ mod tests {
         // inspect #3 must re-execute (cache invalidated) → 2 executions.
         processor.process_tool_calls(&[call("a3", "agent_inspect", ea)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         assert_eq!(exists_calls.load(Ordering::SeqCst), 2, "agent_inspect after promote must re-execute");
+    }
+
+    /// A fake tool that returns a non-recoverable fatal error. Used to verify
+    /// the tool dispatch safety net: fatal tool errors must be surfaced as
+    /// structured tool results, not propagated as session-killing Errs.
+    struct FakeFatalTool;
+    impl NativeTool for FakeFatalTool {
+        fn name(&self) -> &'static str {
+            "fake_fatal"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "fake".to_string(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+        fn is_available(&self, _m: &AgentManifest) -> bool {
+            true
+        }
+        fn execute(
+            &self,
+            _m: &AgentManifest,
+            _p: &PolicyEngine,
+            _ad: &Path,
+            _gd: Option<&Path>,
+            _args: &str,
+            _sid: Option<&str>,
+            _tid: Option<&str>,
+            _cfg: Option<&autonoetic_types::config::GatewayConfig>,
+            _gs: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _rc: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            // The message contains "corrupted" so the gateway classifies this
+            // as ToolErrorType::Fatal (non-recoverable).
+            anyhow::bail!("artifact id 'art_deadbeef' already exists but its manifest does not match the requested inputs (identity mismatch). Refusing reuse; remove or repair the on-disk artifact if it is corrupted.")
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_recoverable_tool_error_is_surfaced_as_tool_result() {
+        let temp = tempdir().unwrap();
+        let gw_dir = temp.path().join("gateway");
+        std::fs::create_dir_all(&gw_dir).unwrap();
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gw_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(FakeFatalTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(Some("fatal-sess".to_string()), Some("t1".to_string()));
+
+        let (had_success, results) = processor
+            .process_tool_calls(&[call("f1", "fake_fatal", "{}")], temp.path(), None, &mut SessionTracer::test_tracer())
+            .await
+            .expect("process_tool_calls must return Ok even for non-recoverable tool errors");
+
+        assert!(!had_success, "a fatal tool call is not a success");
+        assert_eq!(results.len(), 1, "one result per tool call");
+
+        let parsed: serde_json::Value = serde_json::from_str(&results[0].2)
+            .expect("result must be valid JSON");
+        assert_eq!(parsed["ok"], false, "result must report ok:false");
+        assert_eq!(parsed["error_type"], "fatal", "result must be typed fatal");
+        assert!(
+            parsed["message"].as_str().unwrap().contains("corrupted"),
+            "message must preserve the original error"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

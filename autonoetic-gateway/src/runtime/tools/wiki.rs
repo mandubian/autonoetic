@@ -107,7 +107,7 @@ pub struct WikiListTool;
 
 impl NativeTool for WikiListTool {
     fn name(&self) -> &'static str {
-        "wiki.list"
+        "wiki_list"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -152,7 +152,7 @@ pub struct WikiGetTool;
 
 impl NativeTool for WikiGetTool {
     fn name(&self) -> &'static str {
-        "wiki.get"
+        "wiki_get"
     }
 
     fn is_available(&self, _manifest: &AgentManifest) -> bool {
@@ -209,7 +209,7 @@ pub struct WikiProposeTool;
 
 impl NativeTool for WikiProposeTool {
     fn name(&self) -> &'static str {
-        "wiki.propose"
+        "wiki_propose"
     }
 
     fn is_available(&self, manifest: &AgentManifest) -> bool {
@@ -329,14 +329,22 @@ impl NativeTool for WikiProposeTool {
             session_id,
             run_context,
             config,
-            reason: if is_edit {
-                format!("Edit wiki page '{}': {}", args.id, args.title)
-            } else {
-                format!("Propose new wiki page '{}': {}", args.id, args.title)
-            },
+            context: crate::runtime::human_gate::DecisionContext::tier2(
+                format!(
+                    "wiki {} \"{}\" ({})",
+                    if is_edit { "edit" } else { "new" },
+                    args.title,
+                    args.id
+                ),
+                "agent proposes a wiki change for review",
+                "publishes agent-authored content to the wiki",
+                "Approve if the proposed wiki content is accurate and appropriate to publish; reject if it is inaccurate, low-quality, or out of scope",
+            ),
             summary: format!("Wiki proposal: {}", args.title),
             approval_ref: None,
             pre_validated: false,
+            cache_backfill: None,
+            request_id: None,
             turn_id: None,
         };
 

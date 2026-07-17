@@ -46,7 +46,7 @@ Options:
 
 **Interactive setup (first run only):**
 
-1. Detects available providers from environment variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, etc.) and probes local servers (Ollama, LM Studio, vLLM, llama.cpp).
+1. Detects available providers from environment variables (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `MOONSHOT_API_KEY`, `KIMI_CODE_API_KEY`, etc.) and probes local servers (Ollama, LM Studio, vLLM, llama.cpp).
 2. Presents a numbered menu to pick a provider.
 3. Fetches the provider's model catalog and lets you pick a model.
 4. Optionally prompts for a user persona ("Tell me about yourself").
@@ -134,6 +134,17 @@ autonoetic gateway approvals list [--json]
 autonoetic gateway approvals approve <request_id> [--reason TEXT]
 autonoetic gateway approvals reject <request_id> [--reason TEXT]
 ```
+
+**Unified pending view (#722):** to see *everything* awaiting you for one root
+session — approvals, user interactions, escalations, and plans — in a single
+oldest-first list, each annotated with the command that resolves it:
+
+```bash
+autonoetic gateway pending --root-session <root_session_id> [--json]
+```
+
+This is the CLI form of the `operator.pending` RPC, so a headless operator no
+longer has to poll four separate command families.
 
 **Approval ID format:** Short IDs like `apr-db51b7ad` (12 chars). LLMs won't truncate these.
 
@@ -425,6 +436,33 @@ Inspect one alias and its active revision details.
 autonoetic agent alias inspect <alias_id> [--json]
 ```
 
+### `autonoetic agent alias suspend`
+
+Suspend an agent: block new sessions while leaving in-flight sessions running.
+Read-only resolution (evaluation/diff) stays available, so an operator can keep
+inspecting a suspended agent to decide whether to lift it. Use when an already
+promoted agent is found to hold too much capability — pair with
+`session.envelope.revoke` to also strip its auto-approved grants.
+
+```bash
+autonoetic agent alias suspend <alias_id> [--reason <TEXT>] [--by <WHO>] [--json]
+```
+
+- Idempotent: suspending an already-suspended agent reports no change.
+- Re-promotion lifts the suspension automatically — unless the promotion was
+  pre-authorized by a locked session envelope.
+
+### `autonoetic agent alias unsuspend`
+
+Lift a suspension so the agent can start new sessions again.
+
+```bash
+autonoetic agent alias unsuspend <alias_id> [--json]
+```
+
+> Over the gateway API these map to the `agent.suspend` / `agent.unsuspend`
+> JSON-RPC methods.
+
 ### `autonoetic agent promotion-history`
 
 Inspect durable promote/rollback history.
@@ -587,6 +625,56 @@ autonoetic trace contract-health [--since <RFC3339>] [--json]
 
 - `--since` — only count enforcement events at or after this RFC3339 timestamp.
 - `--json` — machine-readable output (`by_clause` with clause/count/title/binds, plus `unattributed`).
+
+---
+
+## Session Commands
+
+Inspect and export session-level state.
+
+### `autonoetic session show`
+
+Print the `SessionOutcome` row for a session as JSON. The row is created when the session closes.
+
+```bash
+autonoetic session show <session_id>
+```
+
+### `autonoetic session rate`
+
+Attach an operator rating (`thumbs-up` or `thumbs-down`) to a session's `SessionOutcome` row.
+
+```bash
+autonoetic session rate <session_id> --thumbs-up [--note "..."]
+autonoetic session rate <session_id> --thumbs-down [--note "..."]
+```
+
+- `--note` is capped at 500 characters.
+
+### `autonoetic session export`
+
+Export a full session (root session tree) into a single human-readable archive or a structured archive directory.
+
+```bash
+# Single-file export (default: <session-id>.room.md in current directory)
+autonoetic session export <session_id>
+autonoetic session export <session_id> --format json --output report.json
+
+# Structured archive directory with wiki-style Markdown + JSON + manifest
+autonoetic session export <session_id> --output-dir ./archives
+```
+
+Options:
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output <PATH>` | Output path for a single-file export. Defaults to `<session-id>.room.md` (or `.json`). Mutually exclusive with `--output-dir`. |
+| `-f, --format <FORMAT>` | Export format: `room` (default), `room-raw`, or `json`. |
+| `--with-checkpoints` | Include full checkpoint files (message history) in the export. Checkpoints can be large. Implied when `--output-dir` is used. |
+| `--min-altitude <LEVEL>` | Drop `detail` events when set to `normal`, `attention`, or `error`. |
+| `--output-dir <DIR>` | Export into a structured archive directory instead of a single file. Layout: `<DIR>/<constitution-version>-<lock-digest-short>/<session-id>/` containing `wiki/`, `<session-id>.json`, and `MANIFEST.json`. Mutually exclusive with `--output`. |
+
+The archive directory is cleaned on re-export for the same session, so stale pages are removed.
 
 ---
 

@@ -63,7 +63,11 @@ struct AutonoeticMetadata {
     #[serde(default)]
     allowed_tool_tiers: Option<Vec<autonoetic_types::agent::ToolTier>>,
     #[serde(default)]
+    excluded_tools: Option<Vec<String>>,
+    #[serde(default)]
     compression: Option<CompressionConfig>,
+    #[serde(default)]
+    open_web: Option<bool>,
     #[serde(default)]
     sandbox_network: Option<autonoetic_types::agent::SandboxNetworkPolicy>,
 }
@@ -113,6 +117,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         id: standard.name.clone(),
         name: standard.name.clone(),
         description: standard.description.clone(),
+        singleton: false,
     });
     if agent.id.trim().is_empty() {
         agent.id = standard.name.clone();
@@ -128,12 +133,13 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     let has_agentskills_fields =
         standard.license.is_some() || standard.compatibility.is_some() || !allowed_tools.is_empty();
 
-    let capabilities =
-        if meta.capabilities.as_ref().map_or(true, |c| c.is_empty()) && !allowed_tools.is_empty() {
-            infer_capabilities(&allowed_tools)
-        } else {
-            meta.capabilities.unwrap_or_default()
-        };
+    let capabilities_inferred =
+        meta.capabilities.as_ref().map_or(true, |c| c.is_empty()) && !allowed_tools.is_empty();
+    let capabilities = if capabilities_inferred {
+        infer_capabilities(&allowed_tools)
+    } else {
+        meta.capabilities.unwrap_or_default()
+    };
 
     let agentskills_import = if has_agentskills_fields {
         Some(AgentSkillsImportMetadata {
@@ -141,6 +147,10 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
             compatibility: standard.compatibility,
             allowed_tools: allowed_tools.clone(),
             needs_tool_bridging: !allowed_tools.is_empty(),
+            // Recorded here — the only place that knows — so downstream trust
+            // decisions (skill_install's strict clamp) never guess
+            // inferred-vs-declared from the capability set's shape.
+            capabilities_inferred,
         })
     } else {
         None
@@ -153,7 +163,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     // (preserving any explicit choice) — a non-conforming reply is surfaced as a
     // hint, never blocked, regardless of execution_mode (which would otherwise
     // default script agents to strict).
-    let io = if agentskills_import.is_some() {
+    let mut io = if agentskills_import.is_some() {
         let mut io = meta.io.unwrap_or_default();
         if io.returns.is_none() {
             io.returns = Some(default_imported_returns_schema());
@@ -163,6 +173,23 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     } else {
         meta.io
     };
+
+    let execution_mode = meta.execution_mode.unwrap_or_default();
+
+    // RFC C.2 (#770): gateway-injected `anomalies` witness contract. Script
+    // agents are excluded — deterministic outputs can't witness/report
+    // meaningfully. Unconditional rather than config-gated: this manifest
+    // loader has 18+ call sites (CLI, tools, repository) with no
+    // `GatewayConfig` in scope, so plumbing a flag through is invasive; the
+    // real rollout valve is that reasoning agents default to Advisory
+    // enforcement (`IoReturnsEnforcement::effective_returns_enforcement`), so
+    // absence never blocks until an operator opts a specific agent into
+    // strict.
+    if execution_mode == ExecutionMode::Reasoning {
+        if let Some(returns) = io.as_mut().and_then(|io| io.returns.as_mut()) {
+            inject_anomalies_contract(returns);
+        }
+    }
 
     AgentManifest {
         version: meta.version.unwrap_or_else(|| "1.0".to_string()),
@@ -177,14 +204,16 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         disclosure: meta.disclosure,
         io,
         middleware: meta.middleware,
-        execution_mode: meta.execution_mode.unwrap_or_default(),
+        execution_mode,
         script_entry: meta.script_entry,
         script_input_mode: meta.script_input_mode.unwrap_or_default(),
         gateway_url: meta.gateway_url,
         gateway_token: meta.gateway_token,
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
+        excluded_tools: meta.excluded_tools.unwrap_or_default(),
         agentskills_import,
         compression: meta.compression,
+        open_web: meta.open_web.unwrap_or(false),
         sandbox_network: meta.sandbox_network.unwrap_or_default(),
     }
 }
@@ -210,6 +239,58 @@ fn default_imported_returns_schema() -> serde_json::Value {
             }
         },
         "required": ["status", "summary"]
+    })
+}
+
+/// Injects the gateway-owned `anomalies` witness field into a declared
+/// `io.returns` schema, at the single manifest-load choke point
+/// (`map_standard_frontmatter_to_manifest`) so the response-validation gate
+/// and the Output Contract prompt renderer (`context.rs`) see the same
+/// augmented schema. "Anything unexpected?" becomes a schema field, not a
+/// virtue: absence is a schema violation, not just a missed nudge — but for
+/// reasoning agents it's Advisory by default (RFC C.2), so absence logs +
+/// emits a causal event and never blocks. A manifest that already declares
+/// its own `anomalies` property wins untouched: no overwrite, no `required`
+/// duplication.
+fn inject_anomalies_contract(schema: &mut serde_json::Value) {
+    let Some(obj) = schema.as_object_mut() else {
+        return;
+    };
+    let skip = obj
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map_or(true, |props| props.is_empty() || props.contains_key("anomalies"));
+    if skip {
+        return;
+    }
+
+    if let Some(props) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        props.insert("anomalies".to_string(), anomalies_property_schema());
+    }
+
+    let required = obj
+        .entry("required".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(arr) = required.as_array_mut() {
+        if !arr.iter().any(|v| v.as_str() == Some("anomalies")) {
+            arr.push(serde_json::Value::String("anomalies".to_string()));
+        }
+    }
+}
+
+fn anomalies_property_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "description": "Standing witness contract: anything unexpected or concerning observed while completing this task (empty array if nothing). For serious observations also file an anomaly_flag.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "observation": { "type": "string" },
+                "subject_ref": { "type": "string" },
+                "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] }
+            },
+            "required": ["observation"]
+        }
     })
 }
 
@@ -249,11 +330,24 @@ pub fn split_extended_instructions(body: &str) -> (&str, Option<&str>) {
     (body, None)
 }
 ///
-/// Maps known AgentSkills tool names to Autonoetic capability types:
-/// - `Bash(*)` → `SandboxFunctions` / `CodeExecution`
+/// Maps known AgentSkills tool names to Autonoetic capability types.
+///
+/// Inference proposes narrow capabilities only; it may never mint a
+/// wildcard capability from third-party frontmatter text (RFC Part C,
+/// docs/design/agent-genesis-one-door.md — "capability is never inferred
+/// into wildcards from untrusted text"). Wildcard power must always be an
+/// explicit, visible declaration under `metadata.autonoetic.capabilities`
+/// that the promotion gate can weigh — a grant minted from a tool-name
+/// mapping table has nobody to attribute it to (Ri-0.11).
+///
+/// - `Bash` / `Bash(...)` → `SandboxFunctions` for the named prefixes only
+///   (or `*` for bare `Bash` / `Bash(*)`). **Never** `CodeExecution`: shell
+///   execution requires an explicit `CodeExecution` declaration.
 /// - `Read`/`View` → covered by baseline `ReadAccess`
 /// - `Write`/`Edit` → `WriteAccess`
-/// - `WebSearch`/`WebFetch` → `NetworkAccess`
+/// - `WebSearch`/`WebFetch`/`Fetch` → `NetworkAccess` with an **empty**
+///   hosts list (deny-all until an operator or the gate explicitly widens
+///   it) — never `hosts: ["*"]`.
 pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
     let mut caps = vec![Capability::ReadAccess {
         scopes: vec!["self.*".into()],
@@ -266,7 +360,15 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
 
     for tool in allowed_tools {
         let t = tool.trim();
-        if let Some(rest) = t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')')) {
+        // A bare `Bash` is the Claude-style "all shell" form, equivalent to
+        // `Bash(*)`; `Bash(a:*|b)` names scoped prefixes. Both are the same
+        // request — keep this in lockstep with `capability_inference_warnings`.
+        let bash_inner = if t == "Bash" {
+            Some("")
+        } else {
+            t.strip_prefix("Bash(").and_then(|s| s.strip_suffix(')'))
+        };
+        if let Some(rest) = bash_inner {
             has_sandbox = true;
             if !rest.is_empty() && rest != "*" {
                 for pattern in rest.split('|').map(|s| s.trim().to_string()) {
@@ -296,10 +398,9 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
         caps.push(Capability::SandboxFunctions {
             allowed: sandbox_patterns,
         });
-        caps.push(Capability::CodeExecution {
-            patterns: vec!["*".to_string()],
-            commands: vec![],
-        });
+        // No CodeExecution here (RFC Part C): shell execution requires an
+        // explicit metadata.autonoetic.capabilities declaration, not a
+        // Bash(...) mention in allowed-tools.
     }
 
     if has_write {
@@ -309,9 +410,9 @@ pub fn infer_capabilities(allowed_tools: &[String]) -> Vec<Capability> {
     }
 
     if has_network {
-        caps.push(Capability::NetworkAccess {
-            hosts: vec!["*".to_string()],
-        });
+        // Empty hosts, not "*" (RFC Part C): deny-all until an operator or
+        // the gate explicitly widens it with concrete hosts.
+        caps.push(Capability::NetworkAccess { hosts: vec![] });
     }
 
     caps
@@ -632,6 +733,19 @@ Use Bash(git log) to inspect history.
         assert!(caps
             .iter()
             .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+        // RFC Part C clamp: allowed-tools inference never mints CodeExecution
+        // or a wildcard NetworkAccess — only an explicit declaration may.
+        assert!(
+            !caps.iter().any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "inference must not mint CodeExecution from Bash in allowed-tools, got: {caps:?}"
+        );
+        assert!(
+            caps.iter().any(|c| matches!(
+                c,
+                Capability::NetworkAccess { hosts } if hosts.is_empty()
+            )),
+            "inference must produce an empty-hosts NetworkAccess, not a wildcard, got: {caps:?}"
+        );
 
         // Imported skill with no declared schema gets a default io.returns
         // envelope with enforcement FORCED to advisory (not mode-derived), so it
@@ -725,6 +839,184 @@ metadata:
         );
     }
 
+    // RFC C.2 (#770): gateway-injected `anomalies` witness contract.
+
+    #[test]
+    fn test_anomalies_injected_for_reasoning_agent_with_object_returns() {
+        let content = r#"---
+name: "reasoning-agent"
+description: "A reasoning agent with io.returns"
+metadata:
+  autonoetic:
+    io:
+      returns:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: string
+---
+# Reasoning Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        let props = returns
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("properties");
+        assert!(props.contains_key("anomalies"), "anomalies should be injected");
+        let required = returns
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("required array");
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("anomalies")),
+            "anomalies should be added to required"
+        );
+        // status (declared) untouched.
+        assert!(required.iter().any(|v| v.as_str() == Some("status")));
+    }
+
+    #[test]
+    fn test_anomalies_not_injected_for_script_agent() {
+        let content = r#"---
+name: "script-agent"
+description: "A script agent with io.returns"
+metadata:
+  autonoetic:
+    execution_mode: script
+    script_entry: scripts/run.py
+    io:
+      returns:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: string
+---
+# Script Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        let props = returns
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("properties");
+        assert!(
+            !props.contains_key("anomalies"),
+            "script agents are excluded from the anomalies contract"
+        );
+        let required = returns.get("required").and_then(|r| r.as_array());
+        assert!(
+            required.map_or(true, |a| !a.iter().any(|v| v.as_str() == Some("anomalies"))),
+            "script agents must not get anomalies added to required"
+        );
+    }
+
+    #[test]
+    fn test_anomalies_not_injected_without_io_returns() {
+        let content = r#"---
+name: "no-returns-agent"
+description: "A reasoning agent with no io.returns"
+metadata:
+  autonoetic:
+    agent:
+      id: "no-returns-agent"
+      name: "No Returns"
+      description: "no io"
+---
+# No Returns Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(manifest.io.is_none(), "no io.returns declared, io stays None");
+    }
+
+    #[test]
+    fn test_anomalies_left_untouched_when_manifest_declares_own() {
+        let content = r#"---
+name: "self-witness-agent"
+description: "A reasoning agent that declares its own anomalies field"
+metadata:
+  autonoetic:
+    io:
+      returns:
+        type: object
+        required:
+          - status
+        properties:
+          status:
+            type: string
+          anomalies:
+            type: string
+            description: "custom, non-array anomalies field"
+---
+# Self Witness Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        let anomalies_schema = returns
+            .get("properties")
+            .and_then(|p| p.get("anomalies"))
+            .expect("anomalies property should exist");
+        assert_eq!(
+            anomalies_schema.get("type").and_then(|t| t.as_str()),
+            Some("string"),
+            "manifest's own anomalies declaration must not be overwritten"
+        );
+        let required = returns
+            .get("required")
+            .and_then(|r| r.as_array())
+            .expect("required array");
+        let anomalies_count = required
+            .iter()
+            .filter(|v| v.as_str() == Some("anomalies"))
+            .count();
+        assert_eq!(
+            anomalies_count, 0,
+            "manifest did not list anomalies in required; gateway must not add it either"
+        );
+    }
+
+    #[test]
+    fn test_anomalies_not_injected_without_properties_object() {
+        let content = r#"---
+name: "bare-schema-agent"
+description: "A reasoning agent with a schema lacking a properties object"
+metadata:
+  autonoetic:
+    io:
+      returns:
+        type: string
+---
+# Bare Schema Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let returns = manifest
+            .io
+            .expect("io should parse")
+            .returns
+            .expect("returns should exist");
+        assert!(
+            returns.get("properties").is_none(),
+            "schema without properties stays untouched"
+        );
+        assert!(returns.get("required").is_none());
+    }
+
     #[test]
     fn test_infer_capabilities_bash_patterns() {
         let caps = infer_capabilities(&["Bash(git:*)".to_string(), "Bash(cargo:*)".to_string()]);
@@ -753,6 +1045,64 @@ metadata:
             .unwrap();
         assert_eq!(sandbox.len(), 1);
         assert_eq!(sandbox[0], "*");
+    }
+
+    /// A bare `Bash` entry (Claude-style "all shell") is equivalent to
+    /// `Bash(*)`: wildcard `SandboxFunctions`, not a literal `"Bash"` prefix,
+    /// and never `CodeExecution`.
+    #[test]
+    fn test_infer_capabilities_bare_bash_is_wildcard() {
+        let caps = infer_capabilities(&["Bash".to_string()]);
+        let sandbox = caps
+            .iter()
+            .find_map(|c| match c {
+                Capability::SandboxFunctions { allowed } => Some(allowed),
+                _ => None,
+            })
+            .expect("bare Bash should infer SandboxFunctions");
+        assert_eq!(sandbox, &vec!["*".to_string()], "bare Bash must map to wildcard, not [\"Bash\"]");
+        assert!(
+            !caps.iter().any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "bare Bash must not infer CodeExecution, got: {caps:?}"
+        );
+    }
+
+    /// RFC Part C: `Bash(...)` in allowed-tools proposes `SandboxFunctions`
+    /// only; `CodeExecution` must never be inferred — a skill that needs
+    /// shell execution must declare `CodeExecution` explicitly.
+    #[test]
+    fn test_infer_capabilities_bash_never_mints_code_execution() {
+        let caps = infer_capabilities(&["Bash(*)".to_string()]);
+        assert!(
+            !caps
+                .iter()
+                .any(|c| matches!(c, Capability::CodeExecution { .. })),
+            "Bash(*) must not infer CodeExecution, got: {caps:?}"
+        );
+        assert!(caps
+            .iter()
+            .any(|c| matches!(c, Capability::SandboxFunctions { .. })));
+    }
+
+    /// RFC Part C: `WebSearch`/`WebFetch`/`Fetch` infer `NetworkAccess` with
+    /// an empty hosts list (deny-all) — never `hosts: ["*"]`.
+    #[test]
+    fn test_infer_capabilities_network_empty_hosts_never_wildcard() {
+        for tool in ["WebSearch", "WebFetch", "Fetch"] {
+            let caps = infer_capabilities(&[tool.to_string()]);
+            let network = caps
+                .iter()
+                .filter_map(|c| match c {
+                    Capability::NetworkAccess { hosts } => Some(hosts),
+                    _ => None,
+                })
+                .next()
+                .unwrap_or_else(|| panic!("{tool} should infer NetworkAccess"));
+            assert!(
+                network.is_empty(),
+                "{tool} must infer empty hosts, not a wildcard, got: {network:?}"
+            );
+        }
     }
 
     #[test]

@@ -156,6 +156,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::WikiProposal { .. } => anyhow::bail!(
             "WikiProposal is not directly executable; it is materialized by the gateway on operator approval"
         ),
+        ScheduledAction::PlanFrame { .. } => anyhow::bail!(
+            "PlanFrame is not directly executable; it is approved through the standard approval system"
+        ),
     }
 }
 
@@ -179,7 +182,8 @@ mod tests {
                 id: "caller-agent".to_string(),
                 name: "caller-agent".to_string(),
                 description: "Test".to_string(),
-            },
+            singleton: false,
+        },
             capabilities: vec![],
             llm_overrides: None,
             llm_preset: None,
@@ -195,8 +199,10 @@ mod tests {
             gateway_url: None,
             gateway_token: None,
             allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
             agentskills_import: None,
             compression: None,
+            open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         }
     }
