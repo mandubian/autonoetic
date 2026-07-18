@@ -227,6 +227,28 @@ pub enum Capability {
         #[serde(default = "default_patterns_all")]
         kinds: Vec<String>,
     },
+
+    /// Adjudicate anomaly flags via the `anomaly_adjudicate` tool (citizenship
+    /// RFC Part F follow-up, #774). Granted to an institutional office —
+    /// typically `ombudsman.default` — so it can work the anomaly-flag queue
+    /// directly instead of routing every recommendation through an admin
+    /// proposal for the operator to enact via `anomaly.resolve`.
+    ///
+    /// This is a held right exercised by a distinct seat: the operator grants
+    /// it explicitly to a named office, never via `*` or a prefix, and can
+    /// revoke it to fall back to manual adjudication. The `patterns` field
+    /// selects which status transitions the office may apply:
+    /// `under_review` (non-terminal) and the terminal decisions `confirmed`,
+    /// `dismissed`, `deferred`. Terminal decisions still require a non-empty
+    /// `reason` (decider-obligation parity with `anomaly.resolve`) and can be
+    /// deferred to the operator via `anomaly_adjudication.require_terminal_cosign`.
+    /// The operator remains the sovereignty backstop (RFC invariant: offices
+    /// are advisory first; this tool removes the admin-proposal detour, not
+    /// the backstop).
+    AnomalyAdjudicate {
+        #[serde(default = "default_patterns_all")]
+        patterns: Vec<String>,
+    },
 }
 
 /// Operations that confer **authority** rather than mere participation.
@@ -402,6 +424,7 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
         "WikiContribute",
         "PromoteWith",
         "GateDecider",
+        "AnomalyAdjudicate",
     ]
 }
 
@@ -444,6 +467,7 @@ impl Capability {
             Capability::WikiContribute => "WikiContribute".to_string(),
             Capability::PromoteWith { .. } => "PromoteWith".to_string(),
             Capability::GateDecider { .. } => "GateDecider".to_string(),
+            Capability::AnomalyAdjudicate { .. } => "AnomalyAdjudicate".to_string(),
         }
     }
 }

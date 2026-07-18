@@ -150,6 +150,7 @@ fn capability_type_name(cap: &Capability) -> &'static str {
         Capability::WikiContribute => "WikiContribute",
         Capability::PromoteWith { .. } => "PromoteWith",
         Capability::GateDecider { .. } => "GateDecider",
+        Capability::AnomalyAdjudicate { .. } => "AnomalyAdjudicate",
     }
 }
 

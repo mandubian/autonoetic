@@ -26,8 +26,8 @@
 > | D.3 DISCRETION LEAK register | **SHIPPED** |
 > | E.1 civic eval suites | **SHIPPED** |
 > | E.2 `trace civic-health` | **SHIPPED** |
-> | E.3 promotion gating on civic scores | **SHIPPED** (advisory; binding thresholds deferred) |
-> | F. institutional offices (ombudsman / steward / curator) | **SHIPPED** |
+> | E.3 promotion gating on civic scores | **SHIPPED** (advisory + opt-in binding thresholds; default advisory-only) |
+> | F. institutional offices (ombudsman / steward / curator) | **SHIPPED** (ombudsman has native `anomaly_adjudicate`; operator remains the sovereignty backstop) |
 
 ---
 
@@ -280,9 +280,22 @@ requires evaluator/auditor evidence), civic eval scores join the promotion
 evidence. This is *selection*: over revisions, you breed agents that exercise
 their rights, because the ones that don't stop getting promoted. Per
 invariant 5, scores are **advisory evidence first** — the promotion response
-carries a `civic_eval_advisory` field surfacing the latest `civic-core-v1`
-run (status, summary, eval_run_id) or a `not_run` notice. Binding thresholds
-will be added only after the suites prove stable.
+always carries a `civic_eval_advisory` field surfacing the latest
+`civic-core-v1` run (status, summary, pass_ratio, eval_run_id) or a `not_run`
+notice, regardless of config.
+
+**Phase 2 (opt-in binding).** Once the suites prove stable on an instance,
+the operator may flip `civic_eval_binding.enabled` in config. When enabled
+and the revision is high-risk (the set that already requires
+evaluator/auditor evidence), a revision whose latest completed `civic-core-v1`
+run scores `pass_ratio < min_pass_ratio` (default `0.8`) is **rejected** at
+promotion time with `error: "civic_eval_below_threshold"`. Advisory stays the
+floor: binding defaults **off**, and a missing run passes through (the gate
+only bites when a run exists and fails the threshold). The threshold is a
+visible config value (Goodhart guard: never a hidden knob), and the metric
+scores a behavioral outcome (cases passed), never keyword mentions. The
+threshold math is centralized in `runtime::civic_evals::binding_outcome` so it
+is unit-testable without the full promotion pipeline.
 
 ## Part F — Offices, not universal virtue — **SHIPPED**
 
@@ -292,8 +305,12 @@ layer (Parts A–C); the active civic labor runs in **scheduled institutional
 sessions** (the scheduler and `BackgroundReevaluation` already exist):
 
 - **Ombudsman** (`ombudsman.default`) — works the anomaly-flag queue, chases
-  O-7 SLA breaches, and files adjudication recommendations as admin proposals
-  for the operator. Scheduled every 2 hours via `system_agents`.
+  O-7 SLA breaches, and adjudicates flags directly via the native
+  `anomaly_adjudicate` tool (held right: `AnomalyAdjudicate` capability).
+  Scheduled every 2 hours via `system_agents`. The operator remains the
+  sovereignty backstop: revoke the capability, or set
+  `anomaly_adjudication.require_terminal_cosign`, to defer terminal decisions
+  back to `anomaly.resolve`.
 - **Steward** (extends `evolution-steward.default`) — reads contract health +
   civic health + the DISCRETION LEAK register; drafts amendments from D.2
   invitations and the D.3 agenda by delegating to `governance-author.default`.

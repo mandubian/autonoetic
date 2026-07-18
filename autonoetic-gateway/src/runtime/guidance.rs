@@ -240,6 +240,7 @@ pub fn capability_kind(cap: &Capability) -> &'static str {
         Capability::PlanFrameAccess { .. } => "plan_frame_access",
         Capability::PromoteWith { .. } => "promote_with",
         Capability::GateDecider { .. } => "gate_decider",
+        Capability::AnomalyAdjudicate { .. } => "anomaly_adjudicate",
     }
 }
 

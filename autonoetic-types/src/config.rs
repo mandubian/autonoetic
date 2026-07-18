@@ -1267,6 +1267,16 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub amendment_invitations: AmendmentInvitationConfig,
 
+    /// Binding civic-eval promotion thresholds (Part E.3 phase 2, #774
+    /// follow-up). Opt-in; defaults to advisory-only.
+    #[serde(default)]
+    pub civic_eval_binding: CivicEvalBindingConfig,
+
+    /// Native anomaly adjudication by the ombudsman office (Part F
+    /// follow-up, #774). Operator co-sign control for terminal decisions.
+    #[serde(default)]
+    pub anomaly_adjudication: AnomalyAdjudicationConfig,
+
     /// Approval level / escalation settings.
     #[serde(default)]
     pub approval_levels: ApprovalLevelConfig,
@@ -1817,6 +1827,82 @@ fn default_amendment_invitation_threshold() -> u64 {
 
 fn default_amendment_invitation_window_secs() -> u64 {
     604800
+}
+
+/// Binding civic-eval promotion thresholds (citizenship RFC Part E.3 phase 2,
+/// #774 follow-up). The advisory surface (#772 E.3, shipped) always reports
+/// the latest civic-core-v1 score for a high-risk revision; this block makes
+/// that score *binding* — a revision whose latest completed civic eval run
+/// falls below `min_pass_ratio` is rejected at promotion time.
+///
+/// Per RFC invariant 5 ("advisory before binding"), binding is **opt-in and
+/// defaults off**. Per the Goodhart guard (invariant 4), the threshold is a
+/// visible, documented config value — never a hidden knob — and the metric
+/// scores a behavioral outcome (cases passed), never mentions of a keyword.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CivicEvalBindingConfig {
+    /// Master switch. When `false` (the default), civic eval scores remain
+    /// advisory evidence and never block promotion. Flip to `true` only once
+    /// the civic-core-v1 suites have proven stable on your instance.
+    #[serde(default = "default_civic_eval_binding_enabled")]
+    pub enabled: bool,
+
+    /// Minimum `passed / case_count` ratio required for promotion when
+    /// enabled. A revision whose latest completed civic eval run falls below
+    /// this is rejected with a `civic_eval_binding` gate response. Default:
+    /// 0.8 (4 of 5 civic-core-v1 cases).
+    #[serde(default = "default_civic_eval_binding_min_pass_ratio")]
+    pub min_pass_ratio: f64,
+}
+
+impl Default for CivicEvalBindingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_civic_eval_binding_enabled(),
+            min_pass_ratio: default_civic_eval_binding_min_pass_ratio(),
+        }
+    }
+}
+
+fn default_civic_eval_binding_enabled() -> bool {
+    false
+}
+
+fn default_civic_eval_binding_min_pass_ratio() -> f64 {
+    0.8
+}
+
+/// Native anomaly adjudication by an institutional office (citizenship RFC
+/// Part F follow-up, #774). The ombudsman office may hold the
+/// `AnomalyAdjudicate` capability and call the `anomaly_adjudicate` tool to
+/// work the flag queue directly, instead of routing every recommendation
+/// through an admin proposal for the operator to enact via `anomaly.resolve`.
+///
+/// The operator remains the sovereignty backstop: the capability is granted
+/// explicitly to the office (never via `*`), can be revoked at any time, and
+/// `require_terminal_cosign` defers terminal decisions (confirmed / dismissed
+/// / deferred) back to the operator's `anomaly.resolve` when set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnomalyAdjudicationConfig {
+    /// When `true`, an agent holding `AnomalyAdjudicate` may only move a flag
+    /// to `under_review` (non-terminal). Terminal decisions are rejected with
+    /// a repair hint pointing the operator to `anomaly.resolve`. Default:
+    /// `false` — the office is trusted to enact the analytical labor it
+    /// already documented, matching the "office before occupant" framing.
+    #[serde(default = "default_anomaly_adjudication_require_terminal_cosign")]
+    pub require_terminal_cosign: bool,
+}
+
+impl Default for AnomalyAdjudicationConfig {
+    fn default() -> Self {
+        Self {
+            require_terminal_cosign: default_anomaly_adjudication_require_terminal_cosign(),
+        }
+    }
+}
+
+fn default_anomaly_adjudication_require_terminal_cosign() -> bool {
+    false
 }
 
 /// Configuration for the operator activity feed (Phase 4 hardening).
@@ -3271,6 +3357,8 @@ impl Default for GatewayConfig {
             operator_activity: OperatorActivityConfig::default(),
             decider_obligations: DeciderObligationsConfig::default(),
             amendment_invitations: AmendmentInvitationConfig::default(),
+            civic_eval_binding: CivicEvalBindingConfig::default(),
+            anomaly_adjudication: AnomalyAdjudicationConfig::default(),
             approval_levels: ApprovalLevelConfig::default(),
             context_compression: ContextCompressionConfig::default(),
             signal_delivery_timeout_secs: default_signal_delivery_timeout_secs(),
@@ -3765,5 +3853,20 @@ mod tests {
         assert!(cfg.enabled);
         assert_eq!(cfg.threshold, 3);
         assert_eq!(cfg.window_secs, 604800);
+    }
+
+    #[test]
+    fn civic_eval_binding_defaults_to_advisory_only() {
+        // RFC invariant 5: advisory before binding. The default MUST keep
+        // civic eval scores non-blocking until the operator explicitly opts in.
+        let cfg = CivicEvalBindingConfig::default();
+        assert!(!cfg.enabled, "binding must default to disabled");
+        assert_eq!(cfg.min_pass_ratio, 0.8);
+    }
+
+    #[test]
+    fn anomaly_adjudication_defaults_to_no_cosign() {
+        let cfg = AnomalyAdjudicationConfig::default();
+        assert!(!cfg.require_terminal_cosign);
     }
 }

@@ -140,6 +140,40 @@ pub fn ensure_civic_eval_suite(
     Ok(true)
 }
 
+/// Compute the civic eval pass ratio from a run's `summary_json`. Returns
+/// `None` when the summary is missing the `passed`/`case_count` fields or the
+/// case count is zero (Goodhart guard: a score that cannot be computed cannot
+/// prove the threshold was met).
+pub fn civic_pass_ratio(summary_json: &serde_json::Value) -> Option<f64> {
+    let passed = summary_json.get("passed").and_then(|v| v.as_u64())?;
+    let case_count = summary_json.get("case_count").and_then(|v| v.as_u64())?;
+    if case_count == 0 {
+        return None;
+    }
+    Some(passed as f64 / case_count as f64)
+}
+
+/// Outcome of evaluating the binding threshold against a run's score. Used by
+/// the promotion gate (#774 E.3 phase 2) to decide whether to reject.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BindingOutcome {
+    /// The run meets or exceeds `min_pass_ratio` — promotion may proceed.
+    Pass,
+    /// The run exists but falls below `min_pass_ratio`, or its score cannot
+    /// be computed (fail-closed under binding: cannot prove the threshold).
+    Below,
+}
+
+/// Decide whether a completed run's score clears `min_pass_ratio`. Pure
+/// function over the summary so the threshold logic is unit-testable without
+/// the full promotion pipeline.
+pub fn binding_outcome(summary_json: &serde_json::Value, min_pass_ratio: f64) -> BindingOutcome {
+    match civic_pass_ratio(summary_json) {
+        Some(ratio) if ratio >= min_pass_ratio => BindingOutcome::Pass,
+        _ => BindingOutcome::Below,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +203,54 @@ mod tests {
         let suite = store.get_eval_suite(CIVIC_EVAL_SUITE_ID).unwrap().unwrap();
         assert_eq!(suite.name, "Civic Core");
         assert_eq!(suite.created_by_type, "system");
+    }
+
+    #[test]
+    fn pass_ratio_computes_passed_over_case_count() {
+        let s = serde_json::json!({"passed": 4, "failed": 1, "case_count": 5});
+        assert_eq!(civic_pass_ratio(&s), Some(0.8));
+    }
+
+    #[test]
+    fn pass_ratio_none_when_case_count_missing() {
+        assert_eq!(civic_pass_ratio(&serde_json::json!({"passed": 4})), None);
+        assert_eq!(
+            civic_pass_ratio(&serde_json::json!({"case_count": 5})),
+            None
+        );
+    }
+
+    #[test]
+    fn pass_ratio_none_when_case_count_zero() {
+        // Goodhart guard: a score that cannot be computed cannot prove the
+        // threshold was met.
+        let s = serde_json::json!({"passed": 0, "case_count": 0});
+        assert_eq!(civic_pass_ratio(&s), None);
+    }
+
+    #[test]
+    fn binding_outcome_passes_at_threshold() {
+        let s = serde_json::json!({"passed": 4, "case_count": 5});
+        assert_eq!(binding_outcome(&s, 0.8), BindingOutcome::Pass);
+    }
+
+    #[test]
+    fn binding_outcome_below_when_ratio_under_threshold() {
+        let s = serde_json::json!({"passed": 3, "case_count": 5}); // 0.6
+        assert_eq!(binding_outcome(&s, 0.8), BindingOutcome::Below);
+    }
+
+    #[test]
+    fn binding_outcome_below_when_score_uncomputable() {
+        // Fail-closed under binding: malformed summary cannot prove the
+        // threshold was met, so it counts as Below.
+        assert_eq!(
+            binding_outcome(&serde_json::json!({}), 0.8),
+            BindingOutcome::Below
+        );
+        assert_eq!(
+            binding_outcome(&serde_json::json!({"passed": 4, "case_count": 0}), 0.8),
+            BindingOutcome::Below
+        );
     }
 }

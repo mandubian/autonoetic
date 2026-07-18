@@ -459,6 +459,7 @@ An anomaly review authority (today: the operator) adjudicates pending flags via 
 |--------|--------|-------------|
 | `anomaly.list_pending` | `status?` (default `pending`), `limit?` | List flags awaiting a decision |
 | `anomaly.resolve` | `flag_id, decided_by, status, reason?` | Record a decision: `confirmed` / `dismissed` / `deferred` (+ `under_review`) |
+| `anomaly_adjudicate` | `flag_id, status, reason?, evidence_refs?` | Same decision state machine as `anomaly.resolve`, but invoked as a native tool by an office holding the `AnomalyAdjudicate` capability (typically the ombudsman). Terminal statuses require an exact capability grant for that status; terminal decisions still require a non-empty `reason`. The operator remains the backstop: set `anomaly_adjudication.require_terminal_cosign` to defer terminal decisions back to `anomaly.resolve`. |
 
 Terminal decisions (`confirmed`/`dismissed`/`deferred`) require a non-empty `reason` when `decider_obligations.enabled` (mirrors the O-1 decider-motivation requirement for approvals) — a decision without motivation is rejected, not silently accepted.
 

@@ -30,6 +30,11 @@ rules:
   # least-privileged witness must still be able to report anomalies.
   - prefix: anomaly_flag
     tier: core
+  # Native adjudication by an institutional office (Part F follow-up, #774).
+  # Capability-gated (AnomalyAdjudicate) — tier is civic infrastructure; the
+  # capability grant is the real boundary. Only the ombudsman office sees it.
+  - prefix: anomaly_adjudicate
+    tier: core
   # On-demand tool discovery — always available so agents can expand their
   # tool surface without waiting for escalation.
   - prefix: tool_discover

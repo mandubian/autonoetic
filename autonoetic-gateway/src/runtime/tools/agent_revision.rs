@@ -4346,6 +4346,85 @@ do not re-issue."
             }
         }
 
+        // E.3 phase 2 — binding civic-eval promotion threshold (#774
+        // follow-up). When `civic_eval_binding.enabled` is set and this is a
+        // high-risk revision, the latest completed civic-core-v1 run must
+        // meet `min_pass_ratio` or promotion is rejected. Advisory stays the
+        // floor (RFC invariant 5): binding is opt-in and defaults off.
+        //
+        // Missing-run policy: if no completed civic eval run exists for this
+        // revision, promotion proceeds (the binding gate only bites when a
+        // run exists and fails the threshold) — see the user-facing decision
+        // recorded in docs/design/citizenship-as-a-runtime-service.md.
+        if has_high_risk
+            && config
+                .map(|c| c.civic_eval_binding.enabled)
+                .unwrap_or(false)
+        {
+            match gateway_store.find_latest_completed_eval_run(
+                crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
+                &args.revision_id,
+            ) {
+                Ok(Some(run)) => {
+                    let min_ratio = config
+                        .map(|c| c.civic_eval_binding.min_pass_ratio)
+                        .unwrap_or(0.8);
+                    let outcome = crate::runtime::civic_evals::binding_outcome(
+                        &run.summary_json,
+                        min_ratio,
+                    );
+                    if matches!(outcome, crate::runtime::civic_evals::BindingOutcome::Below) {
+                        let passed = run.summary_json.get("passed").and_then(|v| v.as_u64());
+                        let case_count =
+                            run.summary_json.get("case_count").and_then(|v| v.as_u64());
+                        let ratio_str =
+                            match crate::runtime::civic_evals::civic_pass_ratio(&run.summary_json)
+                            {
+                                Some(r) => format!("{:.3}", r),
+                                None => "unknown".to_string(),
+                            };
+                        record_attempt(
+                            "rejected",
+                            Some("civic_eval_binding"),
+                            Some("civic_eval_below_threshold"),
+                        );
+                        return Ok(ToolError::permission(format!(
+                            "Promotion gate (civic_eval_binding): revision '{}' latest civic \
+                             eval run '{}' scored pass_ratio={} (passed={:?}/case_count={:?}), \
+                             below the configured min_pass_ratio={:.3}. Civic eval scores are \
+                             binding for this revision class.",
+                            args.revision_id, run.eval_run_id, ratio_str, passed, case_count, min_ratio,
+                        ))
+                        .with_code("civic_eval_below_threshold")
+                        .with_repair_hint(
+                            "Re-run eval_run with suite_id 'civic-core-v1' until pass_ratio meets \
+                             the threshold, or disable civic_eval_binding.enabled for this \
+                             revision class.",
+                        )
+                        .to_error_response());
+                    }
+                }
+                Ok(None) => {
+                    // No completed run: pass through (advisory note still
+                    // surfaces in the success response below). The binding
+                    // gate only bites when a run exists and fails.
+                    tracing::info!(
+                        target: "agent_revision",
+                        revision_id = %args.revision_id,
+                        "civic_eval_binding enabled but no completed civic-core-v1 run found; \
+                         proceeding (missing-run pass-through)",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "agent_revision",
+                        error = %e,
+                        "Failed to query civic eval for binding gate; proceeding (non-blocking)"
+                    );
+                }
+            }
+        }
+
         let promotion_id = autonoetic_types::id_format::mint_hashed_prefixed_id(
             "prom-",
             &format!(
@@ -4413,10 +4492,18 @@ do not re-issue."
         }
 
         // E.3 advisory: for high-risk revisions, surface civic eval scores as
-        // non-blocking advisory evidence (#772). Binding thresholds come later,
-        // once the suites prove stable (RFC invariant 5). Advisory only — never
-        // blocks promotion here.
+        // non-blocking advisory evidence (#772). When binding is enabled
+        // (civic_eval_binding.enabled) the gate above has already enforced the
+        // threshold; this block reports the score and the binding outcome so
+        // the caller can see why promotion was (or was not) allowed. Advisory
+        // stays the floor (RFC invariant 5): binding is opt-in, default off.
         if has_high_risk {
+            let binding_enabled = config
+                .map(|c| c.civic_eval_binding.enabled)
+                .unwrap_or(false);
+            let min_ratio = config
+                .map(|c| c.civic_eval_binding.min_pass_ratio)
+                .unwrap_or(0.8);
             let civic_advisory = match gateway_store
                 .find_latest_completed_eval_run(
                     crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
@@ -4424,21 +4511,49 @@ do not re-issue."
                 ) {
                 Ok(Some(run)) => {
                     let status_str = format!("{:?}", run.status);
+                    let passed = run.summary_json.get("passed").and_then(|v| v.as_u64());
+                    let case_count = run.summary_json.get("case_count").and_then(|v| v.as_u64());
+                    let ratio = match (passed, case_count) {
+                        (Some(p), Some(n)) if n > 0 => Some(p as f64 / n as f64),
+                        _ => None,
+                    };
+                    // If binding is on and we reached here, the gate above
+                    // already passed — report that explicitly.
+                    let binding_status = if binding_enabled {
+                        match ratio {
+                            Some(r) if r >= min_ratio => "passed",
+                            _ => "skipped_malformed",
+                        }
+                    } else {
+                        "disabled"
+                    };
                     serde_json::json!({
                         "status": status_str,
                         "eval_run_id": run.eval_run_id,
                         "summary": run.summary_json,
-                        "advisory_note": "Civic eval scores are advisory evidence (#772 E.3); they do not block promotion. Binding thresholds will be added once the suites prove stable."
+                        "pass_ratio": ratio,
+                        "binding": binding_status,
+                        "advisory_note": if binding_enabled {
+                            "Civic eval scores are binding for this revision class (#774 E.3 \
+                             phase 2); promotion was allowed because the threshold was met."
+                        } else {
+                            "Civic eval scores are advisory evidence (#772 E.3); they do not \
+                             block promotion unless civic_eval_binding.enabled is set."
+                        }
                     })
                 }
                 Ok(None) => serde_json::json!({
                     "status": "not_run",
-                    "advisory_note": "No civic eval run found for this revision. Consider running eval_run with civic-core-v1 to measure civic behavior (#772 E.3, advisory)."
+                    "binding": if binding_enabled { "passed_no_run" } else { "disabled" },
+                    "advisory_note": "No civic eval run found for this revision. Consider running \
+                     eval_run with civic-core-v1 to measure civic behavior (#772 E.3). When \
+                     binding is enabled, a missing run passes through (does not block)."
                 }),
                 Err(e) => {
                     tracing::warn!(target: "agent_revision", error = %e, "Failed to query civic eval advisory");
                     serde_json::json!({
                         "status": "query_failed",
+                        "binding": if binding_enabled { "skipped_query_failed" } else { "disabled" },
                         "advisory_note": "Civic eval advisory query failed (non-blocking)."
                     })
                 }
