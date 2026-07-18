@@ -165,6 +165,68 @@ pub fn preflight_plan<L: CapabilityLookup>(
     }
 }
 
+/// Production `CapabilityLookup` backed by the on-disk agent registry.
+///
+/// Each lookup triggers a fresh directory scan via
+/// [`AgentRepository::get_sync`] — the same pattern
+/// `materialize_plan_grants` uses for the capability-envelope fallback.
+/// Plans are small (a handful of steps), so this is fine; a future
+/// optimization could memoize within a single preflight pass.
+impl CapabilityLookup for crate::AgentRepository {
+    fn declared_capabilities(&self, agent_id: &str) -> Option<Vec<String>> {
+        match self.get_sync(agent_id) {
+            Ok(loaded) => Some(
+                loaded
+                    .manifest
+                    .capabilities
+                    .iter()
+                    .map(|c| c.type_name())
+                    .collect(),
+            ),
+            Err(_) => None,
+        }
+    }
+}
+
+/// Compact JSON-serializable view of a preflight run, fit for inclusion
+/// in a `planframe_propose` / `planframe_amend` response. Drops the
+/// `Covered` findings (the common case) so the response stays lean —
+/// the planner only needs to see what failed.
+///
+/// Build with [`PreflightView::from_result`]. The view omits the
+/// `capability_preflight` field entirely when there are no warnings
+/// (clean plan + no steps checked), so a plan that doesn't opt into
+/// preflight (`required_capabilities` empty everywhere) sees no noise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreflightView {
+    pub steps_checked: usize,
+    pub has_warnings: bool,
+    pub warnings: Vec<PreflightFinding>,
+}
+
+impl PreflightView {
+    /// Build the response view. `Covered` findings are filtered out.
+    pub fn from_result(result: &PreflightResult) -> Self {
+        let warnings = result
+            .findings
+            .iter()
+            .filter(|f| f.kind != PreflightKind::Covered)
+            .cloned()
+            .collect();
+        Self {
+            steps_checked: result.steps_checked,
+            has_warnings: result.has_warnings,
+            warnings,
+        }
+    }
+
+    /// `true` when the preflight surfaced zero findings worth reporting.
+    /// Used by the tool surface to omit the field entirely on clean plans.
+    pub fn is_empty(&self) -> bool {
+        self.steps_checked == 0 && self.warnings.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +359,64 @@ mod tests {
         assert_eq!(result.findings[0].kind, PreflightKind::Covered);
         assert_eq!(result.findings[1].kind, PreflightKind::UncoveredCapabilities);
         assert_eq!(result.findings[2].kind, PreflightKind::AgentNotInstalled);
+    }
+
+    #[test]
+    fn preflight_view_drops_covered_findings() {
+        // The response surface should carry only the warnings — Covered is
+        // the common case and would balloon every propose response.
+        let lookup = StaticLookup(
+            [
+                ("coder.default".to_string(), vec!["WriteAccess".to_string(), "CodeExecution".to_string()]),
+                ("researcher.default".to_string(), vec!["ReadAccess".to_string()]),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let p = plan(vec![
+            step("s1", Some("coder.default"), &["WriteAccess"]),           // covered
+            step("s2", Some("researcher.default"), &["NetworkAccess"]),    // uncovered
+            step("s3", Some("missing.agent"), &["ReadAccess"]),            // not installed
+        ]);
+        let result = preflight_plan(&p, &lookup);
+        let view = PreflightView::from_result(&result);
+        assert_eq!(view.steps_checked, 3);
+        assert!(view.has_warnings);
+        assert_eq!(view.warnings.len(), 2, "only non-Covered findings");
+        assert!(view.warnings.iter().all(|w| w.kind != PreflightKind::Covered));
+        assert!(!view.is_empty());
+    }
+
+    #[test]
+    fn preflight_view_is_empty_when_no_steps_checked() {
+        // No step opted in → no findings, no checked count → is_empty.
+        let lookup = StaticLookup(HashMap::new());
+        let p = plan(vec![step("s1", Some("coder.default"), &[])]);
+        let result = preflight_plan(&p, &lookup);
+        let view = PreflightView::from_result(&result);
+        assert_eq!(view.steps_checked, 0);
+        assert!(!view.has_warnings);
+        assert!(view.warnings.is_empty());
+        assert!(view.is_empty());
+    }
+
+    #[test]
+    fn preflight_view_not_empty_when_clean_but_steps_checked() {
+        // A plan that opts in and is fully covered is NOT empty: the
+        // operator/planner asked the question, so the (clean) answer is
+        // surfaced. This distinguishes "didn't ask" from "asked and got
+        // no warnings" — important for the response contract.
+        let lookup = StaticLookup(
+            [("coder.default".to_string(), vec!["WriteAccess".to_string()])]
+                .into_iter()
+                .collect(),
+        );
+        let p = plan(vec![step("s1", Some("coder.default"), &["WriteAccess"])]);
+        let result = preflight_plan(&p, &lookup);
+        let view = PreflightView::from_result(&result);
+        assert_eq!(view.steps_checked, 1);
+        assert!(!view.has_warnings);
+        assert!(view.warnings.is_empty());
+        assert!(!view.is_empty(), "asked-and-clean is not empty");
     }
 }

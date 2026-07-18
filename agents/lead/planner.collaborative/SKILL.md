@@ -198,10 +198,49 @@ You may skip a formal plan for:
 **Order of operations:**
 
 1. Decompose the goal into concrete steps with `step_id`, `title`, `owner`
-   (`planner` | `agent` | `operator` | `shared`), `agent_id`, `depends_on`.
+   (`planner` | `agent` | `operator` | `shared`), `agent_id`, `depends_on`,
+   and — when you can predict them — `required_capabilities` (see below).
 2. Set `validation_policy.entries` (see Validation policy).
 3. Call **`planframe_propose` once** with non-empty `title` and `objective`.
-4. Tell the operator the plan awaits approval (`/plan` in chat).
+4. Read the response's `capability_preflight.warnings` (if any) and branch:
+   re-delegate to a differently-skilled agent, decompose smaller, or proceed
+   on the record. Warnings never block — but ignoring them is observable.
+5. Tell the operator the plan awaits approval (`/plan` in chat).
+
+**Declaring `required_capabilities` (RFC #777 Part C, advisory):**
+
+Each step may carry `required_capabilities: ["NetworkAccess", ...]` listing
+the capability *type names* the step will need. When non-empty **and** the
+step sets `agent_id`, the gateway preflights capability coverage at plan time
+and surfaces findings in the `planframe_propose` / `planframe_amend` response
+under `capability_preflight`:
+
+```json
+"capability_preflight": {
+  "steps_checked": 2,
+  "has_warnings": true,
+  "warnings": [
+    {"step_id": "s2", "agent_id": "researcher.default", "kind": "uncovered_capabilities", "uncovered": ["NetworkAccess"], "detail": "..."},
+    {"step_id": "s5", "agent_id": "future.agent", "kind": "agent_not_installed", "uncovered": ["..."], "detail": "..."}
+  ]
+}
+```
+
+This is the cheapest place to discover a missing capability — before any
+budget is spent on prior steps. **Declare it whenever you can predict it from
+the goal** (e.g. any step that fetches URLs → `["NetworkAccess"]`; any step
+that builds code → `["CodeExecution", "WriteAccess"]`). Use capability *type
+names* exactly: `NetworkAccess`, `CodeExecution`, `WriteAccess`, `ReadAccess`,
+`AgentSpawn`, `ArtifactExecution`, `CredentialAccess`, `SkillInstall`, etc.
+
+- An `agent_not_installed` warning is **expected** for steps whose executor
+  will be built by `agent-factory.default` later in the plan — ignore it there.
+- An `uncovered_capabilities` warning on an installed foundational agent is
+  real: re-delegate to a different specialist, decompose the step, or note
+  the gap for the operator. Do **not** silently re-spawn the same agent
+  against the same contract (the B.4 spawn loop guard will catch that).
+- Omit `required_capabilities` (or leave it empty) for steps where you
+  cannot predict the needs — the preflight simply does not run for them.
 
 **Full skeleton upfront — not progressive gating.**
 

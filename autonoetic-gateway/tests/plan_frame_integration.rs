@@ -1732,3 +1732,274 @@ fn planframe_propose_defaults_to_awaiting_approval() {
     assert_eq!(v["status"], "awaiting_approval");
     assert_eq!(v["auto_approved"], false);
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// RFC #777 Part C — capability preflight wiring into planframe_propose /
+// planframe_amend. The `capability_preflight` field is advisory: missing
+// entirely on plans that don't declare `required_capabilities`, and
+// surfaces only non-Covered findings on plans that do.
+// ──────────────────────────────────────────────────────────────────────
+
+fn write_test_skill(agents_dir: &std::path::Path, agent_id: &str, capabilities_yaml: &str) {
+    let dir = agents_dir.join(agent_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let body = format!(
+        "---\n\
+         version: \"1.0\"\n\
+         runtime:\n  engine: autonoetic\n  gateway_version: \"0.1.0\"\n  sdk_version: \"0.1.0\"\n  type: stateful\n  sandbox: bubblewrap\n  runtime_lock: runtime.lock\n\
+         agent:\n  id: {agent_id}\n  name: {agent_id}\n  description: test\n\
+         {capabilities_yaml}\n\
+         ---\n\
+         # {agent_id}\n",
+        agent_id = agent_id,
+        capabilities_yaml = capabilities_yaml,
+    );
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    std::fs::write(dir.join("runtime.lock"), "dependencies: []\n").unwrap();
+}
+
+#[test]
+fn planframe_propose_omits_capability_preflight_when_no_step_declares_required_caps() {
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    // No agent dirs at all — irrelevant, since no step opts in.
+    let args = json!({
+        "title": "No preflight",
+        "objective": "Steps declare no required_capabilities",
+        "steps": [
+            {"step_id": "s1", "title": "do thing", "agent_id": "coder.default"}
+        ]
+    });
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).unwrap(),
+            Some("root-preflight-none/planner"),
+            Some("turn-001"),
+            Some(&config),
+            Some(store),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["ok"], true);
+    // Field absent (null) — fully opt-in.
+    assert!(
+        v.get("capability_preflight").map_or(true, |p| p.is_null()),
+        "expected no capability_preflight field, got: {:?}",
+        v.get("capability_preflight")
+    );
+}
+
+#[test]
+fn planframe_propose_surfaces_capability_preflight_warnings_for_uncovered_steps() {
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+
+    // coder.default declares only WriteAccess — missing CodeExecution + NetworkAccess.
+    write_test_skill(&agents_dir, "coder.default", "capabilities:\n  - type: WriteAccess\n    scopes: [\"self.*\"]\n");
+    // researcher.default is not installed at all (intentional).
+
+    let mut config = make_config(&agents_dir);
+    config.agents_dir = agents_dir.clone();
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let args = json!({
+        "title": "Preflight surface",
+        "objective": "Mix of covered, uncovered, and not-installed",
+        "steps": [
+            {
+                "step_id": "s1",
+                "title": "covered",
+                "agent_id": "coder.default",
+                "required_capabilities": ["WriteAccess"]
+            },
+            {
+                "step_id": "s2",
+                "title": "uncovered",
+                "agent_id": "coder.default",
+                "required_capabilities": ["WriteAccess", "NetworkAccess"]
+            },
+            {
+                "step_id": "s3",
+                "title": "not installed",
+                "agent_id": "researcher.default",
+                "required_capabilities": ["ReadAccess"]
+            }
+        ]
+    });
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).unwrap(),
+            Some("root-preflight-warn/planner"),
+            Some("turn-001"),
+            Some(&config),
+            Some(store),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["ok"], true);
+    let preflight = v.get("capability_preflight").expect("preflight present");
+    assert_eq!(preflight["steps_checked"], 3);
+    assert_eq!(preflight["has_warnings"], true);
+
+    let warnings = preflight["warnings"].as_array().expect("warnings array");
+    // Covered findings are filtered out of the response view.
+    assert_eq!(warnings.len(), 2, "only non-Covered findings surface: {:?}", warnings);
+
+    let kinds: Vec<&str> = warnings
+        .iter()
+        .map(|w| w["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"uncovered_capabilities"));
+    assert!(kinds.contains(&"agent_not_installed"));
+
+    let uncovered = warnings
+        .iter()
+        .find(|w| w["kind"] == "uncovered_capabilities")
+        .unwrap();
+    assert_eq!(uncovered["step_id"], "s2");
+    assert_eq!(uncovered["agent_id"], "coder.default");
+    assert_eq!(uncovered["uncovered"].as_array().unwrap().len(), 1);
+    assert_eq!(uncovered["uncovered"][0], "NetworkAccess");
+
+    let not_installed = warnings
+        .iter()
+        .find(|w| w["kind"] == "agent_not_installed")
+        .unwrap();
+    assert_eq!(not_installed["step_id"], "s3");
+    assert_eq!(not_installed["agent_id"], "researcher.default");
+}
+
+#[test]
+fn planframe_propose_preflight_clean_when_all_capabilities_covered() {
+    let dir = tempdir().unwrap();
+    let agents_dir = dir.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+
+    // Agent that fully covers the step's declared requirements.
+    write_test_skill(
+        &agents_dir,
+        "coder.default",
+        "capabilities:\n  - type: WriteAccess\n    scopes: [\"self.*\"]\n  - type: CodeExecution\n    patterns: [\"*\"]\n",
+    );
+
+    let mut config = make_config(&agents_dir);
+    config.agents_dir = agents_dir.clone();
+    let registry = default_registry();
+    let manifest = plan_frame_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+    );
+
+    let args = json!({
+        "title": "Clean preflight",
+        "objective": "All covered",
+        "steps": [
+            {
+                "step_id": "s1",
+                "title": "covered",
+                "agent_id": "coder.default",
+                "required_capabilities": ["WriteAccess", "CodeExecution"]
+            }
+        ]
+    });
+
+    let result = registry
+        .execute(
+            "planframe_propose",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&args).unwrap(),
+            Some("root-preflight-clean/planner"),
+            Some("turn-001"),
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+
+    let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["ok"], true);
+    let preflight = v.get("capability_preflight").expect("preflight present");
+    assert_eq!(preflight["steps_checked"], 1);
+    assert_eq!(preflight["has_warnings"], false);
+    assert_eq!(preflight["warnings"].as_array().unwrap().len(), 0);
+
+    // The plan exists; amend it to add a new uncovered step and confirm
+    // the preflight re-runs with fresh warnings on planframe_amend.
+    let plan_id = v["plan_id"].as_str().unwrap();
+    let amend_args = json!({
+        "plan_id": plan_id,
+        "reason": "add uncovered step",
+        "steps": [
+            {"step_id": "s1", "title": "covered", "agent_id": "coder.default", "required_capabilities": ["WriteAccess", "CodeExecution"]},
+            {"step_id": "s2", "title": "uncovered", "agent_id": "coder.default", "required_capabilities": ["NetworkAccess"]}
+        ]
+    });
+
+    let amend_result = registry
+        .execute(
+            "planframe_amend",
+            &manifest,
+            &policy,
+            dir.path(),
+            Some(&gateway_dir),
+            &serde_json::to_string(&amend_args).unwrap(),
+            Some("root-preflight-clean/planner"),
+            Some("turn-002"),
+            Some(&config),
+            Some(store),
+            None,
+        )
+        .unwrap();
+
+    let av: serde_json::Value = serde_json::from_str(&amend_result).unwrap();
+    assert_eq!(av["ok"], true);
+    let ap = av.get("capability_preflight").expect("amend preflight present");
+    assert_eq!(ap["steps_checked"], 2);
+    assert_eq!(ap["has_warnings"], true);
+    let aw = ap["warnings"].as_array().unwrap();
+    assert_eq!(aw.len(), 1);
+    assert_eq!(aw[0]["step_id"], "s2");
+    assert_eq!(aw[0]["kind"], "uncovered_capabilities");
+}
