@@ -193,10 +193,13 @@ impl CapabilityLookup for crate::AgentRepository {
 /// `Covered` findings (the common case) so the response stays lean —
 /// the planner only needs to see what failed.
 ///
-/// Build with [`PreflightView::from_result`]. The view omits the
-/// `capability_preflight` field entirely when there are no warnings
-/// (clean plan + no steps checked), so a plan that doesn't opt into
-/// preflight (`required_capabilities` empty everywhere) sees no noise.
+/// Build with [`PreflightView::from_result`]. The tool surface omits
+/// the `capability_preflight` field entirely when *no step opted in*
+/// (`required_capabilities` empty everywhere → `steps_checked == 0`,
+/// see [`PreflightView::is_empty`]). A plan that opts in and comes
+/// back clean is intentionally surfaced with `warnings: []` so the
+/// caller can distinguish "didn't ask" from "asked and got no
+/// warnings" — important for the response contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreflightView {
     pub steps_checked: usize,
@@ -220,8 +223,10 @@ impl PreflightView {
         }
     }
 
-    /// `true` when the preflight surfaced zero findings worth reporting.
-    /// Used by the tool surface to omit the field entirely on clean plans.
+    /// `true` when *no step opted in* — the only condition under which
+    /// the tool surface omits the `capability_preflight` field. A clean
+    /// run on an opted-in plan is NOT empty: the caller asked, so the
+    /// (clean) answer is surfaced with `warnings: []`.
     pub fn is_empty(&self) -> bool {
         self.steps_checked == 0 && self.warnings.is_empty()
     }

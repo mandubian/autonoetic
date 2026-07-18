@@ -123,9 +123,20 @@ fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
 }
 
 /// RFC #777 Part C — run the capability preflight over `plan` and return
-/// the response-facing view. Best-effort: any failure (e.g. agents_dir
-/// not configured) yields `None` so the propose/amend flow never breaks
-/// over advisory findings. The preflight itself is purely static
+/// the response-facing view.
+///
+/// Returns `None` only when no step opted in (`required_capabilities`
+/// empty everywhere) — the common case, and the only condition under
+/// which the propose/amend response omits the `capability_preflight`
+/// field entirely. In every other case the preflight runs and the view
+/// is returned, even if every step is `Covered` (clean-but-asked is
+/// surfaced with `warnings: []` so the caller can tell opt-in from
+/// opt-out).
+///
+/// Repository/scan failures are not special-cased: a missing agent or
+/// unreadable SKILL.md simply surfaces as an `agent_not_installed`
+/// finding for that step, which is exactly the contract the planner
+/// branches on. The preflight itself is purely static
 /// (`required_capabilities` vs. declared capabilities) — no LLM, no
 /// network, no judgment.
 fn compute_preflight_view(
@@ -410,7 +421,7 @@ impl NativeTool for PlanFrameProposeTool {
                                 "required_capabilities": {
                                     "type": "array",
                                     "items": { "type": "string" },
-                                    "description": "Capability type names this step requires (e.g. [\"NetworkAccess\", \"CodeExecution\"]). When non-empty AND agent_id is set, the gateway runs an advisory capability preflight at plan time and surfaces findings in the response's `capability_preflight`. Does not block — proceeding past a warning is on the record. Valid names match Capability::type_name (SandboxFunctions, ReadAccess, WriteAccess, NetworkAccess, AgentSpawn, AgentMessage, BackgroundReevaluation, CodeExecution, ArtifactExecution, EmergencyStop, AgentRevision, Evaluation, ApprovalQueue, SchedulerSignal, CredentialAccess, UserProfileAccess, SchedulerAccess, SkillInstall, ConstitutionalProposal, ReasoningAudit, GithubIssueCreate, SecurityRedTeam, CapsuleExport, SelfCapsuleExport, PlanFrameAccess, WikiContribute, PromoteWith, GateDecider)."
+                                    "description": "Capability type names this step requires (e.g. [\"NetworkAccess\", \"CodeExecution\"]). When non-empty AND agent_id is set, the gateway runs an advisory capability preflight at plan time and surfaces findings in the response's `capability_preflight`. Does not block — proceeding past a warning is on the record. Valid names match Capability::type_name: SandboxFunctions, ReadAccess, WriteAccess, NetworkAccess, AgentSpawn, AgentMessage, BackgroundReevaluation, CodeExecution, ArtifactExecution, EmergencyStop, AgentRevision, Evaluation, ApprovalQueue, SchedulerSignal, CredentialAccess, UserProfileAccess, SchedulerAccess, SkillInstall, ConstitutionalProposal, ReasoningAudit, GithubIssueCreate, budget.no_price_available.allow, SecurityRedTeam, CapsuleExport, SelfCapsuleExport, PlanFrameAccess, WikiContribute, PromoteWith, GateDecider."
                                 }
                             },
                             "required": ["step_id"]
