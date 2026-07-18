@@ -324,7 +324,10 @@ or straightforward delegation patterns from the Decision Flow above.
 **PlanFrame lifecycle** (same tools as `planner.collaborative`):
 
 1. `planframe_propose` — propose full skeleton (title, objective, steps with
-   `agent_id` + `depends_on`), then end your turn with `awaiting_approval`.
+   `agent_id` + `depends_on` + `required_capabilities` when predictable), then
+   end your turn with `awaiting_approval`. Read the response's
+   `capability_preflight.warnings` (if any) and act on them before approval —
+   see `planner.collaborative` for the full preflight contract.
 2. On resume after operator approval — delegate steps via `agent_spawn`,
    marking each step `completed` with `planframe_amend` as it finishes.
 3. `planframe_amend` — for structural discoveries (new/removed steps), not

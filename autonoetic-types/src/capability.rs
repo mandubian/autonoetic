@@ -357,18 +357,18 @@ pub fn compute_capability_delta(
 fn capability_map(caps: &[Capability]) -> BTreeMap<String, Capability> {
     let mut out = BTreeMap::new();
     for cap in caps {
-        out.insert(capability_type_name(cap), cap.clone());
+        out.insert(cap.type_name(), cap.clone());
     }
     out
 }
 
 /// Canonical capability-kind names — every value here matches what
-/// [`capability_type_name`] would produce for that `Capability`
+/// [`Capability::type_name`] would produce for that `Capability`
 /// variant. Exported so config-validation code (e.g.,
 /// `ImproveConfig::high_blast_radius_capability_kinds`) can check
 /// operator-supplied capability names against the known set rather
 /// than silently accepting typos. Keep this list in sync with
-/// [`capability_type_name`] — both are exhaustive over the
+/// [`Capability::type_name`] — both are exhaustive over the
 /// `Capability` enum.
 pub fn all_capability_kind_names() -> &'static [&'static str] {
     &[
@@ -405,37 +405,46 @@ pub fn all_capability_kind_names() -> &'static [&'static str] {
     ]
 }
 
-fn capability_type_name(cap: &Capability) -> String {
-    match cap {
-        Capability::SandboxFunctions { .. } => "SandboxFunctions".to_string(),
-        Capability::ReadAccess { .. } => "ReadAccess".to_string(),
-        Capability::WriteAccess { .. } => "WriteAccess".to_string(),
-        Capability::NetworkAccess { .. } => "NetworkAccess".to_string(),
-        Capability::AgentSpawn { .. } => "AgentSpawn".to_string(),
-        Capability::AgentMessage { .. } => "AgentMessage".to_string(),
-        Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
-        Capability::CodeExecution { .. } => "CodeExecution".to_string(),
-        Capability::ArtifactExecution => "ArtifactExecution".to_string(),
-        Capability::EmergencyStop => "EmergencyStop".to_string(),
-        Capability::AgentRevision { .. } => "AgentRevision".to_string(),
-        Capability::Evaluation { .. } => "Evaluation".to_string(),
-        Capability::ApprovalQueue { .. } => "ApprovalQueue".to_string(),
-        Capability::SchedulerSignal { .. } => "SchedulerSignal".to_string(),
-        Capability::CredentialAccess { .. } => "CredentialAccess".to_string(),
-        Capability::UserProfileAccess { .. } => "UserProfileAccess".to_string(),
-        Capability::SchedulerAccess { .. } => "SchedulerAccess".to_string(),
-        Capability::SkillInstall { .. } => "SkillInstall".to_string(),
-        Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
-        Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
-        Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
-        Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
-        Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
-        Capability::CapsuleExport => "CapsuleExport".to_string(),
-        Capability::SelfCapsuleExport => "SelfCapsuleExport".to_string(),
-        Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
-        Capability::WikiContribute => "WikiContribute".to_string(),
-        Capability::PromoteWith { .. } => "PromoteWith".to_string(),
-        Capability::GateDecider { .. } => "GateDecider".to_string(),
+impl Capability {
+    /// Canonical type name for this capability variant (e.g.
+    /// `"NetworkAccess"`, `"WriteAccess"`). Variant fields (hosts, scopes,
+    /// patterns, …) are ignored — this is the kind name only. Used by
+    /// capability-delta computation, plan-time preflight (#777 Part C),
+    /// and config validation against [`all_capability_kind_names`].
+    ///
+    /// Keep in sync with [`all_capability_kind_names`].
+    pub fn type_name(&self) -> String {
+        match self {
+            Capability::SandboxFunctions { .. } => "SandboxFunctions".to_string(),
+            Capability::ReadAccess { .. } => "ReadAccess".to_string(),
+            Capability::WriteAccess { .. } => "WriteAccess".to_string(),
+            Capability::NetworkAccess { .. } => "NetworkAccess".to_string(),
+            Capability::AgentSpawn { .. } => "AgentSpawn".to_string(),
+            Capability::AgentMessage { .. } => "AgentMessage".to_string(),
+            Capability::BackgroundReevaluation { .. } => "BackgroundReevaluation".to_string(),
+            Capability::CodeExecution { .. } => "CodeExecution".to_string(),
+            Capability::ArtifactExecution => "ArtifactExecution".to_string(),
+            Capability::EmergencyStop => "EmergencyStop".to_string(),
+            Capability::AgentRevision { .. } => "AgentRevision".to_string(),
+            Capability::Evaluation { .. } => "Evaluation".to_string(),
+            Capability::ApprovalQueue { .. } => "ApprovalQueue".to_string(),
+            Capability::SchedulerSignal { .. } => "SchedulerSignal".to_string(),
+            Capability::CredentialAccess { .. } => "CredentialAccess".to_string(),
+            Capability::UserProfileAccess { .. } => "UserProfileAccess".to_string(),
+            Capability::SchedulerAccess { .. } => "SchedulerAccess".to_string(),
+            Capability::SkillInstall { .. } => "SkillInstall".to_string(),
+            Capability::ConstitutionalProposal { .. } => "ConstitutionalProposal".to_string(),
+            Capability::ReasoningAudit { .. } => "ReasoningAudit".to_string(),
+            Capability::GithubIssueCreate { .. } => "GithubIssueCreate".to_string(),
+            Capability::BudgetNoPriceAvailableAllow => "budget.no_price_available.allow".to_string(),
+            Capability::SecurityRedTeam => "SecurityRedTeam".to_string(),
+            Capability::CapsuleExport => "CapsuleExport".to_string(),
+            Capability::SelfCapsuleExport => "SelfCapsuleExport".to_string(),
+            Capability::PlanFrameAccess { .. } => "PlanFrameAccess".to_string(),
+            Capability::WikiContribute => "WikiContribute".to_string(),
+            Capability::PromoteWith { .. } => "PromoteWith".to_string(),
+            Capability::GateDecider { .. } => "GateDecider".to_string(),
+        }
     }
 }
 
@@ -444,7 +453,7 @@ fn capability_type_name(cap: &Capability) -> String {
 pub fn capability_set_covers(declared: &[Capability], artifact_caps: &[Capability]) -> bool {
     let declared_map = capability_map(declared);
     artifact_caps.iter().all(|ac| {
-        let name = capability_type_name(ac);
+        let name = ac.type_name();
         match declared_map.get(&name) {
             None => false,
             Some(dc) => capability_broadening(&name, dc, ac).is_none(),
@@ -788,7 +797,7 @@ mod tests {
 
     #[test]
     fn all_capability_kind_names_matches_capability_type_name() {
-        // Pin: every value `capability_type_name` produces for a real
+        // Pin: every value `Capability::type_name` produces for a real
         // `Capability` variant must appear in `all_capability_kind_names()`.
         // Adding a new variant without updating the list (used by
         // ImproveConfig validation) would silently let typos through;
@@ -843,10 +852,10 @@ mod tests {
             Capability::GateDecider { kinds: vec![] },
         ];
         for cap in &samples {
-            let name = capability_type_name(cap);
+            let name = cap.type_name();
             assert!(
                 known.contains(name.as_str()),
-                "capability_type_name() returned '{}' but it's not in all_capability_kind_names() — \
+                "Capability::type_name() returned '{}' but it's not in all_capability_kind_names() — \
                  add it to keep ImproveConfig high-blast validation honest",
                 name
             );

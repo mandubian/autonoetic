@@ -122,6 +122,49 @@ fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
         .any(|c| matches!(c, Capability::PlanFrameAccess { .. }))
 }
 
+/// RFC #777 Part C — run the capability preflight over `plan` and return
+/// the response-facing view.
+///
+/// Returns `None` only when no step opted in (`required_capabilities`
+/// empty everywhere) — the common case, and the only condition under
+/// which the propose/amend response omits the `capability_preflight`
+/// field entirely. In every other case the preflight runs and the view
+/// is returned, even if every step is `Covered` (clean-but-asked is
+/// surfaced with `warnings: []` so the caller can tell opt-in from
+/// opt-out).
+///
+/// Repository/scan failures are not special-cased: a missing agent or
+/// unreadable SKILL.md simply surfaces as an `agent_not_installed`
+/// finding for that step, which is exactly the contract the planner
+/// branches on. The preflight itself is purely static
+/// (`required_capabilities` vs. declared capabilities) — no LLM, no
+/// network, no judgment.
+fn compute_preflight_view(
+    config: &GatewayConfig,
+    plan: &PlanFrame,
+) -> Option<crate::runtime::plan_preflight::PreflightView> {
+    use crate::runtime::plan_preflight::{preflight_plan, PreflightView};
+
+    // Skip the directory scan entirely when no step opted into preflight
+    // (the common case). Avoids touching the filesystem on every propose.
+    let any_caps = plan
+        .steps
+        .iter()
+        .any(|s| !s.required_capabilities.is_empty());
+    if !any_caps {
+        return None;
+    }
+
+    let repo = crate::AgentRepository::from_config(config);
+    let result = preflight_plan(plan, &repo);
+    let view = PreflightView::from_result(&result);
+    if view.is_empty() {
+        None
+    } else {
+        Some(view)
+    }
+}
+
 /// Whether a set of `PlanFrameAccess` patterns grants `operation`. Pure so it
 /// is unit-testable without constructing a full manifest.
 ///
@@ -351,7 +394,7 @@ impl NativeTool for PlanFrameProposeTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Propose a new PlanFrame for collaborative work. Creates a workflow if one does not exist yet. The plan starts in 'awaiting_approval' status and must be approved before agents act on it.".to_string(),
+            description: "Propose a new PlanFrame for collaborative work. Creates a workflow if one does not exist yet. The plan starts in 'awaiting_approval' status and must be approved before agents act on it. The response carries a `capability_preflight` field (RFC #777 Part C) when any step declares `required_capabilities`: a deterministic, advisory check that the intended `agent_id` declares those capability types. Warnings do not block — branch on them (re-delegate, decompose, escalate) or proceed on the record.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -374,7 +417,12 @@ impl NativeTool for PlanFrameProposeTool {
                                 "owner": { "type": "string", "enum": ["planner", "agent", "operator", "shared"] },
                                 "agent_id": { "type": "string" },
                                 "depends_on": { "type": "array", "items": { "type": "string" } },
-                                "notes": { "type": "string" }
+                                "notes": { "type": "string" },
+                                "required_capabilities": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Capability type names this step requires (e.g. [\"NetworkAccess\", \"CodeExecution\"]). When non-empty AND agent_id is set, the gateway runs an advisory capability preflight at plan time and surfaces findings in the response's `capability_preflight`. Does not block — proceeding past a warning is on the record. Valid names match Capability::type_name: SandboxFunctions, ReadAccess, WriteAccess, NetworkAccess, AgentSpawn, AgentMessage, BackgroundReevaluation, CodeExecution, ArtifactExecution, EmergencyStop, AgentRevision, Evaluation, ApprovalQueue, SchedulerSignal, CredentialAccess, UserProfileAccess, SchedulerAccess, SkillInstall, ConstitutionalProposal, ReasoningAudit, GithubIssueCreate, budget.no_price_available.allow, SecurityRedTeam, CapsuleExport, SelfCapsuleExport, PlanFrameAccess, WikiContribute, PromoteWith, GateDecider."
+                                }
                             },
                             "required": ["step_id"]
                         }
@@ -769,6 +817,15 @@ impl NativeTool for PlanFrameProposeTool {
         }
 
         let summary = plan.compact_summary();
+
+        // RFC #777 Part C — plan-time capability preflight. Advisory: returns
+        // findings (uncovered capabilities / not-installed agents) but never
+        // blocks. The planner branches on them; if it proceeds anyway, the
+        // warnings are part of the tool response the LLM saw, so "on the
+        // record" is satisfied. Empty when no step declares
+        // `required_capabilities` — fully opt-in per the RFC.
+        let preflight_view = compute_preflight_view(config, &plan);
+
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
             "plan_id": plan_id,
@@ -782,6 +839,7 @@ impl NativeTool for PlanFrameProposeTool {
             },
             "auto_approved": auto_approved,
             "summary": summary,
+            "capability_preflight": preflight_view,
         }))?)
     }
 
@@ -1154,7 +1212,7 @@ impl NativeTool for PlanFrameAmendTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the prior revision was approved, the new revision INHERITS that approval unless the amendment expands the safety envelope (adds/removes a step, changes a step owner or agent, weakens/removes a validation gate, or broadens capability_envelope). Cosmetic changes (rewording objective/title, recording a progress reason) inherit automatically. Envelope-expanding changes re-open the operator gate. The response carries `diff_summary`, `inherited`, and `requires_regate` so the caller — and the operator — can see exactly what changed.".to_string(),
+            description: "Amend an existing PlanFrame by creating a new immutable revision. The previous revision is preserved unchanged. If the prior revision was approved, the new revision INHERITS that approval unless the amendment expands the safety envelope (adds/removes a step, changes a step owner or agent, weakens/removes a validation gate, or broadens capability_envelope). Cosmetic changes (rewording objective/title, recording a progress reason) inherit automatically. Envelope-expanding changes re-open the operator gate. The response carries `diff_summary`, `inherited`, and `requires_regate` so the caller — and the operator — can see exactly what changed. The response also re-runs the `capability_preflight` (RFC #777 Part C) when any resolved step declares `required_capabilities`.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1837,6 +1895,13 @@ impl NativeTool for PlanFrameAmendTool {
             },
         )?;
 
+        // RFC #777 Part C — re-run the capability preflight on the amended
+        // revision. Same advisory shape as `planframe_propose`: warnings
+        // surface to the planner, never block. Re-runs on every amend so a
+        // step that newly declares `required_capabilities`, or a step whose
+        // `agent_id` was changed, gets fresh findings.
+        let preflight_view = compute_preflight_view(config, &new_revision);
+
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
             "plan_id": current.plan_id,
@@ -1853,6 +1918,7 @@ impl NativeTool for PlanFrameAmendTool {
             // The LoopGuard uses this to avoid resetting the no-progress
             // counter on stagnant amendment loops.
             "progress_recorded": step_status_changed || envelope_diff.requires_regate(),
+            "capability_preflight": preflight_view,
             "message": if inherit {
                 "Plan amended (no envelope change) — operator approval inherited from the prior revision."
             } else {
