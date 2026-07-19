@@ -1,6 +1,12 @@
 # Task Robustness: Typed Failures, Honest Contracts, and Fail-at-Plan-Time
 
-> **Status:** Draft RFC (2026-07-12) — design exploration, not yet a proposal.
+> **Status:** Implemented (2026-07-13 / wiring follow-up 2026-07-19). All
+> six workstreams shipped: Part A taxonomy (#783), Part B bundle (#789),
+> Part C preflight (#786 + wiring PR #830), Part D burn-rate (#784),
+> Part E.1 compression (#791), Part E.2 failover (#785). The design is
+> kept as the canonical reference for the invariants and contract
+> shape; open questions at the bottom remain open per their original
+> framing.
 > Tracking issue: [#781](https://github.com/mandubian/autonoetic/issues/781)
 > (workstreams #775–#780). Companion to
 > [`citizenship-as-a-runtime-service.md`](citizenship-as-a-runtime-service.md)
