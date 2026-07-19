@@ -1,4 +1,4 @@
-//! Anomaly flag persistence — future Ri-0.18 / O-7 (issue #770 part C.1).
+//! Anomaly flag persistence — Ri-0.18 / O-7 (issue #770 part C.1).
 //!
 //! An agent holding zero capabilities can still report unexpected behavior
 //! with a single tool call (`anomaly_flag`): "the agent most likely to
@@ -6,10 +6,11 @@
 //! are durable — every flag gets an id and cannot be silently dropped — and
 //! progress through a state machine: `pending -> under_review -> (confirmed
 //! | dismissed | deferred)`. Every flag is owed a recorded decision with
-//! motivation (O-7). Mirrors `constitutional_proposals.rs` closely; the
-//! clauses are not yet enacted (signing pending), so causal events carry
-//! the rule IDs "Ri-0.18"/"O-7" today and contract-health buckets them as
-//! `unattributed` until the amendment is signed.
+//! motivation (O-7). Mirrors `constitutional_proposals.rs` closely. Ri-0.18
+//! and O-7 entered the signed constitution with the 2026.07.19 amendment;
+//! causal events carry the rule IDs "Ri-0.18"/"O-7" and contract-health
+//! attributes them to their clauses (pre-enactment they bucketed as
+//! `unattributed`).
 
 use anyhow::Result;
 use rusqlite::params;

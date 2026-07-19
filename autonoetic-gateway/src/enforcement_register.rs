@@ -162,6 +162,21 @@ pub fn principles() -> &'static [Principle] {
                         action, outcome) leaves a stale hash detectable by recomputation.",
             entrenched: true,
         },
+        // P-9 — Agent Install & Provenance. Parent principle for the §9
+        // sub-rules registered individually (P-9.15 single door, P-9.16
+        // import provenance). The §9 prose frame is "Three-stage activation:
+        // artifact_build → revision.create → revision.promote"; the
+        // registered sub-rules pin the guarantees that make the door
+        // single and the import attributable.
+        Principle {
+            id: "P-9",
+            title: "Agent Install & Provenance",
+            statement: "Three-stage activation — artifact_build, revision.create, \
+                        revision.promote — gated so that every surface that activates an \
+                        agent passes the same promotion gates (single door), and every \
+                        externally-installed agent carries durable import provenance.",
+            entrenched: false,
+        },
     ]
 }
 
@@ -229,6 +244,15 @@ pub fn rights() -> &'static [Right] {
                         migration to another gateway. Scoped to the caller's own identity.",
             entrenched: false,
         },
+        Right {
+            id: "Ri-0.18",
+            title: "Right to report",
+            statement: "Any agent may file an anomaly report without holding any \
+                        capability; every flag is durably recorded, non-repudiably \
+                        attributed, cannot be silently dropped, and filing is never \
+                        itself grounds for sanction.",
+            entrenched: false,
+        },
     ]
 }
 
@@ -262,7 +286,10 @@ pub struct Obligation {
 
 /// Decider obligations (§O, bind the decider). Seeded with the two enacted
 /// clauses (O-1 motivation, O-2 attribution); O-3/O-4/O-5 enter by amendment as
-/// each becomes mechanically enforced (#399).
+/// each becomes mechanically enforced (#399). O-6 (proposal adjudication duty)
+/// and O-7 (anomaly adjudication duty) were enacted law from 2026.07.08 / 2026.07.19
+/// respectively and join the register here so contract-health attributes their
+/// `decider_obligation` / `sla_breached` events rather than bucketing `unattributed`.
 pub fn obligations() -> &'static [Obligation] {
     &[
         Obligation {
@@ -281,6 +308,25 @@ pub fn obligations() -> &'static [Obligation] {
             statement: "Every decision is attributed to the deciding principal (id + kind) on the \
                         causal chain and cannot be reattributed. The agent under decision can \
                         always tell who decided and what kind of principal they are.",
+            entrenched: false,
+        },
+        Obligation {
+            id: "O-6",
+            title: "Duty to adjudicate proposals, on time",
+            statement: "A proposal review authority owes every Ri-0.8 proposal a recorded, \
+                        motivated decision within a bounded adjudication window; a proposal left \
+                        un-adjudicated past the window is a recorded breach attributed to the \
+                        adjudicating seat (the decision is still owed). Window duration is config.",
+            entrenched: false,
+        },
+        Obligation {
+            id: "O-7",
+            title: "Duty to adjudicate reports, on time",
+            statement: "An anomaly review authority owes every Ri-0.18 flag a recorded, motivated \
+                        decision (confirmed/dismissed/deferred, with under_review as the \
+                        non-terminal holding state) within a bounded adjudication window; a flag \
+                        left un-adjudicated past the window is a recorded breach attributed to the \
+                        adjudicating seat (the decision is still owed). Window duration is config.",
             entrenched: false,
         },
     ]
@@ -450,6 +496,88 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             code: "decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) \
                    + actor bound into the causal-chain entry hash (causal_chain.rs)",
             test: "constitution_o_1_decider_motivation.rs",
+            config: None,
+        },
+        // ── Ri-0.18 (binds gateway — capability-free intake + loud flood cap) ──
+        // The tool's `is_available` is unconditionally true (Core tier); intake
+        // is gated only by the per-reporter triage bound, which rejects past the
+        // cap *loudly* (`anomaly_flag_flood`), never silently. The two halves
+        // are pinned by separate tests; collapse them into one entry mirroring
+        // the O-1/O-2 one-entry-per-clause convention.
+        EnforcementEntry {
+            clause_id: "Ri-0.18",
+            rule_id: "Ri-0.18",
+            check_id: "anomaly_flag_capability_free_intake",
+            code: "runtime/tools/anomaly_flag.rs::AnomalyFlagTool \
+                   + scheduler/gateway_store/anomaly_flags.rs::insert_anomaly_flag \
+                   + scheduler/gateway_store/anomaly_flags.rs::emit_anomaly_flag_flood_alert",
+            test: "anomaly_flag_integration.rs::tool_available_with_zero_capabilities \
+                   + anomaly_flag_integration.rs::filing_emits_causal_event_tagged_ri_0_18 \
+                   + anomaly_flags.rs::flood_cap_rejects_at_limit_and_keeps_existing \
+                   + anomaly_flag_integration.rs::flood_cap_rejects_filing_loudly",
+            config: Some("max_pending_anomaly_flags_per_reporter"),
+        },
+        // ── O-6 (binds decider — proposal adjudication duty + SLA breach) ──
+        // Enacted law since 2026.07.08 (was missing from the register); now
+        // registered alongside the SLA breach path so contract-health attributes
+        // both the recorded decision and any `sla_breached` event against O-6.
+        EnforcementEntry {
+            clause_id: "O-6",
+            rule_id: "O-6",
+            check_id: "proposal_adjudication_recorded_within_sla",
+            code: "scheduler/gateway_store/constitutional_proposals.rs::decide_constitutional_proposal \
+                   + scheduler/gateway_store/constitutional_proposals.rs::flag_proposal_sla_breaches \
+                   + scheduler.rs::check_adjudication_sla_breaches",
+            test: "router.rs::test_dispatch_constitution_resolve_proposal \
+                   + scheduler.rs::breaches_are_recorded_without_changing_status",
+            config: Some("decider_obligations.enabled, decider_obligations.adjudication_sla_secs"),
+        },
+        // ── O-7 (binds decider — anomaly adjudication duty + SLA breach) ──
+        // Both adjudication surfaces route through `decide_anomaly_flag`: the
+        // operator seat (`anomaly.resolve`) and the ombudsman office
+        // (`anomaly_adjudicate`, RFC Part F #774). The shared SLA test covers
+        // both O-6 and O-7 (it inserts a sample proposal and a sample flag in
+        // one body); citing it for both obligations is correct, not redundant.
+        EnforcementEntry {
+            clause_id: "O-7",
+            rule_id: "O-7",
+            check_id: "anomaly_adjudication_recorded_within_sla",
+            code: "runtime/tools/anomaly_adjudicate.rs::AnomalyAdjudicateTool \
+                   + scheduler/gateway_store/anomaly_flags.rs::decide_anomaly_flag \
+                   + scheduler/gateway_store/anomaly_flags.rs::flag_anomaly_flag_sla_breaches \
+                   + scheduler.rs::check_adjudication_sla_breaches",
+            test: "router.rs::test_dispatch_anomaly_resolve_terminal_decision_without_reason_rejected \
+                   + anomaly_adjudicate_tool_integration.rs::terminal_decision_requires_reason \
+                   + scheduler.rs::breaches_are_recorded_without_changing_status",
+            config: Some("decider_obligations.enabled, decider_obligations.adjudication_sla_secs"),
+        },
+        // ── P-9.15 (binds agent — single door for agent activation) ──
+        // skill_install must install Candidate only; activation must route
+        // through the AgentRevisionPromoteTool gate matrix. Startup bootstrap's
+        // auto-promote of the operator's own reference bundles is the sole
+        // declared exception, and it is parameter-explicit (`auto_promote: bool`).
+        EnforcementEntry {
+            clause_id: "P-9",
+            rule_id: "P-9.15",
+            check_id: "single_door_activation",
+            code: "runtime/tools/skill.rs::SkillInstallTool \
+                   + bootstrap.rs::bootstrap_single_agent_candidate_only \
+                   + bootstrap.rs::bootstrap_agents \
+                   + runtime/tools/agent_revision.rs::AgentRevisionPromoteTool \
+                   + runtime/tools/agent_revision.rs::check_capability_delta",
+            test: "skill_install_one_door_provenance.rs::one_door_generous_install_stays_candidate_and_unpromoted",
+            config: None,
+        },
+        // ── P-9.16 (binds agent — import provenance on externally-installed agents) ──
+        // source_kind/source_ref recorded on the revision and an
+        // agent_install/skill_imported causal event emitted, both durably.
+        EnforcementEntry {
+            clause_id: "P-9",
+            rule_id: "P-9.16",
+            check_id: "import_provenance_recorded",
+            code: "runtime/tools/skill.rs::SkillInstallTool \
+                   + bootstrap.rs::bootstrap_single_agent_candidate_only",
+            test: "skill_install_one_door_provenance.rs::provenance_recorded_on_revision_and_causal_event",
             config: None,
         },
     ]
@@ -1318,9 +1446,17 @@ mod citation_check {
     /// resolvable `a::b::c` module path) so they are mechanically verified —
     /// shrinking this list is progress; growing it needs justification in the
     /// PR that adds the new entry.
+    ///
+    /// `P-5.2` / `P-5.8` were missing from this list despite carrying prose
+    /// asides (`(tokio::task_local scope)`, `(gateway-authored repair prompt)`)
+    /// — a pre-existing gap that surfaced when regenerating the register doc
+    /// alongside the 2026.07.19 amendment. Closing it here is mechanical
+    /// reconciliation, not new prose: the entries themselves are unchanged.
     const KNOWN_PROSE_CITATIONS: &[(&str, &str)] = &[
         ("O-1", "code"),
         ("O-2", "code"),
+        ("P-5.2", "code"),
+        ("P-5.8", "code"),
         ("P-7.19", "code"),
         ("P-8.1", "code"),
         ("Ri-0.11", "code"),

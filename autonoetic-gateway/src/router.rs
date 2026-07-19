@@ -4558,7 +4558,8 @@ fn append_delegation_task_entry(
 /// Emit an `O-7`-tagged causal event recording the anomaly-flag decider
 /// obligation outcome (`decider_obligation.refused` / `…satisfied`), mirroring
 /// `scheduler::approval::emit_decider_obligation_event`'s shape so
-/// contract-health attributes it consistently once O-7 is signed. Best-effort:
+/// contract-health attributes it consistently to O-7 (which entered the
+/// enforcement register with the 2026.07.19 amendment). Best-effort:
 /// a store/emit failure must not change the decision outcome.
 fn emit_anomaly_decider_obligation_event(
     store: &crate::scheduler::gateway_store::GatewayStore,
