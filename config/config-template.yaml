@@ -494,6 +494,15 @@ max_session_turns: 25
 #     the same (tool, normalized-error) rejection recurs this many times the
 #     guard trips. Distinct rejections never accumulate together. Set to 0 to
 #     disable.
+#   max_spawn_identity_repeats: parent spawn-loop trip threshold (RFC #776
+#     Part B.4). When a parent delegates to the same agent_id with the same
+#     contract + input this many times, the guard trips with
+#     `RepeatedSpawnIdentity`. The identity key is structural (agent_id +
+#     expected_outputs hash + input digest) — start strict; the trip surfaces
+#     the attempt history to an operator/escalation gate. Catches the
+#     "declare success, produced nothing → respawn the same child" loop
+#     that the B.1 output-contract check converts from silent failure to a
+#     typed `output_contract_unmet` failure. Set to 0 to disable.
 #loop_guard:
 #  max_loops_without_progress: 10
 #  max_tool_failures: 8
@@ -506,6 +515,7 @@ max_session_turns: 25
 #  recurring_error_window: 10
 #  recurring_error_distinct_tools: 3
 #  max_irrecoverable_repeats: 3
+#  max_spawn_identity_repeats: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
