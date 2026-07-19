@@ -266,7 +266,9 @@ impl NativeTool for AnomalyAdjudicateTool {
 
         // Causal event + notification are best-effort visibility surfaces —
         // a failure there must not undo the durable decision above. Mirrors
-        // the anomaly_flag.filed event shape with action = "adjudicated".
+        // the anomaly_flag.filed event shape: action = "decided" for terminal
+        // decisions, "review_started" for the non-terminal `under_review`
+        // transition. Both record under category "anomaly_flag".
         let action_label = if is_terminal { "decided" } else { "review_started" };
         let event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: format!("aflag-ev-{}", uuid::Uuid::new_v4()),

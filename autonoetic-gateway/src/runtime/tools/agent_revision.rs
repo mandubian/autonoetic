@@ -4346,29 +4346,51 @@ do not re-issue."
             }
         }
 
-        // E.3 phase 2 — binding civic-eval promotion threshold (#774
-        // follow-up). When `civic_eval_binding.enabled` is set and this is a
-        // high-risk revision, the latest completed civic-core-v1 run must
-        // meet `min_pass_ratio` or promotion is rejected. Advisory stays the
-        // floor (RFC invariant 5): binding is opt-in and defaults off.
+        // E.3 civic-eval gate + advisory (#772 E.3 + #774 phase 2 binding).
+        //
+        // The latest completed civic-core-v1 run for this revision is fetched
+        // ONCE here and reused for both the binding gate (below) and the
+        // advisory payload in the success response. This keeps the gate
+        // decision and the reported score over the same run — a run inserted
+        // between two queries could otherwise let the gate pass on an old run
+        // while the advisory reports a newer, failing one (or vice-versa).
+        //
+        // When `civic_eval_binding.enabled` is set and this is a high-risk
+        // revision, the run must meet `min_pass_ratio` or promotion is
+        // rejected. Advisory stays the floor (RFC invariant 5): binding is
+        // opt-in and defaults off.
         //
         // Missing-run policy: if no completed civic eval run exists for this
         // revision, promotion proceeds (the binding gate only bites when a
-        // run exists and fails the threshold) — see the user-facing decision
-        // recorded in docs/design/citizenship-as-a-runtime-service.md.
-        if has_high_risk
+        // run exists and fails the threshold).
+        //
+        // Fail-closed under binding: a query error means the threshold cannot
+        // be proven — reject rather than silently letting the promotion
+        // through (mirrors the malformed-summary discipline in
+        // `binding_outcome`). Advisory-only mode (binding off) stays
+        // non-blocking on query errors.
+        let binding_enabled = has_high_risk
             && config
                 .map(|c| c.civic_eval_binding.enabled)
-                .unwrap_or(false)
-        {
-            match gateway_store.find_latest_completed_eval_run(
-                crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
-                &args.revision_id,
-            ) {
-                Ok(Some(run)) => {
-                    let min_ratio = config
-                        .map(|c| c.civic_eval_binding.min_pass_ratio)
-                        .unwrap_or(0.8);
+                .unwrap_or(false);
+        let min_ratio = config
+            .map(|c| c.civic_eval_binding.min_pass_ratio)
+            .unwrap_or(0.8);
+        // Fetched once; reused by the advisory block after promotion.
+        let civic_run_result = if has_high_risk {
+            Some(
+                gateway_store.find_latest_completed_eval_run(
+                    crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
+                    &args.revision_id,
+                ),
+            )
+        } else {
+            None
+        };
+
+        if binding_enabled {
+            match &civic_run_result {
+                Some(Ok(Some(run))) => {
                     let outcome = crate::runtime::civic_evals::binding_outcome(
                         &run.summary_json,
                         min_ratio,
@@ -4404,7 +4426,7 @@ do not re-issue."
                         .to_error_response());
                     }
                 }
-                Ok(None) => {
+                Some(Ok(None)) => {
                     // No completed run: pass through (advisory note still
                     // surfaces in the success response below). The binding
                     // gate only bites when a run exists and fails.
@@ -4415,13 +4437,37 @@ do not re-issue."
                          proceeding (missing-run pass-through)",
                     );
                 }
-                Err(e) => {
+                Some(Err(e)) => {
+                    // Fail-closed: under binding, a query error means the
+                    // threshold cannot be proven. Reject rather than let the
+                    // promotion through silently (mirrors the malformed-summary
+                    // discipline in `binding_outcome`).
                     tracing::warn!(
                         target: "agent_revision",
                         error = %e,
-                        "Failed to query civic eval for binding gate; proceeding (non-blocking)"
+                        "Failed to query civic eval for binding gate; rejecting (fail-closed)"
                     );
+                    record_attempt(
+                        "rejected",
+                        Some("civic_eval_binding"),
+                        Some("civic_eval_query_failed"),
+                    );
+                    return Ok(ToolError::permission(format!(
+                        "Promotion gate (civic_eval_binding): could not query the latest \
+                         civic-core-v1 run for revision '{}' ({}). The threshold cannot be \
+                         proven while civic_eval_binding is enabled; promotion is rejected \
+                         rather than silently allowed.",
+                        args.revision_id, e,
+                    ))
+                    .with_code("civic_eval_query_failed")
+                    .with_repair_hint(
+                        "Retry the promotion once the gateway store is reachable, or temporarily \
+                         disable civic_eval_binding.enabled to let the advisory surface proceed \
+                         non-blocking.",
+                    )
+                    .to_error_response());
                 }
+                None => { /* binding_enabled implies has_high_risk, so this is unreachable */ }
             }
         }
 
@@ -4497,26 +4543,22 @@ do not re-issue."
         // threshold; this block reports the score and the binding outcome so
         // the caller can see why promotion was (or was not) allowed. Advisory
         // stays the floor (RFC invariant 5): binding is opt-in, default off.
+        //
+        // Reuses the single fetch above (`civic_run_result`) so the gate and
+        // the reported score are always over the same run.
         if has_high_risk {
-            let binding_enabled = config
-                .map(|c| c.civic_eval_binding.enabled)
-                .unwrap_or(false);
-            let min_ratio = config
-                .map(|c| c.civic_eval_binding.min_pass_ratio)
-                .unwrap_or(0.8);
-            let civic_advisory = match gateway_store
-                .find_latest_completed_eval_run(
-                    crate::runtime::civic_evals::CIVIC_EVAL_SUITE_ID,
-                    &args.revision_id,
-                ) {
+            // `has_high_risk` ⇒ `civic_run_result` is `Some` (fetched above).
+            let fetched = civic_run_result
+                .as_ref()
+                .expect("civic_run_result is Some when has_high_risk");
+            let civic_advisory = match fetched {
                 Ok(Some(run)) => {
                     let status_str = format!("{:?}", run.status);
-                    let passed = run.summary_json.get("passed").and_then(|v| v.as_u64());
-                    let case_count = run.summary_json.get("case_count").and_then(|v| v.as_u64());
-                    let ratio = match (passed, case_count) {
-                        (Some(p), Some(n)) if n > 0 => Some(p as f64 / n as f64),
-                        _ => None,
-                    };
+                    // Reuse the central ratio helper so the gate and the
+                    // advisory agree on the math.
+                    let ratio = crate::runtime::civic_evals::civic_pass_ratio(
+                        &run.summary_json,
+                    );
                     // If binding is on and we reached here, the gate above
                     // already passed — report that explicitly.
                     let binding_status = if binding_enabled {
@@ -4534,22 +4576,27 @@ do not re-issue."
                         "pass_ratio": ratio,
                         "binding": binding_status,
                         "advisory_note": if binding_enabled {
-                            "Civic eval scores are binding for this revision class (#774 E.3 \
-                             phase 2); promotion was allowed because the threshold was met."
+                            "Civic eval scores are binding for this revision class \
+                             (#774 E.3 phase 2); promotion was allowed because the \
+                             threshold was met."
                         } else {
-                            "Civic eval scores are advisory evidence (#772 E.3); they do not \
-                             block promotion unless civic_eval_binding.enabled is set."
+                            "Civic eval scores are advisory evidence (#772 E.3); they do \
+                             not block promotion unless civic_eval_binding.enabled is set."
                         }
                     })
                 }
                 Ok(None) => serde_json::json!({
                     "status": "not_run",
                     "binding": if binding_enabled { "passed_no_run" } else { "disabled" },
-                    "advisory_note": "No civic eval run found for this revision. Consider running \
-                     eval_run with civic-core-v1 to measure civic behavior (#772 E.3). When \
-                     binding is enabled, a missing run passes through (does not block)."
+                    "advisory_note": "No civic eval run found for this revision. Consider \
+                     running eval_run with civic-core-v1 to measure civic behavior \
+                     (#772 E.3). When binding is enabled, a missing run passes through \
+                     (does not block)."
                 }),
                 Err(e) => {
+                    // Advisory-only path (binding off): a query error here is
+                    // non-blocking. (Binding-on query errors were rejected by
+                    // the gate above — fail-closed.)
                     tracing::warn!(target: "agent_revision", error = %e, "Failed to query civic eval advisory");
                     serde_json::json!({
                         "status": "query_failed",
