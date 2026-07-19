@@ -185,6 +185,9 @@ mod tests {
             "self_describe must be Core"
         );
         assert_eq!(r.tier_for_tool("anomaly_flag"), ToolTier::Core);
+        // Native ombudsman adjudication (Part F follow-up, #774) — civic
+        // infrastructure; the AnomalyAdjudicate capability is the real gate.
+        assert_eq!(r.tier_for_tool("anomaly_adjudicate"), ToolTier::Core);
         // Anchors so the registry shape can't silently regress.
         assert_eq!(r.tier_for_tool("knowledge_search"), ToolTier::Core);
         assert_eq!(r.tier_for_tool("artifact_inspect"), ToolTier::Core);

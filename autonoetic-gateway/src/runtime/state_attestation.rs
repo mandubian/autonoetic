@@ -397,6 +397,7 @@ fn capability_type_name(cap: &Capability) -> String {
         Capability::WikiContribute => "WikiContribute",
         Capability::PromoteWith { .. } => "PromoteWith",
         Capability::GateDecider { .. } => "GateDecider",
+        Capability::AnomalyAdjudicate { .. } => "AnomalyAdjudicate",
     }
     .to_string()
 }

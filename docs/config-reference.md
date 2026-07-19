@@ -865,6 +865,56 @@ amendment_invitations:
 
 ---
 
+## Civic Eval Binding (E.3 phase 2)
+
+Opt-in binding promotion gate for civic eval scores (#774 follow-up). The
+advisory surface (#772 E.3) always reports the latest `civic-core-v1` run in
+the promotion response. When `enabled` is set, a high-risk revision (the set
+that already requires evaluator/auditor evidence) whose latest completed
+`civic-core-v1` run scores `pass_ratio < min_pass_ratio` is **rejected** at
+promotion time with `error: "civic_eval_below_threshold"`. Advisory stays the
+floor (RFC invariant 5): binding defaults **off**, and a missing run passes
+through (the gate only bites when a run exists and fails the threshold). Flip
+to `true` only once the `civic-core-v1` suites prove stable on your instance.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `civic_eval_binding.enabled` | bool | `false` | Master switch. When `false`, civic eval scores remain advisory evidence and never block promotion. |
+| `civic_eval_binding.min_pass_ratio` | f64 | `0.8` | Minimum `passed / case_count` ratio required for promotion when enabled. |
+
+Example:
+
+```yaml
+civic_eval_binding:
+  enabled: false
+  min_pass_ratio: 0.8
+```
+
+---
+
+## Anomaly Adjudication (Part F follow-up)
+
+Native ombudsman adjudication (#774 follow-up). An office holding the
+`AnomalyAdjudicate` capability (typically `ombudsman.default`) can work the
+anomaly-flag queue directly via the `anomaly_adjudicate` tool, instead of
+routing every recommendation through an admin proposal for the operator to
+enact via `anomaly.resolve`. The operator remains the sovereignty backstop:
+set `require_terminal_cosign` to defer terminal decisions
+(`confirmed` / `dismissed` / `deferred`) back to `anomaly.resolve`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `anomaly_adjudication.require_terminal_cosign` | bool | `false` | When `true`, an office holding `AnomalyAdjudicate` may only move a flag to `under_review`; terminal decisions are rejected and must be enacted via `anomaly.resolve`. |
+
+Example:
+
+```yaml
+anomaly_adjudication:
+  require_terminal_cosign: false
+```
+
+---
+
 ## Cognitive Capsules
 
 Controls export/import of portable agent snapshots. A Cognitive Capsule pins a specific `AgentRevisionRecord` together with its `runtime.lock`, layer references (or embedded layer content in hermetic mode), and optional memory / checkpoint snapshots. See [`docs/cognitive-capsule.md`](cognitive-capsule.md).
