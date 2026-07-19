@@ -6,11 +6,12 @@
 > (workstreams #768–#773). Companion to the principal-model RFC
 > ([`principal-model-and-symmetric-obligations.md`](principal-model-and-symmetric-obligations.md), #359):
 > that RFC defines *who* a citizen is; this one is about making citizens
-> actually *behave* like citizens. Nothing here amends the constitution;
-> clauses proposed below (an anomaly-report right, an O-6 SLA) are drafted,
-> ready-to-apply, and **awaiting signing** —
-> [`docs/constitution/amendments/2026-07-12-anomaly-reporting-DRAFT.md`](../constitution/amendments/2026-07-12-anomaly-reporting-DRAFT.md)
-> — but not yet enacted; they would go through the normal amendment process.
+> actually *behave* like citizens. The constitutional clauses proposed here
+> (the anomaly-report right Ri-0.18, the adjudication duty O-7, and the O-6
+> SLA) were **enacted and signed in the 2026.07.19 constitution** —
+> [`docs/constitution/versions/2026.07.19/`](../constitution/versions/2026.07.19/constitution.md)
+> — so C.1's reporting surface and D.1's adjudication timeliness are now
+> law, and contract-health attributes their events to their clauses.
 >
 > | Part | Status |
 > |---|---|
@@ -18,10 +19,10 @@
 > | A.2 civic line in turn attestation | **SHIPPED** |
 > | B.1 injected recall at wake | **SHIPPED** |
 > | B.2 lessons crystallize into revisions | Implemented via memory-curator `promote_to_skill` / `flag_for_evolution` verdicts |
-> | C.1 `anomaly_flag` tool + adjudication RPC | **SHIPPED** (code); constitutional enactment pending signing |
+> | C.1 `anomaly_flag` tool + adjudication RPC | **SHIPPED**; constitutional enactment **signed** (2026.07.19 — Ri-0.18 / O-7) |
 > | C.2 `anomalies` schema field | **SHIPPED** (advisory) |
 > | C.3 precision-scored civic record | Deferred — needs adjudication volume first |
-> | D.1 O-6/O-7 adjudication SLA | **SHIPPED** (code); constitutional enactment pending signing |
+> | D.1 O-6/O-7 adjudication SLA | **SHIPPED**; constitutional enactment **signed** (2026.07.19 — O-6 SLA + O-7) |
 > | D.2 mechanical amendment invitations from denial telemetry | **SHIPPED** |
 > | D.3 DISCRETION LEAK register | **SHIPPED** |
 > | E.1 civic eval suites | **SHIPPED** |

@@ -21,13 +21,15 @@ Candidate-only + the `source_kind`/`source_ref` recording).
 
 Baseline: **2026.07.08**. Six clause-level changes — one new right, one
 replaced obligation + one new obligation, two new §9 sub-rules, one new
-§13 invariant bullet — plus a one-character ratio fix in the §0 prose
-(`17 rights against 177 rules` → `18 rights against 177 rules`). One
-existing clause's status changes: O-6 `PARTIAL` → `ENFORCED` (the SLA
-mechanism ships in code, so it is no longer partial). No entrenched
-clause's text or status changes; none of the new clauses are entrenched
-(whether the correction machinery belongs in the entrenched core is its
-own deliberate decision, not a rider here).
+§13 invariant bullet — plus a §0 prose ratio update
+(`17 rights against 177 rules` → `18 rights against 179 rules`) to keep
+the design-signal prose in sync with the mechanically counted lock
+numbers (Ri-0.18 raises rights 17→18; P-9.15 + P-9.16 raise rules
+177→179). One existing clause's status changes: O-6 `PARTIAL` →
+`ENFORCED` (the SLA mechanism ships in code, so it is no longer partial).
+No entrenched clause's text or status changes; none of the new clauses
+are entrenched (whether the correction machinery belongs in the
+entrenched core is its own deliberate decision, not a rider here).
 
 ## Amendments
 

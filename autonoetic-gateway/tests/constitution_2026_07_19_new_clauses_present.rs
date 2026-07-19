@@ -98,10 +98,14 @@ fn i_13_creation_is_not_delegation_is_present() {
 #[test]
 fn rights_rules_ratio_prose_was_updated() {
     // Ri-0.18 added → 18 rights; P-9.15/P-9.16 added → 179 rules.
-    // The §0 bind-direction paragraph cites the rights count as a design
-    // signal; it must not be left stale after the amendment. The prose wraps
-    // across two lines in the source, so we check the rights count token
-    // rather than the full sentence.
+    // The §0 bind-direction paragraph cites the ratio as a design signal;
+    // it must not be left stale after the amendment. The prose wraps across
+    // two lines in the source, so we check the count tokens individually.
+    //
+    // Both numbers are pinned symmetrically — an earlier draft updated only
+    // the rights count and shipped "18 rights against 177 rules", which
+    // contradicted the signed lock's `rule_enforcement_count: 179`. Don't
+    // let that asymmetry recur.
     assert!(
         DRAFT_CONSTITUTION.contains("18 rights against"),
         "the rights/rules ratio prose should read 18 rights after the amendment"
@@ -109,5 +113,13 @@ fn rights_rules_ratio_prose_was_updated() {
     assert!(
         !DRAFT_CONSTITUTION.contains("17 rights against"),
         "the pre-amendment (17 rights) ratio prose must be updated"
+    );
+    assert!(
+        DRAFT_CONSTITUTION.contains("179 rules"),
+        "the rights/rules ratio prose should read 179 rules after P-9.15/P-9.16 were added"
+    );
+    assert!(
+        !DRAFT_CONSTITUTION.contains("177 rules"),
+        "the pre-amendment (177 rules) ratio prose must be updated — P-9.15/P-9.16 raised the count"
     );
 }

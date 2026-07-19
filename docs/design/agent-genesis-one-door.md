@@ -1,10 +1,10 @@
 # Agent Genesis — One Door
 
 > **Status:** Partial — the security core **shipped** (Parts A, B, C, D, E.1,
-> F.1, merged via #802/#805; plus designer lineage #803/#804). **Remaining:**
-> F.3/F.4 birth quality (#799, staged), and the P-9.15/P-9.16/I-13 amendment
-> (#800, drafted in `docs/constitution/amendments/2026-07-14-genesis-one-door-DRAFT.md`,
-> awaiting signing). F.5 probation is deliberately routed to the citizenship
+> F.1, merged via #802/#805; plus designer lineage #803/#804), and the
+> P-9.15/P-9.16/I-13 amendment (#800) is **enacted and signed** in the
+> 2026.07.19 constitution. **Remaining:** F.3/F.4 birth quality (#799,
+> staged). F.5 probation is deliberately routed to the citizenship
 > RFC's E.3, not here. Tracking issue:
 > [#801](https://github.com/mandubian/autonoetic/issues/801)
 > (workstreams #793–#800). Companion to
@@ -12,8 +12,8 @@
 > (#774): that RFC makes existing agents behave like citizens; this one makes
 > sure **new** agents — whether built by the system or imported from outside —
 > are *born* through one lawful door. Constitutional clauses proposed here
-> (P-9.15, P-9.16, I-13) are drafted for the signing queue in
-> `docs/constitution/amendments/`; nothing here amends the law directly.
+> (P-9.15, P-9.16, I-13) are now law in
+> [`docs/constitution/versions/2026.07.19/`](../constitution/versions/2026.07.19/constitution.md).
 
 ---
 
@@ -222,10 +222,10 @@ P-9.16 (Part G) something real to point at.
   drift apart: E.3 is the newborn-screening mechanism; this RFC only makes
   sure every newborn passes through the door where screening can happen.
 
-## Part G — Constitutional clauses (drafted for the signing queue)
+## Part G — Constitutional clauses (enacted 2026.07.19)
 
-Drafted in `docs/constitution/amendments/2026-07-14-genesis-one-door-DRAFT.md`
-(sign together with the pending Ri-0.18 / O-7 / O-6-SLA batch):
+Enacted in `docs/constitution/versions/2026.07.19/constitution.md`, signed in
+the same batch as the Ri-0.18 / O-7 / O-6-SLA citizenship amendments:
 
 - **P-9.15 (Single door):** every surface that activates an agent passes the
   same promotion gates (P-9.7, P-9.9, P-2.25); gateway-startup bootstrap of
