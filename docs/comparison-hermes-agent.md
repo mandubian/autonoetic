@@ -1,7 +1,7 @@
 # Autonoetic vs Hermes-Agent Comparison
 
 > Comparing the Autonoetic agent runtime (Rust) with Hermes-Agent (Python, by Nous Research).
-> Last updated: 2026-03-31, based on code audit of both codebases.
+> Last updated: 2026-07-19 (Autonoetic status refresh for context compression + provider failover, both now shipped per task-robustness RFC #781 Parts E.1/E.2). Original comparison: 2026-03-31, based on code audit of both codebases.
 
 ---
 
@@ -98,8 +98,8 @@ This table reflects what is actually implemented in the codebase, not just docum
 | **Learning tools** (`execution_search`, `knowledge_search`, `digest_query`) | **Fully implemented** — native tools at `tools.rs`, integration tested | N/A (uses FTS5 session search instead) |
 | **Post-session memory extraction** | **Fully implemented** — `post_session_digest.rs` (397 lines), wired into execution lifecycle | **Implemented** — background review thread |
 | **Background scheduling** | **Fully implemented** — 9-module scheduler (`scheduler/`), tick loop, wake predicates, workflow tasks, approval gating, signal delivery | **Implemented** — cron scheduler with JSON job storage |
-| **Context compression** | **Partial** — token counting, context %, session pruning, text truncation exist; no LLM summarization when approaching limits | **Implemented** — iterative summarization at configurable threshold |
-| **Model fallback** | **Partial** — `fallback_provider`/`fallback_model` fields exist in types and checkpoints; no automatic runtime failover at driver level | **Implemented** — automatic fallback chain on rate limits/failures |
+| **Context compression** | **Implemented** (#791, task-robustness Part E.1) — capsule governor strategy: LLM summarization when approaching the context limit, plan-anchored, opt-in per agent. Full pre-compression history is archived to the content store (audit trail untouched; compression affects only the in-memory window) | **Implemented** — iterative summarization at configurable threshold |
+| **Model fallback** | **Implemented** (#785, task-robustness Part E.2) — automatic cross-provider failover chain at the driver boundary on transient errors (rate limit, 5xx, Anthropic overloaded, connection refused, timeout). Deterministic errors (400/401/403) and context overflow are excluded — they route to their own handling, not failover | **Implemented** — automatic fallback chain on rate limits/failures |
 | **Smart model routing** | **Not implemented** — single provider/model per agent; `llm_preset_mapping` config field declared but never read | **Implemented** — cheap vs strong model based on task complexity |
 | **User modeling** | **Not implemented** — no Honcho integration, no user profile system | **Implemented** — Honcho dialectic user modeling + `USER.md` |
 | **Skill self-improvement** | **Partial** — evolution agents exist as static bundles; `agent.install` works; no autonomous closed-loop improvement | **Implemented** — skills auto-patch during use, autonomous creation after complex tasks |
@@ -137,27 +137,25 @@ This table reflects what is actually implemented in the codebase, not just docum
 1. **Closed learning loop** — autonomous skill creation after complex tasks, self-improvement during use. Autonoetic has the primitives (learning tools, memory extraction, background scheduler) but hasn't wired the automation together.
 2. **User modeling** — Honcho dialectic user modeling across sessions. Autonoetic has no user profiling.
 3. **Messaging platforms** — 15+ platform adapters. Autonoetic has CLI + HTTP only.
-4. **Context compression** — iterative summarization when approaching limits. Autonoetic tracks usage but doesn't compress.
-5. **LLM provider failover** — automatic fallback chain. Autonoetic declares fallbacks but doesn't execute them.
-6. **Smart model routing** — cheap vs strong model by task complexity. Autonoetic pins one model per agent.
-7. **FTS session search** — full-text search across conversation content. Autonoetic searches execution traces only.
-8. **Rich tool ecosystem** — 40+ built-in tools (browser, vision, TTS, etc.). Autonoetic has a smaller core set, relies on MCP for extension.
-9. **Developer experience** — `curl | bash` → chat in 2 minutes vs Rust build, gateway setup, agent bundle creation.
+4. **Smart model routing** — cheap vs strong model by task complexity. Autonoetic pins one model per agent.
+5. **FTS session search** — full-text search across conversation content. Autonoetic searches execution traces only.
+6. **Rich tool ecosystem** — 40+ built-in tools (browser, vision, TTS, etc.). Autonoetic has a smaller core set, relies on MCP for extension.
+7. **Developer experience** — `curl | bash` → chat in 2 minutes vs Rust build, gateway setup, agent bundle creation.
+
+> **Note (2026-07-19):** Context compression and LLM provider failover previously appeared in this list; both shipped as task-robustness RFC Parts E.1 (#791) and E.2 (#785) respectively. The design discussion in §25/§26 below is the historical proposal — kept for reference; the production implementations live in `runtime/context_governor/capsule.rs` and `runtime/lifecycle.rs` (failover loop).
 
 ### What Autonoetic Got Right (and Hermes Should Consider)
 
 1. **Gateway mediation** — tool dispatch has a natural enforcement point for capability checking.
 2. **Toolsets as convention** — YAML in SKILL.md, zero gateway code. Hermes' `toolsets.py` (542 lines) is overkill.
 3. **Rust performance** — compile-time guarantees, memory safety.
-4. **Immutable audit trail** — hash-chained causal chain for non-repudiable security.
+4. **Immutable audit trail** — hash-chained causal chain for non-repudiation.
 
 ### What Hermes Got Right (and Autonoetic Should Adopt)
 
 1. **Closed learning loop automation** — the trigger → create → improve cycle should be automatic, not manual. Autonoetic's primitives are all there; they just need to be wired together.
 2. **User modeling** — cross-session personalization is a real user need. Autonoetic should at minimum support a `USER.md` convention.
-3. **Context compression** — iterative summarization prevents context window exhaustion on long sessions.
-4. **Provider failover** — automatic fallback prevents silent failures during rate limits.
-5. **FTS session search** — full-text search across conversation content is more useful than execution-trace-only search.
+3. **FTS session search** — full-text search across conversation content is more useful than execution-trace-only search.
 
 ---
 
