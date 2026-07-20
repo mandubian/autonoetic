@@ -449,7 +449,29 @@ artifact_exec({
 })
 ```
 
-`artifact_exec` analyzes the artifact's source files for remote access (not the shell command string), and binds approval reuse to the artifact identity. This means re-running the same artifact with different arguments will reuse prior approvals instead of re-requesting them.
+`artifact_exec` analyzes the artifact's source files for remote access (not the shell command string), and binds approval reuse to the entrypoint and command. This means re-running the same test entrypoint on a rebuilt artifact will reuse the prior approval — no new operator approval is needed as long as the entrypoint and network targets stay the same.
+
+### approval_ref — resuming after operator approval
+
+When `artifact_exec` returns an approval-required response, the response includes an `approval_request_id` (e.g. `apr-abc123`). After the operator approves, the gateway resumes your session automatically. On resume, pass `approval_ref: "<the apr-XXX id>"` to `artifact_exec` to skip the gate and run immediately:
+
+```json
+artifact_exec({
+  "artifact_ref": "ar.example",
+  "entrypoint": "test_main.py",
+  "approval_ref": "apr-abc123"
+})
+```
+
+**Do NOT fabricate or guess `approval_ref` IDs.** Only use the exact `approval_request_id` from the approval card or the gateway response. If you pass a wrong ID, the call fails with "approval_ref not found in store" and you waste a turn. If you don't know the ID, call without `approval_ref` — the gateway will create a new approval if needed.
+
+### Batch fixes — minimize rebuild-test cycles
+
+`artifact_exec` output is truncated at ~4000 chars. If the test suite produces more output than that, you cannot see all failures in one read. To avoid iterating (fix → rebuild → test → see next failure → fix → rebuild → test):
+
+1. **Read the full test output before making any changes.** Use `resolve` with `offset`/`limit` to page through the full output if it's truncated.
+2. **List ALL failures, then fix them ALL in one pass.** Don't fix one failure, rebuild, and discover the next.
+3. **Rebuild once after all fixes are applied**, then run `artifact_exec` once. Each rebuild triggers a new operator approval; batching saves operator round-trips.
 
 ### Promotion Evaluation Has No Network
 
@@ -471,14 +493,6 @@ You don't have `NetworkAccess`, so you cannot install packages directly. If your
 }
 ```
 
-## Artifact Execution Failure Handling
-
-When `artifact_exec` returns a non-zero exit:
-
-1. **DO NOT** rewrite code that was working - may be environment issue
-2. **DO** check stderr for your script's errors (ignore `/etc/profile.d/` noise)
-3. **DO** report environment issues to user if persistent
-
 ### Persistent Test Failure — Avoid Degradation Spiral
 
 The gateway's LoopGuard will block repeated `artifact_exec` failures. To avoid reaching that point:
@@ -488,6 +502,14 @@ The gateway's LoopGuard will block repeated `artifact_exec` failures. To avoid r
 3. **If failures are missing dependencies** (ImportError, ModuleNotFoundError for third-party packages), stop trying to install them — you don't have network. Declare them in `requirements.txt` / `package.json`, skip the smoke test, and return `needs_packager` to the planner.
 4. **If stderr shows wrong SDK usage** (`has no attribute 'memory'`, `has no attribute 'store'`), fix `autonoetic_sdk.init()` and `remember`/`recall` or `state.get`/`set` before rebuilding — do not ship the artifact hoping federation will catch it later.
 5. **If you cannot get a passing smoke test** for environment reasons only (not API/syntax bugs), you may still build the artifact — but fix SDK API errors first; those are code bugs, not environment limits.
+
+## Artifact Execution Failure Handling
+
+When `artifact_exec` returns a non-zero exit:
+
+1. **DO NOT** rewrite code that was working - may be environment issue
+2. **DO** check stderr for your script's errors (ignore `/etc/profile.d/` noise)
+3. **DO** report environment issues to user if persistent
 
 ## Permission Denied
 

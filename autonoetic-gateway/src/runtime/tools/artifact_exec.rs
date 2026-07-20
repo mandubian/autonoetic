@@ -342,6 +342,7 @@ impl NativeTool for ArtifactExecTool {
             artifact_id
         );
 
+        let command = build_command(entrypoint, &args.args);
         let mut approval_validated_for_command = false;
         if let Some(approval_ref) = args.approval_ref.as_ref() {
             if let Some(store) = &gateway_store {
@@ -365,7 +366,7 @@ impl NativeTool for ArtifactExecTool {
                         &manifest.agent.id,
                         &normalized_targets,
                         &artifact_code,
-                        Some(&bundle.artifact_canonical_digest),
+                        Some(&format!("exec:{}", command)),
                         &manifest.capabilities,
                     );
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
@@ -392,7 +393,6 @@ impl NativeTool for ArtifactExecTool {
             }
         }
 
-        let command = build_command(entrypoint, &args.args);
         let decision = if manifest_may_exec_artifact_in_promotion_gate(manifest) {
             promotion_gate_artifact_command_decision(&command)
         } else {
@@ -519,7 +519,7 @@ impl NativeTool for ArtifactExecTool {
                             &manifest.agent.id,
                             targets,
                             &artifact_code,
-                            Some(&bundle.artifact_canonical_digest),
+                            Some(&format!("exec:{}", command)),
                             &manifest.capabilities,
                         );
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
