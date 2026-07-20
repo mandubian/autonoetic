@@ -298,6 +298,11 @@ scores a behavioral outcome (cases passed), never keyword mentions. The
 threshold math is centralized in `runtime::civic_evals::binding_outcome` so it
 is unit-testable without the full promotion pipeline.
 
+The procedure for proving stability (and the parallel C.2 strict-readiness
+measurement) lives in
+[`../civic-eval-measurement-runbook.md`](../civic-eval-measurement-runbook.md) —
+run it before flipping either default.
+
 ## Part F — Offices, not universal virtue — **SHIPPED**
 
 Most citizens are civically passive; functioning polities carry the active

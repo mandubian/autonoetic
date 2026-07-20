@@ -52,6 +52,7 @@ are in [`archived/`](archived/).
 - [`gateway-constitution-roadmap.md`](./gateway-constitution-roadmap.md) — Constitutional gap-closure backlog.
 - [`constitution-signing.md`](./constitution-signing.md) — Constitution lock and signing.
 - [`iteration-repair-validation-runbook.md`](./iteration-repair-validation-runbook.md) — Repair/validation runbook.
+- [`civic-eval-measurement-runbook.md`](./civic-eval-measurement-runbook.md) — Measurement procedure for the E.3 binding flip and C.2 strict-readiness decisions.
 
 ## CLI and External Interfaces
 
