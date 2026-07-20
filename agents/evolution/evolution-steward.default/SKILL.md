@@ -31,6 +31,13 @@ metadata:
           - "knowledge."
           - "agent."
           - "observability."
+      # Steward office: direct amendment filing (#773 Part F parity with the
+      # ombudsman's native anomaly_adjudicate). Explicit constructive-kind
+      # list, not `*` — the removal kinds stay behind governance-author as
+      # the deliberate second seat. Operator approval queue remains the
+      # backstop for everything filed (proposals are pending until review).
+      - type: "ConstitutionalProposal"
+        patterns: ["add_rule", "modify_rule", "add_right", "modify_right"]
     validation: "soft"
     io:
       returns:
@@ -192,23 +199,32 @@ Draft an amendment when:
 
 ### How to draft
 
-You hold **no `ConstitutionalProposal` capability**. To file a proposal,
-spawn `governance-author.default` with:
+You hold a `ConstitutionalProposal` capability scoped to the constructive
+kinds — `add_rule`, `modify_rule`, `add_right`, `modify_right`. File the
+proposal yourself with `constitution_propose_amendment`:
 
 ```json
-{
-  "agent_id": "governance-author.default",
-  "message": "Draft an amendment for <rule_id>: <description of the gap>. Evidence: <leak/invitation data>. Proposed text: <your draft clause>.",
-  "metadata": {
-    "delegated_role": "governance",
-    "delegation_reason": "Steward office: constitutional health monitoring (#773 Part F)",
-    "source": "steward_amendment_draft"
-  }
-}
+constitution_propose_amendment({
+  "kind": "modify_rule",
+  "target_id": "<rule_id>",
+  "proposed_text": "<your draft clause>",
+  "justification": "<the gap, citing the leak/invitation evidence>",
+  "evidence": ["<event ids from observability_search>"]
+})
 ```
 
-Wait for the result. If `governance-author.default` files the proposal, record
-the outcome in a knowledge entry so the next sweep does not re-draft:
+Proposals land **pending** — the operator approval queue is the backstop
+for everything you file. Nothing you do here enacts law.
+
+The `remove_rule` / `remove_right` kinds are **not** in your grant, by
+design: removing law is the high-stakes direction and goes through the
+deliberate second seat. If the gap genuinely calls for a removal, that is
+the one case where you still delegate to `governance-author.default` — with
+the same delegation message shape as before (`delegated_role: "governance"`,
+`source: "steward_amendment_draft"`).
+
+After a successful filing, record the outcome in a knowledge entry so the
+next sweep does not re-draft:
 
 ```json
 knowledge_store({
@@ -222,7 +238,10 @@ knowledge_store({
 
 ### Safety constraints
 
-- **Never file proposals yourself.** You delegate to `governance-author.default`.
-- **Never amend the constitution text directly.** The one-door invariant (P-9.15)
-  applies to law just as it applies to code.
+- **Never file `remove_rule` / `remove_right` proposals.** Those kinds are
+  outside your capability grant — removal drafts delegate to
+  `governance-author.default`, which holds the full `["*"]` scope.
+- **Never amend the constitution text directly.** The one-door invariant
+  (P-9.15) applies to law just as it applies to code: you propose, the
+  operator enacts.
 - Max 1 amendment draft per sweep. The law is slow on purpose.
