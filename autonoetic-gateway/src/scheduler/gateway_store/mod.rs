@@ -812,8 +812,64 @@ mod tests {
     }
 
     #[test]
-    fn test_artifact_ref_revocation_and_expiry_filter_resolution_and_list() -> Result<()> {
+    fn test_list_artifact_refs_for_session_respects_scope_visibility() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        store.create_artifact_ref(&artifact_ref(
+            "ar.global.001.aaaa",
+            ArtifactRefScopeType::Global,
+            "__global__",
+            None,
+        ))?;
+        store.create_artifact_ref(&artifact_ref(
+            "ar.root.002.bbbb",
+            ArtifactRefScopeType::Session,
+            "sess-root",
+            None,
+        ))?;
+        store.create_artifact_ref(&artifact_ref(
+            "ar.child.003.cccc",
+            ArtifactRefScopeType::Session,
+            "sess-root/coder.default-x",
+            None,
+        ))?;
+        store.create_artifact_ref(&artifact_ref(
+            "ar.other.004.dddd",
+            ArtifactRefScopeType::Session,
+            "sess-unrelated",
+            None,
+        ))?;
+
+        let visible: Vec<String> = store
+            .list_artifact_refs_for_session("sess-root/coder.default-x")?
+            .into_iter()
+            .map(|r| r.ref_id)
+            .collect();
+
+        assert!(visible.contains(&"ar.global.001.aaaa".to_string()));
+        assert!(visible.contains(&"ar.root.002.bbbb".to_string()));
+        assert!(visible.contains(&"ar.child.003.cccc".to_string()));
+        assert!(
+            !visible.contains(&"ar.other.004.dddd".to_string()),
+            "unrelated session refs must not be visible: {visible:?}"
+        );
+
+        // From the root session, the child-scoped ref is not visible.
+        let root_visible: Vec<String> = store
+            .list_artifact_refs_for_session("sess-root")?
+            .into_iter()
+            .map(|r| r.ref_id)
+            .collect();
+        assert!(root_visible.contains(&"ar.global.001.aaaa".to_string()));
+        assert!(root_visible.contains(&"ar.root.002.bbbb".to_string()));
+        assert!(!root_visible.contains(&"ar.child.003.cccc".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_artifact_ref_revocation_and_expiry_filter_resolution_and_list() -> Result<()> {        let temp_dir = tempfile::tempdir()?;
         let store = GatewayStore::open(temp_dir.path())?;
 
         let active = artifact_ref(

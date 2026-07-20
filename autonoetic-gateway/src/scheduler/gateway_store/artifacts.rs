@@ -300,6 +300,14 @@ impl GatewayStore {
         scope_id: &str,
     ) -> Result<Vec<ArtifactRefRecord>> {
         let conn = self.conn.lock().unwrap();
+        Self::list_refs_for_scope_with_conn(&conn, scope_type, scope_id)
+    }
+
+    fn list_refs_for_scope_with_conn(
+        conn: &Connection,
+        scope_type: ArtifactRefScopeType,
+        scope_id: &str,
+    ) -> Result<Vec<ArtifactRefRecord>> {
         let mut stmt = conn.prepare(
             "SELECT
                 ref_id, scope_type, scope_id, artifact_id, artifact_digest, artifact_canonical_digest,
@@ -322,6 +330,59 @@ impl GatewayStore {
             }
         }
         Ok(refs)
+    }
+
+    /// List all active artifact refs visible from the given session, for
+    /// repair hints when an agent guesses a ref that doesn't exist
+    /// (anti-thrash, #312). Visibility mirrors `resolve_artifact_ref_any_scope`:
+    /// Global → workflow of the root session → exact session → root session →
+    /// fork ancestor roots (each with their workflow scope).
+    pub fn list_artifact_refs_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ArtifactRefRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let root_sid = crate::runtime::content_store::root_session_id(session_id);
+
+        let wf_for = |conn: &Connection, root: &str| -> Result<Option<String>> {
+            Ok(conn
+                .query_row(
+                    "SELECT workflow_id FROM workflow_index WHERE root_session_id = ?1",
+                    params![root],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        };
+
+        let mut scopes: Vec<(ArtifactRefScopeType, String)> =
+            vec![(ArtifactRefScopeType::Global, "__global__".to_string())];
+        if let Some(wf) = wf_for(&conn, root_sid)? {
+            scopes.push((ArtifactRefScopeType::Workflow, wf));
+        }
+        scopes.push((ArtifactRefScopeType::Session, session_id.to_string()));
+        if root_sid != session_id {
+            scopes.push((ArtifactRefScopeType::Session, root_sid.to_string()));
+        }
+        for ancestor_root in self.fork_ancestor_roots(&conn, session_id) {
+            if ancestor_root == root_sid {
+                continue;
+            }
+            if let Some(wf) = wf_for(&conn, &ancestor_root)? {
+                scopes.push((ArtifactRefScopeType::Workflow, wf));
+            }
+            scopes.push((ArtifactRefScopeType::Session, ancestor_root));
+        }
+
+        let mut out: Vec<ArtifactRefRecord> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (scope_type, scope_id) in scopes {
+            for record in Self::list_refs_for_scope_with_conn(&conn, scope_type, &scope_id)? {
+                if seen.insert(record.ref_id.clone()) {
+                    out.push(record);
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn revoke_artifact_ref(

@@ -165,6 +165,16 @@ impl ResolveTool {
                 )
                 .to_error_response());
             };
+            // Pre-resolve the ref so a guessed ref gets the enriched
+            // ref-listing response rather than a file-miss message.
+            if let Err(e) = crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+                artifact_ref,
+                sid,
+                &gs,
+                gw_dir,
+            ) {
+                return Ok(self.artifact_ref_not_found(&gs, sid, artifact_ref, &e.to_string()));
+            }
             return match crate::runtime::tools::content::read_artifact_file(
                 gw_dir,
                 Some(&gs),
@@ -192,11 +202,20 @@ impl ResolveTool {
                     })
                     .to_string())
                 }
-                Err(e) => Ok(ToolError::not_found(
-                    format!("file '{file}' in artifact '{artifact_ref}': {e}"),
-                    Some("Use include=files to see the artifact's file list."),
-                )
-                .to_error_response()),
+                Err(e) => {
+                    let mut value = json!({
+                        "ok": false,
+                        "error_type": "resource",
+                        "error": "artifact_file_not_found",
+                        "message": format!("file '{file}' in artifact '{artifact_ref}': {e}"),
+                        "repair_hint": "Use include=files to see the artifact's file list.",
+                    });
+                    if let Some(object) = value.as_object_mut() {
+                        crate::runtime::failure_classification::WorkflowFailureMetadata::bad_reference()
+                            .apply_to_json_map(object);
+                    }
+                    Ok(value.to_string())
+                }
             };
         }
 
@@ -207,7 +226,9 @@ impl ResolveTool {
             gw_dir,
         ) {
             Ok(r) => r,
-            Err(e) => return Ok(ToolError::not_found(e.to_string(), None::<String>).to_error_response()),
+            Err(e) => {
+                return Ok(self.artifact_ref_not_found(&gs, sid, artifact_ref, &e.to_string()));
+            }
         };
 
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
@@ -318,6 +339,58 @@ impl ResolveTool {
             .to_string()),
             Err(e) => Ok(self.content_not_found(gw_dir, &store, sid, reference, &e.to_string())),
         }
+    }
+
+    /// Build an artifact-ref not-found response listing the refs that
+    /// actually resolve from this session (anti-thrash, #312). A miss on a
+    /// guessed ref is a deterministic lookup failure, so the response is
+    /// stamped `bad_reference` / non-retryable up front — same rationale as
+    /// `content_not_found`.
+    fn artifact_ref_not_found(
+        &self,
+        gs: &crate::scheduler::gateway_store::GatewayStore,
+        sid: &str,
+        reference: &str,
+        err: &str,
+    ) -> String {
+        const MAX_LISTED: usize = 20;
+        let refs = gs.list_artifact_refs_for_session(sid).unwrap_or_default();
+        let mut listed: Vec<serde_json::Value> = refs
+            .iter()
+            .take(MAX_LISTED)
+            .map(|r| {
+                json!({
+                    "artifact_ref": r.ref_id,
+                    "artifact_id": r.artifact_id,
+                    "created_by": r.created_by_agent_id,
+                })
+            })
+            .collect();
+        if refs.len() > MAX_LISTED {
+            listed.push(json!({
+                "note": format!("...and {} more refs visible from this session", refs.len() - MAX_LISTED)
+            }));
+        }
+        let repair_hint = if listed.is_empty() {
+            "No artifact refs are visible from this session — build one with artifact_build, or \
+             get a ref from a completed child task's output (workflow_state)."
+        } else {
+            "Pick an artifact_ref from available_artifacts (those are what actually resolve from \
+             this session)."
+        };
+        let mut value = json!({
+            "ok": false,
+            "error_type": "resource",
+            "error": "artifact_ref_not_found",
+            "message": format!("artifact_ref '{reference}' not found in session '{sid}': {err}"),
+            "repair_hint": repair_hint,
+            "available_artifacts": listed,
+        });
+        if let Some(object) = value.as_object_mut() {
+            crate::runtime::failure_classification::WorkflowFailureMetadata::bad_reference()
+                .apply_to_json_map(object);
+        }
+        value.to_string()
     }
 
     /// Build a content not-found response, preserving the helpful hints the
@@ -572,6 +645,53 @@ mod tests {
 
         // The downstream normalizer must not overwrite the explicit stamps
         // with the generic Resource → transient_infra classification.
+        let normalized =
+            crate::runtime::failure_classification::normalize_tool_result_json(&response);
+        let reparsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(reparsed["failure_class"], "bad_reference");
+        assert_eq!(reparsed["retryable"], false);
+    }
+
+    #[test]
+    fn artifact_ref_not_found_lists_visible_refs_and_stamps_bad_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let gs = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        gs.create_artifact_ref(&autonoetic_types::artifact::ArtifactRefRecord {
+            ref_id: "ar.real1234567".to_string(),
+            scope_type: autonoetic_types::artifact::ArtifactRefScopeType::Session,
+            scope_id: "session-x".to_string(),
+            artifact_id: "art_abcd1234".to_string(),
+            artifact_manifest_digest: "sha256:aa".to_string(),
+            artifact_canonical_digest: "sha256:bb".to_string(),
+            created_by_agent_id: "coder.default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+        let tool = ResolveTool;
+        let response = tool.artifact_ref_not_found(
+            &gs,
+            "session-x",
+            "ar.deadbeef0000",
+            "artifact_ref 'ar.deadbeef0000' not found, expired, or revoked",
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"], "artifact_ref_not_found");
+        assert_eq!(parsed["failure_class"], "bad_reference");
+        assert_eq!(parsed["retryable"], false);
+        assert_eq!(parsed["retry_advice"], "do_not_retry");
+        let artifacts = parsed["available_artifacts"].as_array().unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0]["artifact_ref"], "ar.real1234567");
+        assert_eq!(artifacts[0]["artifact_id"], "art_abcd1234");
+
+        // Normalizer must preserve the explicit stamps here too.
         let normalized =
             crate::runtime::failure_classification::normalize_tool_result_json(&response);
         let reparsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
