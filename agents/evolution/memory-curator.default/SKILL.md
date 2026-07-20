@@ -66,6 +66,23 @@ metadata:
                 reason_detail:
                   type: string
                   description: One-paragraph explanation backing the reason_code.
+                target_agent:
+                  type: string
+                  description: >
+                    For promote_to_skill: the agent whose SKILL.md receives the
+                    graduated instruction. A strict Curator-office requirement
+                    for that action (not enforced by io.returns validation,
+                    which is shallow over nested items) — the orchestrator
+                    skips promote_to_skill entries missing this field rather
+                    than routing incomplete input.
+                proposed_instruction:
+                  type: string
+                  description: >
+                    For promote_to_skill: the concrete instruction text to add
+                    to the target agent's SKILL.md. A strict Curator-office
+                    requirement for that action (same caveat as target_agent);
+                    structured field, not buried in reason_detail — the
+                    consumer reads it mechanically.
                 metric_values:
                   type: object
                   description: >
@@ -312,7 +329,9 @@ decision journal with:
   "target": "<knowledge_entry_id>",
   "action": "promote_to_skill",
   "reason_code": "high_confidence_pattern",
-  "reason_detail": "Recurring across <N> sessions, <M> agents. Proposed instruction: <text>.",
+  "reason_detail": "Recurring across <N> sessions, <M> agents.",
+  "target_agent": "<agent_id receiving the instruction>",
+  "proposed_instruction": "<the concrete instruction text to add to the agent's SKILL.md>",
   "metric_values": {
     "session_count": <N>,
     "agent_count": <M>,
@@ -323,8 +342,25 @@ decision journal with:
 }
 ```
 
-The evolution-steward reads `promote_to_skill` decisions and incorporates the
-proposed instruction into the agent's SKILL.md via `agent-factory.default`.
+Both routing fields are strict Curator-office requirements for
+`promote_to_skill` (not mechanically enforced by io.returns validation,
+which is shallow over nested items — but the orchestrator skips
+entries missing them rather than routing incomplete input):
+
+- **`target_agent`** — the agent whose SKILL.md receives the instruction.
+  For a cross-agent lesson pick the most-affected agent; for a genuinely
+  universal lesson use `planner.default` (its instructions shape every
+  downstream agent). Never emit a graduation without naming the receiver —
+  an untargeted lesson cannot be routed.
+- **`proposed_instruction`** — the instruction text itself, as a structured
+  field. Do not bury it in `reason_detail` prose; the consumer reads this
+  field mechanically.
+
+The evolution-orchestrator routes `promote_to_skill` decisions to the
+evolution-steward, which incorporates the proposed instruction into the
+target agent's SKILL.md via `agent-factory.default`. The gateway also
+persists each decision as a `curator.decision` causal event — the audit
+trail is the chain; the spawn-return payload is the routing channel.
 
 ### What NOT to graduate
 

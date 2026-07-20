@@ -147,9 +147,54 @@ Wait for the result (`workflow_wait` or synchronous spawn). The curator returns:
       "priority": "high"
     }
   ],
+  "decision_journal": [
+    {
+      "target": "<knowledge_entry_id>",
+      "action": "promote_to_skill",
+      "reason_code": "high_confidence_pattern",
+      "reason_detail": "...",
+      "target_agent": "<agent_id>",
+      "proposed_instruction": "<instruction text>",
+      "confidence": 0.8
+    }
+  ],
   "learnings_stored": 27
 }
 ```
+
+The `decision_journal` is part of the curator's required return contract.
+Entries with `action == "promote_to_skill"` are lesson-graduation
+proposals owned by the Curator office (B.2) — you route them; the steward
+judges them.
+
+### Step 4b: Route lesson graduations
+
+For each `decision_journal` entry where `action == "promote_to_skill"`:
+
+1. **Skip if malformed** — `target_agent` and `proposed_instruction` are
+   both required (Curator-office policy; io.returns validation is shallow
+   over nested items, so a malformed entry can reach you). Log a warning
+   naming the offending `target` and continue with the next entry; never
+   spawn the steward with incomplete graduation input.
+2. Check `target_agent` is NOT in the exemption list.
+3. Check we have not already queued a graduation for the same `target`
+   (knowledge entry id) this run — one graduation per lesson per run.
+4. Spawn `evolution-steward.default` with:
+
+```json
+{
+  "graduation": {
+    "knowledge_entry_id": "<target>",
+    "target_agent": "<target_agent>",
+    "proposed_instruction": "<proposed_instruction>",
+    "confidence": <confidence>,
+    "reason_detail": "<reason_detail>"
+  }
+}
+```
+
+Wait for the result before spawning the next graduation — lessons are
+slow on purpose, and the steward dedups against prior graduations.
 
 ### Step 5: Process systemic gaps
 
@@ -202,6 +247,7 @@ Report:
 - Sessions analysed
 - Learnings stored (from curator)
 - Admin proposals created
+- Lesson graduations routed to the steward (knowledge entry IDs + target agents)
 - Agents queued for evolution (agent IDs + outcome)
 - Bookmark generation number
 
