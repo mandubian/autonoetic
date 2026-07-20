@@ -171,10 +171,15 @@ judges them.
 
 For each `decision_journal` entry where `action == "promote_to_skill"`:
 
-1. Check `target_agent` is NOT in the exemption list.
-2. Check we have not already queued a graduation for the same `target`
+1. **Skip if malformed** — `target_agent` and `proposed_instruction` are
+   both required (Curator-office policy; io.returns validation is shallow
+   over nested items, so a malformed entry can reach you). Log a warning
+   naming the offending `target` and continue with the next entry; never
+   spawn the steward with incomplete graduation input.
+2. Check `target_agent` is NOT in the exemption list.
+3. Check we have not already queued a graduation for the same `target`
    (knowledge entry id) this run — one graduation per lesson per run.
-3. Spawn `evolution-steward.default` with:
+4. Spawn `evolution-steward.default` with:
 
 ```json
 {

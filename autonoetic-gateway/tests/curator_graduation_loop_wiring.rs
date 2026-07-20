@@ -36,20 +36,32 @@ fn all_three_manifests_parse() {
 
 #[test]
 fn curator_emit_structured_graduation_fields() {
-    // The decision_journal schema must carry the routing fields the
-    // orchestrator reads mechanically — not prose buried in reason_detail.
+    // The decision_journal io.returns schema must carry the routing fields
+    // the orchestrator reads mechanically — not prose buried in reason_detail.
+    // Check the PARSED schema, not the raw SKILL.md text, so a Markdown code
+    // example can't satisfy the assertion while the schema silently drops the
+    // field. (Copilot review of #838: raw `contains("\"target_agent\"")` was
+    // brittle — a doc example passing the assert hid a missing schema entry.)
+    let manifest = SkillParser::parse(CURATOR_SKILL_MD)
+        .expect("curator SKILL.md must parse")
+        .0;
+    let decision_items_props = manifest
+        .io
+        .as_ref()
+        .and_then(|io| io.returns.as_ref())
+        .and_then(|r| r.get("properties"))
+        .and_then(|p| p.get("decision_journal"))
+        .and_then(|d| d.get("items"))
+        .and_then(|i| i.get("properties"))
+        .expect("io.returns schema must define decision_journal[].properties");
+
     assert!(
-        CURATOR_SKILL_MD.contains("\"target_agent\""),
-        "curator graduation decisions must carry target_agent"
+        decision_items_props.get("target_agent").is_some(),
+        "decision_journal item schema must declare target_agent"
     );
     assert!(
-        CURATOR_SKILL_MD.contains("\"proposed_instruction\""),
-        "curator graduation decisions must carry proposed_instruction"
-    );
-    // And the frontmatter schema documents them (the consumer contract).
-    assert!(
-        CURATOR_SKILL_MD.contains("orchestrator routes on this field"),
-        "the io.returns schema must document target_agent as the routing field"
+        decision_items_props.get("proposed_instruction").is_some(),
+        "decision_journal item schema must declare proposed_instruction"
     );
 }
 

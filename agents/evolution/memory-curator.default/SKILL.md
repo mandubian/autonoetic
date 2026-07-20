@@ -70,14 +70,19 @@ metadata:
                   type: string
                   description: >
                     For promote_to_skill: the agent whose SKILL.md receives the
-                    graduated instruction. Required for that action — the
-                    orchestrator routes on this field.
+                    graduated instruction. A strict Curator-office requirement
+                    for that action (not enforced by io.returns validation,
+                    which is shallow over nested items) — the orchestrator
+                    skips promote_to_skill entries missing this field rather
+                    than routing incomplete input.
                 proposed_instruction:
                   type: string
                   description: >
                     For promote_to_skill: the concrete instruction text to add
-                    to the target agent's SKILL.md. Structured field, not
-                    buried in reason_detail — the consumer reads it mechanically.
+                    to the target agent's SKILL.md. A strict Curator-office
+                    requirement for that action (same caveat as target_agent);
+                    structured field, not buried in reason_detail — the
+                    consumer reads it mechanically.
                 metric_values:
                   type: object
                   description: >
@@ -337,7 +342,10 @@ decision journal with:
 }
 ```
 
-Both routing fields are required for the loop to close:
+Both routing fields are strict Curator-office requirements for
+`promote_to_skill` (not mechanically enforced by io.returns validation,
+which is shallow over nested items — but the orchestrator skips
+entries missing them rather than routing incomplete input):
 
 - **`target_agent`** — the agent whose SKILL.md receives the instruction.
   For a cross-agent lesson pick the most-affected agent; for a genuinely
