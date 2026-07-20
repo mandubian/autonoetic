@@ -2787,7 +2787,18 @@ pub struct PromptBudgetConfig {
     /// waiting for the hard limit wastes tokens on every round. Recommended
     /// value for such models: 30000–50000.
     ///
-    /// `None` (the default) disables the soft budget; only the hard limit fires.
+    /// `None` (the default) means no explicit soft budget. On models with a
+    /// configured `context_window_tokens >= 100_000`, `None` is replaced at
+    /// config load by a derived value (`min(window/3, 50_000)`, see
+    /// [`GatewayConfig::apply_profile_defaults`]); on smaller windows `None`
+    /// is left as-is and only the hard limit fires.
+    ///
+    /// To opt out of the derived default on a large-window model, set an
+    /// explicit value higher than the context window (e.g. `200000` on a
+    /// 128K model) — the soft constraint then never binds and the governor
+    /// falls back to hard-limit-only behaviour. (YAML `null` is
+    /// indistinguishable from "unset" for this `Option<u32>` field and does
+    /// **not** disable derivation.)
     #[serde(default)]
     pub soft_budget_tokens: Option<u32>,
 
@@ -3421,10 +3432,13 @@ impl GatewayConfig {
     /// correct for small models — firing early would be wasteful and risk
     /// trimming a context that isn't actually large).
     ///
-    /// Explicit operator values — including a deliberate `null` to disable —
-    /// are honoured by the early return. This mirrors how
-    /// `apply_role_mapping_fallbacks` treats serde-`None` (unset) vs a
-    /// concrete value (operator choice).
+    /// Explicit operator values are honoured by the early return — including
+    /// a value chosen to effectively disable the soft constraint (set a
+    /// number higher than the model's context window; see the field doc on
+    /// [`PromptBudgetConfig::soft_budget_tokens`]). Note that YAML `null`
+    /// deserializes the same as a missing key for this `Option<u32>` field,
+    /// so it does **not** opt out of derivation — only a concrete numeric
+    /// value does.
     ///
     /// Returns the derived value when it was applied, so the gateway's
     /// `load_config` can emit a tracing line (this crate stays
@@ -3681,6 +3695,61 @@ mod tests {
             .insert("opus".to_string(), preset_with_window(Some(200_000)));
         let derived = config.apply_profile_defaults();
         assert_eq!(derived, Some(50_000), "should use the largest window (200K)");
+    }
+
+    #[test]
+    fn soft_budget_explicit_high_value_is_the_disable_path() {
+        // The documented opt-out: set soft_budget_tokens higher than the
+        // context window. Derivation must not overwrite it, and at runtime
+        // the governor's `total <= soft_budget` is always true so the soft
+        // constraint never binds (effectively hard-limit-only). This test
+        // pins the config-side half of that contract.
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(Some(128_000)));
+        config.prompt_budget.soft_budget_tokens = Some(200_000);
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, None, "explicit value suppresses derivation");
+        assert_eq!(
+            config.prompt_budget.soft_budget_tokens,
+            Some(200_000),
+            "explicit high value preserved — the disable escape hatch"
+        );
+    }
+
+    #[test]
+    fn soft_budget_yaml_null_parses_same_as_unset() {
+        // Pin the serde behaviour the field doc warns about: a YAML `null`
+        // (which serde_yaml maps to serde_json `Value::Null`) and a missing
+        // key both deserialize an `Option<u32>` to `None`, so writing `null`
+        // does NOT opt out of derivation. We exercise the Option<u32>
+        // deserialization contract directly with serde_json (already a dep) —
+        // the semantics are identical for our `#[serde(default)] Option<u32>`.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OnlySoft {
+            #[serde(default)]
+            soft_budget_tokens: Option<u32>,
+        }
+        let explicit_null: OnlySoft =
+            serde_json::from_str(r#"{"soft_budget_tokens":null}"#).expect("parse null");
+        let missing_key: OnlySoft = serde_json::from_str(r#"{}"#).expect("parse missing");
+        assert_eq!(explicit_null.soft_budget_tokens, None);
+        assert_eq!(missing_key.soft_budget_tokens, None);
+
+        // And None + a large window still derives.
+        let mut config = GatewayConfig::default();
+        config.prompt_budget.soft_budget_tokens = explicit_null.soft_budget_tokens;
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(Some(128_000)));
+        let derived = config.apply_profile_defaults();
+        assert_eq!(
+            derived,
+            Some(42_000),
+            "null does not disable derivation — only a concrete value does"
+        );
     }
 
     #[test]
