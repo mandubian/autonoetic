@@ -28,7 +28,7 @@
 > | E.1 civic eval suites | **SHIPPED** |
 > | E.2 `trace civic-health` | **SHIPPED** |
 > | E.3 promotion gating on civic scores | **SHIPPED** (advisory + opt-in binding thresholds; default advisory-only) |
-> | F. institutional offices (ombudsman / steward / curator) | **SHIPPED** (ombudsman has native `anomaly_adjudicate`; operator remains the sovereignty backstop) |
+> | F. institutional offices (ombudsman / steward / curator) | **SHIPPED** (ombudsman has native `anomaly_adjudicate`; steward files amendments natively for the constructive kinds, removal drafts still route through governance-author; operator remains the sovereignty backstop) |
 
 ---
 
@@ -314,7 +314,14 @@ sessions** (the scheduler and `BackgroundReevaluation` already exist):
   back to `anomaly.resolve`.
 - **Steward** (extends `evolution-steward.default`) — reads contract health +
   civic health + the DISCRETION LEAK register; drafts amendments from D.2
-  invitations and the D.3 agenda by delegating to `governance-author.default`.
+  invitations and the D.3 agenda and **files them natively** via
+  `constitution_propose_amendment` (held right: `ConstitutionalProposal`
+  capability scoped to the constructive kinds — `add_rule` / `modify_rule` /
+  `add_right` / `modify_right`). Removal drafts (`remove_rule` /
+  `remove_right`) stay behind the deliberate second seat and still delegate
+  to `governance-author.default`, which holds the full `["*"]` scope. The
+  operator approval queue remains the backstop for everything filed
+  (proposals land `pending`; nothing the office does enacts law).
 - **Curator** (extends `memory-curator.default`) — owns B.2 graduation policy:
   decides when a recurring lesson (≥ 3 distinct sessions, ≥ 2 agents) is
   stable enough to graduate into SKILL.md instruction text.
