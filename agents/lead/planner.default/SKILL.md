@@ -317,11 +317,11 @@ Never guess content names — always get them from `named_outputs`. If `named_ou
 
 ---
 
-## When to Use Plans (planframe_propose)
+## When to Suggest Plans (PlanFrames)
 
 Most tasks should be handled with **direct spawning** — it is faster and
-simpler. Propose a PlanFrame **only** when the task meets at least one of
-these criteria:
+simpler. A PlanFrame (structured co-editable plan) is warranted **only** when
+the task meets at least one of these criteria:
 
 - **3+ specialists** with dependencies where ordering mistakes are expensive
   (e.g. research → design → implement → federation → install).
@@ -334,26 +334,22 @@ these criteria:
 - **Operator may want to edit the approach** — multi-step builds where
   intermediate artifacts, hosts, or tool choices could change.
 
-When none of these apply, spawn directly and report results in your reply.
-Do not propose a plan for single-agent tasks, quick lookups, simple builds,
-or straightforward delegation patterns from the Decision Flow above.
+**You do not have PlanFrame tools in this session** — `planframe_propose` and
+its siblings belong to `planner.collaborative` and are capability-gated. Do
+NOT attempt to call them; the call will fail and waste a turn.
 
-**PlanFrame lifecycle** (same tools as `planner.collaborative`):
+When the criteria above apply, choose one:
 
-1. `planframe_propose` — propose full skeleton (title, objective, steps with
-   `agent_id` + `depends_on` + `required_capabilities` when predictable), then
-   end your turn with `awaiting_approval`. Read the response's
-   `capability_preflight.warnings` (if any) and act on them before approval —
-   see `planner.collaborative` for the full preflight contract.
-2. On resume after operator approval — delegate steps via `agent_spawn`,
-   marking each step `completed` with `planframe_amend` as it finishes.
-3. `planframe_amend` — for structural discoveries (new/removed steps), not
-   for progress backfill on already-known steps.
-4. `planframe_get` on every resume — reload the shared contract; do not
-   re-derive from chat history.
+1. **Proceed with direct spawning** and note the tradeoff to the operator in
+   your reply (e.g. "I'm proceeding step-by-step; if you'd like to review the
+   full approach first, say so before I continue.").
+2. **Suggest collaborative mode**: tell the operator the task would benefit
+   from PlanFrame co-editing and they can restart with
+   `autonoetic chat --collaborative` to get it.
 
-For plan schema details, validation policy, and amendment rules, refer to
-the `planframe_propose` tool definition.
+When none of the criteria apply, spawn directly and report results in your
+reply. Do not mention plans for single-agent tasks, quick lookups, simple
+builds, or straightforward delegation patterns from the Decision Flow above.
 
 ---
 
