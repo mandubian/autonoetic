@@ -273,6 +273,30 @@ impl NativeTool for ArtifactBuildTool {
             sid,
         )?;
 
+        // Agent bundles are install candidates: agent_revision.create and the
+        // agent-factory install pipeline require a SKILL.md manifest. A coder
+        // rebuilding an agent artifact after a code-only fix easily drops it
+        // (session-56d3108b), and the missing manifest is only discovered
+        // dozens of turns later at install time. Fail loudly at build time.
+        if kind == autonoetic_types::artifact::ArtifactKind::AgentBundle
+            && !bundle.files.iter().any(|f| f.name == "SKILL.md")
+        {
+            let available: Vec<&str> = bundle.files.iter().map(|f| f.name.as_str()).collect();
+            return Ok(ToolError::validation(
+                format!(
+                    "agent_bundle artifact is missing SKILL.md — it cannot be installed or \
+                     federation-reviewed without an agent manifest. Built files: {available:?}."
+                ),
+                Some(
+                    "Re-include SKILL.md in inputs. When rebuilding an existing artifact, carry \
+                     over every file you did not modify: resolve(ref=<source artifact>, \
+                     include=\"content\", file=\"SKILL.md\") then content_write it into your \
+                     session before calling artifact_build.",
+                ),
+            )
+            .to_error_response());
+        }
+
         let root = crate::runtime::content_store::root_session_id(sid);
         let (scope_type, scope_id) = match config {
             Some(cfg) => {
@@ -486,6 +510,142 @@ mod tests {
         .unwrap();
 
         assert_eq!(normalized, vec![bundle.artifact_id]);
+    }
+
+    fn coder_manifest() -> AgentManifest {
+        use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
+        AgentManifest {
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: AgentIdentity {
+                id: "coder.default".to_string(),
+                name: "Coder".to_string(),
+                description: "test".to_string(),
+                singleton: false,
+            },
+            capabilities: vec![
+                Capability::WriteAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+                Capability::ReadAccess {
+                    scopes: vec!["self.*".to_string()],
+                },
+            ],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        }
+    }
+
+    fn build_tool_fixture(names: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, GatewayStore) {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let content_store = ContentStore::new(&gateway_dir).unwrap();
+        for name in names {
+            let handle = content_store
+                .write(format!("-- {name}\n").as_bytes())
+                .unwrap();
+            content_store
+                .register_name("session-1/coder.default-x", name, &handle)
+                .unwrap();
+        }
+        let gateway_store = GatewayStore::open(&gateway_dir).unwrap();
+        (temp, gateway_dir, gateway_store)
+    }
+
+    #[test]
+    fn agent_bundle_without_skill_md_is_rejected_at_build_time() {
+        let (_temp, gateway_dir, gateway_store) = build_tool_fixture(&["main.py"]);
+        let gs = std::sync::Arc::new(gateway_store);
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactBuildTool;
+
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "inputs": ["main.py"],
+                    "entrypoints": ["main.py"],
+                    "kind": "agent_bundle"
+                })
+                .to_string(),
+                Some("session-1/coder.default-x"),
+                None,
+                None,
+                Some(gs.clone()),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], false, "expected rejection: {parsed}");
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(message.contains("SKILL.md"), "message: {message}");
+
+        // No ref may be minted for the rejected bundle.
+        let refs = gs
+            .list_artifact_refs_for_scope(ArtifactRefScopeType::Session, "session-1")
+            .unwrap();
+        assert!(refs.is_empty(), "rejected bundle must not mint a ref");
+    }
+
+    #[test]
+    fn agent_bundle_with_skill_md_builds_and_mints_ref() {
+        let (_temp, gateway_dir, gateway_store) = build_tool_fixture(&["main.py", "SKILL.md"]);
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactBuildTool;
+
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "inputs": ["main.py", "SKILL.md"],
+                    "entrypoints": ["main.py"],
+                    "kind": "agent_bundle"
+                })
+                .to_string(),
+                Some("session-1/coder.default-x"),
+                None,
+                None,
+                Some(std::sync::Arc::new(gateway_store)),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], true, "expected success: {parsed}");
     }
 }
 
