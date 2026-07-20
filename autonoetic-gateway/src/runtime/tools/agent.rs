@@ -174,7 +174,7 @@ the single join already does that."
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Delegate a task to a specialist agent. With async=false (default), blocks until the child completes and returns its reply. With async=true, returns immediately with a task_id — use workflow.wait to check status. Spawn multiple children in parallel with async=true, then wait for all of them. The `message` is free-form natural language for reasoning agents (researcher/architect/coder/etc. — the common case); you do NOT need to look up an input schema before spawning them. Only when the target declares an object `io.accepts` schema (agent.list reports `message_format: \"json_schema\"`) must `message` be a JSON string matching it.".to_string(),
+            description: "Delegate a task to a specialist agent. With async=false (default), blocks until the child completes and returns its reply. With async=true, returns immediately with a task_id — use workflow_wait to check status. Spawn multiple children in parallel with async=true, then wait for all of them. The `message` is free-form natural language for reasoning agents (researcher/architect/coder/etc. — the common case); you do NOT need to look up an input schema before spawning them. Only when the target declares an object `io.accepts` schema (agent.list reports `message_format: \"json_schema\"`) must `message` be a JSON string matching it.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -846,7 +846,7 @@ the single join already does that."
                 "task_id": task_id,
                 "agent_id": target_agent_id,
                 "session_id": child_delegation_path,
-                "message": "Task queued for async execution. Use workflow.wait with task_ids to check completion status."
+                "message": "Task queued for async execution. Use workflow_wait with task_ids to check completion status."
             });
             if let Some(rev_id) = args.revision_id {
                 resp["revision_id"] = serde_json::json!(rev_id);

@@ -354,9 +354,9 @@ impl ResolveTool {
             if !hints.is_empty() {
                 let repair_hint = if session_has_content {
                     "Pick a name from available_artifacts (that is what actually exists in this \
-                     session), or use workflow.state to get a completed child task's output handle."
+                     session), or use workflow_state to get a completed child task's output handle."
                 } else {
-                    "Use workflow.wait/workflow.state to get a stable output ref from a completed \
+                    "Use workflow_wait/workflow_state to get a stable output ref from a completed \
                      child, then resolve that."
                 };
                 let mut value = json!({

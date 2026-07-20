@@ -168,7 +168,7 @@ impl NativeTool for UserAskTool {
                 if has_active_children {
                     return Ok(ToolError::conflict(
                         "user.ask is not available while workflow tasks are active. Complete or cancel child tasks first.",
-                        Some("Call workflow.wait until child tasks complete, then retry."),
+                        Some("Call workflow_wait until child tasks complete, then retry."),
                     )
                     .with_code("workflow_tasks_active")
                     .to_error_response());

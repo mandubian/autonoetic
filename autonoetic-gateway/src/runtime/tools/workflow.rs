@@ -1125,7 +1125,7 @@ impl NativeTool for WorkflowForceCompleteTool {
     fn definition(&self) -> crate::llm::ToolDefinition {
         crate::llm::ToolDefinition {
             name: self.name().to_string(),
-            description: "Force-complete a task that is stuck in Running state. Checks whether the child session has actually finished (via checkpoint, session manifest, or promotion store) and transitions the task to Succeeded or Failed. Use this when workflow.wait keeps timing out but the child session is no longer active.".to_string(),
+            description: "Force-complete a task that is stuck in Running state. Checks whether the child session has actually finished (via checkpoint, session manifest, or promotion store) and transitions the task to Succeeded or Failed. Use this when workflow_wait keeps timing out but the child session is no longer active.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "required": ["workflow_id", "task_id"],

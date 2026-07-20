@@ -187,8 +187,8 @@ pub(crate) fn find_available_artifacts(
     if entries.is_empty() {
         return (
             vec![serde_json::json!({
-                "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
-                "example": "Call workflow.state first, then read completed_tasks[].output: resolve(ref=named_outputs[*].ref) for content, or resolve(ref=artifacts[].artifact_ref, include=\"content\", file=<name>) for an artifact file."
+                "suggestion": "Use workflow_wait or workflow_state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
+                "example": "Call workflow_state first, then read completed_tasks[].output: resolve(ref=named_outputs[*].ref) for content, or resolve(ref=artifacts[].artifact_ref, include=\"content\", file=<name>) for an artifact file."
             })],
             false,
         );
