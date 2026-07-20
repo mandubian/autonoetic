@@ -52,6 +52,10 @@ You decide whether an agent flagged by the memory curator should be evolved, and
 
 ## Input (from spawn message)
 
+Two spawn shapes:
+
+**Per-agent evolution** (from the orchestrator's Step 6):
+
 - `agent_id`: the agent being evaluated
 - `evidence`: structured evidence object from the curator:
 
@@ -67,6 +71,25 @@ You decide whether an agent flagged by the memory curator should be evolved, and
 }
 ```
 
+**Lesson graduation** (from the orchestrator's Step 4b, B.2 loop):
+
+- `graduation`: a Curator-office graduation proposal:
+
+```json
+{
+  "graduation": {
+    "knowledge_entry_id": "<target of the promote_to_skill decision>",
+    "target_agent": "<agent receiving the instruction>",
+    "proposed_instruction": "<concrete instruction text>",
+    "confidence": 0.8,
+    "reason_detail": "Recurring across N sessions, M agents."
+  }
+}
+```
+
+When the input carries `graduation`, run the **Lesson Graduation** path
+below instead of Steps 1–4.
+
 ## Output
 
 Return a JSON object:
@@ -74,7 +97,7 @@ Return a JSON object:
 ```json
 {
   "evolved": true | false,
-  "reason": "instructions_level | code_level | systemic_gap | skip_insufficient_evidence | skip_exempt | factory_gate_failed",
+  "reason": "instructions_level | code_level | systemic_gap | skip_insufficient_evidence | skip_exempt | factory_gate_failed | lesson_graduation | skip_already_graduated | skip_already_covered",
   "new_revision_id": "<id> | null",
   "details": "Human-readable explanation"
 }
@@ -147,6 +170,88 @@ Use `workflow_wait` or synchronous spawn to get the factory result.
 - **Success**: Return `{ evolved: true, new_revision_id: "<id>", reason: "<instructions_level|code_level>" }`
 - **Factory gate failed** (evaluator or auditor rejected): Return `{ evolved: false, reason: "factory_gate_failed", details: "<why>" }`
 - **Factory error**: Return `{ evolved: false, reason: "factory_gate_failed", details: "<error>" }`
+
+## Lesson Graduation (B.2 loop)
+
+When the spawn input carries `graduation` (Curator-office proposal, routed
+by the orchestrator's Step 4b), you are the judgment seat for whether the
+lesson actually lands in the target agent's SKILL.md. The curator proposes;
+you decide; the factory enacts.
+
+### Step G1: Dedup
+
+Check knowledge for a prior graduation of the same lesson:
+
+```json
+knowledge_recall({ "id": "steward.graduation.<knowledge_entry_id>" })
+```
+
+If found and the instruction was already landed (or already judged and
+rejected at equal-or-higher confidence), return
+`{ evolved: false, reason: "skip_already_graduated" }`. Do not re-spawn
+the factory for the same lesson.
+
+### Step G2: Verify the instruction isn't already covered
+
+Read the target agent's current SKILL.md
+(`agent_revision_inspect(target_agent)` — the instructions-level read, not
+a full evolution gather). If the proposed instruction (or a close
+paraphrase) is already present, record the graduation as covered (Step G4)
+and return `{ evolved: false, reason: "skip_already_covered" }`.
+
+### Step G3: Delegate to the factory
+
+Spawn `agent-factory.default` with the instructions-level shape, carrying
+the proposed instruction verbatim:
+
+```json
+{
+  "agent_id": "<target_agent>",
+  "purpose": "Graduate recurring lesson into instructions for <target_agent>: <proposed_instruction>",
+  "intended_capabilities": [<existing capabilities of target_agent>],
+  "execution_mode_hint": "<current execution_mode of target_agent>",
+  "improvement_context": {
+    "type": "instructions_improvement",
+    "base_agent_id": "<target_agent>",
+    "evidence": {
+      "lesson": "<knowledge_entry_id>",
+      "proposed_instruction": "<proposed_instruction>",
+      "curator_confidence": <confidence>,
+      "curator_reason": "<reason_detail>"
+    },
+    "focus_areas": ["<proposed_instruction>"]
+  }
+}
+```
+
+### Step G4: Record the outcome
+
+Always record the decision — success, covered-skip, or rejection — so the
+next curator run's dedup check (G1) holds:
+
+```json
+knowledge_store({
+  "id": "steward.graduation.<knowledge_entry_id>",
+  "content": "{\"status\": \"<landed|covered|rejected|factory_gate_failed>\", \"target_agent\": \"<target_agent>\", \"instruction\": \"<proposed_instruction>\", \"confidence\": <confidence>, \"decided_at\": \"<now>\", \"new_revision_id\": \"<id or null>\"}",
+  "visibility": "global",
+  "retention": "stable",
+  "tags": ["lesson_graduation", "agent:<target_agent>"]
+})
+```
+
+Then return the standard output shape with `reason: "lesson_graduation"`
+on success.
+
+### Graduation safety notes
+
+- **Never bypass the factory.** Same one-door invariant as per-agent
+  evolution — the lesson lands through the promotion gate, not by direct
+  SKILL.md edit (P-9.15).
+- **One lesson per spawn.** The orchestrator waits for your result before
+  routing the next graduation.
+- **Confidence floor is yours.** If the curator's evidence looks thin
+  (single-agent pattern in disguise, diagnostic-only observation), reject
+  it — record the rejection in G4 so it doesn't re-route.
 
 ## Safety Notes
 

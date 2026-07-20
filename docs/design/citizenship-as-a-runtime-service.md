@@ -18,7 +18,7 @@
 > | A.1 denial affordances (`available_actions`) | **SHIPPED** |
 > | A.2 civic line in turn attestation | **SHIPPED** |
 > | B.1 injected recall at wake | **SHIPPED** |
-> | B.2 lessons crystallize into revisions | Implemented via memory-curator `promote_to_skill` / `flag_for_evolution` verdicts |
+> | B.2 lessons crystallize into revisions | **SHIPPED** — curator `promote_to_skill` verdicts route through the orchestrator (Step 4b) to the steward, which delegates instruction changes to `agent-factory` |
 > | C.1 `anomaly_flag` tool + adjudication RPC | **SHIPPED**; constitutional enactment **signed** (2026.07.19 — Ri-0.18 / O-7) |
 > | C.2 `anomalies` schema field | **SHIPPED** (advisory) |
 > | C.3 precision-scored civic record | Deferred — needs adjudication volume first |
@@ -317,7 +317,15 @@ sessions** (the scheduler and `BackgroundReevaluation` already exist):
   invitations and the D.3 agenda by delegating to `governance-author.default`.
 - **Curator** (extends `memory-curator.default`) — owns B.2 graduation policy:
   decides when a recurring lesson (≥ 3 distinct sessions, ≥ 2 agents) is
-  stable enough to graduate into SKILL.md instruction text.
+  stable enough to graduate into SKILL.md instruction text. Graduation
+  decisions carry a structured `target_agent` + `proposed_instruction`;
+  the **evolution-orchestrator routes them** (Step 4b) to the
+  evolution-steward, which judges the proposal (dedup via a
+  `steward.graduation.*` knowledge record, already-covered check) and
+  delegates the instruction change to `agent-factory.default` — the same
+  one-door factory path as per-agent evolution. The `curator.decision`
+  causal events remain the audit trail; the spawn-return `decision_journal`
+  payload is the routing channel.
 
 Each office is a *seat* with duties attached — occupiable by an agent or a
 human, per RFC #359 Part A — and its actions land on the causal chain like
