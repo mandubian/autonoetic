@@ -268,9 +268,14 @@ fn output_contract_clean_does_not_stamp_failure_class() -> anyhow::Result<()> {
     } else {
         &notifications[0].payload["notification"]
     };
-    let inner_fc = inner.get("failure_class").and_then(|v| v.as_str());
+    // Strict match of the event-payload assertion above: clean completion
+    // means `failure_class` is absent (the struct field is
+    // `skip_serializing_if = "Option::is_none"`). A loose `as_str()` check
+    // would silently pass if a future change emitted an unexpected
+    // object/number value here — pin the actual JSON shape instead.
+    let inner_fc = inner.get("failure_class");
     assert!(
-        inner_fc.is_none() || inner_fc == Some(""),
+        inner_fc.map_or(true, |v| v.is_null()),
         "no failure_class on clean notification, got: {:?}",
         inner_fc
     );

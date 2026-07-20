@@ -30,9 +30,13 @@ use autonoetic_types::config::LoopGuardConfig;
 /// `docs/config-reference.md` documents.
 #[test]
 fn default_config_trips_on_third_identical_spawn() {
-    let guard = LoopGuard::with_config(&LoopGuardConfig::default());
+    // Explicit pin that the production default matches what
+    // `docs/config-reference.md` and `config-template.yaml` publish. The
+    // behavior assertion below (third identical spawn trips) implicitly
+    // covers it too, but spelling out the number surfaces a default bump
+    // as a test failure rather than a silent behavior change.
     assert_eq!(
-        guard_max_spawn_identity_repeats(&guard),
+        LoopGuardConfig::default().max_spawn_identity_repeats,
         3,
         "default matches docs/config-reference.md and config-template.yaml"
     );
@@ -235,12 +239,4 @@ fn identity_hash_is_structural_over_all_three_inputs() {
         hash_a, hash_b,
         "different message must produce a different identity_hash"
     );
-}
-
-// Small helper because max_spawn_identity_repeats is private on LoopGuard;
-// the config it was built from is the public surface.
-fn guard_max_spawn_identity_repeats(_guard: &LoopGuard) -> u32 {
-    // The default is documented in `LoopGuardConfig::default()` and mirrors
-    // what `config-template.yaml` and `docs/config-reference.md` publish.
-    LoopGuardConfig::default().max_spawn_identity_repeats
 }
