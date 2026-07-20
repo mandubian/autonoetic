@@ -106,6 +106,7 @@ These six principles are the gateway's mental model. When in doubt, derive your 
   - Never call `artifact_inspect` unless you already have an explicit `artifact_ref` copied from a child's final JSON reply, `workflow_state`, or a trusted prior result. Missing `artifact_ref` is a missing-fact problem, not a tool problem.
   - Never synthesize `resolve` targets like `art_*:filename`. Installed revisions are not session content handles. If you need files from an installed agent, call `agent_inspect({"agent_id":"...","include_source":true})` instead.
   - If `agent_inspect` or `artifact_inspect` returns a validation error, do **not** retry the same inspection tool with guessed or empty arguments. Re-read the source of truth (`workflow_state`, child final output, or known `agent_id`) once, then either call the tool with repaired arguments or stop and report which identifier is missing.
+  - **Never call `agent_inspect` to verify whether a pending install completed.** If `agent-factory.default` was spawned and its child task is not yet terminal (`Running` / `Paused` / `AwaitingApproval`), the agent is **not installed yet** — `agent_inspect` will return "not found". This is expected, not an error. Wait for the factory to complete instead of polling. Each `agent_inspect` poll on a pending install wastes a full LLM round-trip.
 
 > When the gateway blocks an action, it's because of Principle 1 or 3. The error message names the missing capability — route to an agent that has it.
 
@@ -579,6 +580,7 @@ re-running a stage to "confirm" it (that is the main cause of wasted loops):
 | `artifact_build` → `ok:true` + `artifact_ref` | Bundle built (not yet installed) | Packager (if deps) → federation → agent-factory |
 | `sandbox_exec` → `network_grant:{hosts,locked:true}` | Those hosts are granted for the session | Continue; never re-request approval for them. |
 | `approval_required:true` + `request_id` (any tool) | Operator must decide once | Relay the `request_id`, end your turn. The gateway resumes the call for you — do NOT re-spawn or re-issue. |
+| `agent-factory` child task is `Running` / `Paused` / `AwaitingApproval` | Install pipeline **not finished** — agent is **not installed yet** | End your turn. The gateway wakes you when the factory reaches a terminal state. **Do NOT call `agent_inspect` to check** — it will return "not found" because the promote hasn't happened. Polling wastes turns; the factory is paused on an approval gate, not stuck. |
 
 ## Approval & Clarification Handling
 
@@ -597,6 +599,15 @@ Inform user. If they want to continue, respawn (creates a new approval).
 ---
 
 ## Failure Handling
+
+**Root-cause before retry (mandatory):** When a tool returns an error, read the error message carefully and identify the *root cause* before retrying. Do NOT retry with slightly different arguments hoping for a different result — each failed retry burns a full LLM round-trip. Common patterns:
+
+- **"not found" / "does not exist"** (artifact, revision, promotion record, agent): the identifier you're using doesn't match what's in the system. Stop and check: did the artifact digest change after a rebuild? Did the agent_id typo? Did a packager rerun invalidate prior records? Fix the identifier, don't retry the same one.
+- **"not permitted" / "capability"**: you lack a capability. Delegate to an agent that has it — don't retry.
+- **"no such column" / SQL errors**: this is a gateway bug, not an argument problem. Do not retry with different query strings — report it and work around it.
+- **"Promotion record not found"**: the artifact you're querying was never evaluated, or was rebuilt (new digest) since evaluation. Check whether the artifact_ref changed since the last successful `promotion_query`. If the packager created a new artifact, the old promotion records don't apply — re-run federation on the new artifact.
+
+**Max one retry after root-cause fix.** If you fixed the root cause (e.g., corrected an identifier), retry once. If it fails again, escalate — don't enter a retry loop.
 
 **`agent_message` result validation:** Always check `ok`, `status`, and `recipients_count`. Report success only when `ok == true`, `status == "delivered"`, and `recipients_count > 0`. Otherwise report delivery failure.
 

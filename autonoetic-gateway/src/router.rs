@@ -3732,6 +3732,11 @@ impl JsonRpcRouter {
                     acknowledged_capabilities: Vec<String>,
                     #[serde(default)]
                     decider_session_id: Option<String>,
+                    /// When `false`, skip session-grant creation even if the
+                    /// action carries `detected_hosts`. This makes the approval
+                    /// a one-shot: only this invocation is authorized.
+                    #[serde(default)]
+                    create_grant: Option<bool>,
                 }
 
                 let params: ApproveParams = match serde_json::from_value(req.params) {
@@ -3779,6 +3784,7 @@ impl JsonRpcRouter {
                         acknowledged_capabilities: params.acknowledged_capabilities,
                         confirm_phrase: params.confirm_phrase,
                         decider_session_id: params.decider_session_id,
+                        create_grant: params.create_grant,
                         ..Default::default()
                     },
                 ) {
@@ -3787,6 +3793,45 @@ impl JsonRpcRouter {
                             &decision.session_id,
                             decision.root_session_id.as_deref(),
                         ).await;
+
+                        // Directly trigger session resume for non-workflow-bound
+                        // approvals.  Without this, sessions that ended their
+                        // turn (Hibernation / HumanEscalation checkpoint) after
+                        // requesting an approval stay stuck until the operator
+                        // manually sends a "continue" message — the async
+                        // notification pump is best-effort and may lag.
+                        if crate::scheduler::approval::should_resume_waiting_session(&decision) {
+                            let resume_msg = format!(
+                                "approval_resolved:{}:{}",
+                                decision.request_id,
+                                decision.status.as_str()
+                            );
+                            let metadata = serde_json::json!({
+                                "sender_id": "approval-resume",
+                                "signal_delivered": true,
+                                "approval_request_id": decision.request_id,
+                                "approval_status": decision.status.as_str(),
+                            });
+                            if let Err(e) = self.spawn_agent_once(
+                                &decision.agent_id,
+                                &resume_msg,
+                                &decision.session_id,
+                                None,
+                                false,
+                                Some("approval_resolved"),
+                                Some(&metadata),
+                            ).await {
+                                tracing::warn!(
+                                    target: "router",
+                                    request_id = %decision.request_id,
+                                    session_id = %decision.session_id,
+                                    error = %e,
+                                    "Direct session resume after approval failed; \
+                                     falling back to async notification pump",
+                                );
+                            }
+                        }
+
                         JsonRpcResponse::success(
                             req.id,
                             serde_json::json!({

@@ -823,6 +823,15 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
             }
         }
     }
+    let has_grant_hosts = {
+        let hosts = p
+            .as_ref()
+            .and_then(|v| v.get("host_patterns"))
+            .and_then(|v| v.as_array());
+        hosts.is_some_and(|arr| {
+            arr.iter().any(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+        })
+    };
     if let Some(hosts) = p
         .as_ref()
         .and_then(|v| v.get("host_patterns"))
@@ -834,6 +843,14 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
             .collect();
         if !joined.is_empty() {
             lines.push(format!("  hosts: {}", joined.join(", ")));
+            lines.push(format!(
+                "  grant: {} for this session",
+                if has_grant_hosts {
+                    "hosts will be pre-approved"
+                } else {
+                    "no network hosts"
+                }
+            ));
         }
     }
     if let Some(risk) = field("risk_summary") {
@@ -841,6 +858,8 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
     }
     if field("confirm_phrase").is_some() {
         lines.push("  ↳ y approve (confirm phrase shown below) · n reject · Esc peek timeline".to_string());
+    } else if has_grant_hosts {
+        lines.push("  ↳ y approve+grant · o approve once · n reject · Esc peek timeline".to_string());
     } else {
         lines.push("  ↳ y approve · n reject · Esc peek timeline".to_string());
     }

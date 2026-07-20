@@ -569,19 +569,38 @@ impl<'a> ToolCallProcessor<'a> {
             // invariants. The cache is consulted only when we have both a
             // session id and a gateway store to hold the per-session cache.
             //
+            // Artifact-category reads (resolve of `art_`/`ar.`, artifact_inspect)
+            // are bucketed under the *root* session so sibling fan-out children
+            // share the memoized read (#841) — `artifact_build` already scopes
+            // refs to the root, so this matches the store's visibility model.
+            // Content reads stay keyed by the exact session (they may be
+            // `ContentVisibility::Private`).
+            //
             // We inject `execution_trace_id` before caching so the memoized
             // payload already carries the durable trace handle; cache hits
             // reuse that id and skip creating a duplicate execution trace.
             let cache_ctx = match (self.session_id.as_deref(), self.gateway_store.as_ref()) {
-                (Some(sid), Some(store)) => Some((sid.to_string(), store.clone())),
+                (Some(sid), Some(store)) => {
+                    // Reuse the root resolution the rest of the processor uses:
+                    // run_context.root_session_id if available, else derived
+                    // from the session id.
+                    let root = self
+                        .run_context
+                        .as_ref()
+                        .map(|c| c.root_session_id.as_str())
+                        .unwrap_or_else(|| crate::runtime::content_store::root_session_id(sid));
+                    Some((sid.to_string(), root.to_string(), store.clone()))
+                }
                 _ => None,
             };
 
-            if let Some((sid, store)) = cache_ctx.as_ref() {
-                if let Some(hit) = store
-                    .session_read_cache
-                    .get(sid, tool_name, &sanitized_args)
-                {
+            if let Some((sid, root, store)) = cache_ctx.as_ref() {
+                if let Some(hit) = store.session_read_cache.get(
+                    sid,
+                    Some(root),
+                    tool_name,
+                    &sanitized_args,
+                ) {
                     self.emit_cache_hit_event(store, tool_name);
                     (hit, true)
                 } else {
@@ -599,7 +618,9 @@ impl<'a> ToolCallProcessor<'a> {
                         self.run_context.as_ref(),
                     )?;
                     let r = inject_execution_trace_id(&r, Some(&uuid::Uuid::new_v4().to_string()));
-                    self.maybe_cache_or_invalidate(store, sid, tool_name, &sanitized_args, &r);
+                    self.maybe_cache_or_invalidate(
+                        store, sid, Some(root), tool_name, &sanitized_args, &r,
+                    );
                     (r, false)
                 }
             } else {
@@ -653,10 +674,15 @@ impl<'a> ToolCallProcessor<'a> {
     /// After a successful `registry.execute` for a tool with cache
     /// relevance: store cacheable read results, and invalidate the
     /// affected cache-tag class when the tool was a mutator (#289).
+    ///
+    /// `root_session_id` is the bucket key for root-scoped reads
+    /// (artifact-category); see [`session_read_cache`] for why artifact
+    /// reads are shared across siblings under the same root (#841).
     fn maybe_cache_or_invalidate(
         &self,
         store: &std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
         session_id: &str,
+        root_session_id: Option<&str>,
         tool_name: &str,
         arguments_json: &str,
         result: &str,
@@ -670,9 +696,13 @@ impl<'a> ToolCallProcessor<'a> {
         }
 
         if read_cache_policy(tool_name, arguments_json).is_some() {
-            store
-                .session_read_cache
-                .put(session_id, tool_name, arguments_json, result);
+            store.session_read_cache.put(
+                session_id,
+                root_session_id,
+                tool_name,
+                arguments_json,
+                result,
+            );
         }
 
         if let Some(tag) = invalidation_tag_for(tool_name) {

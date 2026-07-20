@@ -1229,6 +1229,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
             acknowledged_capabilities: Vec::new(),
             confirm_phrase: Some(confirm_phrase),
             decider_session_id: None,
+            create_grant: None,
         },
     )
     .expect("approval should succeed");
@@ -1363,6 +1364,7 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
             acknowledged_capabilities: Vec::new(),
             confirm_phrase: Some(confirm_phrase),
             decider_session_id: None,
+            create_grant: None,
         },
     );
     assert!(approval_result.is_err());

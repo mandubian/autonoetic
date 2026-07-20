@@ -7,9 +7,9 @@ use rusqlite::params;
 /// Check if a query string contains FTS5-syntax characters that could cause
 /// a MATCH parse error, in which case we fall back to LIKE.
 fn looks_like_fts_syntax(query: &str) -> bool {
-    query
-        .chars()
-        .any(|c| matches!(c, '.' | '(' | ')' | '"' | '*' | '-' | '+' | '&'))
+    query.chars().any(|c| {
+        matches!(c, '.' | '(' | ')' | '"' | '*' | '-' | '+' | '&' | ':')
+    })
 }
 
 fn should_fallback_to_like(err: &rusqlite::Error, query: &str) -> bool {

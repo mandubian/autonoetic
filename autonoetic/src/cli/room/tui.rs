@@ -3052,7 +3052,7 @@ pub fn run(
                                     KeyCode::Char('g') | KeyCode::Home => {
                                         popup.selected = 0;
                                     }
-                                    KeyCode::Char('y') | KeyCode::Char('n') => {
+                                    KeyCode::Char('y') | KeyCode::Char('n') | KeyCode::Char('o') => {
                                         let idx = popup.selected.min(row_count.saturating_sub(1));
                                         let row = &popup.rows[idx];
                                         if !row.is_pending {
@@ -3098,18 +3098,34 @@ pub fn run(
                                                 );
                                             }
                                         } else {
-                                            let approve = key.code == KeyCode::Char('y');
+                                            let approve = key.code == KeyCode::Char('y')
+                                                || key.code == KeyCode::Char('o');
+                                            let create_grant = if key.code == KeyCode::Char('o') {
+                                                Some(false)
+                                            } else {
+                                                None
+                                            };
                                             let row_id = row.id.clone();
                                             let method = if approve { "approvals.approve" } else { "approvals.reject" };
-                                            match rpc(client, method, serde_json::json!({
+                                            let mut rpc_params = serde_json::json!({
                                                 "request_id": &row_id,
                                                 "decided_by": "operator",
-                                            })) {
+                                            });
+                                            if let Some(cg) = create_grant {
+                                                rpc_params["create_grant"] = serde_json::json!(cg);
+                                            }
+                                            match rpc(client, method, rpc_params) {
                                                 Ok(_) => {
                                                     acted.insert(row_id.clone());
                                                     status = Some(format!(
                                                         "✓ {} {}",
-                                                        if approve { "approved" } else { "rejected" },
+                                                        if !approve {
+                                                            "rejected"
+                                                        } else if create_grant == Some(false) {
+                                                            "approved (one-shot, no grant)"
+                                                        } else {
+                                                            "approved"
+                                                        },
                                                         row_id
                                                     ));
                                                     force_timeline_refresh = true;
@@ -3396,7 +3412,7 @@ pub fn run(
                                         rows,
                                     });
                                     status = Some(
-                                        "approvals: j/k navigate · y approve · n reject · Esc close"
+                                        "approvals: j/k navigate · y approve+grant · o approve once · n reject · Esc close"
                                             .to_string(),
                                     );
                                 }
@@ -7079,7 +7095,7 @@ fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup) {
     let pending = rows.iter().filter(|r| r.is_pending).count();
     let resolved_count = rows.len() - pending;
     let title = format!(
-        " Approvals — {} pending · {} resolved [A/Esc close · j/k nav · y approve · n reject] ",
+        " Approvals — {} pending · {} resolved [A/Esc close · j/k nav · y approve+grant · o once · n reject] ",
         pending, resolved_count,
     );
     let area = centered_rect(75, 70, f.area());

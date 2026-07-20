@@ -148,6 +148,8 @@ Before you report `dependency_files` in your result JSON, you MUST inspect every
    - **Test frameworks are NEVER a dependency**: `pytest`, `nose`, `hypothesis` must be rewritten to `unittest` (see the rule above). Do not put them in `requirements.txt`.
 5. Only report `dependency_files: []` when **zero** files contain third-party imports.
 
+6. **CRITICAL — Do NOT write a `requirements.txt` for stdlib-only code.** If every import across every file is stdlib or gateway-provided (`autonoetic_sdk`), you MUST NOT include a `requirements.txt` in the artifact bundle. An empty `requirements.txt` triggers the packager downstream (which runs `pip install -r` on nothing and still produces a layer) and wastes ~5-10 LLM turns per agent. The presence of `requirements.txt` is treated as "has dependencies" — even if its content is empty or stdlib-only. So: no real deps = no `requirements.txt` file at all. Return `dependency_files: []` and `status: "ok"`.
+
 **Common trap:** `pytest` is NOT stdlib. If a test file (including one authored by `architect.default`) contains `import pytest`, rewrite it to `unittest`. Never declare test frameworks as dependencies.
 
 ## Behavior

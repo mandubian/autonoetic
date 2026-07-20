@@ -130,6 +130,12 @@ pub struct ApproveOptions {
     pub grant_scope: Option<autonoetic_types::background::GrantScope>,
     pub grant_targets: Vec<autonoetic_types::background::GrantTarget>,
     pub grant_expires_at: Option<String>,
+    /// When `Some(false)`, skip session-grant materialization even if the
+    /// approved action carries `detected_hosts`. This turns the approval into
+    /// a one-shot: only this single invocation is authorized, and subsequent
+    /// calls to the same hosts will re-trigger the gate. When `None` or
+    /// `Some(true)` (the default), grants are created normally.
+    pub create_grant: Option<bool>,
     /// Capability type names the operator explicitly acknowledges as part of
     /// approving a `RevisionPromote` request (R++2). Must match the union of
     /// `added_capabilities + broadened_capabilities` exactly. Empty for any
@@ -226,7 +232,11 @@ pub fn apply_decision(
     };
 
     // ── 1. Session grants (Approved only) ──────────────────────────────
-    if decision.status == ApprovalStatus::Approved {
+    // Operator can opt out of grant creation via `create_grant: Some(false)`
+    // to approve just this one invocation without pre-authorizing the hosts
+    // for the rest of the session.
+    let create_grant = options.create_grant.unwrap_or(true);
+    if decision.status == ApprovalStatus::Approved && create_grant {
         let hosts = decision.action.detected_hosts();
         if let Some(hosts) = hosts {
             if !hosts.is_empty() {
@@ -1334,7 +1344,7 @@ fn should_notify_parent_session(decision: &ApprovalDecision) -> bool {
     }
 }
 
-fn should_resume_waiting_session(decision: &ApprovalDecision) -> bool {
+pub(crate) fn should_resume_waiting_session(decision: &ApprovalDecision) -> bool {
     if matches!(decision.action, ScheduledAction::PlanFrame { .. }) {
         return false;
     }

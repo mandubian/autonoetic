@@ -106,6 +106,12 @@ pub fn approval_timeline_extra_from_action(
                         ),
                     );
                 }
+                let hosts: Vec<String> = detected_hosts.clone().unwrap_or_default();
+                if !hosts.is_empty() {
+                    obj.insert("grant_hosts".into(), serde_json::Value::Array(
+                        hosts.iter().map(|h| serde_json::Value::String(h.clone())).collect()
+                    ));
+                }
             }
             Some(extra)
         }
@@ -151,6 +157,88 @@ pub fn approval_timeline_extra_from_action(
             "max_turns": max_turns,
             "turn_counter": turn_counter,
         })),
+        ScheduledAction::WebFetch {
+            url,
+            detected_hosts,
+            ..
+        } => {
+            let mut extra = serde_json::json!({
+                "url": url,
+                "host_patterns": detected_hosts,
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                let hosts: Vec<String> = detected_hosts
+                    .clone()
+                    .unwrap_or_default();
+                if !hosts.is_empty() {
+                    obj.insert("grant_hosts".into(), serde_json::Value::Array(
+                        hosts.iter().map(|h| serde_json::Value::String(h.clone())).collect()
+                    ));
+                }
+            }
+            Some(extra)
+        }
+        ScheduledAction::WebCall {
+            url,
+            detected_hosts,
+            ..
+        } => {
+            let mut extra = serde_json::json!({
+                "url": url,
+                "host_patterns": detected_hosts,
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                let hosts: Vec<String> = detected_hosts
+                    .clone()
+                    .unwrap_or_default();
+                if !hosts.is_empty() {
+                    obj.insert("grant_hosts".into(), serde_json::Value::Array(
+                        hosts.iter().map(|h| serde_json::Value::String(h.clone())).collect()
+                    ));
+                }
+            }
+            Some(extra)
+        }
+        ScheduledAction::WebSearch {
+            query,
+            detected_hosts,
+            ..
+        } => {
+            let mut extra = serde_json::json!({
+                "query": query,
+                "host_patterns": detected_hosts,
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                let hosts: Vec<String> = detected_hosts
+                    .clone()
+                    .unwrap_or_default();
+                if !hosts.is_empty() {
+                    obj.insert("grant_hosts".into(), serde_json::Value::Array(
+                        hosts.iter().map(|h| serde_json::Value::String(h.clone())).collect()
+                    ));
+                }
+            }
+            Some(extra)
+        }
+        ScheduledAction::CredentialRequest {
+            url,
+            ..
+        } => {
+            let hosts: Vec<String> = action.detected_hosts().unwrap_or_default();
+            let mut extra = serde_json::json!({
+                "url": url,
+                "host_patterns": hosts,
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                let hosts: Vec<String> = action.detected_hosts().unwrap_or_default();
+                if !hosts.is_empty() {
+                    obj.insert("grant_hosts".into(), serde_json::Value::Array(
+                        hosts.iter().map(|h| serde_json::Value::String(h.clone())).collect()
+                    ));
+                }
+            }
+            Some(extra)
+        }
         _ => None,
     }
 }

@@ -153,7 +153,7 @@ If the spawn message includes `source_artifact_ref`, treat it as the canonical i
 
 1. Call `artifact_inspect(source_artifact_ref)` once.
 2. If `source_script_entry` is present and the artifact already contains the required code, skip coder.
-3. If dependency layering is needed **and** `artifact_inspect` shows no dependency layers, go to Step 3 (packager). If layers are already present (planner ran packager before federation), skip Step 3.
+3. If `artifact_inspect` shows dependency files exist AND no dependency layers are present, read the file content via `resolve`. If the content contains real third-party dependencies (not empty / stdlib-only), go to Step 3 (packager). If layers are already present, or the dependency file is empty / stdlib-only, skip Step 3.
 4. If gates are required and `federation_complete` is not set, go to Step 4 with the same artifact.
 5. Only fall back to coder if the artifact is malformed or missing the required entry script.
 
@@ -275,7 +275,16 @@ On resume after coder completes (the child state arrives in your turn-start cont
    - File reads/writes outside `self.*` → add `ReadAccess` / `WriteAccess` with appropriate scopes.
    - Subprocess/shell calls → add `CodeExecution`.
    - Keep `NetworkAccess` hosts **concrete**; only use `hosts: ["*"]` when the agent truly cannot enumerate targets (e.g., an open-web researcher). The gateway rejects revisions whose code contacts hosts not listed in the capability.
-6. If dependency files found → go to Step 3 (packager). Otherwise → go to Step 4.
+6. **Check dependency content, not just file existence.** Use `resolve` to read each dependency file's content. A file that exists but contains no third-party packages (empty, or only stdlib-compatible entries like `autonoetic_sdk`) should NOT trigger the packager — an empty `pip install` still produces a layer and wastes 5-10 LLM turns. Skip to Step 4 instead.
+
+   **Decision table:**
+   | File found | Content has real third-party deps? | Action |
+   |---|---|---|
+   | No | — | Skip to Step 4 |
+   | Yes | Yes | Go to Step 3 (packager) |
+   | Yes | No (empty / stdlib-only) | Skip to Step 4 |
+
+   Additionally, if coder returned `status: "needs_packager"`, always go to Step 3 regardless of content — the coder explicitly signaled that packaging is required.
 
 ### Step 3: Packager (if dependency files found)
 
