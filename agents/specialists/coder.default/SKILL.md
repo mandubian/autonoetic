@@ -30,7 +30,6 @@ metadata:
       - "workbench_*"
       - "planframe_*"
       - "scheduler_*"
-      - "workflow_*"
       - "eval_*"
       - "user_profile_*"
       - "credential_*"
@@ -247,7 +246,7 @@ When the planner asks you to create an agent (e.g. "create a data processing age
 
    On success (`status: "ok"`): include `artifact_ref` and the install intent payload via `reason` or optional fields. The returned `artifact_ref` is the canonical install handoff. Prefer it over loose `cnt_...` handles for downstream packaging, validation, or installation.
 8. Suggested handoff text:
-  "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full pipeline, or specialized_builder.default only if you are already at the final install step."
+  "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full install pipeline."
 
 <!-- extended -->
 
@@ -304,7 +303,7 @@ When using `content_write` and `resolve`:
 ### How Sandbox Works
 - Session content files (written via `content_write`) are automatically mounted into `/tmp/` in the sandbox
 - Files written with `content_write` named `script.py` are available at `/tmp/script.py` in sandbox
-- You can run them directly: `python3 /tmp/script.py`
+- You cannot run them directly (`sandbox_exec` is unavailable to you) — `artifact_exec` runs `python3 /tmp/<entrypoint>` inside the sandbox on your behalf
 
 ### Shebang Requirement for Script Agents
 
@@ -400,7 +399,7 @@ When the agent persists state across independent invocations (cron, scheduler):
 2. **Include `tests/test_*.py` in the same artifact** before federation — mock `autonoetic_sdk.init()` with `unittest.mock`. The `unit_test_runner` only runs existing tests; it will not write them for you.
 3. Do not rely on file-based `state.json` unless stdlib-only is an explicit requirement — prefer SDK state/memory so smoke tests and cron share the same persistence path.
 
-When writing a script agent that accepts structured inputs, always declare `io.accepts` in the install intent so callers format their message as JSON:
+When writing a script agent that accepts structured inputs, include an `io.accepts` schema note in `agent_instructions.md` so agent-factory can declare it in the install intent — callers will then format their message as JSON:
 
 ```yaml
 io:
@@ -475,7 +474,7 @@ artifact_exec({
 
 ### Promotion Evaluation Has No Network
 
-Artifacts that go through promotion evaluation are tested in a sandbox with no network access (gateway constitution rule P-3.10). All tests must mock external services — a test that makes a real HTTP call will fail with `ECONNREFUSED`. Use `constitution.read` to inspect the full rule.
+Artifacts that go through promotion evaluation are tested in a sandbox with no network access (gateway constitution rule P-3.10). All tests must mock external services — a test that makes a real HTTP call will fail with `ECONNREFUSED`.
 
 ### When to Use Dependencies
 You don't have `NetworkAccess`, so you cannot install packages directly. If your code needs external packages:
