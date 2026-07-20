@@ -2638,6 +2638,7 @@ fn test_assertion_session_events_min_and_max() {
 
     let no_session_assertions = EvalAssertions {
         reply_contains_all: None,
+        reply_contains_any: None,
         reply_contains_none: None,
         reply_max_chars: None,
         artifacts_min: None,

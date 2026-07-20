@@ -445,9 +445,10 @@ async fn check_adjudication_sla_breaches(
             .map(|created| (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_seconds())
             .unwrap_or(sla_secs as i64);
 
-        // O-6 is not yet in the enforcement register (amendment pending
-        // signing); this event buckets as `unattributed` in contract-health
-        // until then, but carries the ID so attribution is ready at enactment.
+        // O-6 entered the enforcement register with the 2026.07.19 amendment,
+        // so this event attributes to O-6 in contract-health (pre-enactment
+        // it bucketed as `unattributed`); the rule ID was carried all along
+        // so attribution went live at signing without an event-shape change.
         let event = CausalEventRecord {
             event_id: format!("sla-ev-{}", uuid::Uuid::new_v4()),
             agent_id: proposal.proposer_agent_id.clone(),
@@ -515,9 +516,10 @@ async fn check_adjudication_sla_breaches(
             .map(|created| (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_seconds())
             .unwrap_or(sla_secs as i64);
 
-        // O-7 is not yet in the enforcement register (amendment pending
-        // signing); this event buckets as `unattributed` in contract-health
-        // until then, but carries the ID so attribution is ready at enactment.
+        // O-7 entered the enforcement register with the 2026.07.19 amendment,
+        // so this event attributes to O-7 in contract-health (pre-enactment
+        // it bucketed as `unattributed`); the rule ID was carried all along
+        // so attribution went live at signing without an event-shape change.
         let event = CausalEventRecord {
             event_id: format!("sla-ev-{}", uuid::Uuid::new_v4()),
             agent_id: flag.reporter_agent_id.clone(),
@@ -3544,12 +3546,27 @@ mod adjudication_sla_tests {
             && n.target_session_id == "system"
             && n.payload.get("owed_to").and_then(|v| v.as_str()) == Some("witness.default")));
 
-        // Deferred-attribution contract: O-6/O-7 are not yet in the code
-        // enforcement register, so they must bucket as `unattributed` in
-        // contract-health, not silently vanish or misattribute.
+        // Attribution contract: O-6/O-7 entered the code enforcement
+        // register with the 2026.07.19 amendment, so the breach events must
+        // attribute to their clauses in contract-health (not bucket as
+        // `unattributed` as they did pre-enactment). This is the load-bearing
+        // flip the amendment delivers — see `enforcement_register.rs`
+        // entries for O-6 / O-7 and `docs/constitution/versions/2026.07.19/`.
         let health = store.contract_health(None).unwrap();
-        assert!(!health.by_clause.iter().any(|(clause, _)| clause == "O-6" || clause == "O-7"));
-        assert!(health.unattributed >= 2);
+        let o6_count = health
+            .by_clause
+            .iter()
+            .find(|(clause, _)| clause == "O-6")
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        let o7_count = health
+            .by_clause
+            .iter()
+            .find(|(clause, _)| clause == "O-7")
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        assert!(o6_count >= 1, "O-6 breach should attribute to O-6 post-enactment; health: {:?}", health);
+        assert!(o7_count >= 1, "O-7 breach should attribute to O-7 post-enactment; health: {:?}", health);
     }
 
     #[tokio::test]

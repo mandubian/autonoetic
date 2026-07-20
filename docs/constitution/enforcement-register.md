@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-4 principle(s) (bind the agent), 7 right(s) (bind the gateway), 2 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+5 principle(s) (bind the agent), 8 right(s) (bind the gateway), 4 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -43,6 +43,15 @@ The causal chain is append-only JSONL with hash-chain integrity — each entry's
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `P-8.1` | `hash_chain_integrity` | `causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage` | `constitution_rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash` | — |
+
+### P-9 — Agent Install & Provenance
+
+Three-stage activation — artifact_build, revision.create, revision.promote — gated so that every surface that activates an agent passes the same promotion gates (single door), and every externally-installed agent carries durable import provenance.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `P-9.15` | `single_door_activation` | `runtime/tools/skill.rs::SkillInstallTool + bootstrap.rs::bootstrap_single_agent_candidate_only + bootstrap.rs::bootstrap_agents + runtime/tools/agent_revision.rs::AgentRevisionPromoteTool + runtime/tools/agent_revision.rs::check_capability_delta` | `skill_install_one_door_provenance.rs::one_door_generous_install_stays_candidate_and_unpromoted` | — |
+| `P-9.16` | `import_provenance_recorded` | `runtime/tools/skill.rs::SkillInstallTool + bootstrap.rs::bootstrap_single_agent_candidate_only` | `skill_install_one_door_provenance.rs::provenance_recorded_on_revision_and_causal_event` | — |
 
 ## Rights (bind: gateway)
 
@@ -102,6 +111,14 @@ An agent may request export of its own cognitive capsule for migration to anothe
 |---|---|---|---|---|
 | `Ri-0.17` | `self_capsule_export` | `runtime/tools/capsule.rs::CapsuleExportTool (two-tier gate) + policy.rs::can_use_capsule_self` | `capsule_self_export_scoping_integration.rs::self_export_denied_for_other_agent_id` | — |
 
+### Ri-0.18 — Right to report
+
+Any agent may file an anomaly report without holding any capability; every flag is durably recorded, non-repudiably attributed, cannot be silently dropped, and filing is never itself grounds for sanction.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.18` | `anomaly_flag_capability_free_intake` | `runtime/tools/anomaly_flag.rs::AnomalyFlagTool + scheduler/gateway_store/anomaly_flags.rs::insert_anomaly_flag + scheduler/gateway_store/anomaly_flags.rs::emit_anomaly_flag_flood_alert` | `anomaly_flag_integration.rs::tool_available_with_zero_capabilities + anomaly_flag_integration.rs::filing_emits_causal_event_tagged_ri_0_18 + anomaly_flags.rs::flood_cap_rejects_at_limit_and_keeps_existing + anomaly_flag_integration.rs::flood_cap_rejects_filing_loudly` | `max_pending_anomaly_flags_per_reporter` |
+
 ## Obligations (bind: decider)
 
 ### O-1 — Motivated decision *(entrenched)*
@@ -119,4 +136,20 @@ Every decision is attributed to the deciding principal (id + kind) on the causal
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `O-2` | `decider_attribution` | `decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) + actor bound into the causal-chain entry hash (causal_chain.rs)` | `constitution_o_1_decider_motivation.rs` | — |
+
+### O-6 — Duty to adjudicate proposals, on time
+
+A proposal review authority owes every Ri-0.8 proposal a recorded, motivated decision within a bounded adjudication window; a proposal left un-adjudicated past the window is a recorded breach attributed to the adjudicating seat (the decision is still owed). Window duration is config.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `O-6` | `proposal_adjudication_recorded_within_sla` | `scheduler/gateway_store/constitutional_proposals.rs::decide_constitutional_proposal + scheduler/gateway_store/constitutional_proposals.rs::flag_proposal_sla_breaches + scheduler.rs::check_adjudication_sla_breaches` | `router.rs::test_dispatch_constitution_resolve_proposal + scheduler.rs::breaches_are_recorded_without_changing_status` | `decider_obligations.enabled, decider_obligations.adjudication_sla_secs` |
+
+### O-7 — Duty to adjudicate reports, on time
+
+An anomaly review authority owes every Ri-0.18 flag a recorded, motivated decision (confirmed/dismissed/deferred, with under_review as the non-terminal holding state) within a bounded adjudication window; a flag left un-adjudicated past the window is a recorded breach attributed to the adjudicating seat (the decision is still owed). Window duration is config.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `O-7` | `anomaly_adjudication_recorded_within_sla` | `runtime/tools/anomaly_adjudicate.rs::AnomalyAdjudicateTool + scheduler/gateway_store/anomaly_flags.rs::decide_anomaly_flag + scheduler/gateway_store/anomaly_flags.rs::flag_anomaly_flag_sla_breaches + scheduler.rs::check_adjudication_sla_breaches` | `router.rs::test_dispatch_anomaly_resolve_terminal_decision_without_reason_rejected + anomaly_adjudicate_tool_integration.rs::terminal_decision_requires_reason + scheduler.rs::breaches_are_recorded_without_changing_status` | `decider_obligations.enabled, decider_obligations.adjudication_sla_secs` |
 

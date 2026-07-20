@@ -162,13 +162,13 @@ fn run_skill_install_url(
 
     let ws = workspace();
     let mut config = ws.gateway_config();
-    // The repo-tip constitution (2026.07.08) currently has markdown newer
-    // than its signed lock (re-signing happens on the machine holding the
-    // key), and `bootstrap_constitution_snapshot` fail-closes on that
-    // mismatch. Pin this suite to the newest self-consistent signed version
-    // so the one-door semantics are observable green regardless of the tip
-    // lock's signing state. Constitution *content* is irrelevant to these
-    // tests; only lock integrity is exercised.
+    // The repo-tip constitution has at times carried markdown newer than its
+    // signed lock (re-signing happens on the machine holding the key), and
+    // `bootstrap_constitution_snapshot` fail-closes on that mismatch. Pin
+    // this suite to a known self-consistent signed version so the one-door
+    // semantics are observable green regardless of the tip lock's signing
+    // state. Constitution *content* is irrelevant to these tests; only lock
+    // integrity is exercised.
     config.constitution.source_path =
         "docs/constitution/versions/2026.07.02/constitution.md".into();
     config.constitution.lock_path =

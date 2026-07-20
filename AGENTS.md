@@ -30,14 +30,14 @@ When `docs/constitution/versions/<version>/constitution.md` changes, run the
 maintained script (requires PyNaCl: `python3 -m pip install pynacl`):
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.07.08 \
+python3 docs/constitution/recompute_lock.py --version 2026.07.19 \
   --signing-sk-b64 "$AUTONOETIC_CONSTITUTION_SIGNING_SK_B64"
 ```
 
 To intentionally rotate signer material:
 
 ```bash
-python3 docs/constitution/recompute_lock.py --version 2026.07.08 --generate-key
+python3 docs/constitution/recompute_lock.py --version 2026.07.19 --generate-key
 ```
 
 If you rotate keys, update `trusted_signers` for `autonoetic:constitution:v1`

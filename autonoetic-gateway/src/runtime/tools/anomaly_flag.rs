@@ -1,4 +1,4 @@
-//! `anomaly_flag` — capability-free anomaly reporting (future Ri-0.18,
+//! `anomaly_flag` — capability-free anomaly reporting (Ri-0.18,
 //! issue #770 part C.1).
 //!
 //! An agent must be able to report unexpected behavior with ONE tool call,
@@ -6,9 +6,10 @@
 //! is the least privileged in the room" (Ri-0.18). Flags are durable (every
 //! flag gets an id and cannot be silently dropped), non-repudiably
 //! attributed to the reporting agent/session, and owed a recorded decision
-//! with motivation (future O-7). The clauses are not yet enacted (signing
-//! pending) — causal events still carry the rule ID "Ri-0.18" today;
-//! contract-health buckets unknown IDs as `unattributed` by design.
+//! with motivation (O-7). Ri-0.18 and O-7 entered the signed constitution
+//! with the 2026.07.19 amendment; causal events carry the rule IDs and
+//! contract-health attributes them to their clauses (pre-enactment they
+//! bucketed as `unattributed` by design).
 
 use std::path::Path;
 
