@@ -717,28 +717,39 @@ fn payload_field_str(p: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// Wrap plain text to `max_width` display cells (Unicode-aware).
+/// Preserves intentional newlines — each source line is wrapped
+/// independently, and blank lines produce blank output lines.
 pub fn wrap_display_lines(text: &str, max_width: usize) -> Vec<String> {
     let width = max_width.max(1);
     let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut current_w = 0usize;
-    for word in text.split_whitespace() {
-        let word_w = unicode_width::UnicodeWidthStr::width(word);
-        let extra = if current.is_empty() { word_w } else { word_w + 1 };
-        if current_w + extra > width && !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-            current_w = 0;
+
+    for paragraph in text.split('\n') {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut current_w = 0usize;
+        for word in paragraph.split_whitespace() {
+            let word_w = unicode_width::UnicodeWidthStr::width(word);
+            let extra = if current.is_empty() { word_w } else { word_w + 1 };
+            if current_w + extra > width && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_w = 0;
+            }
+            if !current.is_empty() {
+                current.push(' ');
+                current_w += 1;
+            }
+            current.push_str(word);
+            current_w += word_w;
         }
         if !current.is_empty() {
-            current.push(' ');
-            current_w += 1;
+            lines.push(current);
         }
-        current.push_str(word);
-        current_w += word_w;
     }
-    if !current.is_empty() {
-        lines.push(current);
-    }
+
     if lines.is_empty() {
         lines.push(String::new());
     }
@@ -3233,6 +3244,35 @@ mod tests {
         // Whitespace (incl. newlines) collapses to single spaces.
         assert_eq!(one_line("a\n\n  b\tc", 50), "a b c");
         assert_eq!(one_line("anything", 0), "");
+    }
+
+    #[test]
+    fn wrap_display_lines_preserves_newlines() {
+        let text = "What: run a test\nWhy gated: artifact exec\nAnalysis:\n- import urllib\n- line 2";
+        let out = wrap_display_lines(text, 76);
+        assert_eq!(out.len(), 5, "should preserve 5 source lines: {out:?}");
+        assert_eq!(out[0], "What: run a test");
+        assert_eq!(out[1], "Why gated: artifact exec");
+        assert_eq!(out[2], "Analysis:");
+        assert_eq!(out[3], "- import urllib");
+        assert_eq!(out[4], "- line 2");
+    }
+
+    #[test]
+    fn wrap_display_lines_preserves_blank_lines_and_wraps_long_lines() {
+        let text = "paragraph one\n\nvery long word that exceeds the width limit and must wrap\nshort";
+        let out = wrap_display_lines(text, 20);
+        // Blank line preserved
+        assert_eq!(out[1], "", "blank line should be preserved: {out:?}");
+        // Last line is short
+        assert_eq!(out[out.len() - 1], "short");
+        // No line exceeds the width
+        for line in &out {
+            assert!(
+                line.chars().count() <= 20 || !line.contains(' '),
+                "line should be wrapped: {line:?}"
+            );
+        }
     }
 
     #[test]
