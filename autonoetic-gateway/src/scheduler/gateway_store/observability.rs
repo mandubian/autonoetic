@@ -5,9 +5,9 @@ use rusqlite::params;
 use std::collections::BTreeMap;
 
 fn looks_like_fts_syntax(query: &str) -> bool {
-    query
-        .chars()
-        .any(|c| matches!(c, '.' | '(' | ')' | '"' | '*' | '-' | '+' | '&'))
+    query.chars().any(|c| {
+        matches!(c, '.' | '(' | ')' | '"' | '*' | '-' | '+' | '&' | ':')
+    })
 }
 
 fn should_fallback_to_like(err: &rusqlite::Error, query: &str) -> bool {
@@ -1829,6 +1829,13 @@ mod fts_fallback_tests {
     fn test_looks_like_fts_syntax_plain() {
         assert!(!looks_like_fts_syntax("config"));
         assert!(!looks_like_fts_syntax("runtime lock"));
+    }
+
+    #[test]
+    fn test_looks_like_fts_syntax_column_qualifier() {
+        assert!(looks_like_fts_syntax("report:error"));
+        assert!(looks_like_fts_syntax("title: foo"));
+        assert!(looks_like_fts_syntax("status:failed"));
     }
 
     #[test]
