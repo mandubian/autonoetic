@@ -34,7 +34,7 @@ Goodharts immediately (agents learn the eval, not the behavior).
 run automatically. Run it from an operator session or an agent holding
 the `Evaluation` capability:
 
-```json
+```text
 eval_run({
   "suite_id": "civic-core-v1",
   "agent_ref": "planner.default@<rev_sha256:...>"
