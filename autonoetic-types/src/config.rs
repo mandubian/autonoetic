@@ -3389,13 +3389,76 @@ impl Default for GatewayConfig {
 impl GatewayConfig {
     /// Apply profile-specific defaults for knobs that use serde defaults when omitted.
     /// Explicit operator values in `config.yaml` are preserved.
-    pub fn apply_profile_defaults(&mut self) {
+    ///
+    /// Returns the `soft_budget_tokens` value derived from the configured
+    /// context window (if any), so the caller (gateway `load_config`) can log
+    /// it — this crate stays tracing-dependency-free. `None` means no
+    /// derivation happened (operator set a value, or the window was too small).
+    pub fn apply_profile_defaults(&mut self) -> Option<u32> {
         if matches!(self.profile, Profile::Starter) {
             if self.evidence_mode == default_evidence_mode() {
                 self.evidence_mode = "errors".to_string();
             }
             // `session_report.live_html_on_update` defaults to false via serde.
         }
+        // Derive a proactive `soft_budget_tokens` when the operator hasn't set
+        // one and the active model has a large context window (#842). Without
+        // this, the context governor only fires within `margin_tokens` of the
+        // hard limit — on a 128K model that means ~120K tokens of uncompressed
+        // history are resent every turn, making session cost ~quadratic in
+        // turns. See `context_governor/mod.rs` for the trigger logic.
+        self.apply_default_soft_budget_tokens()
+    }
+
+    /// Derive `prompt_budget.soft_budget_tokens` from the configured context
+    /// window when the operator left it unset and the window is large enough
+    /// that waiting for the hard limit wastes tokens on every round (#842).
+    ///
+    /// Rule: if the largest configured preset window is `>= 100_000` tokens
+    /// and no `soft_budget_tokens` is set, default to
+    /// `min(window / 3, 50_000)` rounded down to the nearest 1000. Windows
+    /// below the threshold keep `None` (the hard-limit-only behaviour is
+    /// correct for small models — firing early would be wasteful and risk
+    /// trimming a context that isn't actually large).
+    ///
+    /// Explicit operator values — including a deliberate `null` to disable —
+    /// are honoured by the early return. This mirrors how
+    /// `apply_role_mapping_fallbacks` treats serde-`None` (unset) vs a
+    /// concrete value (operator choice).
+    ///
+    /// Returns the derived value when it was applied, so the gateway's
+    /// `load_config` can emit a tracing line (this crate stays
+    /// tracing-dependency-free).
+    fn apply_default_soft_budget_tokens(&mut self) -> Option<u32> {
+        if self.prompt_budget.soft_budget_tokens.is_some() {
+            return None;
+        }
+        let Some(window) = self.largest_configured_context_window() else {
+            return None;
+        };
+        const LARGE_WINDOW_THRESHOLD: u32 = 100_000;
+        const SOFT_BUDGET_CAP: u32 = 50_000;
+        if window < LARGE_WINDOW_THRESHOLD {
+            return None;
+        }
+        // window / 3, capped at 50K, rounded down to the nearest 1000.
+        // For 128K → 42666 → 42000; for 200K → 66666 → 50000 (capped).
+        let derived = (window / 3).min(SOFT_BUDGET_CAP);
+        let rounded = (derived / 1000) * 1000;
+        self.prompt_budget.soft_budget_tokens = Some(rounded);
+        Some(rounded)
+    }
+
+    /// The largest `context_window_tokens` across all configured presets —
+    /// a conservative upper bound for the sessions this gateway will run.
+    /// Used to decide whether to derive a proactive soft budget. Returns
+    /// `None` when no preset declares a window (the operator must set
+    /// `soft_budget_tokens` manually in that case).
+    fn largest_configured_context_window(&self) -> Option<u32> {
+        self.llm_presets
+            .values()
+            .filter_map(|p| p.context_window_tokens)
+            .max()
     }
 
     /// Validate that LLM preset references are consistent.
@@ -3506,6 +3569,118 @@ mod tests {
         assert_eq!(config.background_tick_secs, 5);
         assert_eq!(config.background_min_interval_secs, 60);
         assert_eq!(config.max_background_due_per_tick, 32);
+    }
+
+    // --- #842: proactive soft_budget_tokens derivation ---
+
+    /// Build a minimal preset with only the fields the derivation reads.
+    fn preset_with_window(window: Option<u32>) -> LlmPreset {
+        LlmPreset {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4".to_string()),
+            temperature: None,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: None,
+            context_window_tokens: window,
+            base_url: None,
+            api_key_env: None,
+            thinking: None,
+            tier: None,
+            cost: None,
+            latency: None,
+            routing: None,
+        }
+    }
+
+    #[test]
+    fn soft_budget_derived_for_large_context_window() {
+        // 128K window → 128000/3 = 42666 → rounded down to 42000.
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(Some(128_000)));
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, Some(42_000));
+        assert_eq!(config.prompt_budget.soft_budget_tokens, Some(42_000));
+    }
+
+    #[test]
+    fn soft_budget_capped_at_50k_for_very_large_window() {
+        // 200K window → 200000/3 = 66666 → capped at 50000.
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(Some(200_000)));
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, Some(50_000));
+        assert_eq!(config.prompt_budget.soft_budget_tokens, Some(50_000));
+    }
+
+    #[test]
+    fn soft_budget_not_derived_for_small_context_window() {
+        // 32K window is below the 100K threshold — leave None.
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(Some(32_000)));
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, None);
+        assert_eq!(config.prompt_budget.soft_budget_tokens, None);
+    }
+
+    #[test]
+    fn soft_budget_not_derived_when_no_preset_declares_window() {
+        // Presets exist but none has context_window_tokens — can't decide, so
+        // don't derive (operator must set it explicitly).
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(None));
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, None);
+        assert_eq!(config.prompt_budget.soft_budget_tokens, None);
+    }
+
+    #[test]
+    fn soft_budget_not_derived_when_no_presets_configured() {
+        let mut config = GatewayConfig::default();
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, None);
+    }
+
+    #[test]
+    fn soft_budget_explicit_value_is_preserved() {
+        // Operator set 25000 explicitly — must NOT be overwritten by the
+        // derived value even though the window is large.
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("default".to_string(), preset_with_window(Some(128_000)));
+        config.prompt_budget.soft_budget_tokens = Some(25_000);
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, None, "explicit value must suppress derivation");
+        assert_eq!(
+            config.prompt_budget.soft_budget_tokens,
+            Some(25_000),
+            "explicit value must be preserved"
+        );
+    }
+
+    #[test]
+    fn soft_budget_uses_largest_window_across_presets() {
+        // Multiple presets: a small one and a large one. The derivation is
+        // conservative — it activates if ANY preset has a large window,
+        // because sessions using that preset would otherwise run uncompressed.
+        let mut config = GatewayConfig::default();
+        config
+            .llm_presets
+            .insert("haiku".to_string(), preset_with_window(Some(32_000)));
+        config
+            .llm_presets
+            .insert("opus".to_string(), preset_with_window(Some(200_000)));
+        let derived = config.apply_profile_defaults();
+        assert_eq!(derived, Some(50_000), "should use the largest window (200K)");
     }
 
     #[test]

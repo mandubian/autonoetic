@@ -16,7 +16,17 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
             .canonicalize()
             .unwrap_or_else(|_| config.agents_dir.clone());
         apply_role_mapping_fallbacks(&mut config);
-        config.apply_profile_defaults();
+        let derived_soft_budget = config.apply_profile_defaults();
+        if let Some(value) = derived_soft_budget {
+            tracing::info!(
+                target: "autonoetic::prompt_budget",
+                derived_soft_budget_tokens = value,
+                "Derived proactive soft_budget_tokens from a large configured \
+                 context window (#842) — context governor will now fire at the \
+                 soft budget instead of waiting for the hard limit. Set \
+                 prompt_budget.soft_budget_tokens explicitly to override.",
+            );
+        }
         apply_prompt_budget_overrides(&config);
         Ok(config)
     } else {
