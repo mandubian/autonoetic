@@ -1,6 +1,4 @@
 //! End-to-end integration test for live JSON-RPC ingress.
-use autonoetic_types::config::GatewayConfig;
-
 mod support;
 
 use support::agents::install_outbound_reply_agent;
@@ -12,8 +10,36 @@ use support::{
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
 
-#[tokio::test]
-async fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
+// The test drives a live JSON-RPC ingress that triggers an outbound
+// `reqwest`/`hyper` LLM call to the OpenAI stub. In debug builds (no
+// inlining) the future-combinator tower from reqwest → hyper → tower's
+// retry/pool layers is deep enough to overflow the default 2 MiB tokio
+// worker stack; `cargo test` (debug) reliably stack-overflows here even
+// though the same test passes under `--release` and at RUST_MIN_STACK=4 MiB.
+//
+// `#[tokio::test]` doesn't expose `thread_stack_size`, and the
+// current_thread flavor runs on the calling thread anyway — so to bump
+// the stack we have to spawn an OS thread with the size we want and run
+// the runtime there. 8 MiB is big enough for the debug-build reqwest/
+// hyper tower while not affecting any other test. This is a debug-only
+// stack-depth issue, not a production bug: production runs at release
+// with default stacks and never sees it.
+#[test]
+fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
+) -> anyhow::Result<()> {
+    // Spawn a worker thread with a bumped stack and run the runtime there.
+    let child = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces())
+        })?;
+    child.join().expect("test thread panicked")
+}
+
+async fn event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
 ) -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let agents_dir = workspace.agents_dir.clone();
