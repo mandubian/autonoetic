@@ -27,6 +27,10 @@ pub enum FailureClass {
     /// (RFC #775 Part A). Distinct from `Unknown` (unclassifiable error) — this is
     /// a child that gave up without explanation. Counts toward the parent loop guard.
     ChildGaveUp,
+    /// The agent referenced a name/handle that does not exist in the session
+    /// (hallucinated or mutated ref). Deterministic lookup failure — retrying
+    /// the identical reference can never succeed; pick a real one instead.
+    BadReference,
     Unknown,
 }
 

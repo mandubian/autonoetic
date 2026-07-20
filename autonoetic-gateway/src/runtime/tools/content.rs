@@ -162,19 +162,63 @@ in the sandbox."
     }
 }
 
+/// List the content actually resolvable in this session, for inclusion in
+/// `content_not_found` responses (anti-thrash, #312). Returns `(hints,
+/// session_has_content)`.
+///
+/// When the session has content, each hint is a real `{name, ref}` pair the
+/// agent can pass straight back to `resolve`; near-miss names (case-insensitive
+/// substring overlap with the requested ref) are flagged `did_you_mean`, since
+/// a hallucinated ref is usually a small mutation of a real one. When the
+/// session has no content yet, the agent is probably chasing a child task's
+/// output before the child completed, so we fall back to the workflow-tools
+/// guidance instead.
 pub(crate) fn find_available_artifacts(
-    _store: &crate::runtime::content_store::ContentStore,
-    _session_id: &str,
-    _requested_name: &str,
-) -> Vec<serde_json::Value> {
+    store: &crate::runtime::content_store::ContentStore,
+    session_id: &str,
+    requested_name: &str,
+) -> (Vec<serde_json::Value>, bool) {
+    const MAX_LISTED: usize = 20;
+
+    let entries = store
+        .list_names_with_handles(session_id)
+        .unwrap_or_default();
+
+    if entries.is_empty() {
+        return (
+            vec![serde_json::json!({
+                "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
+                "example": "Call workflow.state first, then read completed_tasks[].output: resolve(ref=named_outputs[*].ref) for content, or resolve(ref=artifacts[].artifact_ref, include=\"content\", file=<name>) for an artifact file."
+            })],
+            false,
+        );
+    }
+
+    let requested_lower = requested_name.to_ascii_lowercase();
     let mut hints = Vec::new();
-
-    hints.push(serde_json::json!({
-        "suggestion": "Use workflow.wait or workflow.state to get stable output handles from completed child tasks. Succeeded tasks include an 'output' field with named_outputs and artifacts[].artifact_ref.",
-        "example": "Call workflow.state first, then read completed_tasks[].output: resolve(ref=named_outputs[*].ref) for content, or resolve(ref=artifacts[].artifact_ref, include=\"content\", file=<name>) for an artifact file."
-    }));
-
-    hints
+    for (name, handle) in entries.iter().take(MAX_LISTED) {
+        let mut entry = serde_json::json!({
+            "name": name,
+            "ref": format!(
+                "cnt_{}",
+                crate::runtime::content_store::ContentStore::get_short_alias(handle)
+            ),
+        });
+        let name_lower = name.to_ascii_lowercase();
+        if !requested_lower.is_empty()
+            && requested_lower != name_lower
+            && (name_lower.contains(&requested_lower) || requested_lower.contains(&name_lower))
+        {
+            entry["did_you_mean"] = serde_json::Value::Bool(true);
+        }
+        hints.push(entry);
+    }
+    if entries.len() > MAX_LISTED {
+        hints.push(serde_json::json!({
+            "note": format!("...and {} more names in this session", entries.len() - MAX_LISTED)
+        }));
+    }
+    (hints, true)
 }
 
 pub(crate) fn skill_path_repair_hint(gateway_dir: &Path, input: &str) -> Option<String> {

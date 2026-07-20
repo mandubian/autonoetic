@@ -324,6 +324,13 @@ impl ResolveTool {
     /// former `content_read` surfaced: a skills-path repair hint, or — when
     /// the agent likely guessed a name — the list of artifacts actually
     /// available in the session (anti-thrash, #312).
+    ///
+    /// A miss on a name the session manifest does not contain is a
+    /// deterministic lookup failure, so the response is stamped
+    /// `bad_reference` / non-retryable up front. Otherwise the generic
+    /// `Resource` → `transient_infra` classification downstream would mark the
+    /// miss `retryable: true` and invite the agent to hammer the same
+    /// hallucinated ref.
     fn content_not_found(
         &self,
         gw_dir: &Path,
@@ -342,17 +349,29 @@ impl ResolveTool {
             .to_error_response();
         }
         if !reference.starts_with("sha256:") {
-            let hints = crate::runtime::tools::content::find_available_artifacts(store, sid, reference);
+            let (hints, session_has_content) =
+                crate::runtime::tools::content::find_available_artifacts(store, sid, reference);
             if !hints.is_empty() {
-                return json!({
+                let repair_hint = if session_has_content {
+                    "Pick a name from available_artifacts (that is what actually exists in this \
+                     session), or use workflow.state to get a completed child task's output handle."
+                } else {
+                    "Use workflow.wait/workflow.state to get a stable output ref from a completed \
+                     child, then resolve that."
+                };
+                let mut value = json!({
                     "ok": false,
                     "error_type": "resource",
                     "error": "content_not_found",
                     "message": format!("content '{reference}' not found in session '{sid}'"),
-                    "repair_hint": "Use workflow.wait/workflow.state to get a stable output ref from a completed child, then resolve that.",
+                    "repair_hint": repair_hint,
                     "available_artifacts": hints,
-                })
-                .to_string();
+                });
+                if let Some(object) = value.as_object_mut() {
+                    crate::runtime::failure_classification::WorkflowFailureMetadata::bad_reference()
+                        .apply_to_json_map(object);
+                }
+                return value.to_string();
             }
         }
         ToolError::not_found(
@@ -455,6 +474,109 @@ mod tests {
         assert_eq!(off, 2);
         assert_eq!(lim, 0);
         assert_eq!(next, None);
+    }
+
+    fn store_with_names(names: &[&str]) -> (tempfile::TempDir, crate::runtime::content_store::ContentStore) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::runtime::content_store::ContentStore::new(temp.path()).unwrap();
+        for name in names {
+            let handle = store.write(format!("bytes of {name}").as_bytes()).unwrap();
+            store.register_name("session-x", name, &handle).unwrap();
+        }
+        (temp, store)
+    }
+
+    #[test]
+    fn find_available_artifacts_lists_real_session_names() {
+        let (_temp, store) = store_with_names(&["weather_forecast.py", "test_weather_forecast.py"]);
+
+        let (hints, has_content) = crate::runtime::tools::content::find_available_artifacts(
+            &store,
+            "session-x",
+            "wether_forecast.py",
+        );
+
+        assert!(has_content);
+        assert_eq!(hints.len(), 2);
+        let names: Vec<&str> = hints
+            .iter()
+            .map(|h| h["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"weather_forecast.py"));
+        assert!(names.contains(&"test_weather_forecast.py"));
+        for hint in &hints {
+            assert!(
+                hint["ref"].as_str().unwrap().starts_with("cnt_"),
+                "ref must be a resolvable cnt_ alias: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_available_artifacts_flags_near_miss_names() {
+        let (_temp, store) = store_with_names(&["weather_forecast.py", "notes.md"]);
+
+        let (hints, _) = crate::runtime::tools::content::find_available_artifacts(
+            &store,
+            "session-x",
+            "weather",
+        );
+
+        let flagged: Vec<&serde_json::Value> = hints
+            .iter()
+            .filter(|h| h.get("did_you_mean").is_some())
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0]["name"], "weather_forecast.py");
+    }
+
+    #[test]
+    fn find_available_artifacts_empty_session_falls_back_to_workflow_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::runtime::content_store::ContentStore::new(temp.path()).unwrap();
+
+        let (hints, has_content) = crate::runtime::tools::content::find_available_artifacts(
+            &store,
+            "session-empty",
+            "anything",
+        );
+
+        assert!(!has_content);
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].get("suggestion").is_some());
+        assert!(hints[0].get("name").is_none());
+    }
+
+    #[test]
+    fn content_not_found_lists_real_names_and_stamps_bad_reference() {
+        let (_temp, store) = store_with_names(&["real_file.py"]);
+        let tool = ResolveTool;
+
+        let response = tool.content_not_found(
+            _temp.path(),
+            &store,
+            "session-x",
+            "real_file.py.bak",
+            "content name not found",
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], false);
+        assert_eq!(parsed["error"], "content_not_found");
+        assert_eq!(parsed["failure_class"], "bad_reference");
+        assert_eq!(parsed["retryable"], false);
+        assert_eq!(parsed["retry_advice"], "do_not_retry");
+        let artifacts = parsed["available_artifacts"].as_array().unwrap();
+        assert_eq!(artifacts[0]["name"], "real_file.py");
+        assert!(artifacts[0]["ref"].as_str().unwrap().starts_with("cnt_"));
+
+        // The downstream normalizer must not overwrite the explicit stamps
+        // with the generic Resource → transient_infra classification.
+        let normalized =
+            crate::runtime::failure_classification::normalize_tool_result_json(&response);
+        let reparsed: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(reparsed["failure_class"], "bad_reference");
+        assert_eq!(reparsed["retryable"], false);
     }
 }
 

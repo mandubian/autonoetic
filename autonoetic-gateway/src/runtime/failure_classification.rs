@@ -161,6 +161,21 @@ impl WorkflowFailureMetadata {
         }
     }
 
+    /// The agent referenced a name/handle that does not exist in the session
+    /// (hallucinated or mutated ref). Deterministic lookup failure: retrying
+    /// the identical reference can never succeed, so do not retry — pick one
+    /// of the real names the response listed instead.
+    pub(crate) fn bad_reference() -> Self {
+        Self {
+            failure_class: Some(FailureClass::BadReference),
+            retry_advice: Some(RetryAdvice::DoNotRetry),
+            retryable: Some(false),
+            requires_external_event: Some(false),
+            requires_human: Some(false),
+            side_effect_state: Some(SideEffectState::NoSideEffect),
+        }
+    }
+
     pub(crate) fn apply_to_tool_error(&self, tool_error: &mut ToolError) {
         if tool_error.failure_class.is_none() {
             tool_error.failure_class = self.failure_class;
@@ -455,6 +470,7 @@ pub(crate) fn metadata_for_failure_class(failure_class: FailureClass) -> Workflo
             WorkflowFailureMetadata::output_contract_unmet()
         }
         FailureClass::ChildGaveUp => WorkflowFailureMetadata::child_gave_up(),
+        FailureClass::BadReference => WorkflowFailureMetadata::bad_reference(),
         FailureClass::AwaitingUserInput
         | FailureClass::ArtifactInvalid
         | FailureClass::DependencyMissing
