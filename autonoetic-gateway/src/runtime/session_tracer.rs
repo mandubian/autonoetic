@@ -1205,6 +1205,8 @@ fn extract_tool_args_preview(tool_name: &str, arguments: &str) -> Option<String>
         "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str()),
         "content_write" => args.get("name").and_then(|v| v.as_str()),
         "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str()),
+        "sandbox_exec" => args.get("command").and_then(|v| v.as_str()),
+        "artifact_exec" => args.get("entrypoint").and_then(|v| v.as_str()),
         _ => return None,
     };
     preview.map(|s| {
@@ -1506,6 +1508,20 @@ mod tests {
         assert_eq!(
             extract_tool_args_preview("spawn", r#"{"agent_id":"coder.default"}"#),
             None
+        );
+        assert_eq!(
+            extract_tool_args_preview("sandbox_exec", r#"{"command":"pytest -k foo"}"#)
+                .as_deref(),
+            Some("pytest -k foo"),
+            "sandbox_exec should preview its command, not fall back to 'tool sandbox_exec'"
+        );
+        assert_eq!(
+            extract_tool_args_preview(
+                "artifact_exec",
+                r#"{"artifact_ref":"ar.abc123","entrypoint":"main.py"}"#
+            )
+            .as_deref(),
+            Some("main.py")
         );
     }
 

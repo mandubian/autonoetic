@@ -1295,6 +1295,8 @@ fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Opt
         "artifact_inspect" => args.get("artifact_ref").and_then(|x| x.as_str()),
         "content_write" => args.get("name").and_then(|x| x.as_str()),
         "agent_spawn" => args.get("agent_id").and_then(|x| x.as_str()),
+        "sandbox_exec" => args.get("command").and_then(|x| x.as_str()),
+        "artifact_exec" => args.get("entrypoint").and_then(|x| x.as_str()),
         _ => return None,
     };
     key.map(|s| {
@@ -1697,16 +1699,53 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 Some("artifact_inspect") => s("args_preview")
                     .or_else(|| s("artifact_ref"))
                     .map(|p| cap_preview(&p, 80)),
-                Some("sandbox_exec") | Some("artifact_exec") => p
-                    .as_ref()
-                    .and_then(|v| v.get("result"))
-                    .and_then(|r| r.get("stdout"))
-                    .and_then(|x| x.as_str())
-                    .map(|o| cap_preview(o, 80))
-                    .or_else(|| {
-                        // The result may be a JSON string (not an object).
-                        s("result").map(|r| cap_preview(&r, 80))
-                    }),
+                // `result` is normally a JSON-encoded *string* (see
+                // `log_tool_completed_with_approval`), not a nested object —
+                // parse it before reading stdout/stderr/exit_code. Without
+                // this, `stdout` lookup always misses and the fallback used
+                // to dump the raw, truncated JSON string (e.g.
+                // `{"command_succeeded":false,"execution_trace_id":"80bc0…`).
+                Some("sandbox_exec") | Some("artifact_exec") => {
+                    let result_obj = p.as_ref().and_then(|v| v.get("result")).and_then(|r| {
+                        match r {
+                            serde_json::Value::String(raw) => {
+                                serde_json::from_str::<serde_json::Value>(raw).ok()
+                            }
+                            serde_json::Value::Object(_) => Some(r.clone()),
+                            _ => None,
+                        }
+                    });
+                    result_obj.map(|r| {
+                        let succeeded = r
+                            .get("command_succeeded")
+                            .and_then(|x| x.as_bool())
+                            .or_else(|| r.get("ok").and_then(|x| x.as_bool()))
+                            .unwrap_or(true);
+                        let stdout = r.get("stdout").and_then(|x| x.as_str()).unwrap_or("").trim();
+                        let stderr = r.get("stderr").and_then(|x| x.as_str()).unwrap_or("").trim();
+                        let exit_code = r.get("exit_code").and_then(|x| x.as_i64());
+                        if succeeded {
+                            let out = if !stdout.is_empty() {
+                                stdout
+                            } else if !stderr.is_empty() {
+                                stderr
+                            } else {
+                                "(no output)"
+                            };
+                            cap_preview(out, 160)
+                        } else {
+                            let detail = if !stderr.is_empty() {
+                                stderr
+                            } else if !stdout.is_empty() {
+                                stdout
+                            } else {
+                                "no output"
+                            };
+                            let code = exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default();
+                            cap_preview(&format!("✗ command failed{code}: {detail}"), 160)
+                        }
+                    })
+                }
                 Some("agent_spawn") => s("args_preview")
                     .or_else(|| s("message"))
                     .map(|m| cap_preview(&m, 80)),
@@ -3474,6 +3513,25 @@ mod tests {
     }
 
     #[test]
+    fn tool_requested_sandbox_exec_shows_the_command_not_just_the_tool_name() {
+        let e = entry(
+            SessionRole::Specialist { kind: "researcher".into() },
+            Principal::agent("researcher.default"),
+            "tool.requested",
+            Altitude::Detail,
+            serde_json::json!({
+                "tool_name": "sandbox_exec",
+                "arguments": r#"{"command":"pytest -k foo"}"#,
+            }),
+        );
+        assert!(
+            render_line(&e).contains("sandbox_exec → pytest -k foo"),
+            "got: {}",
+            render_line(&e)
+        );
+    }
+
+    #[test]
     fn llm_failure_links_preceding_action_chain() {
         let e = entry(
             SessionRole::Planner,
@@ -4276,6 +4334,38 @@ mod tests {
         let spec = render_spec(&e);
         assert!(spec.detail.is_some());
         assert!(spec.detail.as_ref().unwrap().contains("hello world"));
+    }
+
+    #[test]
+    fn render_spec_sandbox_exec_result_as_encoded_string_shows_real_preview_not_raw_json() {
+        // The real gateway emits `result` as a JSON-*encoded string* (see
+        // `log_tool_completed_with_approval`), not a nested object. Before the
+        // fix, the `stdout` lookup silently missed this shape and fell back to
+        // dumping the raw, truncated JSON string on-screen.
+        let raw_result = serde_json::json!({
+            "ok": false,
+            "command_succeeded": false,
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "ModuleNotFoundError: no module named 'requests'",
+            "execution_trace_id": "80bc0ef4-c20f-4e70-940a-84ffcb000000"
+        })
+        .to_string();
+        let e = entry(
+            SessionRole::Specialist { kind: "researcher".into() },
+            Principal::agent("researcher.default"),
+            "tool.completed",
+            Altitude::Attention,
+            serde_json::json!({ "tool_name": "sandbox_exec", "result": raw_result }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("expected a detail preview");
+        assert!(
+            !detail.starts_with('{'),
+            "detail must not be the raw JSON payload: {detail}"
+        );
+        assert!(detail.contains("ModuleNotFoundError"), "got: {detail}");
+        assert!(detail.contains("exit 1"), "got: {detail}");
     }
 
     #[test]
