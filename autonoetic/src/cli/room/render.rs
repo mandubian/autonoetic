@@ -1749,17 +1749,31 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 Some("agent_spawn") => s("args_preview")
                     .or_else(|| s("message"))
                     .map(|m| cap_preview(&m, 80)),
-                Some("workflow_wait") | Some("workflow_state") => p
-                    .as_ref()
-                    .and_then(|v| v.get("task_ids"))
-                    .and_then(|x| x.as_array())
-                    .map(|a| {
-                        let ids: Vec<String> = a
-                            .iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect();
-                        cap_preview(&ids.join(", "), 80)
-                    }),
+                // `task_ids` is never a top-level payload field (the real
+                // payload only ever has tool_name/result/args_preview — see
+                // `log_tool_completed_with_approval`), so this always
+                // returned None in production. The real result carries a
+                // human-readable `message` (workflow_wait) or `resume_hint`
+                // (workflow_state) — surface that instead.
+                Some("workflow_wait") | Some("workflow_state") => {
+                    let result_val = p.as_ref().and_then(|v| v.get("result")).and_then(|r| {
+                        match r {
+                            serde_json::Value::String(raw) => {
+                                serde_json::from_str::<serde_json::Value>(raw).ok()
+                            }
+                            serde_json::Value::Object(_) => Some(r.clone()),
+                            _ => None,
+                        }
+                    });
+                    result_val
+                        .as_ref()
+                        .and_then(|r| {
+                            r.get("message")
+                                .and_then(|x| x.as_str())
+                                .or_else(|| r.get("resume_hint").and_then(|x| x.as_str()))
+                        })
+                        .map(|m| cap_preview(m, 160))
+                }
                 Some(_) => {
                     // `result` is normally a JSON-encoded *string* (see
                     // `log_tool_completed_with_approval`, used by every tool).
@@ -4532,19 +4546,48 @@ mod tests {
     }
 
     #[test]
-    fn render_spec_extracts_workflow_wait_task_ids() {
+    fn render_spec_extracts_workflow_wait_message_from_result() {
+        // Real gateway shape: `result` is a JSON-encoded string (see
+        // `log_tool_completed_with_approval`) containing a human-readable
+        // `message` (from `workflow_wait_join_message`) — never a top-level
+        // `task_ids` field, which this branch previously (and always, in
+        // production) looked for.
+        let raw_result = serde_json::json!({
+            "ok": true,
+            "join_satisfied": true,
+            "message": "Join satisfied: 3/3 tasks done"
+        })
+        .to_string();
         let e = entry(
             SessionRole::Planner,
             Principal::agent("planner.default"),
             "tool.completed",
             Altitude::Normal,
-            serde_json::json!({
-                "tool_name": "workflow_wait",
-                "task_ids": ["t-1", "t-2", "t-3"]
-            }),
+            serde_json::json!({ "tool_name": "workflow_wait", "result": raw_result }),
         );
         let spec = render_spec(&e);
-        assert_eq!(spec.detail.as_deref(), Some("t-1, t-2, t-3"));
+        assert_eq!(spec.detail.as_deref(), Some("Join satisfied: 3/3 tasks done"));
+    }
+
+    #[test]
+    fn render_spec_extracts_workflow_state_resume_hint_from_result() {
+        let raw_result = serde_json::json!({
+            "workflow_status": "running",
+            "resume_hint": "coder_done — proceed to evaluator or federation"
+        })
+        .to_string();
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "workflow_state", "result": raw_result }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(
+            spec.detail.as_deref(),
+            Some("coder_done — proceed to evaluator or federation")
+        );
     }
 
     #[test]
