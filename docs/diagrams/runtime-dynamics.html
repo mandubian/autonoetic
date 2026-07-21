@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonoetic — Runtime Dynamics</title>
+<style>
+  :root {
+    --ink: #171b21; --ink-soft: #2b323d; --paper: #eef1f4; --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec; --line: #c7cdd6; --line-strong: #a7b0bd; --muted: #5b6472;
+    --accent: #2a4d8f; --accent-soft: #dbe4f5; --rule: #a05a12; --rule-soft: #f3e3cf;
+    --right: #0f6e63; --right-soft: #d9ece8; --oblig: #6a4c93; --oblig-soft: #e7e0f2;
+    --served: #9c3f4d; --served-soft: #f2dde0; --ok: #1c7a4a; --warn: #a6740b;
+    --bad: #a13a3a; --debt: #5b6472;
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e7eaef; --ink-soft: #c7cedb; --paper: #11151c; --paper-raised: #171d27;
+      --paper-sunken: #0c0f14; --line: #2c3441; --line-strong: #3c4657; --muted: #93a0b3;
+      --accent: #85a8f2; --accent-soft: #1c2a44; --rule: #e0a355; --rule-soft: #34281a;
+      --right: #5cc7b6; --right-soft: #17322e; --oblig: #c1a3ec; --oblig-soft: #291f3a;
+      --served: #e3919b; --served-soft: #35222a; --ok: #4caf7d; --warn: #d3a53f;
+      --bad: #dd7272; --debt: #93a0b3;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e7eaef; --ink-soft: #c7cedb; --paper: #11151c; --paper-raised: #171d27;
+    --paper-sunken: #0c0f14; --line: #2c3441; --line-strong: #3c4657; --muted: #93a0b3;
+    --accent: #85a8f2; --accent-soft: #1c2a44; --rule: #e0a355; --rule-soft: #34281a;
+    --right: #5cc7b6; --right-soft: #17322e; --oblig: #c1a3ec; --oblig-soft: #291f3a;
+    --served: #e3919b; --served-soft: #35222a; --ok: #4caf7d; --warn: #d3a53f;
+    --bad: #dd7272; --debt: #93a0b3;
+  }
+  :root[data-theme="light"] {
+    --ink: #171b21; --ink-soft: #2b323d; --paper: #eef1f4; --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec; --line: #c7cdd6; --line-strong: #a7b0bd; --muted: #5b6472;
+    --accent: #2a4d8f; --accent-soft: #dbe4f5; --rule: #a05a12; --rule-soft: #f3e3cf;
+    --right: #0f6e63; --right-soft: #d9ece8; --oblig: #6a4c93; --oblig-soft: #e7e0f2;
+    --served: #9c3f4d; --served-soft: #f2dde0; --ok: #1c7a4a; --warn: #a6740b;
+    --bad: #a13a3a; --debt: #5b6472;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+  a { color: var(--accent); }
+
+  .page { max-width: 1000px; margin: 0 auto; padding: 0 24px 96px; }
+
+  .titleblock { border-bottom: 3px double var(--line-strong); padding: 48px 0 22px; margin-bottom: 8px; }
+  .titleblock .kicker { font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+  .titleblock h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(2rem, 5vw, 2.9rem); margin: 0 0 10px; text-wrap: balance; letter-spacing: -0.01em; }
+  .titleblock .dek { font-size: 1.05rem; color: var(--ink-soft); max-width: 64ch; margin: 0 0 22px; }
+  .titleblock .companion { font-size: .92rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+
+  .sheet { padding: 46px 0 8px; border-bottom: 1px solid var(--line); }
+  .sheet:last-of-type { border-bottom: none; }
+  .sheet-head { margin-bottom: 22px; }
+  .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .sheet h2 { font-family: var(--font-display); font-weight: 600; font-size: 1.7rem; margin: 0 0 8px; text-wrap: balance; }
+  .sheet .dek { color: var(--muted); max-width: 66ch; margin: 0 0 28px; }
+
+  .box { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 3px; padding: 16px 18px; }
+  .box h3 { font-family: var(--font-body); font-size: 0.95rem; font-weight: 700; margin: 0 0 6px; }
+  .box p { margin: 0; color: var(--ink-soft); font-size: 0.92rem; }
+  .box .fine { color: var(--muted); font-size: 0.82rem; margin-top: 8px; }
+  .mono { font-family: var(--font-mono); font-size: 0.9em; }
+  code { font-family: var(--font-mono); font-size: 0.88em; }
+
+  .badge { display: inline-block; font-family: var(--font-mono); font-size: 11.5px; padding: 1px 7px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--ink-soft); background: var(--paper-sunken); white-space: nowrap; }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .tone-accent { border-left: 3px solid var(--accent); }
+  .tone-right  { border-left: 3px solid var(--right); }
+  .tone-oblig  { border-left: 3px solid var(--oblig); }
+  .tone-served { border-left: 3px dashed var(--served); }
+  .tone-rule   { border-left: 3px solid var(--rule); }
+  .kicker-chip { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; }
+  .tone-accent .kicker-chip { color: var(--accent); }
+  .tone-right .kicker-chip { color: var(--right); }
+  .tone-oblig .kicker-chip { color: var(--oblig); }
+  .tone-served .kicker-chip { color: var(--served); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+  .subhead { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 32px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .subhead::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .para { max-width: 66ch; color: var(--ink-soft); margin: 0 0 20px; }
+  .para strong { color: var(--ink); }
+
+  /* ---- SVG graph (state machine) ---- */
+  .gwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--paper-raised); padding: 10px; }
+  svg.diagram { width: 100%; min-width: 940px; height: auto; display: block; }
+  svg.diagram text { font-family: var(--font-body); }
+  .node { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+  .node-t { fill: var(--ink); font-weight: 700; font-size: 15px; text-anchor: middle; }
+  .node-s { fill: var(--muted); font-size: 11px; text-anchor: middle; }
+  .startnode { fill: var(--paper-sunken); stroke: var(--line-strong); stroke-width: 1.5; }
+  .endnode { fill: var(--served-soft); stroke: var(--served); stroke-width: 2; }
+  .zone { stroke-width: 1.5; }
+  .zone-res { fill: var(--accent-soft); stroke: var(--accent); }
+  .zone-term { fill: var(--served-soft); stroke: var(--served); }
+  .zlabel { font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; letter-spacing: .04em; }
+  .zlabel-res { fill: var(--accent); }
+  .zlabel-term { fill: var(--served); }
+  .znote { font-family: var(--font-mono); font-size: 10.5px; fill: var(--muted); }
+  .pill { fill: var(--paper-raised); stroke-width: 1.5; }
+  .pill-auto { stroke: var(--right); }
+  .pill-gated { stroke: var(--accent); }
+  .pill-term { stroke: var(--served); }
+  .pill-t { fill: var(--ink); font-family: var(--font-mono); font-size: 12px; font-weight: 600; text-anchor: middle; }
+  .edge { fill: none; stroke: var(--line-strong); stroke-width: 1.7; marker-end: url(#rd-arrow); }
+  .edge-resume { stroke: var(--right); stroke-dasharray: 6 4; }
+  .edge-close { stroke: var(--served); }
+  .elabel { fill: var(--muted); font-family: var(--font-mono); font-size: 11px; font-weight: 600; stroke: var(--paper-raised); stroke-width: 4px; paint-order: stroke; text-anchor: middle; }
+
+  /* ---- swimlane ---- */
+  .swim { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px 10px; }
+  .swim-head { font-family: var(--font-mono); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; text-align: center; padding: 8px; border-radius: 4px; }
+  .swim-head.agent { color: var(--accent); background: var(--accent-soft); }
+  .swim-head.gw { color: var(--right); background: var(--right-soft); }
+  .swim-head.dec { color: var(--oblig); background: var(--oblig-soft); }
+  .step { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 4px; padding: 9px 11px; border-top: 3px solid var(--line-strong); }
+  .step.agent { border-top-color: var(--accent); }
+  .step.gw { border-top-color: var(--right); }
+  .step.dec { border-top-color: var(--oblig); }
+  .step .n { font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--muted); }
+  .step .act { font-size: 0.86rem; color: var(--ink); display: block; margin-top: 2px; }
+  .step .clause { font-family: var(--font-mono); font-size: 10px; color: var(--muted); display: block; margin-top: 5px; }
+  @media (max-width: 700px) {
+    .swim { grid-template-columns: 1fr; }
+    .swim-head { display: none; }
+    .step { grid-column: 1 !important; grid-row: auto !important; }
+    .step::before { content: attr(data-lane); font-family: var(--font-mono); font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 3px; }
+  }
+
+  /* ---- attestation block ---- */
+  .att { border: 2px solid var(--accent); border-radius: 6px; padding: 6px; background: color-mix(in srgb, var(--accent-soft) 40%, var(--paper-raised)); }
+  .att-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 8px 12px 12px; flex-wrap: wrap; }
+  .att-head h3 { margin: 0; font-family: var(--font-mono); font-size: 0.9rem; font-weight: 700; color: var(--accent); }
+  .att-head .sig { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .att-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  @media (max-width: 760px) { .att-grid { grid-template-columns: 1fr; } .att-map { grid-template-columns: 1fr !important; } }
+  .field { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px; }
+  .field h4 { margin: 0 0 6px; font-size: 0.82rem; font-weight: 700; color: var(--ink); }
+  .field .keys { display: flex; flex-wrap: wrap; gap: 4px; }
+  .field .k { font-family: var(--font-mono); font-size: 10.5px; background: var(--paper-sunken); border-radius: 3px; padding: 1px 5px; color: var(--ink-soft); }
+  .field.civic { border-color: var(--oblig); }
+  .field.law { border-color: var(--accent); }
+  .att-foot { padding: 10px 12px 6px; color: var(--ink-soft); font-size: 0.86rem; }
+  .att-map { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 14px; }
+  .cap { background: var(--paper-sunken); border-radius: 4px; padding: 8px 10px; text-align: center; }
+  .cap .c-h { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .cap .c-b { font-size: 0.78rem; color: var(--ink-soft); margin-top: 3px; }
+
+  footer.colophon { margin-top: 40px; padding-top: 24px; border-top: 3px double var(--line-strong); font-size: 0.85rem; color: var(--muted); }
+  footer.colophon code { font-family: var(--font-mono); font-size: 0.85em; }
+  footer.colophon ul { padding-left: 18px; margin: 10px 0; columns: 2; column-gap: 32px; }
+  footer.colophon li { margin-bottom: 4px; break-inside: avoid; }
+  @media (max-width: 640px) { footer.colophon ul { columns: 1; } }
+</style>
+
+</head>
+<body>
+<div class="page">
+
+  <header class="titleblock">
+    <div class="kicker">Runtime companion · lifecycle · gates · self-model</div>
+    <h1>Autonoetic — Runtime Dynamics</h1>
+    <p class="dek">The three things prose tables fight you on: how a session moves through its states,
+      how it pauses for a human and resumes, and what verified self-model the gateway hands the agent
+      on every single turn.</p>
+    <p class="companion">Third companion to the governance map (<em>System Architecture</em>) and the
+      <em>Technical Map</em>. Those two are largely static structure; this one is the system in
+      motion — the temporal dimension.</p>
+  </header>
+
+  <!-- ============ A. SESSION LIFECYCLE ============ -->
+  <section class="sheet" id="lifecycle">
+    <div class="sheet-head">
+      <div class="eyebrow">§ A — State Machine</div>
+      <h2>The session lifecycle</h2>
+      <p class="dek">A session is always in the turn loop or parked at a yield point. There are exactly
+        <strong>eleven</strong> ways it can yield (the <span class="mono">YieldReason</span> enum), and
+        every one writes a checkpoint. The constitution's <span class="mono">Ri-0.12</span> sorts them
+        into <strong>five resumable</strong> (the session suspends and continues) and <strong>six
+        terminal</strong> (it closes) — a closed list, so any exit outside it is a bug.</p>
+    </div>
+
+    <div class="gwrap">
+      <svg class="diagram" viewBox="0 0 1180 366" role="img"
+           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of eleven checkpointed states. Ri-0.12 groups them: five resumable (Hibernation and WaitingForChild auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and six terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, ManualStop, Error, ParentTerminated).">
+        <defs>
+          <marker id="rd-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+          </marker>
+        </defs>
+
+        <!-- edges (under nodes) -->
+        <path class="edge" d="M128,277 L152,277"/>
+        <path class="edge" d="M300,240 L436,96"/>
+        <path class="edge edge-resume" d="M436,132 L304,262"/>
+        <path class="edge" d="M300,312 L436,266"/>
+        <path class="edge edge-close" d="M1000,286 L1020,286"/>
+
+        <!-- start -->
+        <rect class="startnode" x="20" y="250" width="108" height="54" rx="27"/>
+        <text class="node-s" x="74" y="275" style="fill:var(--ink-soft);font-weight:700">spawn</text>
+        <text class="node-s" x="74" y="291">session start</text>
+
+        <!-- executing -->
+        <rect class="node" x="154" y="230" width="196" height="94" rx="8"/>
+        <text class="node-t" x="252" y="272">Executing</text>
+        <text class="node-s" x="252" y="292">the turn loop</text>
+
+        <!-- zone RESUMABLE -->
+        <rect class="zone zone-res" x="440" y="18" width="720" height="152" rx="8"/>
+        <text class="zlabel zlabel-res" x="456" y="40">RESUMABLE · suspends &amp; continues (5) · Ri-0.12</text>
+        <text class="znote" x="456" y="58">teal ▸ auto-resume        blue ▸ resumes on an external decision</text>
+        <rect class="pill pill-auto" x="470" y="70" width="150" height="38" rx="6"/><text class="pill-t" x="545" y="94">Hibernation</text>
+        <rect class="pill pill-auto" x="636" y="70" width="186" height="38" rx="6"/><text class="pill-t" x="729" y="94">WaitingForChild</text>
+        <rect class="pill pill-gated" x="470" y="120" width="170" height="38" rx="6"/><text class="pill-t" x="555" y="144">ApprovalRequired</text>
+        <rect class="pill pill-gated" x="656" y="120" width="188" height="38" rx="6"/><text class="pill-t" x="750" y="144">UserInputRequired</text>
+        <rect class="pill pill-gated" x="860" y="120" width="178" height="38" rx="6"/><text class="pill-t" x="949" y="144">HumanEscalation</text>
+
+        <!-- zone TERMINAL -->
+        <rect class="zone zone-term" x="440" y="196" width="560" height="150" rx="8"/>
+        <text class="zlabel zlabel-term" x="456" y="218">TERMINAL · session closes (6) · Ri-0.12 closed list</text>
+        <rect class="pill pill-term" x="456" y="232" width="178" height="38" rx="6"/><text class="pill-t" x="545" y="256">MaxTurnsReached</text>
+        <rect class="pill pill-term" x="650" y="232" width="176" height="38" rx="6"/><text class="pill-t" x="738" y="256">BudgetExhausted</text>
+        <rect class="pill pill-term" x="842" y="232" width="146" height="38" rx="6"/><text class="pill-t" x="915" y="256">EmergencyStop</text>
+        <rect class="pill pill-term" x="456" y="282" width="140" height="38" rx="6"/><text class="pill-t" x="526" y="306">ManualStop</text>
+        <rect class="pill pill-term" x="612" y="282" width="104" height="38" rx="6"/><text class="pill-t" x="664" y="306">Error</text>
+        <rect class="pill pill-term" x="732" y="282" width="180" height="38" rx="6"/><text class="pill-t" x="822" y="306">ParentTerminated</text>
+
+        <!-- closed -->
+        <rect class="endnode" x="1022" y="240" width="138" height="92" rx="8"/>
+        <text class="node-t" x="1091" y="280" style="fill:var(--served)">Closed</text>
+        <text class="node-s" x="1091" y="298">committed &amp;</text>
+        <text class="node-s" x="1091" y="313">attributed</text>
+
+        <!-- edge labels -->
+        <text class="elabel" x="140" y="269">spawn</text>
+        <text class="elabel" x="360" y="156">yield ▸ checkpoint</text>
+        <text class="elabel" x="384" y="206" style="fill:var(--right)">resume</text>
+        <text class="elabel" x="366" y="300">yield</text>
+        <text class="elabel" x="1010" y="278" style="fill:var(--served)">close</text>
+      </svg>
+    </div>
+
+    <div class="grid3" style="margin-top:16px;">
+      <div class="box tone-accent">
+        <span class="kicker-chip">resumable · 5</span>
+        <h3>Suspends, then continues</h3>
+        <p>Two auto-resume on re-entry — <code>Hibernation</code>, <code>WaitingForChild</code>
+          (<span class="badge">Ri-0.14</span> wake-not-poll). Three wait for an external decision — an
+          approval, a user answer, or operator guidance (§ B); their checkpoint is HMAC-signed.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">terminal · 6</span>
+        <h3>The session closes</h3>
+        <p>Budget exhaustion, the LoopGuard halt (<code>MaxTurnsReached</code>), the operator circuit
+          breaker (<code>EmergencyStop</code> — never resumes), a manual stop, an unrecoverable
+          <code>Error</code>, or an orphaned child (<code>ParentTerminated</code>).</p>
+      </div>
+      <div class="box tone-right">
+        <span class="kicker-chip">footnote · distinct axis</span>
+        <h3>Crash recovery ≠ continuation</h3>
+        <p>A separate function, <code>should_auto_resume_checkpoint_yield_reason</code>, restarts
+          <code>Hibernation</code>, <code>BudgetExhausted</code>, <code>WaitingForChild</code>,
+          <code>ManualStop</code> and <code>Error</code> on gateway re-entry with no external input —
+          so a terminal <code>BudgetExhausted</code>/<code>Error</code> close is recoverable once the
+          condition clears. That is a different axis from the terminal/resumable split above.</p>
+      </div>
+    </div>
+
+    <p class="para" style="margin-top:16px;">Two guarantees make this a closed system, not a maze.
+      <strong>Ri-0.12:</strong> a session may terminate <em>only</em> through this declared list — any
+      exit outside it is a gateway bug, not an accepted behaviour. And <strong>every</strong> yield
+      point writes a checkpoint, so any past state is a runnable snapshot: a fork
+      (<span class="mono">session.fork</span>) branches a fresh session from any checkpoint into its own
+      lineage.</p>
+  </section>
+
+  <!-- ============ B. APPROVAL & ESCALATION ============ -->
+  <section class="sheet" id="gates">
+    <div class="sheet-head">
+      <div class="eyebrow">§ B — Multi-Actor Flow</div>
+      <h2>Approval &amp; escalation — the human in the loop</h2>
+      <p class="dek">When an agent proposes something privileged, the turn doesn't fail or fake a retry
+        — it <strong>suspends to a signed checkpoint</strong> and resumes with the real result once a
+        decider acts. Read the swimlane top-to-bottom; the number tells you the order, the column tells
+        you who holds the baton.</p>
+    </div>
+
+    <div class="swim">
+      <div class="swim-head agent">Agent · reasoner</div>
+      <div class="swim-head gw">Gateway · enforcer</div>
+      <div class="swim-head dec">Decider · operator</div>
+
+      <div class="step agent" data-lane="Agent" style="grid-column:1;grid-row:2"><span class="n">1</span><span class="act">Proposes a privileged tool call (e.g. <span class="mono">agent_revision_promote</span>, remote <span class="mono">sandbox_exec</span>).</span></div>
+      <div class="step gw" data-lane="Gateway" style="grid-column:2;grid-row:3"><span class="n">2</span><span class="act">Policy engine: approval required. Creates an <span class="mono">ApprovalRequest</span> row.</span><span class="clause">gateway owes typed DecisionContext · Ri-0.15</span></div>
+      <div class="step gw" data-lane="Gateway" style="grid-column:2;grid-row:4"><span class="n">3</span><span class="act">Checkpoints the session (<span class="mono">YieldReason::ApprovalRequired</span>) — HMAC-signed continuation. Turn suspends.</span><span class="clause">.gateway/continuations/&lt;task_id&gt;.json</span></div>
+      <div class="step dec" data-lane="Decider" style="grid-column:3;grid-row:5"><span class="n">4</span><span class="act">Sees it in the unified queue: <span class="mono">operator.pending</span> aggregates approvals, interactions, escalations, plan-frames.</span></div>
+      <div class="step dec" data-lane="Decider" style="grid-column:3;grid-row:6"><span class="n">5</span><span class="act">Decides — owes a <strong>motivation</strong> and is <strong>attributed</strong> on the chain.</span><span class="clause">O-1 motivated · O-2 attributed</span></div>
+      <div class="step gw" data-lane="Gateway" style="grid-column:2;grid-row:7"><span class="n">6</span><span class="act"><span class="mono">apply_decision</span> → scheduler wakes the session from its checkpoint.</span></div>
+      <div class="step gw" data-lane="Gateway" style="grid-column:2;grid-row:8"><span class="n">7</span><span class="act">Injects <span class="mono">approval_ref</span>, resumes the loop, runs the tool for real, and finishes the batch.</span></div>
+      <div class="step agent" data-lane="Agent" style="grid-column:1;grid-row:9"><span class="n">8</span><span class="act">Receives the <strong>real tool result</strong> in history — no synthetic retry. Checkpoint is deleted.</span></div>
+    </div>
+
+    <p class="para" style="margin-top:18px;">The agent never gains privilege from the approval — it
+      authorizes the <em>gateway's</em> execution path, not an escalation inside the agent runtime. And
+      the suspension is tamper-evident: the continuation is HMAC-signed and its pending action is
+      checked for equality against the stored approval, so a swapped-out action after approval (a TOCTOU
+      attack) is rejected.</p>
+
+    <div class="subhead">Two escalation kinds — don't confuse them</div>
+    <div class="grid2">
+      <div class="box tone-oblig">
+        <span class="kicker-chip">blocking · in-session</span>
+        <h3>session_escalate → human</h3>
+        <p>The agent is stuck and asks for guidance. This <strong>suspends the turn</strong>
+          (<span class="mono">YieldReason::HumanEscalation</span>); the operator's guidance note is
+          injected as a system message on resume. Targets <span class="mono">reasoning_llm</span> /
+          <span class="mono">specialist</span> are advisory and non-blocking instead.</p>
+      </div>
+      <div class="box tone-oblig">
+        <span class="kicker-chip">async · promotion</span>
+        <h3>federation_escalate → operator</h3>
+        <p>The planner bundles federation verdicts into an <span class="mono">EscalationMessage</span>
+          for <span class="mono">admin.escalation_resolve</span>. It does <strong>not</strong> suspend
+          the planner; the FullJury promotion gate mechanically refuses to promote without an approved
+          escalation.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ C. PER-TURN SELF-MODEL ============ -->
+  <section class="sheet" id="selfmodel">
+    <div class="sheet-head">
+      <div class="eyebrow">§ C — Layered Composition</div>
+      <h2>The per-turn self-model</h2>
+      <p class="dek">This is the literal payload behind "autonoetic." Rather than hoping the model
+        remembers its own state, the gateway composes a fresh <span class="mono">StateAttestationPayload</span>
+        (P-6.23) every turn, signs it, and teaches the agent it is <strong>more authoritative than the
+        agent's own memory</strong>. Here is what's in the block.</p>
+    </div>
+
+    <div class="att">
+      <div class="att-head">
+        <h3>P-6.23 · signed turn attestation</h3>
+        <span class="sig">signed · verify_attestation_signature() · one per turn</span>
+      </div>
+      <div class="att-grid">
+        <div class="field">
+          <h4>Identity &amp; lineage</h4>
+          <div class="keys">
+            <span class="k">agent_id</span><span class="k">session_id</span><span class="k">root_session_id</span>
+            <span class="k">turn_counter</span><span class="k">spawn_depth</span><span class="k">gateway_node_id</span>
+          </div>
+        </div>
+        <div class="field">
+          <h4>Capabilities in force</h4>
+          <div class="keys"><span class="k">active_capabilities[]</span></div>
+          <p class="fine" style="margin-top:8px;color:var(--muted);font-size:.8rem">Never silently narrowed mid-session (Ri-0.6).</p>
+        </div>
+        <div class="field">
+          <h4>Budget &amp; bounded future</h4>
+          <div class="keys">
+            <span class="k">budget[]{name,used,limit}</span>
+            <span class="k">burn_rate.tokens_per_turn</span><span class="k">remaining_tokens</span><span class="k">projected_turns_remaining</span>
+          </div>
+        </div>
+        <div class="field">
+          <h4>Pending gates</h4>
+          <div class="keys">
+            <span class="k">pending_approval_ids</span><span class="k">pending_user_interaction_ids</span><span class="k">pending_escalation_ids</span>
+          </div>
+        </div>
+        <div class="field civic">
+          <h4>Civic standing</h4>
+          <div class="keys">
+            <span class="k">pending_proposal_ids</span><span class="k">pending_flag_ids</span>
+            <span class="k">pending_invitations{rule_id,denial_count}</span>
+          </div>
+          <p class="fine" style="margin-top:8px;color:var(--muted);font-size:.8rem">The A.2 civic line — open amendment invitations surfaced by rule.</p>
+        </div>
+        <div class="field law">
+          <h4>The law in force</h4>
+          <div class="keys"><span class="k">constitution_version</span><span class="k">constitution_digest</span></div>
+          <p class="fine" style="margin-top:8px;color:var(--muted);font-size:.8rem">The agent knows <em>which</em> law binds it as a verified fact (Ri-0.10).</p>
+        </div>
+      </div>
+      <div class="att-foot">Taught to the agent as <strong>ground truth over its own recollection</strong> — the antidote to confabulated budgets, invented capabilities, and lost gate state.</div>
+    </div>
+
+    <div class="subhead">Also handed each turn — alongside the signed block</div>
+    <div class="grid2">
+      <div class="box tone-accent">
+        <h3>Injected prior-knowledge recall</h3>
+        <p>A task-matched "Prior Knowledge" block (B.1) pushed into the system prompt at wake — pull-based
+          learning made push-based, so lessons apply without the agent having to remember to query.</p>
+      </div>
+      <div class="box tone-served">
+        <h3>Degradation notice</h3>
+        <p>If the session was placed in degraded mode, a turn-start notice names the rule ID and the
+          evidence that triggered it, <em>before</em> the next turn runs — so the agent never reasons as
+          if still healthy (<span class="badge">Ri-0.5</span>).</p>
+      </div>
+    </div>
+
+    <div class="subhead">Why this is the whole point — the five capacities it delivers</div>
+    <div class="att-map">
+      <div class="cap"><div class="c-h">Past</div><div class="c-b">read own chain, checkpoints, forks</div></div>
+      <div class="cap"><div class="c-h">Present</div><div class="c-b">this signed block, every turn</div></div>
+      <div class="cap"><div class="c-h">Future</div><div class="c-b">truthful budget + burn-rate</div></div>
+      <div class="cap"><div class="c-h">Standing</div><div class="c-b">the law + civic line</div></div>
+      <div class="cap"><div class="c-h">Identity</div><div class="c-b">lineage, non-repudiable</div></div>
+    </div>
+    <p class="para" style="margin-top:14px;">These are the five capacities the governance map opens with —
+      here rendered as the concrete fields that deliver them. Self-knowledge isn't hoped for; it's a
+      payload the runtime signs and guarantees.</p>
+  </section>
+
+  <footer class="colophon">
+    <p>Compiled from the repository's source:</p>
+    <ul>
+      <li><code>autonoetic-gateway/src/runtime/checkpoint.rs</code> (YieldReason)</li>
+      <li><code>autonoetic-gateway/src/runtime/session_resume.rs</code> (auto-resume set)</li>
+      <li><code>autonoetic-gateway/tests/constitution_rights_mid_bucket.rs</code> (terminal/resumable split)</li>
+      <li><code>autonoetic-gateway/src/runtime/state_attestation.rs</code> (P-6.23 payload)</li>
+      <li><code>docs/ARCHITECTURE.md</code> (checkpoints, approvals, escalation, operator.pending)</li>
+      <li>constitution 2026.07.19 — Ri-0.5, Ri-0.10, Ri-0.12, Ri-0.14, Ri-0.15, O-1, O-2, P-6.23</li>
+    </ul>
+  </footer>
+
+</div>
+
+</body>
+</html>

@@ -163,6 +163,7 @@ Self-contained HTML diagrams — open directly in a browser (no build step; ligh
 
 - [`docs/diagrams/architecture-map.html`](docs/diagrams/architecture-map.html): **Governance architecture** — functional autonoesis and the community-of-equals framing, the bind-direction constitution (rules/rights/obligations/served), enforcement & contract health, the standing governance offices (ombudsman, steward, curator), the amendment lifecycle, and a full node-and-edge system graph rendering the whole as one correction loop.
 - [`docs/diagrams/technical-map.html`](docs/diagrams/technical-map.html): **Technical infrastructure** — the tool-call lifecycle, the four sandbox drivers, the three storage classes, the credential vault, the immutability guarantees, the agent-birth pipeline and error/repair loop, the full native tool surface (by tier and capability), and the default agent roster.
+- [`docs/diagrams/runtime-dynamics.html`](docs/diagrams/runtime-dynamics.html): **Runtime dynamics** (the temporal dimension) — the session-lifecycle state machine (the 11 `YieldReason` variants grouped by Ri-0.12 into 5 resumable and 6 terminal, with the distinct `should_auto_resume` crash-recovery set noted), the approval & escalation multi-actor swimlane (suspend-to-signed-checkpoint, resume-with-real-result; session vs federation escalation), and the per-turn self-model (the signed P-6.23 attestation payload, injected recall, and degradation notice, mapped to the five autonoetic capacities).
 
 ### Specialized Docs
 
