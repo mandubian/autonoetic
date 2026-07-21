@@ -1472,6 +1472,7 @@ pub fn update_task_run_status(
                 store,
                 workflow_id,
                 &task.parent_session_id,
+                &task.session_id,
             ) {
                 tracing::warn!(
                     target: "workflow",
@@ -1517,6 +1518,7 @@ fn wake_paused_parent_on_child_terminal(
     store: Option<&GatewayStore>,
     workflow_id: &str,
     parent_session_id: &str,
+    child_session_id: &str,
 ) -> anyhow::Result<()> {
     let Some(store) = store else {
         return Ok(());
@@ -1547,7 +1549,7 @@ fn wake_paused_parent_on_child_terminal(
         // Transition Paused → Runnable directly via `save_task_run` rather
         // than recursing through `update_task_run_status`: a Runnable
         // transition would otherwise emit another "workflow.child.resolved"
-        // notification to the *grandparent`, misleading it into thinking
+        // notification to the *grandparent*, misleading it into thinking
         // the parent has finished. We are merely unpausing, not resolving.
         task.status = TaskRunStatus::Runnable;
         task.updated_at = now_rfc3339();
@@ -1565,7 +1567,7 @@ fn wake_paused_parent_on_child_terminal(
                 payload: serde_json::json!({
                     "status": "runnable",
                     "reason": "child_terminal_wake",
-                    "triggered_by_child_session": parent_session_id,
+                    "triggered_by_child_session": child_session_id,
                 }),
                 occurred_at: now_rfc3339(),
             },
