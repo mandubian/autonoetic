@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonoetic — Federation &amp; Data Model</title>
+<style>
+  :root {
+    --ink: #171b21; --ink-soft: #2b323d; --paper: #eef1f4; --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec; --line: #c7cdd6; --line-strong: #a7b0bd; --muted: #5b6472;
+    --accent: #2a4d8f; --accent-soft: #dbe4f5; --rule: #a05a12; --rule-soft: #f3e3cf;
+    --right: #0f6e63; --right-soft: #d9ece8; --oblig: #6a4c93; --oblig-soft: #e7e0f2;
+    --served: #9c3f4d; --served-soft: #f2dde0; --ok: #1c7a4a; --warn: #a6740b;
+    --bad: #a13a3a; --debt: #5b6472;
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e7eaef; --ink-soft: #c7cedb; --paper: #11151c; --paper-raised: #171d27;
+      --paper-sunken: #0c0f14; --line: #2c3441; --line-strong: #3c4657; --muted: #93a0b3;
+      --accent: #85a8f2; --accent-soft: #1c2a44; --rule: #e0a355; --rule-soft: #34281a;
+      --right: #5cc7b6; --right-soft: #17322e; --oblig: #c1a3ec; --oblig-soft: #291f3a;
+      --served: #e3919b; --served-soft: #35222a; --ok: #4caf7d; --warn: #d3a53f;
+      --bad: #dd7272; --debt: #93a0b3;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e7eaef; --ink-soft: #c7cedb; --paper: #11151c; --paper-raised: #171d27;
+    --paper-sunken: #0c0f14; --line: #2c3441; --line-strong: #3c4657; --muted: #93a0b3;
+    --accent: #85a8f2; --accent-soft: #1c2a44; --rule: #e0a355; --rule-soft: #34281a;
+    --right: #5cc7b6; --right-soft: #17322e; --oblig: #c1a3ec; --oblig-soft: #291f3a;
+    --served: #e3919b; --served-soft: #35222a; --ok: #4caf7d; --warn: #d3a53f;
+    --bad: #dd7272; --debt: #93a0b3;
+  }
+  :root[data-theme="light"] {
+    --ink: #171b21; --ink-soft: #2b323d; --paper: #eef1f4; --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec; --line: #c7cdd6; --line-strong: #a7b0bd; --muted: #5b6472;
+    --accent: #2a4d8f; --accent-soft: #dbe4f5; --rule: #a05a12; --rule-soft: #f3e3cf;
+    --right: #0f6e63; --right-soft: #d9ece8; --oblig: #6a4c93; --oblig-soft: #e7e0f2;
+    --served: #9c3f4d; --served-soft: #f2dde0; --ok: #1c7a4a; --warn: #a6740b;
+    --bad: #a13a3a; --debt: #5b6472;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font-body); font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+  a { color: var(--accent); }
+
+  .page { max-width: 1000px; margin: 0 auto; padding: 0 24px 96px; }
+
+  .titleblock { border-bottom: 3px double var(--line-strong); padding: 48px 0 22px; margin-bottom: 8px; }
+  .titleblock .kicker { font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+  .titleblock h1 { font-family: var(--font-display); font-weight: 600; font-size: clamp(2rem, 5vw, 2.9rem); margin: 0 0 10px; text-wrap: balance; letter-spacing: -0.01em; }
+  .titleblock .dek { font-size: 1.05rem; color: var(--ink-soft); max-width: 64ch; margin: 0 0 22px; }
+  .titleblock .companion { font-size: .92rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px; }
+
+  .sheet { padding: 46px 0 8px; border-bottom: 1px solid var(--line); }
+  .sheet:last-of-type { border-bottom: none; }
+  .sheet-head { margin-bottom: 22px; }
+  .eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .sheet h2 { font-family: var(--font-display); font-weight: 600; font-size: 1.7rem; margin: 0 0 8px; text-wrap: balance; }
+  .sheet .dek { color: var(--muted); max-width: 66ch; margin: 0 0 28px; }
+
+  .box { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 3px; padding: 16px 18px; }
+  .box h3 { font-family: var(--font-body); font-size: 0.95rem; font-weight: 700; margin: 0 0 6px; }
+  .box p { margin: 0; color: var(--ink-soft); font-size: 0.92rem; }
+  .box .fine { color: var(--muted); font-size: 0.82rem; margin-top: 8px; }
+  .mono { font-family: var(--font-mono); font-size: 0.9em; }
+  code { font-family: var(--font-mono); font-size: 0.88em; }
+
+  .badge { display: inline-block; font-family: var(--font-mono); font-size: 11.5px; padding: 1px 7px; border-radius: 3px; border: 1px solid var(--line-strong); color: var(--ink-soft); background: var(--paper-sunken); white-space: nowrap; }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .tone-accent { border-left: 3px solid var(--accent); }
+  .tone-right  { border-left: 3px solid var(--right); }
+  .tone-oblig  { border-left: 3px solid var(--oblig); }
+  .tone-served { border-left: 3px dashed var(--served); }
+  .tone-rule   { border-left: 3px solid var(--rule); }
+  .kicker-chip { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; }
+  .tone-accent .kicker-chip { color: var(--accent); }
+  .tone-right .kicker-chip { color: var(--right); }
+  .tone-oblig .kicker-chip { color: var(--oblig); }
+  .tone-served .kicker-chip { color: var(--served); }
+  .ok-chip { color: var(--ok); } .bad-chip { color: var(--bad); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 820px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 560px) { .grid2, .grid3, .grid4 { grid-template-columns: 1fr; } }
+
+  .subhead { font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 32px 0 12px; display: flex; align-items: center; gap: 10px; }
+  .subhead::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .para { max-width: 66ch; color: var(--ink-soft); margin: 0 0 20px; }
+  .para strong { color: var(--ink); }
+
+  /* federation topology */
+  .topo { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
+  .gwnode { flex: 1 1 260px; background: var(--paper-raised); border: 2px solid var(--accent); border-radius: 6px; padding: 14px 16px; }
+  .gwnode h3 { margin: 0 0 4px; font-family: var(--font-mono); font-size: 0.95rem; font-weight: 700; color: var(--accent); }
+  .gwnode .sub { color: var(--muted); font-size: 0.82rem; margin-bottom: 8px; }
+  .gwnode .digest { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); background: var(--paper-sunken); border-radius: 3px; padding: 2px 6px; display: inline-block; }
+  .link { flex: 0 0 auto; min-width: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 8px; }
+  .link .lt { font-family: var(--font-mono); font-size: 11px; color: var(--right); font-weight: 700; }
+  .link .ls { font-family: var(--font-mono); font-size: 10px; color: var(--muted); margin-top: 3px; }
+  .link .wire { width: 100%; height: 2px; background: var(--right); margin: 8px 0; position: relative; }
+  .gwnode.rejected { border: 2px dashed var(--bad); opacity: .85; }
+  .gwnode.rejected h3 { color: var(--bad); }
+  @media (max-width: 620px) { .link { min-width: 0; width: 100%; } .link .wire { width: 60%; } }
+
+  /* swimlane */
+  .swim { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+  .swim-head { font-family: var(--font-mono); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; text-align: center; padding: 8px; border-radius: 4px; }
+  .swim-head.ini { color: var(--accent); background: var(--accent-soft); }
+  .swim-head.rec { color: var(--right); background: var(--right-soft); }
+  .step { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 4px; padding: 9px 11px; border-top: 3px solid var(--line-strong); }
+  .step.ini { border-top-color: var(--accent); }
+  .step.rec { border-top-color: var(--right); }
+  .step .n { font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--muted); }
+  .step .act { font-size: 0.86rem; color: var(--ink); display: block; margin-top: 2px; }
+  .step .clause { font-family: var(--font-mono); font-size: 10px; color: var(--muted); display: block; margin-top: 5px; }
+  .step.fail { border-top-color: var(--bad); }
+  @media (max-width: 620px) {
+    .swim { grid-template-columns: 1fr; }
+    .swim-head { display: none; }
+    .step { grid-column: 1 !important; grid-row: auto !important; }
+    .step::before { content: attr(data-lane); font-family: var(--font-mono); font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 3px; }
+  }
+
+  /* ER svg */
+  .gwrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--paper-raised); padding: 10px; }
+  svg.diagram { width: 100%; min-width: 940px; height: auto; display: block; }
+  svg.diagram text { font-family: var(--font-mono); }
+  .er rect { fill: var(--paper-raised); stroke-width: 1.6; }
+  .er .er-act { stroke: var(--accent); } .er .er-aud { stroke: var(--right); } .er .er-eval { stroke: var(--oblig); }
+  .er-t { fill: var(--ink); font-size: 13px; font-weight: 700; text-anchor: middle; }
+  .er-pk { fill: var(--muted); font-size: 10.5px; text-anchor: middle; }
+  .edge { fill: none; stroke: var(--line-strong); stroke-width: 1.6; marker-end: url(#er-arrow); }
+  .elabel { fill: var(--muted); font-size: 10.5px; font-weight: 600; stroke: var(--paper-raised); stroke-width: 4px; paint-order: stroke; text-anchor: middle; }
+
+  /* ER cluster cards */
+  .ercard { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 3px; padding: 12px 14px; border-top: 3px solid var(--line-strong); }
+  .ercard.act { border-top-color: var(--accent); } .ercard.aud { border-top-color: var(--right); }
+  .ercard.eval { border-top-color: var(--oblig); } .ercard.wf { border-top-color: var(--rule); }
+  .ercard.mem { border-top-color: var(--right); } .ercard.obs { border-top-color: var(--accent); }
+  .ercard.gov { border-top-color: var(--served); } .ercard.lin { border-top-color: var(--oblig); }
+  .ercard > h3 { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; margin: 0 0 8px; color: var(--ink); text-transform: uppercase; letter-spacing: .03em; }
+  .erow { padding: 5px 0; border-bottom: 1px dashed var(--line); font-size: 12px; }
+  .erow:last-child { border-bottom: none; }
+  .erow code { font-family: var(--font-mono); font-weight: 700; color: var(--ink); }
+  .erow .pk { font-family: var(--font-mono); font-size: 10px; color: var(--muted); }
+  .erow .rel { color: var(--muted); font-size: 11px; display: block; margin-top: 1px; }
+  .erow .rel b { color: var(--ink-soft); font-weight: 600; }
+
+  .spine { display: flex; flex-wrap: wrap; gap: 10px; }
+  .spine .sp { flex: 1 1 200px; background: var(--paper-sunken); border-radius: 4px; padding: 10px 12px; border-left: 3px solid var(--accent); }
+  .spine .sp code { font-family: var(--font-mono); font-weight: 700; color: var(--accent); font-size: 12.5px; }
+  .spine .sp p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+
+  footer.colophon { margin-top: 40px; padding-top: 24px; border-top: 3px double var(--line-strong); font-size: 0.85rem; color: var(--muted); }
+  footer.colophon code { font-family: var(--font-mono); font-size: 0.85em; }
+  footer.colophon ul { padding-left: 18px; margin: 10px 0; columns: 2; column-gap: 32px; }
+  footer.colophon li { margin-bottom: 4px; break-inside: avoid; }
+  @media (max-width: 640px) { footer.colophon ul { columns: 1; } }
+</style>
+
+</head>
+<body>
+<div class="page">
+
+  <header class="titleblock">
+    <div class="kicker">Companion · cross-node trust &amp; the data backbone</div>
+    <h1>Autonoetic — Federation &amp; Data Model</h1>
+    <p class="dek">Two structural pictures the other maps don't reach: how independent gateways decide
+      to trust each other across the wire, and how the single database that records everything is
+      actually wired together.</p>
+    <p class="companion">Fourth companion to the governance, technical, and runtime-dynamics maps.
+      §A is the one dimension none of them touch — trust <em>between</em> nodes. §B is the schema
+      behind all the audit and activation the others describe.</p>
+  </header>
+
+  <!-- ============ A. FEDERATION ============ -->
+  <section class="sheet" id="federation">
+    <div class="sheet-head">
+      <div class="eyebrow">§ A — Topology</div>
+      <h2>Federation — trust across nodes (OFP)</h2>
+      <p class="dek">Two gateways cooperate over the OpenFang Protocol only if each can <em>verify</em>
+        the other runs compatible law — the constitution-digest handshake — never because they know
+        each other's internals or reputation. Membership in the federation <em>is</em> operating under
+        verifiable shared law.</p>
+    </div>
+
+    <div class="topo">
+      <div class="gwnode">
+        <h3>Gateway A</h3>
+        <div class="sub">own constitution · PeerRegistry · OFP listener :port</div>
+        <span class="digest">constitution_digest = sha256(…) = 0x9f2a…</span>
+      </div>
+      <div class="link">
+        <div class="lt">OFP</div>
+        <div class="wire"></div>
+        <div class="ls">JSON / TCP · 4-byte length-prefixed · v1</div>
+        <div class="ls">HMAC(shared_secret) + digest compat</div>
+      </div>
+      <div class="gwnode">
+        <h3>Gateway B</h3>
+        <div class="sub">compatible law (exact / known / superset)</div>
+        <span class="digest">constitution_digest = 0x9f2a…  ✓ accepted</span>
+      </div>
+    </div>
+    <div class="topo" style="margin-top:12px;">
+      <div class="gwnode rejected" style="flex:1 1 100%;">
+        <h3>Gateway C — rejected</h3>
+        <div class="sub">incompatible or missing digest → <code>Error{code: 409, "constitutional_incompatibility"}</code>; both digests recorded on the causal chain. No connection is established.</div>
+      </div>
+    </div>
+
+    <div class="subhead">The handshake — verified on both sides</div>
+    <div class="swim">
+      <div class="swim-head ini">Initiator</div>
+      <div class="swim-head rec">Receiver</div>
+      <div class="step ini" data-lane="Initiator" style="grid-column:1;grid-row:2"><span class="n">1</span><span class="act">Sends <span class="mono">Handshake</span>: node_id, fresh nonce, <span class="mono">auth_hmac = HMAC(secret, nonce+node_id)</span>, constitution_digest, ConstitutionProfile, advertised extensions.</span></div>
+      <div class="step rec" data-lane="Receiver" style="grid-column:2;grid-row:3"><span class="n">2</span><span class="act">Checks <span class="mono">protocol_version == 1</span>, then verifies the HMAC.</span><span class="clause">fail → Error 403</span></div>
+      <div class="step rec" data-lane="Receiver" style="grid-column:2;grid-row:4"><span class="n">3</span><span class="act">Evaluates constitution compatibility (below). Records a causal event either way.</span><span class="clause">fail → Error 409 · P-10.9</span></div>
+      <div class="step rec" data-lane="Receiver" style="grid-column:2;grid-row:5"><span class="n">4</span><span class="act">Intersects extensions (only <span class="mono">msg_hmac</span>, <span class="mono">resilience</span> supported), registers the peer, replies <span class="mono">HandshakeAck</span> with its own nonce/HMAC, digest, profile, agreed extensions.</span></div>
+      <div class="step ini" data-lane="Initiator" style="grid-column:1;grid-row:6"><span class="n">5</span><span class="act">Verifies the ack's HMAC + digest, then both exchange <strong>Ed25519-signed</strong> <span class="mono">ChainAttestation ↔ Ack</span> — non-repudiable proof of chain state.</span></div>
+    </div>
+
+    <div class="subhead">P-10.9 — when are two constitutions "compatible"?</div>
+    <div class="grid3">
+      <div class="box tone-right">
+        <span class="kicker-chip">Exact</span>
+        <h3>Digests match</h3>
+        <p>The peer's <span class="mono">constitution_digest</span> equals the local one — byte-identical law.</p>
+      </div>
+      <div class="box tone-right">
+        <span class="kicker-chip">KnownCompatible</span>
+        <h3>On the allowlist</h3>
+        <p>Exact, or the peer digest is in the configured <span class="mono">known_compatible_digests</span> set.</p>
+      </div>
+      <div class="box tone-right">
+        <span class="kicker-chip">Superset</span>
+        <h3>Peer ⊇ local</h3>
+        <p>Every local rule/right enforcement entry appears in the peer's <span class="mono">ConstitutionProfile</span> with an <em>identical</em> citation. The peer may add clauses; it may not drop or diverge on any local one.</p>
+      </div>
+    </div>
+    <p class="para" style="margin-top:14px;">Missing peer digest is rejected unless <span class="mono">allow_missing_peer_digest</span>
+      is set. The check runs in <span class="mono">evaluate_constitution_compatibility</span> on <strong>both</strong>
+      the receiver (handshake) and the initiator (ack). This is where "trust is structural, not personal"
+      is mechanically true: acceptance is a function of law-compatibility and a shared secret — nothing about
+      identity or track record.</p>
+
+    <div class="subhead">The wire &amp; what's actually built</div>
+    <div class="grid2">
+      <div class="box tone-accent">
+        <h3>The protocol</h3>
+        <p><span class="mono">autonoetic-ofp</span> is a wire crate only — JSON over TCP, 4-byte length prefix,
+          <span class="mono">PROTOCOL_VERSION 1</span>, wire-compatible with OpenFang. A <span class="mono">WireMessage</span>
+          carries <span class="mono">{id, signature?, seq_num?, kind}</span>. The negotiated <span class="mono">msg_hmac</span>
+          extension adds a per-message HMAC signature + monotonic <span class="mono">seq_num</span> (integrity + replay protection).</p>
+        <div class="badge-row">
+          <span class="badge">Request: Handshake · AgentMessage · ChainAttestation · Ping · Discover · Capsule*</span>
+        </div>
+        <div class="badge-row">
+          <span class="badge">Response: HandshakeAck · AgentResponse · Pong · Error · Capsule*</span>
+          <span class="badge">Notify: AgentSpawned · AgentTerminated · ShuttingDown</span>
+        </div>
+      </div>
+      <div class="box tone-served">
+        <h3>Shipped vs. deferred</h3>
+        <p><span class="ok-chip mono">shipped</span> — the HMAC handshake, extension negotiation
+          (<span class="mono">msg_hmac</span>, <span class="mono">resilience</span>), per-message signing,
+          digest+profile exchange with all three compatibility modes, Ed25519 chain attestations, and
+          <span class="mono">AgentMessage</span> forwarding (P-10.6) with <span class="mono">Ping/Pong</span>.</p>
+        <p style="margin-top:8px;"><span class="bad-chip mono">deferred</span> — <span class="mono">Discover</span>,
+          the <span class="mono">Capsule*</span> transfer family, and all notifications return
+          <span class="mono">501 Not Implemented</span> inbound; <span class="mono">HandshakeAck.agents</span>
+          is a hardcoded empty TODO. Cross-node capsule emigration is defined at the wire level but not
+          server-wired; cross-node <em>promotion</em> is not an OFP feature at all.</p>
+      </div>
+    </div>
+
+    <div class="box tone-served" style="margin-top:16px;">
+      <h3>Three things called "federation" — keep them apart</h3>
+      <p><strong>OFP node federation</strong> (this sheet) is cross-machine TCP between gateways.
+        It is <em>not</em> <span class="mono">federation_escalate</span> — a local in-process tool that
+        escalates promotion verdicts to the operator — and <em>not</em> the <strong>promotion jury</strong>
+        (auditor + evaluators) that gates a revision. Same word, three architecturally distinct mechanisms.</p>
+    </div>
+  </section>
+
+  <!-- ============ B. DATA MODEL ============ -->
+  <section class="sheet" id="data">
+    <div class="sheet-head">
+      <div class="eyebrow">§ B — Entity-Relationship</div>
+      <h2>The gateway database</h2>
+      <p class="dek">One SQLite file (<span class="mono">gateway.db</span>, schema v71) holds all
+        transactional state — roughly thirty tables. Most relationships are logical joins on shared
+        columns, not declared foreign keys. Four <strong>spine columns</strong> carry the whole model.</p>
+    </div>
+
+    <div class="subhead">The spine — four columns thread every cluster</div>
+    <div class="spine">
+      <div class="sp"><code>root_session_id</code><p>The workflow/run root. Bridges to <code>workflow_id</code> via <code>workflow_index</code>; keys reports, bindings, grants, escalations.</p></div>
+      <div class="sp"><code>workflow_id</code><p>The workflow. Keys task runs, events, approvals, interactions, emergency stops.</p></div>
+      <div class="sp"><code>session_id</code><p>A single agent session. Keys causal events, traces, bindings, transcripts.</p></div>
+      <div class="sp"><code>event_id</code><p>The universal correlation key. PK of <code>causal_events</code>; join column of <code>execution_traces</code> and <code>hook_deliveries</code>.</p></div>
+    </div>
+
+    <div class="subhead">The core relational spine</div>
+    <div class="gwrap">
+      <svg class="diagram er" viewBox="0 0 1180 470" role="img"
+           aria-label="Entity-relationship diagram of the core gateway.db tables: workflow_index maps root_session_id to workflow_id; session_agent_bindings points at agent_aliases and agent_revisions; agent_aliases points at agent_revisions, which self-references via base_revision_id; eval_runs reference agent_revisions; execution_traces join causal_events by event_id and reference approvals.">
+        <defs>
+          <marker id="er-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+          </marker>
+        </defs>
+
+        <!-- edges -->
+        <path class="edge" d="M165,106 L165,150"/>
+        <path class="edge" d="M165,214 L165,258"/>
+        <path class="edge" d="M272,290 L338,290"/>
+        <path class="edge" d="M272,180 L338,266"/>
+        <path class="edge" d="M455,378 L455,334"/>
+        <path class="edge" d="M775,166 L775,108"/>
+        <path class="edge" d="M892,196 L958,196"/>
+        <!-- self ref -->
+        <path class="edge" d="M560,262 C610,250 610,300 566,304"/>
+
+        <!-- activation chain -->
+        <rect class="er-act" x="60" y="46" width="210" height="60" rx="6"/>
+        <text class="er-t" x="165" y="72">workflow_index</text><text class="er-pk" x="165" y="90">PK root_session_id → workflow_id</text>
+        <rect class="er-act" x="60" y="150" width="210" height="62" rx="6"/>
+        <text class="er-t" x="165" y="176">session_agent_bindings</text><text class="er-pk" x="165" y="194">PK session_id · runtime_lock_hash</text>
+        <rect class="er-act" x="60" y="258" width="210" height="62" rx="6"/>
+        <text class="er-t" x="165" y="284">agent_aliases</text><text class="er-pk" x="165" y="302">PK alias_id · UNIQUE agent_id</text>
+        <rect class="er-act" x="338" y="250" width="234" height="80" rx="6"/>
+        <text class="er-t" x="455" y="282">agent_revisions</text><text class="er-pk" x="455" y="300">PK revision_id · content_digest</text><text class="er-pk" x="455" y="316">status: candidate/ready/…</text>
+
+        <!-- eval -->
+        <rect class="er-eval" x="338" y="378" width="234" height="58" rx="6"/>
+        <text class="er-t" x="455" y="404">eval_runs</text><text class="er-pk" x="455" y="422">PK eval_run_id → suite, revision</text>
+
+        <!-- audit -->
+        <rect class="er-aud" x="660" y="48" width="230" height="60" rx="6"/>
+        <text class="er-t" x="775" y="74">causal_events</text><text class="er-pk" x="775" y="92">PK event_id · append-only</text>
+        <rect class="er-aud" x="660" y="166" width="230" height="60" rx="6"/>
+        <text class="er-t" x="775" y="192">execution_traces</text><text class="er-pk" x="775" y="210">PK trace_id</text>
+        <rect class="er-aud" x="958" y="166" width="200" height="60" rx="6"/>
+        <text class="er-t" x="1058" y="192">approvals</text><text class="er-pk" x="1058" y="210">PK request_id</text>
+
+        <!-- edge labels -->
+        <text class="elabel" x="200" y="132">root_session_id</text>
+        <text class="elabel" x="196" y="240">alias_id</text>
+        <text class="elabel" x="305" y="282">revision_id</text>
+        <text class="elabel" x="326" y="238">revision_id (pinned)</text>
+        <text class="elabel" x="512" y="360">subject_revision_id</text>
+        <text class="elabel" x="812" y="140">event_id</text>
+        <text class="elabel" x="925" y="188">approval_request_id</text>
+        <text class="elabel" x="628" y="248">base_revision_id</text>
+      </svg>
+    </div>
+    <p class="para" style="margin-top:14px;">Read it as two stories. <strong>Activation</strong> (blue):
+      a session binds to a pinned revision — <span class="mono">workflow_index → session_agent_bindings
+      → agent_aliases → agent_revisions</span> — where the alias is the single source of truth for
+      "active" and revisions are immutable and self-referential (<span class="mono">base_revision_id</span>).
+      <strong>Audit</strong> (teal): <span class="mono">execution_traces</span> and
+      <span class="mono">hook_deliveries</span> join <span class="mono">causal_events</span> by
+      <span class="mono">event_id</span> — the correlation key everything reconstructs from.</p>
+
+    <div class="subhead">The full inventory, by cluster</div>
+    <div class="grid2">
+      <div class="ercard act">
+        <h3>Revision &amp; Activation</h3>
+        <div class="erow"><code>agent_revisions</code> <span class="pk">PK revision_id</span><span class="rel">self-ref <b>base_revision_id</b>; carries artifact_id, content_digest, runtime_lock_hash, status</span></div>
+        <div class="erow"><code>agent_aliases</code> <span class="pk">PK alias_id</span><span class="rel">→ <b>agent_revisions</b> (revision_id); UNIQUE(agent_id)</span></div>
+        <div class="erow"><code>session_agent_bindings</code> <span class="pk">PK session_id</span><span class="rel">→ workflow_index, agent_aliases, agent_revisions</span></div>
+        <div class="erow"><code>promotion_history</code> <span class="pk">PK promotion_id</span><span class="rel">→ alias, prev/new revision, <b>eval_runs</b> (source_eval_run_id)</span></div>
+        <div class="erow"><code>short_id_index</code> <span class="pk">PK short_id</span><span class="rel">→ agent_revisions · pure lookup</span></div>
+      </div>
+      <div class="ercard eval">
+        <h3>Evaluation</h3>
+        <div class="erow"><code>eval_suites</code> <span class="pk">PK suite_id</span></div>
+        <div class="erow"><code>eval_runs</code> <span class="pk">PK eval_run_id</span><span class="rel">→ eval_suites, agent_revisions (subject + baseline)</span></div>
+        <div class="erow"><code>eval_case_results</code> <span class="pk">PK (eval_run_id, case_id)</span><span class="rel">→ eval_runs · pure child</span></div>
+      </div>
+      <div class="ercard wf">
+        <h3>Workflow &amp; Approval</h3>
+        <div class="erow"><code>workflow_index</code> <span class="pk">PK root_session_id</span><span class="rel">the root ↔ workflow bridge</span></div>
+        <div class="erow"><code>workflow_events</code> · <code>task_runs</code> <span class="rel">→ workflow_index (workflow_id)</span></div>
+        <div class="erow"><code>approvals</code> <span class="pk">PK request_id</span><span class="rel">→ session, root_session, workflow, task</span></div>
+        <div class="erow"><code>user_interactions</code> <span class="pk">PK interaction_id</span><span class="rel">→ session/workflow; checkpoint_turn_id</span></div>
+        <div class="erow"><code>notifications</code> · <code>session_approval_grants</code> <span class="rel">→ <b>approvals</b> (request_id)</span></div>
+        <div class="erow"><code>escalations</code> <span class="pk">PK escalation_id</span><span class="rel">→ agent_revisions, root_session</span></div>
+      </div>
+      <div class="ercard aud">
+        <h3>Execution &amp; Audit</h3>
+        <div class="erow"><code>causal_events</code> <span class="pk">PK event_id</span><span class="rel">the correlation table · append-only</span></div>
+        <div class="erow"><code>execution_traces</code> <span class="pk">PK trace_id</span><span class="rel">→ <b>causal_events</b> (event_id), approvals</span></div>
+        <div class="erow"><code>active_executions</code> <span class="rel">→ emergency_stops (stop_id)</span></div>
+        <div class="erow"><code>emergency_stops</code> · <code>live_digest_events</code> <span class="rel">→ root_session</span></div>
+      </div>
+      <div class="ercard mem">
+        <h3>Memory &amp; Artifacts</h3>
+        <div class="erow"><code>memories</code> <span class="pk">PK memory_id</span><span class="rel">→ agent_revisions, binding_session</span></div>
+        <div class="erow"><code>memory_tags</code> <span class="pk">PK (memory_id, tag)</span><span class="rel">→ memories · pure tag index</span></div>
+        <div class="erow"><code>artifact_refs</code> <span class="pk">PK ref_id</span><span class="rel">(scope_type, scope_id) → artifact_digest</span></div>
+      </div>
+      <div class="ercard obs">
+        <h3>Observability &amp; Hooks</h3>
+        <div class="erow"><code>published_session_reports</code> <span class="pk">PK root_session_id</span><span class="rel">+ FTS5 companion (search index)</span></div>
+        <div class="erow"><code>session_transcripts</code> <span class="rel">→ user_profiles; + FTS5 companion</span></div>
+        <div class="erow"><code>hook_deliveries</code> <span class="pk">PK id</span><span class="rel">UNIQUE <b>event_id</b> · idempotency</span></div>
+      </div>
+      <div class="ercard gov">
+        <h3>Governance &amp; Security</h3>
+        <div class="erow"><code>constitutional_proposals</code> <span class="pk">PK proposal_id</span><span class="rel">→ proposer session; sla_breached_at</span></div>
+        <div class="erow"><code>anomaly_flags</code> <span class="pk">PK flag_id</span><span class="rel">→ reporter session; subject_ref; sla_breached_at</span></div>
+        <div class="erow"><code>security_findings</code> <span class="pk">PK finding_id</span><span class="rel">→ sentinel revision · append-only</span></div>
+        <div class="erow"><code>security_sentinel_disagreements</code> <span class="rel">→ <b>security_findings</b> (baseline/current)</span></div>
+      </div>
+      <div class="ercard lin">
+        <h3>Lineage</h3>
+        <div class="erow"><code>session_fork_lineage</code> <span class="pk">PK forked_session_id</span><span class="rel">source_session_id, fork_turn, branch_message_sha256</span></div>
+        <div class="erow"><code>session_spawn_lineage</code> <span class="pk">PK child_session_id</span><span class="rel">parent_session_id, root_session, spawned_at_turn</span></div>
+      </div>
+    </div>
+
+    <p class="para" style="margin-top:18px;">Two properties worth noting across the model. Several tables
+      are <strong>append-only or insert-only</strong> — <span class="mono">causal_events</span>,
+      <span class="mono">security_findings</span> — matching the immutability guarantees on the technical
+      map. And the pure child/index tables (<span class="mono">memory_tags</span>, the
+      <span class="mono">*_fts</span> search mirrors, <span class="mono">short_id_index</span>,
+      <span class="mono">task_claims</span>) have no independent identity — they exist only to serve
+      their parent, which is why they carry no spine column of their own.</p>
+  </section>
+
+  <footer class="colophon">
+    <p>Compiled from the repository's source:</p>
+    <ul>
+      <li><code>autonoetic-ofp/src/wire.rs</code> (OFP wire protocol)</li>
+      <li><code>autonoetic-gateway/src/server/ofp.rs</code> (handshake, compatibility)</li>
+      <li><code>autonoetic-gateway/src/server/router.rs</code> (client handshake)</li>
+      <li><code>autonoetic-gateway/src/server/registry.rs</code> (PeerRegistry)</li>
+      <li>constitution 2026.07.19 §10 · P-10.6 · P-10.9</li>
+      <li><code>autonoetic-gateway/src/scheduler/gateway_store/migrate.rs</code> (schema v71)</li>
+      <li>the <code>gateway_store/*.rs</code> per-table modules</li>
+      <li><code>docs/ARCHITECTURE.md</code> § Unified Gateway Database</li>
+    </ul>
+  </footer>
+
+</div>
+
+</body>
+</html>
