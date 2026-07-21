@@ -5842,16 +5842,25 @@ fn row_detail_style(spec: &RowSpec) -> Style {
 
 /// Map an `ActorKind` to a stable color. The TUI's left rail uses this so the
 /// operator can scan the room and tell *who* is speaking at a glance.
+///
+/// Must avoid `Red`/`Yellow`/`Blue`: `row_rail_color` reserves those for
+/// altitude (`Error`→Red, `Attention`→Yellow, overriding actor color) and for
+/// `RowTone` (`OperatorGate`→Yellow, `ToolCall`→Blue). Reusing a reserved
+/// color for an actor makes that actor's routine chatter indistinguishable,
+/// by rail color alone, from an actual gate/error/tool-call row — e.g.
+/// Sentinel used to share Yellow with `Attention`/`OperatorGate`, so a
+/// Sentinel row read as "needs attention" even when it wasn't.
+/// `actor_colors_do_not_collide_with_severity_or_tone` guards this.
 fn actor_color(actor: ActorKind) -> Color {
     match actor {
         ActorKind::Operator => Color::Cyan,
         ActorKind::Planner => Color::Green,
         ActorKind::Specialist => Color::LightGreen,
-        ActorKind::Sentinel => Color::Yellow,
+        ActorKind::Sentinel => Color::Indexed(208), // orange — distinct from Attention/Gate yellow
         ActorKind::Curator => Color::Magenta,
         ActorKind::Auditor => Color::LightMagenta,
         ActorKind::Tool => Color::DarkGray,
-        ActorKind::ExternalSurface => Color::Blue,
+        ActorKind::ExternalSurface => Color::Indexed(141), // lavender — distinct from ToolCall blue
         ActorKind::Runtime => Color::LightCyan,
         ActorKind::Other => Color::White,
     }
@@ -7708,6 +7717,35 @@ mod tests {
         assert!(is_system_session("system"));
         assert!(!is_system_session("session-abc123"));
         assert!(!is_system_session("systematic-session"));
+    }
+
+    #[test]
+    fn actor_colors_do_not_collide_with_severity_or_tone() {
+        // `row_rail_color` reserves Red/Yellow/Blue for altitude (Error/
+        // Attention) and RowTone (OperatorGate/ToolCall). If an actor's color
+        // matched one of these, that actor's ordinary rows would be visually
+        // indistinguishable from an error/gate/tool-call row by rail color
+        // alone (this happened: Sentinel used to share Yellow with
+        // Attention/OperatorGate).
+        let reserved = [Color::Red, Color::Yellow, Color::Blue];
+        for actor in [
+            ActorKind::Operator,
+            ActorKind::Planner,
+            ActorKind::Specialist,
+            ActorKind::Sentinel,
+            ActorKind::Curator,
+            ActorKind::Auditor,
+            ActorKind::Tool,
+            ActorKind::ExternalSurface,
+            ActorKind::Runtime,
+            ActorKind::Other,
+        ] {
+            let color = actor_color(actor);
+            assert!(
+                !reserved.contains(&color),
+                "{actor:?} uses {color:?}, which collides with a severity/tone-reserved color"
+            );
+        }
     }
 
     #[test]
