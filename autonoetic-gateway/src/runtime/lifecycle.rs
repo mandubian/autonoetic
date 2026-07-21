@@ -4196,10 +4196,13 @@ fn waiting_for_child_yield_reason(
         }
     };
 
+    // `WaitingChildren` alone is not sufficient: it is set when the current
+    // task is enqueued and cleared only when the task reaches a terminal
+    // status. If the sole active task IS the caller, WaitingChildren is a
+    // stale label — `has_other_active` (above) is the real signal.
     let is_waiting = matches!(
         workflow.status,
-        autonoetic_types::workflow::WorkflowRunStatus::WaitingChildren
-            | autonoetic_types::workflow::WorkflowRunStatus::BlockedApproval
+        autonoetic_types::workflow::WorkflowRunStatus::BlockedApproval
     ) || has_other_active;
 
     if !is_waiting {
@@ -5554,6 +5557,100 @@ mod divergence_robustness_tests {
             reason.is_none(),
             "waiting_for_child_yield_reason must return None when the only \
              active task belongs to the caller's own session, got: {:?}",
+            reason
+        );
+    }
+
+    /// Regression: `WaitingChildren` workflow status alone must not trigger
+    /// `WaitingForChild` — it is set when the current task is enqueued and
+    /// cleared only on terminal status, so it is a stale label when the sole
+    /// active task IS the caller. `has_other_active` is the real signal.
+    #[test]
+    fn waiting_for_child_yield_reason_ignores_stale_waiting_children() {
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
+
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
+
+        let config = autonoetic_types::config::GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..autonoetic_types::config::GatewayConfig::default()
+        };
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("store should open"),
+        );
+
+        let root_session = "root-wc-only";
+        let child_session = format!("{root_session}/executor.y");
+        let task_id = "task-y";
+
+        let run = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            Some("planner.default"),
+        )
+        .expect("workflow should be created");
+        let wf_id = run.workflow_id.clone();
+
+        let mut run = crate::scheduler::workflow_store::load_workflow_run(
+            &config,
+            Some(store.as_ref()),
+            &wf_id,
+        )
+        .expect("workflow should load")
+        .expect("workflow should exist");
+        run.status = WorkflowRunStatus::WaitingChildren;
+        run.active_task_ids = vec![task_id.to_string()];
+        crate::scheduler::workflow_store::save_workflow_run(
+            &config,
+            Some(store.as_ref()),
+            &run,
+        )
+        .expect("workflow should save");
+
+        let task = TaskRun {
+            task_id: task_id.to_string(),
+            workflow_id: wf_id.clone(),
+            agent_id: "executor.y".to_string(),
+            session_id: child_session.clone(),
+            parent_session_id: root_session.to_string(),
+            status: TaskRunStatus::Running,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: Some("work".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        crate::scheduler::workflow_store::save_task_run(
+            &config,
+            Some(store.as_ref()),
+            &task,
+        )
+        .expect("task should save");
+
+        // The workflow is WaitingChildren, but the only active task is the
+        // caller's own — must NOT yield WaitingForChild.
+        let reason = super::waiting_for_child_yield_reason(
+            &config,
+            Some(store.as_ref()),
+            &child_session,
+        );
+        assert!(
+            reason.is_none(),
+            "waiting_for_child_yield_reason must return None when WaitingChildren \
+             is set but the sole active task belongs to the caller, got: {:?}",
             reason
         );
     }

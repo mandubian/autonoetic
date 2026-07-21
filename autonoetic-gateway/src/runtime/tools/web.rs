@@ -1443,7 +1443,7 @@ fn execute_web_fetch_http(
                     .await
                     .map_err(|e| {
                         anyhow::Error::from(tagged::Tagged::resource(anyhow::anyhow!(
-                            "web.fetch request failed: {}",
+                            "web_fetch request failed: {}",
                             e
                         )))
                     })?;
@@ -1457,7 +1457,7 @@ fn execute_web_fetch_http(
                         .map(|s| s.to_string())
                         .ok_or_else(|| {
                             anyhow::Error::from(tagged::Tagged::resource(anyhow::anyhow!(
-                                "web.fetch redirect response missing Location header (status {})",
+                                "web_fetch redirect response missing Location header (status {})",
                                 status
                             )))
                         })?;
@@ -1465,7 +1465,7 @@ fn execute_web_fetch_http(
                 }
                 if !status.is_success() {
                     return Err(anyhow::Error::from(tagged::Tagged::resource(
-                        anyhow::anyhow!("web.fetch request failed with status {}", status),
+                        anyhow::anyhow!("web_fetch request failed with status {}", status),
                     )));
                 }
                 let content_type = response
