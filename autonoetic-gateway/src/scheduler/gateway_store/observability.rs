@@ -1768,19 +1768,34 @@ impl GatewayStore {
         let conn = self.conn.lock().unwrap();
         let (sql, params_vec): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match agent_id {
             Some(_) => (
-                "SELECT root_session_id, source_agent_id, MAX(created_at) as last_ts
-                 FROM live_digest_events
-                 WHERE source_agent_id = ?2
-                 GROUP BY root_session_id
-                 ORDER BY last_ts DESC, root_session_id DESC
+                "SELECT e.root_session_id,
+                        COALESCE(
+                            (SELECT e_start.source_agent_id FROM live_digest_events e_start WHERE e_start.root_session_id = e.root_session_id AND e_start.event_type = 'session.start' LIMIT 1),
+                            (SELECT e_min.source_agent_id FROM live_digest_events e_min WHERE e_min.root_session_id = e.root_session_id ORDER BY e_min.created_at ASC LIMIT 1),
+                            e.source_agent_id
+                        ) as root_agent_id,
+                        MAX(e.created_at) as last_ts
+                 FROM live_digest_events e
+                 WHERE e.source_agent_id = ?2
+                    OR e.root_session_id IN (
+                        SELECT e_sub.root_session_id FROM live_digest_events e_sub WHERE e_sub.source_agent_id = ?2
+                    )
+                 GROUP BY e.root_session_id
+                 ORDER BY last_ts DESC, e.root_session_id DESC
                  LIMIT ?1",
                 vec![Box::new(limit), Box::new(agent_id.unwrap().to_string())],
             ),
             None => (
-                "SELECT root_session_id, source_agent_id, MAX(created_at) as last_ts
-                 FROM live_digest_events
-                 GROUP BY root_session_id
-                 ORDER BY last_ts DESC, root_session_id DESC
+                "SELECT e.root_session_id,
+                        COALESCE(
+                            (SELECT e_start.source_agent_id FROM live_digest_events e_start WHERE e_start.root_session_id = e.root_session_id AND e_start.event_type = 'session.start' LIMIT 1),
+                            (SELECT e_min.source_agent_id FROM live_digest_events e_min WHERE e_min.root_session_id = e.root_session_id ORDER BY e_min.created_at ASC LIMIT 1),
+                            e.source_agent_id
+                        ) as root_agent_id,
+                        MAX(e.created_at) as last_ts
+                 FROM live_digest_events e
+                 GROUP BY e.root_session_id
+                 ORDER BY last_ts DESC, e.root_session_id DESC
                  LIMIT ?1",
                 vec![Box::new(limit)],
             ),

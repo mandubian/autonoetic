@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Autonoetic Web Dashboard</title>
+  <title>Autonoetic — Visual Cockpit & Governance DAG</title>
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <!-- Google Fonts: Inter & Outfit -->
+  <!-- Google Fonts: Inter & Outfit & JetBrains Mono -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   
   <script>
     tailwind.config = {
@@ -22,14 +22,15 @@
             mono: ['JetBrains Mono', 'monospace'],
           },
           colors: {
-            darkBg: '#0b0f19',
-            cardBg: '#111827',
-            borderBg: '#1f2937',
+            darkBg: '#080c14',
+            cardBg: '#0f172a',
+            borderBg: '#1e293b',
             accentViolet: '#8b5cf6',
             accentIndigo: '#6366f1',
             accentAmber: '#f59e0b',
             accentRed: '#ef4444',
             accentGreen: '#10b981',
+            accentCyan: '#06b6d4',
           }
         }
       }
@@ -37,26 +38,33 @@
   </script>
 
   <style>
-    /* Premium glassmorphism & gradients */
     body {
-      background: radial-gradient(circle at top right, rgba(99, 102, 241, 0.08), transparent 40%),
-                  radial-gradient(circle at bottom left, rgba(139, 92, 246, 0.05), transparent 40%),
-                  #0b0f19;
-      color: #f3f4f6;
+      background: radial-gradient(circle at top right, rgba(99, 102, 241, 0.12), transparent 45%),
+                  radial-gradient(circle at bottom left, rgba(139, 92, 246, 0.08), transparent 45%),
+                  #080c14;
+      color: #f1f5f9;
     }
     
     .glass-panel {
-      background: rgba(17, 24, 39, 0.75);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      background: rgba(15, 23, 42, 0.8);
+      backdrop-filter: blur(14px);
+      border: 1px solid rgba(255, 255, 255, 0.07);
     }
     
     .glow-violet {
-      box-shadow: 0 0 20px rgba(139, 92, 246, 0.15);
+      box-shadow: 0 0 25px rgba(139, 92, 246, 0.2);
     }
     
     .glow-indigo {
-      box-shadow: 0 0 25px rgba(99, 102, 241, 0.2);
+      box-shadow: 0 0 30px rgba(99, 102, 241, 0.25);
+    }
+
+    .glow-amber {
+      box-shadow: 0 0 30px rgba(245, 158, 11, 0.3);
+    }
+
+    .glow-red {
+      box-shadow: 0 0 30px rgba(239, 68, 68, 0.35);
     }
 
     /* Scrollbar Styling */
@@ -68,251 +76,292 @@
       background: rgba(255, 255, 255, 0.02);
     }
     ::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.12);
       border-radius: 4px;
     }
     ::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.25);
     }
 
-    /* Micro-animations */
-    @keyframes pulse-glow {
-      0%, 100% { transform: scale(1); opacity: 0.8; box-shadow: 0 0 10px rgba(99, 102, 241, 0.4); }
-      50% { transform: scale(1.15); opacity: 1; box-shadow: 0 0 20px rgba(99, 102, 241, 0.8); }
+    /* Animations */
+    @keyframes pulse-ring {
+      0%, 100% { transform: scale(1); opacity: 0.8; box-shadow: 0 0 12px rgba(245, 158, 11, 0.5); }
+      50% { transform: scale(1.12); opacity: 1; box-shadow: 0 0 24px rgba(245, 158, 11, 0.9); }
     }
-    .status-pulse {
-      animation: pulse-glow 2s infinite ease-in-out;
+    .gate-pulse {
+      animation: pulse-ring 1.8s infinite ease-in-out;
+    }
+
+    @keyframes spin-slow {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .active-spin {
+      animation: spin-slow 8s linear infinite;
     }
 
     /* Diff line highlighting */
-    .diff-added { background-color: rgba(16, 185, 129, 0.15); color: #34d399; }
-    .diff-removed { background-color: rgba(239, 68, 68, 0.15); color: #f87171; }
+    .diff-added { background-color: rgba(16, 185, 129, 0.18); color: #34d399; }
+    .diff-removed { background-color: rgba(239, 68, 68, 0.18); color: #f87171; }
   </style>
 </head>
 <body class="font-sans min-h-screen flex flex-col antialiased">
 
   <!-- Header Bar -->
-  <header class="glass-panel sticky top-0 z-40 px-6 py-4 flex items-center justify-between border-b border-gray-800 shadow-md">
-    <div class="flex items-center gap-3">
-      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-accentIndigo to-accentViolet flex items-center justify-center shadow-lg glow-indigo">
-        <span class="font-display font-extrabold text-lg text-white">A</span>
+  <header class="glass-panel sticky top-0 z-40 px-6 py-3.5 flex items-center justify-between border-b border-slate-800 shadow-xl">
+    <div class="flex items-center gap-3.5">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-accentIndigo via-accentViolet to-accentCyan flex items-center justify-center shadow-lg glow-indigo">
+        <span class="font-display font-extrabold text-xl text-white">A</span>
       </div>
       <div>
-        <h1 class="font-display font-bold text-lg text-white leading-tight">Autonoetic</h1>
-        <p class="text-xs text-gray-400">Principled Agentic Cockpit</p>
+        <div class="flex items-center gap-2">
+          <h1 class="font-display font-bold text-lg text-white leading-tight">Autonoetic</h1>
+          <span class="bg-accentIndigo/20 text-accentIndigo border border-accentIndigo/30 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full">DAG COCKPIT</span>
+        </div>
+        <p class="text-xs text-slate-400">Governed Realtime Multi-Agent Visualizer</p>
       </div>
     </div>
 
-    <!-- Connection Setup -->
+    <!-- Connection Setup & Pending Gates Alert Badge -->
     <div class="flex items-center gap-4 text-sm">
+      
+      <!-- Pending Gate Alert Pill -->
+      <div id="header-gate-alert" onclick="openActiveGateModal()" class="hidden cursor-pointer bg-accentAmber/15 border border-accentAmber/40 hover:bg-accentAmber/25 text-accentAmber px-3 py-1.5 rounded-lg flex items-center gap-2 text-xs font-semibold gate-pulse transition-all">
+        <span class="text-sm">⏸</span>
+        <span><strong id="header-gate-count">1</strong> Pending Gate Approval</span>
+      </div>
+
       <div class="flex flex-col">
-        <label class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Load Recent</label>
-        <select id="recent-sessions-select" onchange="selectRecentSession()" class="bg-gray-900 border border-gray-800 rounded px-2.5 py-1 text-white text-xs w-48 focus:outline-none focus:border-accentIndigo transition-colors">
+        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Load Recent</label>
+        <select id="recent-sessions-select" onchange="selectRecentSession()" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-xs w-44 focus:outline-none focus:border-accentIndigo transition-colors">
           <option value="">-- select session --</option>
         </select>
       </div>
 
       <div class="flex flex-col">
-        <label class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Root Session ID</label>
-        <input id="session-input" type="text" placeholder="session-abc123" class="bg-gray-900 border border-gray-800 rounded px-2.5 py-1 text-white text-xs w-48 focus:outline-none focus:border-accentIndigo transition-colors">
+        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Root Session ID</label>
+        <input id="session-input" type="text" placeholder="session-abc123" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-xs w-44 focus:outline-none focus:border-accentIndigo transition-colors font-mono">
       </div>
       
       <div class="flex flex-col">
-        <label class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Shared Secret</label>
-        <input id="secret-input" type="password" placeholder="••••••••" class="bg-gray-900 border border-gray-800 rounded px-2.5 py-1 text-white text-xs w-36 focus:outline-none focus:border-accentIndigo transition-colors">
+        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Shared Secret</label>
+        <input id="secret-input" type="password" placeholder="••••••••" class="bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white text-xs w-32 focus:outline-none focus:border-accentIndigo transition-colors">
       </div>
 
       <div class="flex flex-col">
-        <label class="text-[10px] text-gray-400 font-semibold uppercase tracking-wider">Gateway Port</label>
-        <input id="port-input" type="text" value="4100" class="bg-gray-900 border border-gray-800 rounded px-2.5 py-1 text-white text-xs w-16 text-center focus:outline-none focus:border-accentIndigo transition-colors">
+        <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider">Port</label>
+        <input id="port-input" type="text" value="4100" class="bg-slate-900 border border-slate-800 rounded px-2 py-1 text-white text-xs w-14 text-center focus:outline-none focus:border-accentIndigo transition-colors font-mono">
       </div>
 
-      <button id="connect-btn" onclick="toggleConnection()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs px-4 py-2 rounded shadow transition-all duration-150 mt-4">
+      <button id="connect-btn" onclick="toggleConnection()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5">
         Connect
       </button>
 
-      <button id="estop-btn" onclick="triggerEmergencyStop()" class="bg-accentRed hover:bg-opacity-90 active:scale-95 text-white font-bold text-xs px-3.5 py-2 rounded shadow transition-all duration-150 mt-4 hidden">
-        🚨 Stop Session
+      <button id="estop-btn" onclick="triggerEmergencyStop()" class="bg-accentRed/90 hover:bg-accentRed active:scale-95 text-white font-bold text-xs px-3.5 py-2 rounded-lg shadow-md transition-all duration-150 mt-3.5 hidden flex items-center gap-1.5">
+        <span>🚨</span> E-Stop
       </button>
 
-      <div class="flex items-center gap-1.5 mt-4 ml-2">
-        <div id="status-indicator" class="w-2.5 h-2.5 rounded-full bg-gray-500"></div>
-        <span id="status-text" class="text-xs text-gray-400 font-medium">Disconnected</span>
+      <div class="flex items-center gap-1.5 mt-3.5 ml-1">
+        <div id="status-indicator" class="w-2.5 h-2.5 rounded-full bg-slate-500"></div>
+        <span id="status-text" class="text-xs text-slate-400 font-medium">Disconnected</span>
       </div>
     </div>
   </header>
 
-  <!-- Dashboard Grid -->
+  <!-- Dashboard Main Layout -->
   <main class="flex-1 flex overflow-hidden">
     
-    <!-- Left Panel: Chat & Timeline -->
-    <section class="w-1/2 flex flex-col border-r border-gray-800 relative bg-darkBg">
+    <!-- Left Panel: Narrative Timeline & Steering Composer -->
+    <section class="w-5/12 flex flex-col border-r border-slate-800/80 relative bg-darkBg">
       <!-- Controls / Filter bar -->
-      <div class="flex items-center justify-between px-6 py-3 border-b border-gray-800 bg-gray-950 bg-opacity-40">
-        <h2 class="font-display font-semibold text-sm text-gray-300">Narrative Timeline</h2>
-        <div class="flex items-center gap-3">
-          <label class="text-xs text-gray-400">Altitude:</label>
-          <select id="altitude-filter" onchange="changeAltitudeFilter()" class="bg-gray-900 border border-gray-800 text-xs rounded px-2 py-0.5 text-gray-300 focus:outline-none">
+      <div class="flex items-center justify-between px-5 py-2.5 border-b border-slate-800/80 bg-slate-950 bg-opacity-60">
+        <div class="flex items-center gap-2">
+          <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider">Narrative Timeline</h2>
+          <span id="timeline-count-badge" class="bg-slate-800 text-slate-400 text-[10px] font-mono px-2 py-0.5 rounded-full">0 events</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="text-[11px] text-slate-400">Altitude:</label>
+          <select id="altitude-filter" onchange="changeAltitudeFilter()" class="bg-slate-900 border border-slate-800 text-xs rounded px-2 py-0.5 text-slate-300 focus:outline-none">
             <option value="detail">Detail (All)</option>
             <option value="normal" selected>Normal (Milestones)</option>
-            <option value="attention">Attention (Gates)</option>
-            <option value="error">Error</option>
+            <option value="attention">Attention (Gates & Warnings)</option>
+            <option value="error">Error Only</option>
           </select>
         </div>
       </div>
 
       <!-- Timeline Stream -->
-      <div id="timeline-stream" class="flex-1 overflow-y-auto p-6 space-y-4">
-        <div class="text-center text-gray-500 text-sm mt-10">
-          Enter connection credentials and click Connect to load the session stream.
+      <div id="timeline-stream" class="flex-1 overflow-y-auto p-5 space-y-3.5">
+        <div class="text-center text-slate-500 text-sm mt-12">
+          Enter credentials and click Connect to start real-time session stream.
         </div>
       </div>
 
       <!-- Composer Box -->
-      <div class="p-4 border-t border-gray-800 bg-gray-950 bg-opacity-40">
+      <div class="p-3.5 border-t border-slate-800 bg-slate-950 bg-opacity-70">
         <div class="flex items-center gap-2">
-          <textarea id="composer-input" placeholder="Type a message to steer the session..." rows="1" class="flex-1 bg-gray-900 border border-gray-850 rounded px-4 py-2.5 text-sm text-white placeholder-gray-500 resize-none focus:outline-none focus:border-accentIndigo transition-colors max-h-24"></textarea>
-          <button id="send-btn" onclick="sendMessage()" disabled class="bg-accentIndigo disabled:bg-gray-800 disabled:text-gray-600 hover:bg-opacity-95 text-white p-2.5 rounded-lg shadow transition-all duration-150 flex items-center justify-center">
-            <!-- Send Icon (Lucide Send) -->
+          <textarea id="composer-input" placeholder="Type a message to steer session (Enter to send)..." rows="1" class="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-white placeholder-slate-500 resize-none focus:outline-none focus:border-accentIndigo transition-colors max-h-24 font-sans"></textarea>
+          <button id="send-btn" onclick="sendMessage()" disabled class="bg-accentIndigo disabled:bg-slate-800 disabled:text-slate-600 hover:bg-opacity-90 active:scale-95 text-white p-2.5 rounded-lg shadow transition-all duration-150 flex items-center justify-center shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-send-horizontal"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
           </button>
         </div>
       </div>
     </section>
 
-    <!-- Right Panel: Plan, Hierarchy & Metadata sidebars -->
-    <section class="w-1/2 flex">
+    <!-- Right Panel: Interactive DAG Workflow + Active Workbenches & Topology -->
+    <section class="w-7/12 flex">
       
-      <!-- Middle Pane: PlanFrame, Workbenches & Tabs -->
-      <div class="w-1/2 border-r border-gray-800 flex flex-col bg-gray-950 bg-opacity-20">
+      <!-- Middle Pane: Plan & Workflow DAG Map -->
+      <div class="w-7/12 border-r border-slate-800/80 flex flex-col bg-slate-950 bg-opacity-20">
         <!-- Tab Navigation -->
-        <div class="flex border-b border-gray-800 bg-gray-950 bg-opacity-40 shrink-0">
-          <button id="tab-btn-checklist" onclick="switchRightTab('checklist')" class="flex-1 py-3 text-center text-xs font-display font-bold border-b-2 border-accentIndigo text-white transition-all focus:outline-none">
-            📋 Checklist
+        <div class="flex border-b border-slate-800 bg-slate-950 bg-opacity-60 shrink-0">
+          <button id="tab-btn-workflow" onclick="switchRightTab('workflow')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-accentIndigo text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>🗺️</span> Workflow DAG
           </button>
-          <button id="tab-btn-constitution" onclick="switchRightTab('constitution')" class="flex-1 py-3 text-center text-xs font-display font-bold border-b-2 border-transparent text-gray-400 hover:text-white transition-all focus:outline-none">
-            🛡️ Constitution
+          <button id="tab-btn-checklist" onclick="switchRightTab('checklist')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>📋</span> Drafts & Plans
           </button>
-          <button id="tab-btn-wiki" onclick="switchRightTab('wiki')" class="flex-1 py-3 text-center text-xs font-display font-bold border-b-2 border-transparent text-gray-400 hover:text-white transition-all focus:outline-none">
-            📖 Wiki & Props
+          <button id="tab-btn-constitution" onclick="switchRightTab('constitution')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>🛡️</span> Constitution
+          </button>
+          <button id="tab-btn-wiki" onclick="switchRightTab('wiki')" class="flex-1 py-2.5 text-center text-xs font-display font-bold border-b-2 border-transparent text-slate-400 hover:text-white transition-all focus:outline-none flex items-center justify-center gap-1.5">
+            <span>📖</span> Wiki
           </button>
         </div>
 
-        <!-- Tab Content 1: Checklist & Drafts -->
-        <div id="tab-content-checklist" class="flex-1 flex flex-col overflow-hidden">
-          <!-- PlanFrame Panel -->
-          <div class="flex-1 flex flex-col overflow-hidden">
-            <div class="px-6 py-3 border-b border-gray-850 bg-gray-950 bg-opacity-40 flex items-center justify-between">
-              <h2 class="font-display font-semibold text-xs text-gray-400 uppercase tracking-wider">Active Plan</h2>
-              <span id="plan-version-badge" class="bg-gray-800 text-[10px] text-gray-400 font-semibold px-2 py-0.5 rounded-full hidden">v1</span>
+        <!-- Tab 1: Visual Workflow & Plan DAG -->
+        <div id="tab-content-workflow" class="flex-1 flex flex-col overflow-hidden">
+          <div class="px-5 py-2.5 border-b border-slate-800 bg-slate-950 bg-opacity-40 flex items-center justify-between">
+            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <span>Execution Graph & Gate Nodes</span>
+            </h2>
+            <span id="dag-status-badge" class="bg-slate-800 text-[10px] text-slate-400 font-mono font-semibold px-2 py-0.5 rounded-full">Waiting...</span>
+          </div>
+
+          <!-- DAG Canvas container -->
+          <div class="flex-1 p-4 overflow-auto relative bg-slate-950/40" id="workflow-dag-container">
+            <svg id="workflow-dag-svg" class="w-full h-full min-h-[350px]"></svg>
+            <div id="workflow-dag-fallback" class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs">
+              Connect to session to render execution DAG graph...
             </div>
-            <div id="plan-steps" class="flex-1 overflow-y-auto p-4 space-y-2.5 text-sm">
-              <div class="text-center text-gray-500 text-xs py-8">No plan loaded yet.</div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Drafts & Active Workbenches Checklist -->
+        <div id="tab-content-checklist" class="flex-1 flex flex-col overflow-hidden hidden">
+          <!-- Active Plan Steps -->
+          <div class="h-1/2 flex flex-col overflow-hidden border-b border-slate-850">
+            <div class="px-5 py-2.5 border-b border-slate-850 bg-slate-950 bg-opacity-40 flex items-center justify-between">
+              <h2 class="font-display font-semibold text-xs text-slate-400 uppercase tracking-wider">Active Plan Steps</h2>
+              <span id="plan-version-badge" class="bg-slate-800 text-[10px] text-slate-400 font-semibold px-2 py-0.5 rounded-full hidden">v1</span>
+            </div>
+            <div id="plan-steps" class="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
+              <div class="text-center text-slate-500 py-6">No plan loaded yet.</div>
             </div>
           </div>
 
-          <!-- Workbenches Panel -->
-          <div class="h-1/3 border-t border-gray-850 flex flex-col overflow-hidden bg-gray-950 bg-opacity-40">
-            <div class="px-6 py-2 border-b border-gray-850 bg-gray-950 bg-opacity-60">
-              <h2 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Active Workbenches & Drafts</h2>
+          <!-- Workbenches & Live Content Drafts -->
+          <div class="h-1/2 flex flex-col overflow-hidden bg-slate-950 bg-opacity-40">
+            <div class="px-5 py-2.5 border-b border-slate-850 bg-slate-950 bg-opacity-60 flex items-center justify-between">
+              <h2 class="font-display font-semibold text-xs text-slate-400 tracking-wider uppercase">Live Content Drafts & Workbenches</h2>
+              <button onclick="fetchContentList(getConnectInfo().baseURL, getConnectInfo().sid, getConnectInfo().secret)" class="text-accentIndigo hover:underline text-[10px] font-mono">↻ Refresh</button>
             </div>
             <div id="workbench-list" class="flex-1 overflow-y-auto p-3 space-y-2">
-              <div class="text-center text-gray-500 text-xs py-4">No active workbenches or drafts.</div>
+              <div class="text-center text-slate-500 text-xs py-4">No active workbenches or drafts.</div>
             </div>
           </div>
         </div>
 
-        <!-- Tab Content 2: Constitution Profile -->
+        <!-- Tab 3: Constitution Profile -->
         <div id="tab-content-constitution" class="flex-1 flex flex-col overflow-hidden hidden">
-          <div class="p-5 overflow-y-auto space-y-4 flex-1 flex flex-col">
-            <div class="bg-gray-900 border border-gray-850 p-4 rounded-xl space-y-2 shrink-0">
-              <h3 class="font-display font-bold text-xs text-gray-400 tracking-wider uppercase">Constitution Profile</h3>
-              <div class="grid grid-cols-3 gap-y-2.5 gap-x-2 text-xs font-mono">
-                <div class="text-gray-500">Version:</div>
-                <div id="const-version" class="text-gray-300 col-span-2 font-semibold">—</div>
-                <div class="text-gray-500">Format:</div>
-                <div id="const-format-version" class="text-gray-300 col-span-2">—</div>
-                <div class="text-gray-500">Digest:</div>
-                <div id="const-digest" class="text-gray-300 font-mono text-[10px] break-all col-span-2 select-all">—</div>
+          <div class="p-4 overflow-y-auto space-y-3.5 flex-1 flex flex-col">
+            <div class="bg-slate-900 border border-slate-800 p-3.5 rounded-xl space-y-2 shrink-0">
+              <h3 class="font-display font-bold text-xs text-slate-400 tracking-wider uppercase">Constitution Profile</h3>
+              <div class="grid grid-cols-3 gap-y-2 gap-x-2 text-xs font-mono">
+                <div class="text-slate-500">Version:</div>
+                <div id="const-version" class="text-slate-300 col-span-2 font-semibold">—</div>
+                <div class="text-slate-500">Format:</div>
+                <div id="const-format-version" class="text-slate-300 col-span-2">—</div>
+                <div class="text-slate-500">Digest:</div>
+                <div id="const-digest" class="text-slate-300 font-mono text-[10px] break-all col-span-2 select-all">—</div>
               </div>
             </div>
-            <div class="flex-1 flex flex-col space-y-2 overflow-hidden min-h-[300px]">
-              <h3 class="font-display font-bold text-xs text-gray-400 tracking-wider uppercase shrink-0">Canonical Rules & Policy</h3>
-              <div id="const-text" class="flex-1 p-4 bg-gray-950 border border-gray-900 rounded-lg font-mono text-[11px] text-gray-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
+            <div class="flex-1 flex flex-col space-y-2 overflow-hidden min-h-[250px]">
+              <h3 class="font-display font-bold text-xs text-slate-400 tracking-wider uppercase shrink-0">Canonical Rules & Rights Text</h3>
+              <div id="const-text" class="flex-1 p-3.5 bg-slate-950 border border-slate-900 rounded-lg font-mono text-[11px] text-slate-300 overflow-y-auto whitespace-pre-wrap select-text leading-relaxed">
                 No constitution loaded.
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Tab Content 3: Wiki & Knowledge Base -->
+        <!-- Tab 4: Wiki & Proposals -->
         <div id="tab-content-wiki" class="flex-1 flex flex-col overflow-hidden hidden">
-          <!-- Wiki Proposals Section -->
-          <div class="h-1/2 border-b border-gray-850 flex flex-col overflow-hidden">
-            <div class="px-6 py-2 border-b border-gray-850 bg-gray-950 bg-opacity-40">
-              <h3 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Pending Wiki Proposals</h3>
+          <div class="h-1/2 border-b border-slate-850 flex flex-col overflow-hidden">
+            <div class="px-5 py-2 border-b border-slate-850 bg-slate-950 bg-opacity-40">
+              <h3 class="font-display font-semibold text-xs text-slate-400 tracking-wider uppercase">Pending Wiki Proposals</h3>
             </div>
-            <div id="wiki-proposals-list" class="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
-              <div class="text-center text-gray-500 py-4">No pending proposals.</div>
+            <div id="wiki-proposals-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-xs">
+              <div class="text-center text-slate-500 py-4">No pending proposals.</div>
             </div>
           </div>
-          <!-- Wiki Pages Section -->
           <div class="h-1/2 flex flex-col overflow-hidden">
-            <div class="px-6 py-2 border-b border-gray-850 bg-gray-950 bg-opacity-40">
-              <h3 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase">Wiki Pages</h3>
+            <div class="px-5 py-2 border-b border-slate-850 bg-slate-950 bg-opacity-40">
+              <h3 class="font-display font-semibold text-xs text-slate-400 tracking-wider uppercase">Wiki Pages</h3>
             </div>
-            <div id="wiki-pages-list" class="flex-1 overflow-y-auto p-4 space-y-2 text-xs">
-              <div class="text-center text-gray-500 py-4">No pages found.</div>
+            <div id="wiki-pages-list" class="flex-1 overflow-y-auto p-3.5 space-y-2 text-xs">
+              <div class="text-center text-slate-500 py-4">No pages found.</div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Right Pane: Agent Spawn Tree & Stats -->
-      <div class="w-1/2 flex flex-col bg-gray-950 bg-opacity-30">
+      <!-- Right Pane: Agent Topology Map & Session Telemetry HUD -->
+      <div class="w-5/12 flex flex-col bg-slate-950 bg-opacity-30">
         
-        <!-- Agent spawn hierarchy graph -->
-        <div class="flex-1 flex flex-col overflow-hidden border-b border-gray-800">
-          <div class="px-6 py-3 border-b border-gray-800 bg-gray-950 bg-opacity-40">
-            <h2 class="font-display font-semibold text-sm text-gray-300 flex items-center gap-1.5">
-              <span>🌲</span> Agent Hierarchy
+        <!-- Alive Agent Topology Map -->
+        <div class="flex-1 flex flex-col overflow-hidden border-b border-slate-800/80">
+          <div class="px-5 py-2.5 border-b border-slate-800/80 bg-slate-950 bg-opacity-40 flex items-center justify-between">
+            <h2 class="font-display font-semibold text-xs text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <span>🌲 Alive Agent Topology</span>
             </h2>
+            <span class="text-[10px] text-slate-500 font-mono">Click node for controls</span>
           </div>
-          <div class="flex-1 p-6 overflow-auto relative" id="agent-tree-container">
-            <svg id="agent-tree-svg" class="w-full h-full min-h-[250px]"></svg>
-            <div id="agent-tree-fallback" class="absolute inset-0 flex items-center justify-center text-gray-500 text-xs">
-              Waiting to parse timeline events...
+          <div class="flex-1 p-4 overflow-auto relative" id="agent-tree-container">
+            <svg id="agent-tree-svg" class="w-full h-full min-h-[220px]"></svg>
+            <div id="agent-tree-fallback" class="absolute inset-0 flex items-center justify-center text-slate-500 text-xs">
+              Waiting to parse agent hierarchy...
             </div>
           </div>
         </div>
 
-        <!-- Stats / Budget HUD -->
-        <div class="p-6 space-y-4 bg-gray-950 bg-opacity-60">
-          <h2 class="font-display font-semibold text-xs text-gray-400 tracking-wider uppercase border-b border-gray-800 pb-2">Session HUD</h2>
+        <!-- Telemetry & Budget HUD -->
+        <div class="p-4 space-y-3 bg-slate-950 bg-opacity-70">
+          <h2 class="font-display font-semibold text-[11px] text-slate-400 tracking-wider uppercase border-b border-slate-800 pb-1.5">Session Telemetry HUD</h2>
           
-          <div class="grid grid-cols-2 gap-4 text-xs">
-            <div class="bg-gray-900 border border-gray-800 p-2.5 rounded shadow-inner">
-              <span class="text-[10px] text-gray-500 font-semibold block uppercase">LLM Calls</span>
+          <div class="grid grid-cols-2 gap-3 text-xs">
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg shadow-inner">
+              <span class="text-[9px] text-slate-500 font-semibold block uppercase">LLM Rounds</span>
               <span id="hud-llm-calls" class="font-mono text-base font-bold text-accentIndigo">0</span>
             </div>
             
-            <div class="bg-gray-900 border border-gray-800 p-2.5 rounded shadow-inner">
-              <span class="text-[10px] text-gray-500 font-semibold block uppercase">Active Grants</span>
+            <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg shadow-inner">
+              <span class="text-[9px] text-slate-500 font-semibold block uppercase">Active Grants</span>
               <span id="hud-grants-count" class="font-mono text-base font-bold text-accentViolet">0</span>
             </div>
           </div>
 
-          <!-- Token consumption -->
-          <div class="space-y-2 text-xs">
-            <div class="flex items-center justify-between text-[10px] text-gray-400 font-semibold uppercase">
+          <!-- Token Consumption Bar -->
+          <div class="space-y-1.5 text-xs">
+            <div class="flex items-center justify-between text-[9px] text-slate-400 font-semibold uppercase">
               <span>Token Consumption</span>
-              <span id="hud-tokens-total">0</span>
+              <span id="hud-tokens-total" class="font-mono text-slate-300">0</span>
             </div>
-            <div class="w-full bg-gray-900 h-2 rounded border border-gray-800 overflow-hidden">
-              <div id="token-bar-in" class="bg-accentIndigo h-full inline-block" style="width: 0%;"></div>
-              <div id="token-bar-out" class="bg-accentViolet h-full inline-block" style="width: 0%;"></div>
+            <div class="w-full bg-slate-900 h-2 rounded border border-slate-800 overflow-hidden flex">
+              <div id="token-bar-in" class="bg-accentIndigo h-full" style="width: 0%;"></div>
+              <div id="token-bar-out" class="bg-accentViolet h-full" style="width: 0%;"></div>
             </div>
-            <div class="flex justify-between text-[9px] text-gray-500 font-mono">
+            <div class="flex justify-between text-[9px] text-slate-500 font-mono">
               <span id="hud-tokens-in">in: 0</span>
               <span id="hud-tokens-out">out: 0</span>
             </div>
@@ -325,106 +374,118 @@
 
   </main>
 
-  <!-- Interactive Gate Modal (Suspension Popup) -->
-  <div id="gate-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
-    <div class="w-[600px] max-w-full glass-panel glow-violet rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
-      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
-        <h3 id="modal-title" class="font-display font-bold text-base text-accentAmber flex items-center gap-2">
-          <span>⏸</span> Gate Suspension
-        </h3>
-        <span id="modal-gate-id" class="text-xs font-mono text-gray-500">apr-xxxx</span>
+  <!-- Interactive Gate Approval Modal (With Linked Plan, Target Artifacts & Content Preview) -->
+  <div id="gate-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden">
+    <div class="w-[720px] max-w-[95%] glass-panel glow-amber rounded-2xl border border-slate-800 p-6 flex flex-col space-y-4 max-h-[90vh]">
+      
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3.5">
+        <div class="flex items-center gap-2.5">
+          <span class="w-8 h-8 rounded-lg bg-accentAmber/20 border border-accentAmber/40 flex items-center justify-center text-accentAmber text-base">⏸</span>
+          <div>
+            <h3 id="modal-title" class="font-display font-bold text-base text-accentAmber leading-tight">
+              Gate Approval Required
+            </h3>
+            <p id="modal-subtitle" class="text-xs text-slate-400">Linked to Execution DAG Node</p>
+          </div>
+        </div>
+        <span id="modal-gate-id" class="text-xs font-mono text-slate-400 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded">apr-xxxx</span>
       </div>
       
-      <div id="modal-body" class="text-sm text-gray-300 space-y-3 overflow-y-auto max-h-[300px]">
+      <!-- Body Section -->
+      <div id="modal-body" class="text-xs text-slate-300 space-y-3.5 overflow-y-auto pr-1">
         <!-- Filled dynamically -->
       </div>
 
       <!-- Motivation / Reply input panel -->
-      <div id="modal-action-panel" class="pt-3 border-t border-gray-800 flex flex-col space-y-3">
-        <label id="modal-input-label" class="text-xs text-gray-400 font-semibold uppercase tracking-wide">Motivation</label>
+      <div id="modal-action-panel" class="pt-3 border-t border-slate-800 flex flex-col space-y-3 shrink-0">
+        <label id="modal-input-label" class="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">Motivation (Required for Governance Audit)</label>
         
-        <!-- Text/Motivation box -->
-        <input id="modal-text-input" type="text" placeholder="Explain your decision rationale..." class="bg-gray-950 border border-gray-850 rounded px-3.5 py-2 text-sm text-white focus:outline-none focus:border-accentIndigo transition-colors">
+        <!-- Motivation Text Box -->
+        <input id="modal-text-input" type="text" placeholder="Explain your decision rationale..." class="bg-slate-950 border border-slate-800 rounded-lg px-3.5 py-2 text-xs text-white focus:outline-none focus:border-accentIndigo transition-colors">
         
         <!-- Multi choice options list -->
         <div id="modal-choices" class="flex flex-col gap-2 hidden"></div>
 
-        <div class="flex justify-end gap-3 pt-2">
-          <button id="modal-cancel-btn" onclick="closeGateModal()" class="border border-gray-800 hover:bg-gray-900 active:scale-95 text-gray-400 font-medium text-xs px-4 py-2 rounded transition-all duration-150">
-            Peek Timeline
+        <div class="flex items-center justify-between pt-1">
+          <button onclick="closeGateModal()" class="text-slate-400 hover:text-white text-xs font-medium underline">
+            Peek DAG & Timeline
           </button>
           
-          <button id="modal-reject-btn" onclick="submitGateAction(false)" class="bg-accentRed hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs px-4 py-2 rounded shadow transition-all duration-150 hidden">
-            Reject
-          </button>
+          <div class="flex gap-2.5">
+            <button id="modal-reject-btn" onclick="submitGateAction(false)" class="bg-accentRed/20 hover:bg-accentRed/30 border border-accentRed/40 active:scale-95 text-accentRed font-bold text-xs px-4 py-2 rounded-lg transition-all duration-150 hidden">
+              Reject Action
+            </button>
 
-          <button id="modal-submit-btn" onclick="submitGateAction(true)" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs px-4 py-2 rounded shadow transition-all duration-150">
-            Submit
-          </button>
+            <button id="modal-submit-btn" onclick="submitGateAction(true)" class="bg-accentAmber hover:bg-opacity-95 text-slate-950 font-bold text-xs px-5 py-2 rounded-lg shadow-lg transition-all duration-150">
+              Approve & Resume
+            </button>
+          </div>
         </div>
+      </div>
     </div>
   </div>
 
   <!-- Agent Control Modal -->
-  <div id="agent-control-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
-    <div class="w-[500px] max-w-full glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
-      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+  <div id="agent-control-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden">
+    <div class="w-[520px] max-w-full glass-panel glow-indigo rounded-2xl border border-slate-800 p-6 flex flex-col space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="agent-control-title" class="font-display font-bold text-base text-white flex items-center gap-2">
-          <span>👾</span> Agent Controls
+          <span>👾</span> Agent Controls & Governance
         </h3>
-        <button onclick="closeAgentControlModal()" class="text-gray-500 hover:text-white transition-colors">
+        <button onclick="closeAgentControlModal()" class="text-slate-500 hover:text-white transition-colors">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
         </button>
       </div>
       
       <div class="grid grid-cols-2 gap-3 text-xs">
-        <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-          <span class="text-[10px] text-gray-500 font-semibold block uppercase">Agent ID</span>
-          <span id="control-agent-id" class="font-mono text-gray-250 font-bold select-all">—</span>
+        <div class="bg-slate-900 border border-slate-800 p-3 rounded-lg">
+          <span class="text-[9px] text-slate-500 font-semibold block uppercase">Session ID</span>
+          <span id="control-agent-id" class="font-mono text-slate-200 font-bold select-all text-[11px]">—</span>
         </div>
-        <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-          <span class="text-[10px] text-gray-500 font-semibold block uppercase">Seat / Role</span>
-          <span id="control-agent-name" class="font-mono text-gray-250 font-bold">—</span>
+        <div class="bg-slate-900 border border-slate-800 p-3 rounded-lg">
+          <span class="text-[9px] text-slate-500 font-semibold block uppercase">Seat / Role</span>
+          <span id="control-agent-name" class="font-mono text-slate-200 font-bold text-[11px]">—</span>
         </div>
       </div>
 
       <!-- Status / Suspension Actions -->
-      <div class="bg-gray-900 border border-gray-850 p-4 rounded-xl space-y-3">
-        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Gating & Suspension</h4>
+      <div class="bg-slate-900 border border-slate-850 p-3.5 rounded-xl space-y-2.5">
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Gating & Suspension</h4>
         <div class="flex justify-between items-center text-xs">
-          <span class="text-gray-400">Current Suspension:</span>
+          <span class="text-slate-400">Current Status:</span>
           <span id="control-agent-suspend-status" class="px-2 py-0.5 rounded font-mono font-bold text-[10px]">Active</span>
         </div>
         <div class="flex gap-2">
-          <button id="agent-suspend-btn" onclick="suspendAgent()" class="flex-1 bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/20 text-accentRed font-bold text-xs py-2 rounded shadow transition-all duration-150">
+          <button id="agent-suspend-btn" onclick="suspendAgent()" class="flex-1 bg-accentRed/10 border border-accentRed/30 hover:bg-accentRed/20 text-accentRed font-bold text-xs py-1.5 rounded shadow transition-all">
             Suspend Agent
           </button>
-          <button id="agent-unsuspend-btn" onclick="unsuspendAgent()" class="flex-1 bg-accentGreen/10 border border-accentGreen/30 hover:bg-accentGreen/20 text-accentGreen font-bold text-xs py-2 rounded shadow transition-all duration-150">
+          <button id="agent-unsuspend-btn" onclick="unsuspendAgent()" class="flex-1 bg-accentGreen/10 border border-accentGreen/30 hover:bg-accentGreen/20 text-accentGreen font-bold text-xs py-1.5 rounded shadow transition-all">
             Unsuspend Agent
           </button>
         </div>
       </div>
 
       <!-- Inference Overrides -->
-      <div class="bg-gray-900 border border-gray-850 p-4 rounded-xl space-y-3">
-        <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wider block">Inference Presets</h4>
+      <div class="bg-slate-900 border border-slate-850 p-3.5 rounded-xl space-y-2.5">
+        <h4 class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Inference Presets</h4>
         <div class="flex flex-col space-y-2">
           <div class="flex justify-between items-center text-xs">
-             <span class="text-gray-400">Active Preset Override:</span>
+             <span class="text-slate-400">Active Preset Override:</span>
              <span id="control-agent-preset" class="font-mono font-bold text-accentIndigo">—</span>
           </div>
           <div class="flex gap-2">
-            <select id="inference-preset-select" class="bg-gray-950 border border-gray-850 rounded px-2.5 py-1.5 text-white text-xs flex-1 focus:outline-none focus:border-accentIndigo">
+            <select id="inference-preset-select" class="bg-slate-950 border border-slate-800 rounded px-2.5 py-1.5 text-white text-xs flex-1 focus:outline-none focus:border-accentIndigo">
               <option value="default">Default</option>
               <option value="fast">Fast (Cost-optimized)</option>
               <option value="smart">Smart (High Reasoning)</option>
               <option value="thorough">Thorough (Long thinking / exhaustive)</option>
               <option value="strict">Strict (Sentinel checked)</option>
             </select>
-            <button onclick="setInferencePreset()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs px-3.5 py-1.5 rounded shadow transition-all duration-150">
+            <button onclick="setInferencePreset()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-medium text-xs px-3.5 py-1.5 rounded shadow transition-all">
               Apply
             </button>
-            <button onclick="clearInferencePreset()" class="border border-gray-855 hover:bg-gray-950 text-gray-400 font-medium text-xs px-3 py-1.5 rounded transition-all duration-150">
+            <button onclick="clearInferencePreset()" class="border border-slate-800 hover:bg-slate-950 text-slate-400 font-medium text-xs px-3 py-1.5 rounded transition-all">
               Clear
             </button>
           </div>
@@ -434,13 +495,13 @@
   </div>
 
   <!-- Event Detail Modal -->
-  <div id="event-detail-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
-    <div class="w-[700px] max-w-[95%] h-[70%] glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
-      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+  <div id="event-detail-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden">
+    <div class="w-[720px] max-w-[95%] h-[75%] glass-panel glow-indigo rounded-2xl border border-slate-800 p-6 flex flex-col space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="event-detail-title" class="font-display font-bold text-base text-white flex items-center gap-2">
           <span>ℹ️</span> Event Details
         </h3>
-        <button onclick="closeEventDetailModal()" class="text-gray-500 hover:text-white transition-colors">
+        <button onclick="closeEventDetailModal()" class="text-slate-500 hover:text-white transition-colors">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
         </button>
       </div>
@@ -451,64 +512,71 @@
     </div>
   </div>
 
-  <!-- Diff / File Inspector Modal -->
-  <div id="diff-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-80 backdrop-blur-sm hidden">
-    <div class="w-[900px] max-w-[95%] h-[80%] glass-panel glow-indigo rounded-xl border border-gray-800 p-6 flex flex-col space-y-4">
-      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+  <!-- File Inspector & Diff Modal (With Line Comments) -->
+  <div id="diff-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden">
+    <div class="w-[960px] max-w-[95%] h-[85%] glass-panel glow-indigo rounded-2xl border border-slate-800 p-6 flex flex-col space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-3">
         <h3 id="diff-title" class="font-display font-bold text-base text-white flex items-center gap-2">
-          <span>📄</span> File Inspector
+          <span>📄</span> File Content Inspector
         </h3>
-        <button onclick="closeDiffModal()" class="text-gray-500 hover:text-white transition-colors">
+        <button onclick="closeDiffModal()" class="text-slate-500 hover:text-white transition-colors">
           <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
         </button>
       </div>
       
       <div class="flex-1 flex gap-4 overflow-hidden">
         <!-- Code Content -->
-        <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-gray-950 p-4 rounded-lg border border-gray-900 font-mono text-xs text-gray-355">
+        <div id="diff-content" class="flex-1 overflow-auto space-y-1 bg-slate-950 p-4 rounded-xl border border-slate-900 font-mono text-xs text-slate-300">
           <!-- Filled dynamically -->
         </div>
 
         <!-- Live Comment Sidebar -->
-        <div class="w-72 flex flex-col bg-gray-900/60 p-4 rounded-lg border border-gray-800 space-y-3 shrink-0">
-          <h4 class="font-display font-bold text-xs text-gray-300 border-b border-gray-800 pb-1.5 flex items-center gap-1.5">
-            <span>💬</span> Attach Live Comment
+        <div class="w-72 flex flex-col bg-slate-900/60 p-4 rounded-xl border border-slate-800 space-y-3 shrink-0">
+          <h4 class="font-display font-bold text-xs text-slate-300 border-b border-slate-800 pb-2 flex items-center gap-1.5">
+            <span>💬</span> Attach Line Comment
           </h4>
           
           <div class="space-y-1">
-            <label class="text-[9px] text-gray-400 font-semibold uppercase tracking-wider block">Line Range (Optional)</label>
+            <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider block">Line Range (Optional)</label>
             <div class="flex gap-2">
-              <input id="comment-line-start" type="number" placeholder="Start (e.g. 12)" class="w-1/2 bg-gray-950 border border-gray-800 rounded px-2.5 py-1 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-accentIndigo">
-              <input id="comment-line-end" type="number" placeholder="End (e.g. 14)" class="w-1/2 bg-gray-950 border border-gray-800 rounded px-2.5 py-1 text-xs text-white placeholder-gray-600 focus:outline-none focus:border-accentIndigo">
+              <input id="comment-line-start" type="number" placeholder="Start (12)" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
+              <input id="comment-line-end" type="number" placeholder="End (14)" class="w-1/2 bg-slate-950 border border-slate-800 rounded px-2.5 py-1 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-accentIndigo">
             </div>
           </div>
 
           <div class="flex-1 flex flex-col space-y-1">
-            <label class="text-[9px] text-gray-400 font-semibold uppercase tracking-wider block">Comment Description</label>
-            <textarea id="comment-body" placeholder="Describe the issue or suggestions..." class="flex-1 bg-gray-950 border border-gray-800 rounded p-2.5 text-xs text-white placeholder-gray-655 resize-none focus:outline-none focus:border-accentIndigo"></textarea>
+            <label class="text-[9px] text-slate-400 font-semibold uppercase tracking-wider block">Comment Body</label>
+            <textarea id="comment-body" placeholder="Describe feedback or suggestions for next turn..." class="flex-1 bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-xs text-white placeholder-slate-600 resize-none focus:outline-none focus:border-accentIndigo font-sans"></textarea>
           </div>
 
-          <button onclick="submitFileComment()" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-medium text-xs py-2 px-3 rounded shadow transition-all duration-150 flex items-center justify-center gap-1.5 w-full">
-            <span>Send Comment</span>
-            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-message-square"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <button onclick="submitFileComment()" class="bg-accentIndigo hover:bg-opacity-90 text-white font-semibold text-xs py-2 px-3 rounded-lg shadow transition-all flex items-center justify-center gap-1.5 w-full">
+            <span>Send Comment to Agent</span>
           </button>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- JS Logic -->
+  <!-- JS Implementation -->
   <script>
     let sseSource = null;
     let sseActivitySource = null;
     let isConnected = false;
     let eventList = [];
     let activityList = [];
-    let pendingGates = new Map();
+    let pendingGates = new Map(); // gateId -> { entry, payload, type }
     let closedGates = new Set();
     let currentModalGateId = null;
     let currentModalGateType = null;
     let activeGrants = new Set();
+    let activePlanData = null;
+
+    function getConnectInfo() {
+      const sid = document.getElementById('session-input').value.trim();
+      const secret = document.getElementById('secret-input').value.trim();
+      const port = document.getElementById('port-input').value.trim() || '4100';
+      return { sid, secret, port, baseURL: `http://127.0.0.1:${port}` };
+    }
 
     async function fetchWithTimeout(resource, options = {}) {
       const { timeout = 8000 } = options;
@@ -541,9 +609,7 @@
     }
 
     function connect() {
-      const sid = document.getElementById('session-input').value.trim();
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
+      const { sid, secret, baseURL } = getConnectInfo();
 
       if (!sid || !secret) {
         alert("Please enter both Root Session ID and Shared Secret.");
@@ -552,7 +618,7 @@
 
       localStorage.setItem('auto_sid', sid);
       localStorage.setItem('auto_secret', secret);
-      localStorage.setItem('auto_port', port);
+      localStorage.setItem('auto_port', document.getElementById('port-input').value.trim());
 
       const statusIndicator = document.getElementById('status-indicator');
       const statusText = document.getElementById('status-text');
@@ -562,23 +628,22 @@
       statusText.innerText = 'Connecting...';
       connectBtn.innerText = 'Cancel';
       
-      const baseURL = `http://127.0.0.1:${port}`;
-
-      // Reset list states and UI elements to clean loading slate
+      // Reset list states
       eventList = [];
       activityList = [];
       pendingGates.clear();
       closedGates.clear();
       activeGrants.clear();
-      document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-gray-500 text-sm mt-10">Loading timeline history...</div>';
-      document.getElementById('plan-steps').innerHTML = '<div class="text-center text-gray-500 text-xs py-8">Loading active plan...</div>';
+      activePlanData = null;
+
+      document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-slate-500 text-sm mt-12">Loading timeline history...</div>';
+      document.getElementById('plan-steps').innerHTML = '<div class="text-center text-slate-500 text-xs py-6">Loading plan...</div>';
       document.getElementById('plan-version-badge').classList.add('hidden');
-      document.getElementById('workbench-list').innerHTML = '<div class="text-center text-gray-500 text-xs py-4">No active workbenches.</div>';
-      document.getElementById('agent-tree-svg').innerHTML = '';
-      document.getElementById('agent-tree-fallback').style.display = 'flex';
+      document.getElementById('workbench-list').innerHTML = '<div class="text-center text-slate-500 text-xs py-4">No active workbenches.</div>';
+      
       updateHUD();
 
-      // Load all snapshot history first, then start streaming updates
+      // Bootstrap data
       loadInitialSessionData(baseURL, sid, secret);
     }
 
@@ -587,19 +652,18 @@
       const statusText = document.getElementById('status-text');
       const connectBtn = document.getElementById('connect-btn');
 
-      // 1. Fetch entire timeline history page-by-page
+      // 1. Fetch entire timeline history
       await fetchTimelineHistory(baseURL, sid, secret);
 
       // 2. Fetch planframes checklist
       await fetchPlanFrame(baseURL, sid, secret);
 
-      // 3. Fetch initial operator activity history page-by-page
+      // 3. Fetch operator activity history
       await fetchActivityHistory(baseURL, sid, secret);
 
-      // 3b. Fetch live content drafts
+      // 4. Fetch content drafts
       await fetchContentList(baseURL, sid, secret);
 
-      // Verify if still in connecting state
       if (statusText.innerText !== 'Connecting...') return;
 
       isConnected = true;
@@ -609,91 +673,44 @@
       document.getElementById('send-btn').disabled = false;
       document.getElementById('estop-btn').classList.remove('hidden');
 
-      // Trigger lazy loads for active tabs if connect succeeds
-      if (!document.getElementById('tab-content-constitution').classList.contains('hidden')) {
-        fetchConstitution();
-      }
-      if (!document.getElementById('tab-content-wiki').classList.contains('hidden')) {
-        fetchWiki();
-      }
-
-      // 4. Determine timeline stream offset (only fetch events after our snapshot)
-      let lastEventId = null;
-      if (eventList.length > 0) {
-        lastEventId = eventList[eventList.length - 1].event_id;
-      }
-
+      // Timeline SSE Stream
+      let lastEventId = eventList.length > 0 ? eventList[eventList.length - 1].event_id : null;
       let timelineURL = `${baseURL}/api/session/timeline/stream/${sid}?token=${encodeURIComponent(secret)}&min_altitude=detail`;
-      if (lastEventId) {
-        timelineURL += `&after=${encodeURIComponent(lastEventId)}`;
-      }
-      sseSource = new EventSource(timelineURL);
+      if (lastEventId) timelineURL += `&after=${encodeURIComponent(lastEventId)}`;
       
+      sseSource = new EventSource(timelineURL);
       sseSource.addEventListener('session.timeline', (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data && data.entries) {
-            handleTimelineBatch(data.entries);
-          }
-        } catch(e) {
-          console.error("Failed to parse timeline SSE event", e);
-        }
+          if (data && data.entries) handleTimelineBatch(data.entries);
+        } catch(e) {}
       });
 
-      sseSource.addEventListener('error', (err) => {
-        console.error("Timeline SSE source error", err);
-        disconnect();
-      });
-
-      // 5. Determine operator activity stream offset
-      let lastActivityId = null;
-      if (activityList.length > 0) {
-        lastActivityId = activityList[activityList.length - 1].activity_id;
-      }
-
+      // Operator Activity SSE Stream
+      let lastActivityId = activityList.length > 0 ? activityList[activityList.length - 1].activity_id : null;
       let activityURL = `${baseURL}/api/operator/activity/stream/${sid}?token=${encodeURIComponent(secret)}`;
-      if (lastActivityId) {
-        activityURL += `&after=${encodeURIComponent(lastActivityId)}`;
-      }
+      if (lastActivityId) activityURL += `&after=${encodeURIComponent(lastActivityId)}`;
+
       sseActivitySource = new EventSource(activityURL);
-      
       sseActivitySource.addEventListener('operator.activity', (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data && data.activities) {
-            handleActivityBatch(data.activities);
-          }
-        } catch(e) {
-          console.error("Failed to parse activity SSE event", e);
-        }
-      });
-
-      sseActivitySource.addEventListener('error', (err) => {
-        console.warn("Activity SSE source error (ignoring for fallback)", err);
+          if (data && data.activities) handleActivityBatch(data.activities);
+        } catch(e) {}
       });
     }
 
     function disconnect() {
-      if (sseSource) {
-        sseSource.close();
-        sseSource = null;
-      }
-      if (sseActivitySource) {
-        sseActivitySource.close();
-        sseActivitySource = null;
-      }
+      if (sseSource) { sseSource.close(); sseSource = null; }
+      if (sseActivitySource) { sseActivitySource.close(); sseActivitySource = null; }
       isConnected = false;
-      document.getElementById('status-indicator').className = 'w-2.5 h-2.5 rounded-full bg-gray-500';
+      
+      document.getElementById('status-indicator').className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
       document.getElementById('status-text').innerText = 'Disconnected';
       document.getElementById('connect-btn').innerText = 'Connect';
       document.getElementById('send-btn').disabled = true;
       document.getElementById('estop-btn').classList.add('hidden');
-      document.getElementById('timeline-stream').innerHTML = '<div class="text-center text-gray-500 text-sm mt-10">Disconnected. Re-enter credentials to stream.</div>';
-      document.getElementById('plan-steps').innerHTML = '<div class="text-center text-gray-500 text-xs py-8">No plan loaded yet.</div>';
-      document.getElementById('plan-version-badge').classList.add('hidden');
-      document.getElementById('workbench-list').innerHTML = '<div class="text-center text-gray-500 text-xs py-4">No active workbenches.</div>';
-      document.getElementById('agent-tree-svg').innerHTML = '';
-      document.getElementById('agent-tree-fallback').style.display = 'flex';
+      document.getElementById('header-gate-alert').classList.add('hidden');
       
       eventList = [];
       activityList = [];
@@ -706,221 +723,113 @@
     async function fetchTimelineHistory(baseURL, sid, secret) {
       let lastCursor = null;
       let hasMore = true;
-      const seenCursors = new Set();
-      console.log("Starting timeline history fetch for root session:", sid);
+      const seen = new Set();
       try {
         while (hasMore) {
-          if (lastCursor && seenCursors.has(lastCursor)) {
-            console.warn("Detected circular timeline cursor:", lastCursor);
-            break;
-          }
-          if (lastCursor) seenCursors.add(lastCursor);
+          if (lastCursor && seen.has(lastCursor)) break;
+          if (lastCursor) seen.add(lastCursor);
           
           const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${secret}`
-            },
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
             body: JSON.stringify({
               jsonrpc: '2.0',
               id: `bootstrap-tl-${lastCursor || 'start'}`,
               method: 'session.timeline.list',
-              params: {
-                root_session_id: sid,
-                min_altitude: 'detail',
-                limit: 150,
-                after_event_id: lastCursor || undefined
-              }
+              params: { root_session_id: sid, min_altitude: 'detail', limit: 150, after_event_id: lastCursor || undefined }
             })
           });
           const json = await resp.json();
           if (json && json.result) {
-            const result = json.result;
-            console.log("Fetched timeline history page, entries count:", result.entries ? result.entries.length : 0, "has_more:", result.has_more, "next_cursor:", result.next_cursor);
-            if (result.entries && result.entries.length > 0) {
-              handleTimelineBatch(result.entries);
+            if (json.result.entries && json.result.entries.length > 0) {
+              handleTimelineBatch(json.result.entries);
             }
-            lastCursor = result.next_cursor;
-            hasMore = result.has_more && result.entries && result.entries.length > 0;
-          } else {
-            console.warn("Invalid jsonrpc result for timeline list:", json);
-            hasMore = false;
-          }
+            lastCursor = json.result.next_cursor;
+            hasMore = json.result.has_more && json.result.entries && json.result.entries.length > 0;
+          } else break;
         }
-      } catch(e) {
-        console.error("Failed to bootstrap snapshot timeline", e);
-      }
+      } catch(e) {}
     }
 
     async function fetchActivityHistory(baseURL, sid, secret) {
       let lastCursor = null;
       let hasMore = true;
-      const seenCursors = new Set();
-      console.log("Starting activity history fetch for root session:", sid);
       try {
         while (hasMore) {
-          if (lastCursor && seenCursors.has(lastCursor)) {
-            console.warn("Detected circular activity cursor:", lastCursor);
-            break;
-          }
-          if (lastCursor) seenCursors.add(lastCursor);
-
           const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${secret}`
-            },
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
             body: JSON.stringify({
               jsonrpc: '2.0',
               id: `bootstrap-act-${lastCursor || 'start'}`,
               method: 'operator.activity.list',
-              params: {
-                root_session_id: sid,
-                limit: 150,
-                after_activity_id: lastCursor || undefined
-              }
+              params: { root_session_id: sid, limit: 150, after_activity_id: lastCursor || undefined }
             })
           });
           const json = await resp.json();
-          if (json && json.result) {
-            const result = json.result;
-            console.log("Fetched activity history page, activities count:", result.activities ? result.activities.length : 0, "has_more:", result.has_more, "next_cursor:", result.next_cursor);
-            if (result.activities && result.activities.length > 0) {
-              handleActivityBatch(result.activities);
-            }
-            lastCursor = result.next_cursor;
-            hasMore = result.has_more && result.activities && result.activities.length > 0;
-          } else {
-            console.warn("Invalid jsonrpc result for activity list:", json);
-            hasMore = false;
-          }
+          if (json && json.result && json.result.activities) {
+            handleActivityBatch(json.result.activities);
+            lastCursor = json.result.next_cursor;
+            hasMore = json.result.has_more && json.result.activities.length > 0;
+          } else break;
         }
-      } catch(e) {
-        console.error("Failed to bootstrap snapshot activities", e);
-      }
-    }
-
-    async function fetchTimelineSnapshot(baseURL, sid, secret) {
-      let lastEventId = eventList.length > 0 ? eventList[eventList.length - 1].event_id : null;
-      console.log("Refreshing timeline snapshot, starting after event ID:", lastEventId);
-      try {
-        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'refresh-tl',
-            method: 'session.timeline.list',
-            params: {
-              root_session_id: sid,
-              min_altitude: 'detail',
-              limit: 100,
-              after_event_id: lastEventId || undefined
-            }
-          })
-        });
-        const json = await resp.json();
-        if (json && json.result && json.result.entries) {
-          console.log("Timeline snapshot refreshed, new entries fetched:", json.result.entries.length);
-          handleTimelineBatch(json.result.entries);
-        }
-      } catch(e) {
-        console.error("Failed to refresh timeline snapshot", e);
-      }
+      } catch(e) {}
     }
 
     async function fetchPlanFrame(baseURL, sid, secret) {
-      console.log("Fetching active PlanFrame for root session:", sid);
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
           body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'bootstrap-plan',
-            method: 'planframes.get_active',
-            params: { root_session_id: sid }
+            jsonrpc: '2.0', id: 'get-plan', method: 'planframes.get_active', params: { root_session_id: sid }
           })
         });
         const json = await resp.json();
         if (json && json.result && json.result.plan) {
-          const activePlan = json.result.plan;
-          console.log("PlanFrame fetched successfully, version:", activePlan.version);
-          renderPlanFrame(activePlan);
-        } else {
-          console.log("No active plan found.");
-          document.getElementById('plan-steps').innerHTML = '<div class="text-center text-gray-500 text-xs py-8">No active plan configured.</div>';
-          document.getElementById('plan-version-badge').classList.add('hidden');
+          activePlanData = json.result.plan;
+          renderPlanFrame(activePlanData);
+          renderWorkflowDAG();
         }
-      } catch(e) {
-        console.error("Failed to load planframes", e);
-      }
+      } catch(e) {}
     }
 
     async function fetchContentList(baseURL, sid, secret) {
-      console.log("Fetching live content list for session:", sid);
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
           body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'fetch-content-list',
-            method: 'content.list',
-            params: { session_id: sid }
+            jsonrpc: '2.0', id: 'fetch-content', method: 'content.list', params: { session_id: sid }
           })
         });
         const json = await resp.json();
         if (json && json.result && json.result.files) {
           renderContentList(json.result.files, sid);
         }
-      } catch (e) {
-        console.error("Failed to fetch content list", e);
-      }
+      } catch(e) {}
     }
 
     function renderContentList(files, sid) {
       const listDiv = document.getElementById('workbench-list');
       if (!files || files.length === 0) {
-        listDiv.innerHTML = '<div class="text-center text-gray-500 text-xs py-4">No active workbenches or drafts.</div>';
+        listDiv.innerHTML = '<div class="text-center text-slate-500 text-xs py-4">No active workbenches or drafts.</div>';
         return;
       }
 
       listDiv.innerHTML = '';
       files.forEach(file => {
-        let badgeColor = 'bg-gray-800 text-gray-400';
-        let badgeGlyph = '🔒 private';
-        if (file.visibility === 'global') {
-          badgeColor = 'bg-accentIndigo/10 text-accentIndigo border border-accentIndigo/20';
-          badgeGlyph = '🌐 global';
-        } else if (file.visibility === 'session') {
-          badgeColor = 'bg-accentViolet/10 text-accentViolet border border-accentViolet/20';
-          badgeGlyph = '📦 session';
-        }
-
         const item = document.createElement('div');
-        item.className = 'p-2 rounded border border-gray-800 bg-gray-900 bg-opacity-20 flex items-center justify-between gap-2 text-xs hover:bg-opacity-40 hover:border-gray-700 transition-all duration-100';
+        item.className = 'p-2 rounded border border-slate-800 bg-slate-900 bg-opacity-30 flex items-center justify-between gap-2 text-xs hover:bg-opacity-50 transition-all';
         item.innerHTML = `
           <div class="flex-1 min-w-0">
-            <span class="font-mono text-gray-250 font-semibold block truncate" title="${file.name}">📄 ${file.name}</span>
-            <div class="flex gap-2 items-center mt-1">
-              <span class="text-[9px] font-mono text-gray-500">alias: ${file.alias}</span>
-              <span class="text-[9px] px-1 rounded ${badgeColor}">${badgeGlyph}</span>
-              <span class="text-[9px] font-semibold text-accentRed bg-accentRed/10 border border-accentRed/20 px-1 rounded">draft</span>
+            <span class="font-mono text-slate-200 font-semibold block truncate" title="${file.name}">📄 ${file.name}</span>
+            <div class="flex gap-1.5 items-center mt-0.5 text-[9px] font-mono text-slate-500">
+              <span>alias: ${file.alias}</span>
+              <span class="px-1 rounded bg-accentIndigo/10 text-accentIndigo border border-accentIndigo/20">${file.visibility}</span>
             </div>
           </div>
-          <button onclick="inspectFile('${file.name}', '${sid}')" class="text-accentIndigo hover:underline font-semibold font-mono text-[10px] uppercase shrink-0">Inspect</button>
+          <button onclick="inspectFile('${file.name}', '${sid}')" class="bg-accentIndigo/20 border border-accentIndigo/30 text-accentIndigo hover:bg-accentIndigo hover:text-white px-2.5 py-1 rounded text-[10px] font-mono font-bold uppercase transition-all">Inspect</button>
         `;
         listDiv.appendChild(item);
       });
@@ -931,7 +840,7 @@
       const badge = document.getElementById('plan-version-badge');
       
       if (!plan || !plan.steps || plan.steps.length === 0) {
-        planStepsDiv.innerHTML = '<div class="text-center text-gray-500 text-xs py-8">No plan steps configured.</div>';
+        planStepsDiv.innerHTML = '<div class="text-center text-slate-500 text-xs py-6">No active plan configured.</div>';
         badge.classList.add('hidden');
         return;
       }
@@ -942,8 +851,8 @@
       planStepsDiv.innerHTML = '';
       plan.steps.forEach((step, idx) => {
         let statusIcon = '⏳';
-        let statusStyle = 'text-gray-500';
-        let bgStyle = 'bg-gray-900 bg-opacity-25';
+        let statusStyle = 'text-slate-500';
+        let bgStyle = 'bg-slate-900 bg-opacity-25 border-slate-800';
 
         if (step.status === 'Completed' || step.status === 'success') {
           statusIcon = '✅';
@@ -951,15 +860,15 @@
         } else if (step.status === 'Active' || step.status === 'running') {
           statusIcon = '⚙️';
           statusStyle = 'text-accentIndigo font-semibold';
-          bgStyle = 'border border-accentIndigo/30 bg-accentIndigo/5 glow-indigo';
+          bgStyle = 'border-accentIndigo/30 bg-accentIndigo/5 glow-indigo';
         }
 
         const stepCard = document.createElement('div');
-        stepCard.className = `p-3 rounded-lg border border-gray-800 ${bgStyle} flex items-start justify-between gap-3`;
+        stepCard.className = `p-2.5 rounded-lg border ${bgStyle} flex items-start justify-between gap-3`;
         stepCard.innerHTML = `
           <div class="flex-1">
-            <span class="text-xs text-gray-500 font-mono block">Step ${idx + 1} · ${step.owner || 'Planner'}</span>
-            <span class="text-sm text-gray-100 font-medium block">${step.title || 'Untitled Step'}</span>
+            <span class="text-[10px] text-slate-500 font-mono block">Step ${idx + 1} · ${step.owner || 'Planner'}</span>
+            <span class="text-xs text-slate-200 font-semibold block">${step.title || 'Untitled Step'}</span>
           </div>
           <span class="text-sm ${statusStyle}">${statusIcon}</span>
         `;
@@ -968,33 +877,22 @@
     }
 
     function handleTimelineBatch(entries) {
-      // Avoid rendering exact duplicates
       const fresh = entries.filter(e => !eventList.some(x => x.event_id === e.event_id));
       if (fresh.length === 0) return;
 
       eventList = [...eventList, ...fresh].sort((a, b) => new Date(a.occurred_at) - new Date(b.occurred_at));
+      
       detectGates();
       renderTimeline();
       updateAgentTree();
+      renderWorkflowDAG();
 
-      // Refresh active plan steps when plan is proposed or approved
-      const hasPlanUpdate = fresh.some(e => e.event_type === 'plan.pending' || e.event_type === 'plan.approved');
-      if (hasPlanUpdate && isConnected) {
-        const sid = document.getElementById('session-input').value.trim();
-        const secret = document.getElementById('secret-input').value.trim();
-        const port = document.getElementById('port-input').value.trim();
-        const baseURL = `http://127.0.0.1:${port}`;
-        fetchPlanFrame(baseURL, sid, secret);
+      const info = getConnectInfo();
+      if (fresh.some(e => e.event_type.startsWith('plan.')) && isConnected) {
+        fetchPlanFrame(info.baseURL, info.sid, info.secret);
       }
-
-      // Refresh content list when there's a new content write event
-      const hasContentWrite = fresh.some(e => e.event_type === 'content_write');
-      if (hasContentWrite && isConnected) {
-        const sid = document.getElementById('session-input').value.trim();
-        const secret = document.getElementById('secret-input').value.trim();
-        const port = document.getElementById('port-input').value.trim();
-        const baseURL = `http://127.0.0.1:${port}`;
-        fetchContentList(baseURL, sid, secret);
+      if (fresh.some(e => e.event_type === 'content_write') && isConnected) {
+        fetchContentList(info.baseURL, info.sid, info.secret);
       }
     }
 
@@ -1010,182 +908,223 @@
       renderTimeline();
     }
 
+    function toggleRowJson(eventId) {
+      const el = document.getElementById(`json-${eventId}`);
+      if (el) el.classList.toggle('hidden');
+    }
+
     function renderTimeline() {
       const streamDiv = document.getElementById('timeline-stream');
+      const countBadge = document.getElementById('timeline-count-badge');
       const altitudeFilter = document.getElementById('altitude-filter').value;
       
+      countBadge.innerText = `${eventList.length} events`;
+
       const filtered = eventList.filter(e => {
         const alt = (e.altitude || '').toLowerCase();
         if (altitudeFilter === 'error') return alt === 'error';
         if (altitudeFilter === 'attention') return alt === 'attention' || alt === 'error';
         if (altitudeFilter === 'normal') return alt !== 'detail';
-        return true; // All details
+        return true;
       });
 
       if (filtered.length === 0) {
-        streamDiv.innerHTML = '<div class="text-center text-gray-500 text-sm mt-10">No events matched the altitude filter.</div>';
+        streamDiv.innerHTML = '<div class="text-center text-slate-500 text-sm mt-10">No events matched altitude filter.</div>';
         return;
       }
 
       streamDiv.innerHTML = '';
       filtered.forEach(e => {
         const item = document.createElement('div');
-        item.className = 'flex gap-4 p-3.5 rounded-xl border border-gray-800/40 bg-gray-900 bg-opacity-30 hover:bg-opacity-40 hover:border-gray-800 transition-all duration-100 cursor-pointer';
-        item.onclick = (event) => {
-          if (event.target.closest('button')) return;
-          showEventDetails(e.event_id);
-        };
+        item.className = 'flex gap-3 p-3.5 rounded-xl border border-slate-800 bg-slate-900/60 hover:bg-slate-900 hover:border-slate-700 transition-all';
 
-        // 1. Altitude/Icon column
-        const altLower = (e.altitude || '').toLowerCase();
-        let altColor = 'text-gray-500';
+        let altColor = 'text-slate-500';
         let altGlyph = '·';
+        const altLower = (e.altitude || '').toLowerCase();
         if (altLower === 'error') { altColor = 'text-accentRed'; altGlyph = '✗'; }
         else if (altLower === 'attention') { altColor = 'text-accentAmber'; altGlyph = '⚠'; }
         else if (altLower === 'normal') { altColor = 'text-accentIndigo'; altGlyph = '▸'; }
 
-        // 2. Formatting Actor labels
         let actorLabel = 'System';
-        let avatarStyle = 'from-gray-700 to-gray-800';
-        let roleBadge = '';
-        
+        let avatarStyle = 'from-slate-700 to-slate-800';
         const roleObj = e.role || {};
         const roleType = typeof roleObj === 'string' ? roleObj : (roleObj.role || 'system');
         
         if (e.principal && e.principal.kind === 'Human') {
-          actorLabel = '🧑 Operator';
-          avatarStyle = 'from-accentGreen to-emerald-600';
+          actorLabel = '🧑 Operator'; avatarStyle = 'from-accentGreen to-emerald-600';
         } else if (roleType === 'planner') {
-          actorLabel = '🤖 Planner';
-          avatarStyle = 'from-accentViolet to-fuchsia-600';
+          actorLabel = '🤖 Planner'; avatarStyle = 'from-accentViolet to-fuchsia-600';
         } else if (roleType === 'sentinel') {
-          actorLabel = '🛡️ Sentinel';
-          avatarStyle = 'from-accentAmber to-yellow-600';
+          actorLabel = '🛡️ Sentinel'; avatarStyle = 'from-accentAmber to-yellow-600';
         } else if (roleType === 'specialist') {
           const kind = roleObj.kind || 'specialist';
-          const kindCap = kind.charAt(0).toUpperCase() + kind.slice(1);
-          actorLabel = `👾 ${kindCap}`;
-          avatarStyle = 'from-accentIndigo to-sky-600';
-        } else if (roleType === 'operator') {
-          actorLabel = '🧑 Operator';
-          avatarStyle = 'from-accentGreen to-emerald-600';
-        } else if (roleType === 'curator') {
-          actorLabel = '📚 Curator';
-          avatarStyle = 'from-teal-600 to-emerald-700';
-        } else if (roleType === 'auditor') {
-          actorLabel = '🔍 Auditor';
-          avatarStyle = 'from-accentRed to-rose-700';
-        } else if (roleType === 'runtime') {
-          actorLabel = '💻 Runtime';
-          avatarStyle = 'from-slate-600 to-slate-700';
-        } else {
-          actorLabel = roleType.charAt(0).toUpperCase() + roleType.slice(1);
+          actorLabel = `👾 ${kind.charAt(0).toUpperCase() + kind.slice(1)}`; avatarStyle = 'from-accentIndigo to-sky-600';
         }
 
-        // Summary details parsing
-        let summary = extractSummary(e);
         let payload = null;
-        try {
-          if (e.payload) payload = JSON.parse(e.payload);
-        } catch(err) {}
+        try { if (e.payload) payload = JSON.parse(e.payload); } catch(err) {}
 
-        let cardContent = '';
-        if (payload) {
-          if (e.event_type === 'content_write' || payload.tool_name === 'content_write') {
-            const fileName = payload.name || payload.sandbox_path || 'file';
-            cardContent = `
-              <div class="mt-2 text-xs bg-gray-950 bg-opacity-50 p-2.5 rounded-lg border border-gray-850 flex items-center justify-between">
-                <span class="font-mono text-gray-300">📄 ${fileName}</span>
-                <button onclick="inspectFile('${fileName}', '${e.session_id}')" class="text-accentIndigo hover:underline font-semibold font-mono text-[10px] uppercase">Inspect</button>
-              </div>
-            `;
-          } else if (e.event_type === 'approval.pending') {
-            const aprId = payload.request_id || e.event_id;
-            const isClosed = closedGates.has(aprId);
-            cardContent = `
-              <div class="mt-2.5 p-3 rounded-lg border border-accentAmber/30 bg-accentAmber/5 flex flex-col space-y-2">
-                <div class="flex items-center justify-between">
-                  <span class="text-xs text-accentAmber font-semibold tracking-wide uppercase">Gate Approval Required</span>
-                  <span class="text-[10px] font-mono text-gray-500">${aprId}</span>
-                </div>
-                <p class="text-xs text-gray-400 font-mono">${payload.command || payload.summary || 'Operation checks failed'}</p>
-                <div class="flex justify-end gap-2 pt-1.5">
-                  ${isClosed ? 
-                    `<span class="text-[10px] text-emerald-500 font-semibold tracking-wider uppercase border border-emerald-500 border-opacity-35 px-2 py-0.5 rounded bg-emerald-500 bg-opacity-5">✓ Resolved</span>` :
-                    `<button onclick="openGateModalById('${aprId}')" class="bg-accentAmber hover:bg-opacity-90 active:scale-95 text-gray-950 font-bold text-[10px] px-3.5 py-1.5 rounded uppercase">Resolve Gate</button>`
-                  }
-                </div>
-              </div>
-            `;
-          } else if (e.event_type === 'user.ask.pending') {
-            const askId = payload.interaction_id || e.event_id;
-            const isClosed = closedGates.has(askId);
-            cardContent = `
-              <div class="mt-2.5 p-3 rounded-lg border border-accentIndigo/30 bg-accentIndigo/5 flex flex-col space-y-2">
-                <div class="flex items-center justify-between">
-                  <span class="text-xs text-accentIndigo font-semibold tracking-wide uppercase">Clarification Request</span>
-                  <span class="text-[10px] font-mono text-gray-500">${askId}</span>
-                </div>
-                <p class="text-xs text-gray-300 font-medium">${payload.question || 'Agent requested feedback.'}</p>
-                <div class="flex justify-end gap-2 pt-1.5">
-                  ${isClosed ?
-                    `<span class="text-[10px] text-emerald-500 font-semibold tracking-wider uppercase border border-emerald-500 border-opacity-35 px-2 py-0.5 rounded bg-emerald-500 bg-opacity-5">✓ Answered</span>` :
-                    `<button onclick="openGateModalById('${askId}')" class="bg-accentIndigo hover:bg-opacity-90 active:scale-95 text-white font-bold text-[10px] px-3.5 py-1.5 rounded uppercase">Provide Answer</button>`
-                  }
-                </div>
-              </div>
-            `;
-          } else if (e.event_type === 'operator.comment') {
-            let lineHint = '';
-            if (payload.line_start) {
-              if (payload.line_end && payload.line_end !== payload.line_start) {
-                lineHint = ` · lines ${payload.line_start}–${payload.line_end}`;
-              } else {
-                lineHint = ` · line ${payload.line_start}`;
-              }
-            }
-            cardContent = `
-              <div class="mt-2.5 p-3 rounded-lg border border-accentAmber/30 bg-accentAmber/5 flex flex-col space-y-1.5">
-                <div class="flex items-center justify-between">
-                  <span class="text-xs text-accentAmber font-semibold tracking-wide uppercase flex items-center gap-1">
-                    <span>💬</span> Operator File Comment
-                  </span>
-                  <span class="text-[9px] font-mono text-gray-500">${payload.comment_id || 'comment'}</span>
-                </div>
-                <div class="text-xs text-gray-300 font-mono">
-                  File: <span class="text-white font-semibold">${payload.name || ''}</span>${lineHint}
-                  ${payload.drifted ? `<span class="ml-2 bg-accentRed/10 text-accentRed border border-accentRed/20 px-1 rounded text-[9px] font-semibold">drifted</span>` : ''}
-                </div>
-                <p class="text-xs text-gray-250 mt-1 italic border-l-2 border-accentAmber/40 pl-2 bg-gray-950/40 py-1.5 rounded-r font-sans leading-relaxed">${escapeHTML(payload.body || '')}</p>
-              </div>
-            `;
-          }
-        }
+        // Rich Content Card construction based on event_type
+        let richBody = '';
+        const eventType = e.event_type || '';
 
-        // Highlight operator messages
-        let messageStyle = 'text-gray-300';
-        if (e.event_type === 'operator.message') {
-          messageStyle = 'text-white font-medium';
+        if (eventType === 'tool.call' || eventType === 'tool.request') {
+          const toolName = payload?.tool_name || payload?.name || 'tool';
+          const cmd = payload?.command || (payload?.arguments ? (typeof payload.arguments === 'string' ? payload.arguments : JSON.stringify(payload.arguments, null, 2)) : '');
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border border-accentIndigo/30 bg-slate-950/80 space-y-1.5 font-mono text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-accentIndigo font-bold flex items-center gap-1.5">
+                  <span>🔧 Tool Call:</span> <code>${toolName}</code>
+                </span>
+                ${payload?.driver ? `<span class="text-[9px] text-slate-500 bg-slate-900 border border-slate-800 px-1.5 py-0.5 rounded">${payload.driver}</span>` : ''}
+              </div>
+              ${cmd ? `<div class="text-[11px] text-slate-200 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-28">${escapeHTML(cmd)}</div>` : ''}
+            </div>
+          `;
+        } else if (eventType === 'tool.result' || eventType === 'tool.response') {
+          const toolName = payload?.tool_name || payload?.name || 'tool';
+          const isSuccess = payload?.ok !== false && payload?.status !== 'failed' && payload?.exit_code === 0;
+          const statusBadge = isSuccess
+            ? '<span class="text-accentGreen font-bold text-[10px] uppercase bg-accentGreen/10 border border-accentGreen/20 px-1.5 py-0.5 rounded">✓ Success</span>'
+            : '<span class="text-accentRed font-bold text-[10px] uppercase bg-accentRed/10 border border-accentRed/20 px-1.5 py-0.5 rounded">✗ Failed</span>';
+          
+          let outSnippet = payload?.stdout || payload?.output || payload?.result || payload?.error || '';
+          if (typeof outSnippet === 'object') outSnippet = JSON.stringify(outSnippet, null, 2);
+          
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1.5 font-mono text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-slate-300 font-semibold">⚡ Result: <code>${toolName}</code></span>
+                ${statusBadge}
+              </div>
+              ${outSnippet ? `<div class="text-[11px] text-slate-300 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-36">${escapeHTML(String(outSnippet))}</div>` : ''}
+              ${payload?.handle ? `
+                <div class="flex justify-end pt-1">
+                  <button onclick="inspectFile('${payload.name || payload.handle}', '${e.session_id}')" class="text-accentIndigo hover:underline font-mono text-[10px] uppercase font-bold">Inspect Artifact (${payload.handle.substring(0, 10)}...)</button>
+                </div>
+              ` : ''}
+            </div>
+          `;
+        } else if (eventType === 'content_write' || payload?.tool_name === 'content_write') {
+          const fileName = payload?.name || payload?.sandbox_path || 'file';
+          const snippet = payload?.content || payload?.patch || '';
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1.5 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="font-mono text-slate-200 font-bold flex items-center gap-1.5">
+                  <span>📄 Draft Write:</span> <code>${fileName}</code>
+                </span>
+                <button onclick="inspectFile('${fileName}', '${e.session_id}')" class="bg-accentIndigo/20 text-accentIndigo border border-accentIndigo/30 hover:bg-accentIndigo hover:text-white px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase transition-all">Inspect Full Content</button>
+              </div>
+              ${snippet ? `<div class="font-mono text-[11px] text-slate-300 bg-slate-900 p-2 rounded border border-slate-850 overflow-x-auto whitespace-pre-wrap max-h-28">${escapeHTML(String(snippet).substring(0, 300))}${snippet.length > 300 ? '...' : ''}</div>` : ''}
+            </div>
+          `;
+        } else if (eventType === 'llm.round') {
+          const inTok = payload?.input_tokens || 0;
+          const outTok = payload?.output_tokens || 0;
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border border-slate-800 bg-slate-950/80 space-y-1 text-xs">
+              <div class="flex items-center justify-between text-slate-400 font-mono text-[10px]">
+                <span>🧠 LLM Reasoning Round</span>
+                <span>In: ${inTok.toLocaleString()} tok │ Out: ${outTok.toLocaleString()} tok</span>
+              </div>
+              ${payload?.thinking || payload?.intent ? `
+                <p class="text-slate-300 text-xs italic bg-slate-900/60 p-2 rounded border-l-2 border-accentIndigo pl-2.5 font-sans">${escapeHTML(payload.thinking || payload.intent)}</p>
+              ` : ''}
+            </div>
+          `;
+        } else if (eventType === 'approval.pending') {
+          const aprId = payload?.request_id || e.event_id;
+          const isClosed = closedGates.has(aprId);
+          richBody = `
+            <div class="mt-2 p-3 rounded-lg border border-accentAmber/40 bg-accentAmber/10 flex flex-col space-y-2 glow-amber text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-accentAmber font-bold uppercase tracking-wide flex items-center gap-1.5">
+                  <span>⏸</span> DAG Approval Gate Required
+                </span>
+                <span class="font-mono text-[10px] text-slate-400">${aprId}</span>
+              </div>
+              <div class="font-mono text-xs text-slate-200 bg-slate-950 p-2 rounded border border-slate-900">${escapeHTML(payload?.command || payload?.summary || 'Privileged operation check')}</div>
+              <div class="flex justify-end gap-2 pt-1">
+                ${isClosed ? 
+                  `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Resolved</span>` :
+                  `<button onclick="openGateModalById('${aprId}')" class="bg-accentAmber hover:bg-opacity-95 text-slate-955 font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Resolve Gate & Inspect</button>`
+                }
+              </div>
+            </div>
+          `;
+        } else if (eventType === 'user.ask.pending') {
+          const askId = payload?.interaction_id || e.event_id;
+          const isClosed = closedGates.has(askId);
+          richBody = `
+            <div class="mt-2 p-3 rounded-lg border border-accentIndigo/40 bg-accentIndigo/10 flex flex-col space-y-2 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-accentIndigo font-bold uppercase tracking-wide flex items-center gap-1.5">
+                  <span>❓</span> Clarification Question
+                </span>
+                <span class="font-mono text-[10px] text-slate-400">${askId}</span>
+              </div>
+              <p class="text-slate-200 font-medium">${escapeHTML(payload?.question || 'Agent requested user feedback.')}</p>
+              <div class="flex justify-end pt-1">
+                ${isClosed ? 
+                  `<span class="text-[10px] text-emerald-400 font-bold uppercase border border-emerald-500/40 px-2 py-0.5 rounded bg-emerald-500/10">✓ Answered</span>` :
+                  `<button onclick="openGateModalById('${askId}')" class="bg-accentIndigo hover:bg-opacity-90 text-white font-bold text-[10px] px-3 py-1.5 rounded uppercase shadow">Provide Answer</button>`
+                }
+              </div>
+            </div>
+          `;
+        } else if (eventType === 'operator.comment') {
+          richBody = `
+            <div class="mt-2 p-2.5 rounded-lg border border-accentAmber/30 bg-accentAmber/5 space-y-1 text-xs">
+              <div class="flex items-center justify-between">
+                <span class="text-accentAmber font-bold flex items-center gap-1">
+                  <span>💬</span> Line Comment: <code class="text-slate-200 ml-1">${payload?.name || 'file'}</code>
+                </span>
+                ${payload?.line_start ? `<span class="font-mono text-[10px] text-slate-400">L${payload.line_start}${payload.line_end ? `–${payload.line_end}` : ''}</span>` : ''}
+              </div>
+              <p class="text-slate-200 italic bg-slate-950/60 p-2 rounded border-l-2 border-accentAmber pl-2.5 font-sans">${escapeHTML(payload?.body || '')}</p>
+            </div>
+          `;
+        } else if (eventType === 'operator.message') {
+          richBody = `
+            <div class="mt-1.5 p-2.5 rounded-lg border border-accentGreen/30 bg-accentGreen/5 text-slate-100 text-xs font-medium leading-relaxed">
+              ${escapeHTML(payload?.message || payload?.text || extractSummary(e))}
+            </div>
+          `;
+        } else if (payload && Object.keys(payload).length > 0) {
+          const keys = Object.keys(payload).slice(0, 4);
+          const fields = keys.map(k => `<span class="text-slate-400">${k}:</span> <span class="text-slate-200 font-semibold">${escapeHTML(String(payload[k]))}</span>`).join(' │ ');
+          richBody = `
+            <div class="mt-1.5 p-2 rounded border border-slate-850 bg-slate-950/50 text-[11px] font-mono text-slate-300">
+              ${fields}
+            </div>
+          `;
         }
 
         item.innerHTML = `
           <div class="w-8 h-8 rounded-full bg-gradient-to-tr ${avatarStyle} flex items-center justify-center font-display font-bold text-xs shadow text-white shrink-0 mt-0.5">
             ${actorLabel.charAt(0)}
           </div>
-          <div class="flex-1 space-y-0.5">
-            <div class="flex items-center justify-between">
-              <span class="text-xs text-gray-400 font-bold font-display">${actorLabel}</span>
-              <span class="text-[10px] text-gray-600 font-mono">${formatTime(e.occurred_at)}</span>
+          <div class="flex-1 space-y-1 min-w-0">
+            <div class="flex items-center justify-between text-xs">
+              <div class="flex items-center gap-2">
+                <span class="text-slate-200 font-bold font-display">${actorLabel}</span>
+                <span class="bg-slate-800 text-slate-400 font-mono text-[9px] px-2 py-0.5 rounded">${eventType}</span>
+                ${e.turn_id ? `<span class="text-[9px] font-mono text-slate-500">turn ${e.turn_id}</span>` : ''}
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] text-slate-500 font-mono">${formatTime(e.occurred_at)}</span>
+                <button onclick="toggleRowJson('${e.event_id}')" class="text-[10px] text-slate-500 hover:text-accentIndigo font-mono bg-slate-950 px-1.5 py-0.5 rounded border border-slate-850">{ } JSON</button>
+              </div>
             </div>
-            <p class="text-sm ${messageStyle} leading-relaxed">${summary}</p>
-            ${cardContent}
+            ${richBody}
+            <pre id="json-${e.event_id}" class="hidden mt-2 font-mono text-[10px] bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-400 overflow-x-auto leading-relaxed select-all max-h-60">${escapeHTML(JSON.stringify(e, null, 2))}</pre>
           </div>
         `;
-        
         streamDiv.appendChild(item);
       });
 
-      // Keep timeline auto-scrolled to bottom
       streamDiv.scrollTop = streamDiv.scrollHeight;
     }
 
@@ -1200,49 +1139,25 @@
       const text = input.value.trim();
       if (!text) return;
 
-      const sid = document.getElementById('session-input').value.trim();
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-
+      const { sid, secret, baseURL } = getConnectInfo();
       input.value = '';
       input.disabled = true;
 
       fetchWithTimeout(`${baseURL}/api/event/ingest`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${secret}`
-        },
-        body: JSON.stringify({
-          event_type: 'chat',
-          message: text,
-          session_id: sid,
-          async_mode: true
-        })
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+        body: JSON.stringify({ event_type: 'chat', message: text, session_id: sid, async_mode: true })
       })
       .then(res => res.json())
-      .then(data => {
-        input.disabled = false;
-        input.focus();
-      })
-      .catch(e => {
-        console.error("Failed to send message", e);
-        alert("Failed to send message: " + e.message);
-        input.disabled = false;
-      });
+      .then(() => { input.disabled = false; input.focus(); })
+      .catch(e => { alert("Send failed: " + e.message); input.disabled = false; });
     }
 
-    // Capture enter key in composer
     document.getElementById('composer-input').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
-      }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
     });
 
     function detectGates() {
-      // Scan timeline entries to find pending approvals or user requests
       closedGates.clear();
       eventList.forEach(e => {
         if (['approval.resolved', 'approval.approved', 'approval.rejected', 'approval.cancelled', 'interaction.resolved'].includes(e.event_type)) {
@@ -1268,13 +1183,32 @@
         }
       });
 
-      // Auto-open modal if there is a pending gate that we haven't resolved yet
+      // Update Header alert
+      const gateCount = pendingGates.size;
+      const alertPill = document.getElementById('header-gate-alert');
+      const alertCount = document.getElementById('header-gate-count');
+      
+      if (gateCount > 0) {
+        alertCount.innerText = gateCount;
+        alertPill.classList.remove('hidden');
+      } else {
+        alertPill.classList.add('hidden');
+      }
+
+      // Auto-open modal if new gate
       if (newestPending && newestPending !== currentModalGateId && document.getElementById('gate-modal').classList.contains('hidden')) {
         openGateModalById(newestPending);
       }
     }
 
-    function openGateModalById(gateId) {
+    function openActiveGateModal() {
+      if (pendingGates.size > 0) {
+        const firstKey = pendingGates.keys().next().value;
+        openGateModalById(firstKey);
+      }
+    }
+
+    async function openGateModalById(gateId) {
       const gate = pendingGates.get(gateId);
       if (!gate) return;
 
@@ -1283,12 +1217,12 @@
       
       const modal = document.getElementById('gate-modal');
       const title = document.getElementById('modal-title');
+      const subtitle = document.getElementById('modal-subtitle');
       const mId = document.getElementById('modal-gate-id');
       const body = document.getElementById('modal-body');
       
       const textInput = document.getElementById('modal-text-input');
       const choicesDiv = document.getElementById('modal-choices');
-      const submitBtn = document.getElementById('modal-submit-btn');
       const rejectBtn = document.getElementById('modal-reject-btn');
       const label = document.getElementById('modal-input-label');
 
@@ -1300,49 +1234,75 @@
       rejectBtn.classList.add('hidden');
       
       if (gate.type === 'approval.pending') {
-        title.innerText = '⏸ Gate Approval Needed';
-        title.className = 'font-display font-bold text-base text-accentAmber flex items-center gap-2';
-        label.innerText = 'Motivation (Why are you approving?)';
+        title.innerText = '⏸ Gate Approval Required';
+        subtitle.innerText = `Linked to Execution Turn: ${gate.entry.turn_id || 'active'}`;
+        label.innerText = 'Governance Motivation (Why are you approving?)';
         rejectBtn.classList.remove('hidden');
         
         let confirmPhraseHTML = '';
         if (gate.payload.confirm_phrase) {
           confirmPhraseHTML = `
-            <div class="bg-accentRed/10 border border-accentRed/30 p-3 rounded-lg text-xs">
-              <span class="text-accentRed font-semibold block uppercase tracking-wide">Tamper Confirmation Required</span>
-              <p class="text-gray-400 mt-1">To approve this high-risk sandbox execution, you MUST type the phrase below exactly into the motivation box:</p>
-              <p class="font-mono text-accentRed font-bold mt-1 text-sm bg-gray-950 p-2.5 rounded border border-gray-900 select-all">${gate.payload.confirm_phrase}</p>
+            <div class="bg-accentRed/10 border border-accentRed/30 p-3 rounded-xl text-xs">
+              <span class="text-accentRed font-bold block uppercase tracking-wide">High-Risk Tamper Confirmation Required</span>
+              <p class="text-slate-400 mt-1">To approve this operation, type the confirmation phrase into motivation:</p>
+              <p class="font-mono text-accentRed font-bold mt-1 text-sm bg-slate-950 p-2 rounded border border-slate-900 select-all">${gate.payload.confirm_phrase}</p>
             </div>
           `;
         }
 
+        // Search if file content/draft is associated
+        let contentPreviewHTML = '';
+        let targetFileName = gate.payload.name || gate.payload.sandbox_path;
+        if (!targetFileName && gate.payload.command) {
+          // Extract filename if command contains a file path
+          const match = gate.payload.command.match(/[\w\-.]+\.(py|rs|json|sh|js|ts|md|txt)/i);
+          if (match) targetFileName = match[0];
+        }
+
         body.innerHTML = `
           <div class="space-y-3">
-            <div class="flex justify-between items-center bg-gray-950 p-3 rounded-lg border border-gray-900 text-xs">
-              <span class="text-gray-400">Action:</span>
-              <span class="font-mono text-white font-semibold">${gate.payload.action || 'Unknown tool'}</span>
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
+                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Tool Action</span>
+                <span class="font-mono text-slate-200 font-bold">${gate.payload.action || gate.payload.tool_name || 'sandbox.exec'}</span>
+              </div>
+              <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-900">
+                <span class="text-[9px] text-slate-500 font-semibold uppercase block">Target Scope</span>
+                <span class="font-mono text-accentIndigo font-bold">${gate.payload.scope || 'RootSession'}</span>
+              </div>
             </div>
             
             ${gate.payload.command ? `
               <div>
-                <span class="text-xs text-gray-500 font-semibold block mb-1">Command to Execute:</span>
-                <div class="font-mono text-xs bg-gray-950 p-3 rounded-lg border border-gray-900 text-gray-300 overflow-x-auto leading-relaxed">${gate.payload.command}</div>
+                <span class="text-[10px] text-slate-400 font-semibold block mb-1 uppercase">Command / Operation:</span>
+                <div class="font-mono text-xs bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-200 overflow-x-auto leading-relaxed">${escapeHTML(gate.payload.command)}</div>
               </div>
             ` : ''}
 
             ${gate.payload.host_patterns ? `
               <div>
-                <span class="text-xs text-gray-500 font-semibold block mb-1">Target Host Permissions:</span>
+                <span class="text-[10px] text-slate-400 font-semibold block mb-1 uppercase">Requested Remote Hosts:</span>
                 <div class="flex flex-wrap gap-1.5">
-                  ${gate.payload.host_patterns.map(h => `<span class="bg-gray-800 text-gray-300 font-mono text-[10px] px-2 py-0.5 rounded border border-gray-700">${h}</span>`).join('')}
+                  ${gate.payload.host_patterns.map(h => `<span class="bg-slate-900 text-accentIndigo font-mono text-[10px] px-2 py-0.5 rounded border border-slate-800">${h}</span>`).join('')}
+                </div>
+              </div>
+            ` : ''}
+
+            ${targetFileName ? `
+              <div class="bg-slate-900 border border-slate-800 p-3 rounded-xl space-y-2">
+                <div class="flex justify-between items-center">
+                  <span class="text-xs text-slate-300 font-semibold flex items-center gap-1.5">
+                    <span>📄</span> Linked Target Content: <strong class="font-mono text-accentIndigo">${targetFileName}</strong>
+                  </span>
+                  <button onclick="inspectFile('${targetFileName}', '${gate.entry.session_id}')" class="bg-accentIndigo text-white font-mono text-[10px] px-2.5 py-1 rounded font-bold uppercase hover:bg-opacity-90">Preview Content</button>
                 </div>
               </div>
             ` : ''}
 
             ${gate.payload.risk_summary ? `
-              <div class="bg-gray-900 border border-gray-800/80 p-3.5 rounded-lg text-xs">
-                <span class="text-xs font-semibold text-accentAmber block">Safety Risk Assessment:</span>
-                <p class="text-gray-400 mt-1 leading-relaxed">${gate.payload.risk_summary}</p>
+              <div class="bg-slate-900/80 border border-slate-800 p-3 rounded-xl text-xs">
+                <span class="text-[10px] font-semibold text-accentAmber uppercase block">Safety Risk Assessment:</span>
+                <p class="text-slate-300 mt-1 leading-relaxed">${gate.payload.risk_summary}</p>
               </div>
             ` : ''}
 
@@ -1350,29 +1310,27 @@
           </div>
         `;
       } else {
-        title.innerText = '❓ Clarification Input';
-        title.className = 'font-display font-bold text-base text-accentIndigo flex items-center gap-2';
+        title.innerText = '❓ Clarification Input Needed';
+        subtitle.innerText = 'Agent requires user decision to continue step';
         label.innerText = 'Your Answer';
 
         body.innerHTML = `
           <div class="space-y-3">
-            <p class="text-sm text-gray-200 font-medium leading-relaxed">${gate.payload.question}</p>
+            <p class="text-sm text-slate-200 font-medium leading-relaxed bg-slate-950 p-4 rounded-xl border border-slate-900">${gate.payload.question}</p>
           </div>
         `;
 
         if (gate.payload.options && gate.payload.options.length > 0) {
           choicesDiv.classList.remove('hidden');
-          if (!gate.payload.allow_freeform) {
-            textInput.classList.add('hidden');
-          }
+          if (!gate.payload.allow_freeform) textInput.classList.add('hidden');
           
           gate.payload.options.forEach((opt, index) => {
             const card = document.createElement('div');
-            card.className = 'flex items-center gap-3 p-3 rounded-lg border border-gray-850 bg-gray-900/30 hover:bg-gray-900 hover:border-gray-800 cursor-pointer text-xs';
+            card.className = 'flex items-center gap-3 p-3 rounded-lg border border-slate-800 bg-slate-900/40 hover:bg-slate-900 hover:border-accentIndigo cursor-pointer text-xs transition-all';
             card.onclick = () => submitInteractionChoice(gateId, opt.id || String(index + 1));
             card.innerHTML = `
-              <span class="w-5 h-5 rounded-full bg-accentIndigo/10 text-accentIndigo flex items-center justify-center font-bold text-[10px]">${index + 1}</span>
-              <span class="text-gray-300 font-medium">${opt.label}</span>
+              <span class="w-5 h-5 rounded-full bg-accentIndigo/20 text-accentIndigo flex items-center justify-center font-bold text-[10px]">${index + 1}</span>
+              <span class="text-slate-200 font-medium">${opt.label}</span>
             `;
             choicesDiv.appendChild(card);
           });
@@ -1389,101 +1347,59 @@
 
     async function submitGateAction(isApprove) {
       const input = document.getElementById('modal-text-input').value.trim();
-      const sid = document.getElementById('session-input').value.trim();
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
+      const { sid, secret, baseURL } = getConnectInfo();
 
       if (currentModalGateType === 'approval.pending') {
         const gate = pendingGates.get(currentModalGateId);
-        // Enforce confirm phrase check on client side for immediate feedback
         if (isApprove && gate && gate.payload && gate.payload.confirm_phrase && input.toLowerCase() !== gate.payload.confirm_phrase.toLowerCase()) {
           alert(`Approval requires typing the confirmation phrase exactly: "${gate.payload.confirm_phrase}"`);
           return;
         }
 
         const method = isApprove ? 'approvals.approve' : 'approvals.reject';
-        let params = {};
+        let params = { request_id: currentModalGateId, decided_by: "operator", reason: input || undefined };
+
         if (isApprove) {
           let acknowledged_capabilities = [];
           if (gate && gate.payload) {
-            if (gate.payload.added_capabilities) {
-              acknowledged_capabilities = acknowledged_capabilities.concat(gate.payload.added_capabilities);
-            }
-            if (gate.payload.broadened_capabilities) {
-              acknowledged_capabilities = acknowledged_capabilities.concat(gate.payload.broadened_capabilities);
-            }
+            if (gate.payload.added_capabilities) acknowledged_capabilities.push(...gate.payload.added_capabilities);
+            if (gate.payload.broadened_capabilities) acknowledged_capabilities.push(...gate.payload.broadened_capabilities);
           }
-          params = {
-            request_id: currentModalGateId,
-            decided_by: "operator",
-            reason: input || undefined,
-            confirm_phrase: (gate && gate.payload && gate.payload.confirm_phrase) || undefined,
-            acknowledged_capabilities: Array.from(new Set(acknowledged_capabilities))
-          };
-        } else {
-          params = {
-            request_id: currentModalGateId,
-            decided_by: "operator",
-            reason: input || undefined
-          };
+          params.confirm_phrase = gate?.payload?.confirm_phrase || undefined;
+          params.acknowledged_capabilities = Array.from(new Set(acknowledged_capabilities));
         }
 
         try {
           const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${secret}`
-            },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              id: 'gate-approve',
-              method: method,
-              params: params
-            })
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 'gate-approve', method: method, params: params })
           });
           const json = await resp.json();
           if (json.error) {
             alert(`Error: ${json.error.message}`);
           } else {
             closeGateModal();
-            fetchTimelineSnapshot(baseURL, sid, secret);
+            fetchTimelineHistory(baseURL, sid, secret);
           }
         } catch(e) {
           alert(`Connection failed: ${e.message}`);
         }
       } else {
-        // Submit user reply as interaction answer
-        if (!input) {
-          alert("Please type a reply.");
-          return;
-        }
+        if (!input) { alert("Please enter an answer."); return; }
         submitInteractionChoice(currentModalGateId, input);
       }
     }
 
     async function submitInteractionChoice(gateId, answerText) {
-      const sid = document.getElementById('session-input').value.trim();
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-
+      const { sid, secret, baseURL } = getConnectInfo();
       try {
-         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
+        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
           body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'gate-answer',
-            method: 'interaction.resolve_and_answer',
-            params: {
-              interaction_id: gateId,
-              answer: answerText
-            }
+            jsonrpc: '2.0', id: 'gate-answer', method: 'interaction.resolve_and_answer',
+            params: { interaction_id: gateId, answer: answerText }
           })
         });
         const json = await resp.json();
@@ -1491,26 +1407,118 @@
           alert(`Error: ${json.error.message}`);
         } else {
           closeGateModal();
-          fetchTimelineSnapshot(baseURL, sid, secret);
+          fetchTimelineHistory(baseURL, sid, secret);
         }
       } catch(e) {
         alert(`Connection failed: ${e.message}`);
       }
     }
 
-    // Dynamic Tree Visualization Builder
+    // Render Execution Workflow DAG
+    function renderWorkflowDAG() {
+      const svg = document.getElementById('workflow-dag-svg');
+      const fallback = document.getElementById('workflow-dag-fallback');
+      const badge = document.getElementById('dag-status-badge');
+
+      if (!activePlanData || !activePlanData.steps || activePlanData.steps.length === 0) {
+        svg.innerHTML = '';
+        fallback.style.display = 'flex';
+        badge.innerText = 'No Plan DAG';
+        return;
+      }
+
+      fallback.style.display = 'none';
+      svg.innerHTML = '';
+      badge.innerText = `DAG Version v${activePlanData.version || 1}`;
+
+      const steps = activePlanData.steps;
+      const width = svg.clientWidth || 400;
+      const startY = 40;
+      const stepYGap = 80;
+
+      // Draw SVG connections
+      for (let i = 0; i < steps.length - 1; i++) {
+        const y1 = startY + i * stepYGap + 24;
+        const y2 = startY + (i + 1) * stepYGap - 24;
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', width / 2); line.setAttribute('y1', y1);
+        line.setAttribute('x2', width / 2); line.setAttribute('y2', y2);
+        line.setAttribute('stroke', '#334155'); line.setAttribute('stroke-width', '2');
+        line.setAttribute('stroke-dasharray', '4 3');
+        svg.appendChild(line);
+      }
+
+      // Draw DAG step nodes
+      steps.forEach((step, i) => {
+        const cx = width / 2;
+        const cy = startY + i * stepYGap;
+        
+        let nodeColor = '#334155';
+        let textColor = '#94a3b8';
+        let statusBadge = '⏳';
+
+        if (step.status === 'Completed' || step.status === 'success') {
+          nodeColor = '#10b981'; textColor = '#34d399'; statusBadge = '✅';
+        } else if (step.status === 'Active' || step.status === 'running') {
+          nodeColor = '#6366f1'; textColor = '#818cf8'; statusBadge = '⚙️';
+        }
+
+        // Check if there is a pending gate associated with this session
+        const hasGate = pendingGates.size > 0 && i === steps.findIndex(s => s.status === 'Active' || s.status === 'running');
+        if (hasGate) {
+          nodeColor = '#f59e0b'; textColor = '#fbbf24'; statusBadge = '⏸';
+        }
+
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('transform', `translate(${cx}, ${cy})`);
+        g.style.cursor = 'pointer';
+        
+        if (hasGate) {
+          g.onclick = openActiveGateModal;
+        }
+
+        // Outer Rect
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', '-140'); rect.setAttribute('y', '-22');
+        rect.setAttribute('width', '280'); rect.setAttribute('height', '44');
+        rect.setAttribute('rx', '10');
+        rect.setAttribute('fill', '#0f172a');
+        rect.setAttribute('stroke', nodeColor);
+        rect.setAttribute('stroke-width', hasGate ? '2.5' : '1.5');
+        if (hasGate) rect.style = 'animation: pulse-ring 1.8s infinite ease-in-out;';
+        g.appendChild(rect);
+
+        // Title
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', '-120'); text.setAttribute('y', '3');
+        text.setAttribute('fill', textColor);
+        text.setAttribute('font-size', '11px');
+        text.setAttribute('font-weight', '600');
+        text.textContent = `Step ${i+1}: ${step.title.substring(0, 28)}${step.title.length > 28 ? '...' : ''}`;
+        g.appendChild(text);
+
+        // Badge
+        const bText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        bText.setAttribute('x', '110'); bText.setAttribute('y', '4');
+        bText.setAttribute('font-size', '12px');
+        bText.textContent = statusBadge;
+        g.appendChild(bText);
+
+        svg.appendChild(g);
+      });
+    }
+
+    // Dynamic Tree Visualization Builder for Alive Agents
     function updateAgentTree() {
       const fallback = document.getElementById('agent-tree-fallback');
       const svg = document.getElementById('agent-tree-svg');
       
       const rootSessionId = document.getElementById('session-input').value.trim();
-      const agents = new Map(); // id -> { name, parent, status }
-      const sessionNames = new Map(); // id -> name
-      
-      // Seed root session name
+      const agents = new Map();
+      const sessionNames = new Map();
       sessionNames.set(rootSessionId, 'Planner');
 
-      // 1. Scan roles to associate session IDs with agent types
+      // Associate session IDs with agent roles
       eventList.forEach(e => {
         const sessId = e.source_session_id;
         if (!sessId) return;
@@ -1519,90 +1527,42 @@
         const roleObj = e.role || {};
         const roleType = typeof roleObj === 'string' ? roleObj : (roleObj.role || 'system');
         
-        if (roleType === 'planner') {
-          roleLabel = 'Planner';
-        } else if (roleType === 'sentinel') {
-          roleLabel = 'Sentinel';
-        } else if (roleType === 'specialist') {
+        if (roleType === 'planner') roleLabel = 'Planner';
+        else if (roleType === 'sentinel') roleLabel = 'Sentinel';
+        else if (roleType === 'specialist') {
           const kind = roleObj.kind || 'specialist';
           roleLabel = kind.charAt(0).toUpperCase() + kind.slice(1);
-        } else if (roleType === 'curator') {
-          roleLabel = 'Curator';
-        } else if (roleType === 'auditor') {
-          roleLabel = 'Auditor';
-        } else if (roleType === 'runtime') {
-          roleLabel = 'Runtime';
         }
 
-        if (roleLabel && !sessionNames.has(sessId)) {
-          sessionNames.set(sessId, roleLabel);
-        }
+        if (roleLabel && !sessionNames.has(sessId)) sessionNames.set(sessId, roleLabel);
       });
 
-      // Seed Planner root node
       agents.set(rootSessionId, { id: rootSessionId, name: 'Planner', parent: null, status: 'running' });
 
-      // 2. Parse active agent nodes and hierarchies
       eventList.forEach(e => {
         let payload = null;
-        try {
-          if (e.payload) payload = JSON.parse(e.payload);
-        } catch(err) {}
-
+        try { if (e.payload) payload = JSON.parse(e.payload); } catch(err) {}
         const currentSessionId = e.source_session_id || rootSessionId;
 
         if (payload) {
-          // Detect agent_spawn
           if (payload.tool_name === 'agent_spawn' || e.event_type === 'agent_spawn') {
-            let argsObj = {};
-            if (typeof payload.arguments === 'string') {
-              try { argsObj = JSON.parse(payload.arguments); } catch(err) {}
-            } else if (payload.arguments) {
-              argsObj = payload.arguments;
-            }
-
-            let resObj = {};
-            if (typeof payload.result === 'string') {
-              try { resObj = JSON.parse(payload.result); } catch(err) {}
-            } else if (payload.result) {
-              resObj = payload.result;
-            }
-
+            let argsObj = typeof payload.arguments === 'string' ? (JSON.parse(payload.arguments || '{}')) : (payload.arguments || {});
+            let resObj = typeof payload.result === 'string' ? (JSON.parse(payload.result || '{}')) : (payload.result || {});
             const childId = payload.child_session_id || resObj.session_id || resObj.child_session_id;
-            let agentId = payload.agent_id || argsObj.agent_id || payload.args_preview || 'Specialist';
-            
-            // Clean suffix
+            let agentId = payload.agent_id || argsObj.agent_id || 'Specialist';
             agentId = agentId.replace('.default', '');
             agentId = agentId.charAt(0).toUpperCase() + agentId.slice(1);
 
             if (childId) {
-              // Ensure parent exists
               if (!agents.has(currentSessionId)) {
-                const pName = sessionNames.get(currentSessionId) || 'Agent';
-                agents.set(currentSessionId, { id: currentSessionId, name: pName, parent: null, status: 'idle' });
+                agents.set(currentSessionId, { id: currentSessionId, name: sessionNames.get(currentSessionId) || 'Agent', parent: null, status: 'idle' });
               }
-              // Register child session label
-              if (!sessionNames.has(childId)) {
-                sessionNames.set(childId, agentId);
-              }
-              // Add child node
-              agents.set(childId, {
-                id: childId,
-                name: agentId,
-                parent: currentSessionId,
-                status: 'running'
-              });
+              sessionNames.set(childId, agentId);
+              agents.set(childId, { id: childId, name: agentId, parent: currentSessionId, status: 'running' });
             }
-          }
-
-          // Detect turn ends to settle status
-          if (e.event_type === 'turn.end') {
-            const node = agents.get(currentSessionId);
-            if (node) node.status = 'idle';
           }
         }
 
-        // Adjust node statuses based on gate status
         if (e.event_type === 'approval.pending' || e.event_type === 'user.ask.pending') {
           try {
             const p = JSON.parse(e.payload);
@@ -1624,95 +1584,68 @@
       fallback.style.display = 'none';
       svg.innerHTML = '';
 
-      // Build hierarchical coordinates
       const nodes = Array.from(agents.values());
       const roots = nodes.filter(n => !n.parent || !agents.has(n.parent));
-      
-      // Basic layout coords
-      let levelHeights = [40, 120, 200, 280];
+      let levelHeights = [30, 110, 190];
       const visitedNodes = new Set();
 
-      // Assign position coordinates recursively
       function layoutNode(node, depth, xStart, xRange) {
         if (visitedNodes.has(node.id)) return;
         visitedNodes.add(node.id);
-
-        node.y = levelHeights[depth] || 300;
+        node.y = levelHeights[depth] || 220;
         node.x = xStart + xRange / 2;
 
         const children = nodes.filter(n => n.parent === node.id);
         if (children.length > 0) {
           const subWidth = xRange / children.length;
-          children.forEach((child, i) => {
-            layoutNode(child, depth + 1, xStart + i * subWidth, subWidth);
-          });
+          children.forEach((child, i) => layoutNode(child, depth + 1, xStart + i * subWidth, subWidth));
         }
       }
 
-      roots.forEach((root, i) => {
-        layoutNode(root, 0, 0, svg.clientWidth || 300);
-      });
+      roots.forEach((root) => layoutNode(root, 0, 0, svg.clientWidth || 250));
 
-      // Draw SVG lines first (so they compile behind text boxes)
       nodes.forEach(node => {
         if (node.parent && agents.has(node.parent)) {
           const parent = agents.get(node.parent);
           const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          line.setAttribute('x1', parent.x);
-          line.setAttribute('y1', parent.y);
-          line.setAttribute('x2', node.x);
-          line.setAttribute('y2', node.y);
-          line.setAttribute('stroke', '#1f2937');
-          line.setAttribute('stroke-width', '2');
-          line.setAttribute('stroke-dasharray', '4 2');
+          line.setAttribute('x1', parent.x); line.setAttribute('y1', parent.y);
+          line.setAttribute('x2', node.x); line.setAttribute('y2', node.y);
+          line.setAttribute('stroke', '#334155'); line.setAttribute('stroke-width', '2');
+          line.setAttribute('stroke-dasharray', '3 2');
           svg.appendChild(line);
         }
       });
 
-      // Draw nodes
       nodes.forEach(node => {
-        // Node color base
-        let strokeColor = '#4b5563';
+        let strokeColor = '#475569';
         let pulseStyle = '';
 
-        if (node.status === 'running') {
-          strokeColor = '#6366f1';
-          pulseStyle = 'stroke-width: 2.5; stroke-dasharray: 4 2; animation: spin 10s linear infinite;';
-        } else if (node.status === 'gated') {
-          strokeColor = '#f59e0b';
-        } else if (node.status === 'idle') {
-          strokeColor = '#10b981';
-        }
+        if (node.status === 'running') strokeColor = '#6366f1';
+        else if (node.status === 'gated') { strokeColor = '#f59e0b'; pulseStyle = 'animation: pulse-ring 1.8s infinite ease-in-out;'; }
 
         const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
         group.setAttribute('transform', `translate(${node.x},${node.y})`);
         group.style.cursor = 'pointer';
-        group.onclick = () => openAgentControlModal(node.id, node.name, node.status);
+        group.onclick = () => {
+          if (node.status === 'gated') openActiveGateModal();
+          else openAgentControlModal(node.id, node.name, node.status);
+        };
 
-        // Outer glow
         const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        circle.setAttribute('r', '18');
-        circle.setAttribute('fill', '#111827');
-        circle.setAttribute('stroke', strokeColor);
-        circle.setAttribute('stroke-width', '2');
-        circle.style = pulseStyle;
+        circle.setAttribute('r', '16'); circle.setAttribute('fill', '#0f172a');
+        circle.setAttribute('stroke', strokeColor); circle.setAttribute('stroke-width', '2');
+        if (pulseStyle) circle.style = pulseStyle;
         group.appendChild(circle);
 
-        // Name text
         const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        text.setAttribute('y', '32');
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('fill', '#9ca3af');
-        text.setAttribute('font-size', '10px');
+        text.setAttribute('y', '28'); text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('fill', '#94a3b8'); text.setAttribute('font-size', '9px');
         text.setAttribute('font-weight', '600');
         text.textContent = node.name.replace('.default', '');
         group.appendChild(text);
 
-        // Status badge indicator
         const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
-        dot.setAttribute('cx', '12');
-        dot.setAttribute('cy', '-12');
-        dot.setAttribute('r', '4');
+        dot.setAttribute('cx', '10'); dot.setAttribute('cy', '-10'); dot.setAttribute('r', '4');
         dot.setAttribute('fill', node.status === 'running' ? '#6366f1' : (node.status === 'gated' ? '#f59e0b' : '#10b981'));
         group.appendChild(dot);
 
@@ -1720,106 +1653,21 @@
       });
     }
 
-    // Extract a human-readable summary from an event, since the API has no
-    // dedicated summary field — it's derived from event_type + payload.
     function extractSummary(e) {
       let payload = null;
       try { if (e.payload) payload = JSON.parse(e.payload); } catch(err) {}
 
       const type = e.event_type || '';
-
-      // Agent lifecycle
       if (type === 'session.start') return payload?.goal || 'Session started';
-      if (type === 'session.end') return 'Session ended';
       if (type === 'turn.start') return `Turn ${payload?.turn_number || ''} started`;
       if (type === 'turn.end') return `Turn completed`;
-
-      // Operator messages
       if (type === 'operator.message') return payload?.message || payload?.text || 'Operator message';
-
-      // LLM rounds
-      if (type === 'llm.round') {
-        const inp = payload?.input_tokens || 0;
-        const out = payload?.output_tokens || 0;
-        return `LLM round (${inp} in / ${out} out tokens)`;
-      }
-
-      // Tool calls
-      if (type === 'tool.call' || type === 'tool.result') {
-        const tool = payload?.tool_name || payload?.name || '';
-        return `${type === 'tool.call' ? 'Called' : 'Result from'} ${tool}`;
-      }
-
-      // Content writes
-      if (type === 'content_write') {
-        return `Wrote file: ${payload?.name || payload?.sandbox_path || 'unknown'}`;
-      }
-
-      // Approvals
+      if (type === 'llm.round') return `LLM round (${payload?.input_tokens || 0} in / ${payload?.output_tokens || 0} out tokens)`;
+      if (type === 'tool.call' || type === 'tool.result') return `${type === 'tool.call' ? 'Called' : 'Result from'} ${payload?.tool_name || payload?.name || ''}`;
+      if (type === 'content_write') return `Wrote file: ${payload?.name || payload?.sandbox_path || 'unknown'}`;
       if (type === 'approval.pending') return payload?.command || payload?.summary || 'Approval required';
       if (type === 'approval.approved') return 'Approval granted';
-      if (type === 'approval.rejected') return 'Approval rejected';
-
-      // User interactions
       if (type === 'user.ask.pending') return payload?.question || 'Agent requested feedback';
-      if (type === 'user.ask.resolved') return 'Interaction resolved';
-
-      // Plans
-      if (type === 'plan.pending') {
-        let text = payload?.title || 'Plan proposed';
-        if (payload?.diff_summary) {
-          text += ` (Envelope diff: ${payload.diff_summary})`;
-        }
-        return text;
-      }
-      if (type === 'plan.approved') {
-        const grants = payload?.grants_materialized || 0;
-        let text = 'Plan approved';
-        if (payload?.inherited) {
-          text = `Plan approval inherited from version ${payload.inherited_from || ''}`;
-        }
-        if (grants > 0) {
-          text += ` (Materialized ${grants} capability grant${grants > 1 ? 's' : ''})`;
-        }
-        return text;
-      }
-
-      // Promotions
-      if (type === 'promotion.pending') return payload?.title || 'Promotion pending';
-      if (type === 'promotion.approved') return 'Promotion approved';
-      if (type === 'promotion.rejected') return 'Promotion rejected';
-
-      // Delegate / escalate
-      if (type === 'delegate.start') return `Delegated to ${payload?.agent_id || 'specialist'}`;
-      if (type === 'delegate.end') return 'Delegate completed';
-
-      // Operator comments
-      if (type === 'operator.comment') {
-        let lineHint = '';
-        if (payload?.line_start) {
-          if (payload?.line_end && payload?.line_end !== payload?.line_start) {
-            lineHint = ` (lines ${payload.line_start}–${payload.line_end})`;
-          } else {
-            lineHint = ` (line ${payload.line_start})`;
-          }
-        }
-        return `Commented on \`${payload?.name || ''}\`${lineHint}${payload?.drifted ? ' [drifted]' : ''}: "${payload?.body || ''}"`;
-      }
-
-      // Session envelope/lock lifecycle
-      if (type === 'envelope.proposed') {
-        const hosts = payload?.hosts || [];
-        return `Proposed network envelope for hosts: ${hosts.join(', ')}`;
-      }
-      if (type === 'envelope.locked') {
-        const hosts = payload?.hosts || [];
-        return `Locked network envelope & materialized grants for hosts: ${hosts.join(', ')}`;
-      }
-      if (type === 'envelope.revoked') {
-        return `Revoked session network envelope/grants: ${payload?.reason || ''}`;
-      }
-
-      // Fallback: humanize event_type
       return type.replace(/\./g, ' ').replace(/_/g, ' ');
     }
 
@@ -1828,76 +1676,26 @@
       if (!e) return;
 
       let payloadObj = null;
-      try {
-        if (e.payload) payloadObj = JSON.parse(e.payload);
-      } catch(err) {}
+      try { if (e.payload) payloadObj = JSON.parse(e.payload); } catch(err) {}
 
-      // Extract principal info from nested object
-      const principalId = e.principal?.id || 'System';
-      const principalKind = e.principal?.kind || 'internal';
-      const altLower = (e.altitude || '').toLowerCase();
-      const altColorClass = altLower === 'error' ? 'text-accentRed' : (altLower === 'attention' ? 'text-accentAmber' : 'text-accentIndigo');
-
-      // Extract role info
-      const roleObj = e.role || {};
-      const roleType = typeof roleObj === 'string' ? roleObj : (roleObj.role || 'system');
-      const roleKind = roleObj.kind || roleObj.surface || '';
-      const roleLabel = roleKind ? `${roleType} (${roleKind})` : roleType;
-
-      document.getElementById('event-detail-title').innerHTML = `<span>ℹ️</span> Event Detail: <span class="font-mono text-accentIndigo">${e.event_type}</span>`;
+      document.getElementById('event-detail-title').innerHTML = `<span>ℹ️</span> Event: <span class="font-mono text-accentIndigo">${e.event_type}</span>`;
       
       const content = document.getElementById('event-detail-content');
       content.innerHTML = `
-        <div class="grid grid-cols-2 gap-4 text-xs">
-          <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-            <span class="text-[10px] text-gray-500 font-semibold block uppercase">Event Type</span>
-            <span class="font-mono text-gray-200 font-bold">${e.event_type}</span>
+        <div class="grid grid-cols-2 gap-3 text-xs">
+          <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
+            <span class="text-[9px] text-slate-500 font-semibold block uppercase">Event Type</span>
+            <span class="font-mono text-slate-200 font-bold">${e.event_type}</span>
           </div>
-          <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-            <span class="text-[10px] text-gray-500 font-semibold block uppercase">Occurred At</span>
-            <span class="font-mono text-gray-200">${formatTime(e.occurred_at)}</span>
-          </div>
-          <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-            <span class="text-[10px] text-gray-500 font-semibold block uppercase">Actor / Principal</span>
-            <span class="font-mono text-gray-200">${principalId} <span class="text-gray-500">(${principalKind})</span></span>
-          </div>
-          <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-            <span class="text-[10px] text-gray-500 font-semibold block uppercase">Altitude</span>
-            <span class="font-mono text-gray-200 font-bold ${altColorClass}">${e.altitude || 'normal'}</span>
-          </div>
-          <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-            <span class="text-[10px] text-gray-500 font-semibold block uppercase">Role / Seat</span>
-            <span class="font-mono text-gray-200">${roleLabel}</span>
-          </div>
-          <div class="bg-gray-900 border border-gray-850 p-3 rounded-lg">
-            <span class="text-[10px] text-gray-500 font-semibold block uppercase">Session</span>
-            <span class="font-mono text-gray-200 text-[10px]">${e.source_session_id || e.root_session_id || '—'}</span>
+          <div class="bg-slate-900 border border-slate-800 p-2.5 rounded-lg">
+            <span class="text-[9px] text-slate-500 font-semibold block uppercase">Occurred At</span>
+            <span class="font-mono text-slate-200">${formatTime(e.occurred_at)}</span>
           </div>
         </div>
-
-        <div>
-          <span class="text-xs text-gray-500 font-semibold block mb-1">Summary:</span>
-          <div class="text-sm bg-gray-900 p-3.5 rounded-lg border border-gray-850 text-gray-250 leading-relaxed">${extractSummary(e)}</div>
-        </div>
-
         ${payloadObj ? `
           <div>
-            <span class="text-xs text-gray-500 font-semibold block mb-1">Structured Payload:</span>
-            <pre class="text-xs bg-gray-950 p-4 rounded-lg border border-gray-900 text-gray-350 overflow-x-auto leading-relaxed font-mono max-h-[300px]">${JSON.stringify(payloadObj, null, 2)}</pre>
-          </div>
-        ` : ''}
-
-        ${e.refs && Object.keys(e.refs).length > 0 ? `
-          <div>
-            <span class="text-xs text-gray-500 font-semibold block mb-1">References:</span>
-            <pre class="text-xs bg-gray-950 p-3 rounded-lg border border-gray-900 text-gray-400 overflow-x-auto font-mono">${JSON.stringify(e.refs, null, 2)}</pre>
-          </div>
-        ` : ''}
-
-        ${e.turn_id ? `
-          <div>
-            <span class="text-xs text-gray-500 font-semibold block mb-1">Turn ID:</span>
-            <span class="text-xs font-mono text-gray-400">${e.turn_id}</span>
+            <span class="text-[10px] text-slate-400 font-semibold block mb-1 uppercase">Payload JSON:</span>
+            <pre class="text-xs bg-slate-950 p-3 rounded-lg border border-slate-900 text-slate-300 font-mono overflow-x-auto leading-relaxed max-h-[300px]">${JSON.stringify(payloadObj, null, 2)}</pre>
           </div>
         ` : ''}
       `;
@@ -1909,32 +1707,12 @@
       document.getElementById('event-detail-modal').classList.add('hidden');
     }
 
-    // Dynamic HUD stats updating
     function updateHUD() {
       let llmCalls = 0;
-      let totalTokens = 0;
       let inputTokens = 0;
       let outputTokens = 0;
       activeGrants.clear();
 
-      eventList.forEach(e => {
-        let payload = null;
-        try { if (e.payload) payload = JSON.parse(e.payload); } catch(err) {}
-
-        if (payload) {
-          // Tally active hosts from approval alerts
-          if (payload.host_patterns) {
-            payload.host_patterns.forEach(h => activeGrants.add(h));
-          }
-        }
-      });
-
-      // Scan operator activities for aggregate metrics
-      activityList.forEach(act => {
-        // Optional parse variables if needed
-      });
-
-      // Extract details from timeline stats
       eventList.forEach(e => {
         if (e.event_type === 'llm.round') {
           llmCalls++;
@@ -1944,56 +1722,44 @@
             if (p.output_tokens) outputTokens += p.output_tokens;
           } catch(err) {}
         }
+        try {
+          const p = JSON.parse(e.payload);
+          if (p.host_patterns) p.host_patterns.forEach(h => activeGrants.add(h));
+        } catch(err) {}
       });
 
-      totalTokens = inputTokens + outputTokens;
-
+      const totalTokens = inputTokens + outputTokens;
       document.getElementById('hud-llm-calls').innerText = llmCalls;
       document.getElementById('hud-grants-count').innerText = activeGrants.size;
       document.getElementById('hud-tokens-total').innerText = totalTokens.toLocaleString();
       document.getElementById('hud-tokens-in').innerText = `in: ${inputTokens.toLocaleString()}`;
       document.getElementById('hud-tokens-out').innerText = `out: ${outputTokens.toLocaleString()}`;
 
-      // Calculate progress bars
       if (totalTokens > 0) {
-        const inPct = (inputTokens / totalTokens) * 100;
-        const outPct = (outputTokens / totalTokens) * 100;
-        document.getElementById('token-bar-in').style.width = `${inPct}%`;
-        document.getElementById('token-bar-out').style.width = `${outPct}%`;
+        document.getElementById('token-bar-in').style.width = `${(inputTokens / totalTokens) * 100}%`;
+        document.getElementById('token-bar-out').style.width = `${(outputTokens / totalTokens) * 100}%`;
       } else {
         document.getElementById('token-bar-in').style.width = `0%`;
         document.getElementById('token-bar-out').style.width = `0%`;
       }
     }
 
-    // Inspect files via base64 content loads
     async function inspectFile(fileName, sessionId) {
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-
+      const { secret, baseURL } = getConnectInfo();
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/content/read`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            session_id: sessionId,
-            name_or_handle: fileName
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ session_id: sessionId, name_or_handle: fileName })
         });
         const json = await resp.json();
         if (json.content) {
-          // Decode content
-          const codeText = atob(json.content);
-          openDiffModal(fileName, codeText, json.handle, sessionId);
+          openDiffModal(fileName, atob(json.content), json.handle, sessionId);
         } else {
           alert(`File content not found: ${json.error || 'Unknown error'}`);
         }
       } catch(e) {
-        alert(`Failed to load file contents: ${e.message}`);
+        alert(`Failed to load file content: ${e.message}`);
       }
     }
 
@@ -2007,9 +1773,8 @@
       currentViewedFileSessionId = sessionId;
 
       const modal = document.getElementById('diff-modal');
-      document.getElementById('diff-title').innerHTML = `<span>📄</span> ${fileName} <span class="text-[10px] text-gray-500 font-mono ml-2 font-normal">${handle ? `(${handle.substring(0, 12)}...)` : ''}</span>`;
+      document.getElementById('diff-title').innerHTML = `<span>📄</span> ${fileName} <span class="text-[10px] text-slate-500 font-mono font-normal ml-2">${handle ? `(${handle.substring(0, 12)}...)` : ''}</span>`;
       
-      // Clear comment inputs
       document.getElementById('comment-line-start').value = '';
       document.getElementById('comment-line-end').value = '';
       document.getElementById('comment-body').value = '';
@@ -2017,20 +1782,12 @@
       const contentDiv = document.getElementById('diff-content');
       contentDiv.innerHTML = '';
       
-      // Formatted file lines
       codeText.split('\n').forEach((line, index) => {
         const lineEl = document.createElement('div');
-        lineEl.className = 'hover:bg-gray-900/50 px-2 py-0.5 rounded flex';
-        
-        let highlightClass = '';
-        if (line.startsWith('+')) {
-          highlightClass = 'diff-added';
-        } else if (line.startsWith('-')) {
-          highlightClass = 'diff-removed';
-        }
-
+        lineEl.className = 'hover:bg-slate-900/60 px-2 py-0.5 rounded flex';
+        let highlightClass = line.startsWith('+') ? 'diff-added' : (line.startsWith('-') ? 'diff-removed' : '');
         lineEl.innerHTML = `
-          <span class="w-10 text-gray-650 text-[10px] select-none text-right pr-4 shrink-0 font-mono">${index + 1}</span>
+          <span class="w-10 text-slate-600 text-[10px] select-none text-right pr-4 shrink-0 font-mono">${index + 1}</span>
           <span class="flex-1 font-mono whitespace-pre ${highlightClass}">${escapeHTML(line)}</span>
         `;
         contentDiv.appendChild(lineEl);
@@ -2044,20 +1801,10 @@
       const lineEndVal = document.getElementById('comment-line-end').value.trim();
       const body = document.getElementById('comment-body').value.trim();
 
-      if (!body) {
-        alert("Please enter comment text.");
-        return;
-      }
+      if (!body) { alert("Please enter comment body."); return; }
+      if (!currentViewedFileName || !currentViewedFileSessionId) { alert("No active file context."); return; }
 
-      if (!currentViewedFileName || !currentViewedFileSessionId) {
-        alert("No active file context found.");
-        return;
-      }
-
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-
+      const { secret, baseURL } = getConnectInfo();
       const params = {
         session_id: currentViewedFileSessionId,
         name: currentViewedFileName,
@@ -2066,109 +1813,63 @@
         commented_by: "operator"
       };
 
-      if (lineStartVal) {
-        params.line_start = parseInt(lineStartVal, 10);
-      }
-      if (lineEndVal) {
-        params.line_end = parseInt(lineEndVal, 10);
-      }
-
-      if (params.line_start && params.line_end && params.line_end < params.line_start) {
-        alert("Line End cannot precede Line Start.");
-        return;
-      }
+      if (lineStartVal) params.line_start = parseInt(lineStartVal, 10);
+      if (lineEndVal) params.line_end = parseInt(lineEndVal, 10);
 
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'file-comment-submit',
-            method: 'content.comment',
-            params: params
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'file-comment', method: 'content.comment', params: params })
         });
         const json = await resp.json();
-        if (json.error) {
-          alert(`Failed to add comment: ${json.error.message}`);
-        } else {
+        if (json.error) alert(`Failed to add comment: ${json.error.message}`);
+        else {
           document.getElementById('comment-line-start').value = '';
           document.getElementById('comment-line-end').value = '';
           document.getElementById('comment-body').value = '';
-          alert("Operator comment successfully attached to draft!");
-          fetchTimelineSnapshot(baseURL, currentViewedFileSessionId, secret);
+          alert("Comment successfully attached to draft!");
+          fetchTimelineHistory(baseURL, currentViewedFileSessionId, secret);
         }
-      } catch (e) {
-        alert(`Connection error: ${e.message}`);
-      }
+      } catch(e) { alert(`Error: ${e.message}`); }
     }
 
     function closeDiffModal() {
       document.getElementById('diff-modal').classList.add('hidden');
-      currentViewedFileName = null;
-      currentViewedFileHandle = null;
-      currentViewedFileSessionId = null;
     }
 
     function escapeHTML(str) {
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    // Tabs navigation in Right Sidebar
     function switchRightTab(tabId) {
-      const tabChecklist = document.getElementById('tab-content-checklist');
-      const tabConstitution = document.getElementById('tab-content-constitution');
-      const tabWiki = document.getElementById('tab-content-wiki');
-      
-      const btnChecklist = document.getElementById('tab-btn-checklist');
-      const btnConstitution = document.getElementById('tab-btn-constitution');
-      const btnWiki = document.getElementById('tab-btn-wiki');
-      
-      tabChecklist.classList.add('hidden');
-      tabConstitution.classList.add('hidden');
-      tabWiki.classList.add('hidden');
-      
-      btnChecklist.className = btnChecklist.className.replace('border-accentIndigo text-white', 'border-transparent text-gray-400 hover:text-white');
-      btnConstitution.className = btnConstitution.className.replace('border-accentIndigo text-white', 'border-transparent text-gray-400 hover:text-white');
-      btnWiki.className = btnWiki.className.replace('border-accentIndigo text-white', 'border-transparent text-gray-400 hover:text-white');
-      
-      if (tabId === 'checklist') {
-        tabChecklist.classList.remove('hidden');
-        btnChecklist.className = btnChecklist.className.replace('border-transparent text-gray-400 hover:text-white', 'border-accentIndigo text-white');
-      } else if (tabId === 'constitution') {
-        tabConstitution.classList.remove('hidden');
-        btnConstitution.className = btnConstitution.className.replace('border-transparent text-gray-400 hover:text-white', 'border-accentIndigo text-white');
-        if (isConnected) fetchConstitution();
-      } else if (tabId === 'wiki') {
-        tabWiki.classList.remove('hidden');
-        btnWiki.className = btnWiki.className.replace('border-transparent text-gray-400 hover:text-white', 'border-accentIndigo text-white');
-        if (isConnected) fetchWiki();
-      }
+      const tabs = ['workflow', 'checklist', 'constitution', 'wiki'];
+      tabs.forEach(t => {
+        document.getElementById(`tab-content-${t}`).classList.add('hidden');
+        const btn = document.getElementById(`tab-btn-${t}`);
+        btn.className = btn.className.replace('border-accentIndigo text-white', 'border-transparent text-slate-400 hover:text-white');
+      });
+
+      document.getElementById(`tab-content-${tabId}`).classList.remove('hidden');
+      const activeBtn = document.getElementById(`tab-btn-${tabId}`);
+      activeBtn.className = activeBtn.className.replace('border-transparent text-slate-400 hover:text-white', 'border-accentIndigo text-white');
+
+      const info = getConnectInfo();
+      if (tabId === 'constitution' && isConnected) fetchConstitution(info.baseURL, info.secret);
+      if (tabId === 'wiki' && isConnected) fetchWiki(info.baseURL, info.sid, info.secret);
     }
 
-    // Recent sessions switcher
     async function fetchRecentSessions() {
       const secret = document.getElementById('secret-input').value.trim() || localStorage.getItem('auto_secret') || '';
       const port = document.getElementById('port-input').value.trim() || localStorage.getItem('auto_port') || '4100';
       if (!secret) return;
+      
       const select = document.getElementById('recent-sessions-select');
       try {
         const resp = await fetchWithTimeout(`http://127.0.0.1:${port}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'list-sessions',
-            method: 'session.list',
-            params: { limit: 15 }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'list-sessions', method: 'session.list', params: { limit: 15 } })
         });
         const json = await resp.json();
         if (json && json.result && json.result.sessions) {
@@ -2176,259 +1877,98 @@
           json.result.sessions.forEach(s => {
             const opt = document.createElement('option');
             opt.value = s.root_session_id;
-            const dateStr = s.last_active_at ? new Date(s.last_active_at).toLocaleString() : 'unknown';
+            const dateStr = s.last_active_at ? new Date(s.last_active_at).toLocaleTimeString() : 'unknown';
             opt.innerText = `${s.agent_id} (${s.root_session_id.substring(0,8)}...) - ${dateStr}`;
             select.appendChild(opt);
           });
         }
-      } catch (e) {
-        console.warn("Could not load recent sessions:", e);
-      }
+      } catch (e) {}
     }
 
     function selectRecentSession() {
       const val = document.getElementById('recent-sessions-select').value;
-      if (val) {
-        document.getElementById('session-input').value = val;
-        connect();
-      }
+      if (val) { document.getElementById('session-input').value = val; connect(); }
     }
 
-    // Emergency Stop
     async function triggerEmergencyStop() {
-      const sid = document.getElementById('session-input').value.trim();
+      const { sid, secret, baseURL } = getConnectInfo();
       if (!sid) return;
-      if (!confirm("Are you absolutely sure you want to trigger an Emergency Stop for this session?\nThis will stop all running agents and lock the session.")) return;
-      
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      
+      if (!confirm("Trigger Emergency Stop? This will stop all running agents.")) return;
+
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
           body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'estop',
-            method: 'root_session.emergency_stop',
-            params: {
-              root_session_id: sid,
-              reason: "Operator clicked Emergency Stop from dashboard",
-              requested_by_type: "operator",
-              requested_by_id: "dashboard"
-            }
+            jsonrpc: '2.0', id: 'estop', method: 'root_session.emergency_stop',
+            params: { root_session_id: sid, reason: "Operator E-Stop", requested_by_type: "operator", requested_by_id: "dashboard" }
           })
         });
         const json = await resp.json();
-        if (json.error) {
-          alert(`Failed to trigger Emergency Stop: ${json.error.message}`);
-        } else {
-          alert("Emergency Stop successfully executed!");
-          disconnect();
-        }
-      } catch (e) {
-        alert(`Connection failed: ${e.message}`);
-      }
+        if (json.error) alert(`E-Stop failed: ${json.error.message}`);
+        else { alert("Emergency Stop executed!"); disconnect(); }
+      } catch (e) { alert(`Connection error: ${e.message}`); }
     }
 
-    // Constitution Viewer
-    async function fetchConstitution() {
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
+    async function fetchConstitution(baseURL, secret) {
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'get-const',
-            method: 'constitution.get',
-            params: { include_text: true }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'get-const', method: 'constitution.get', params: { include_text: true } })
         });
         const json = await resp.json();
         if (json && json.result) {
           document.getElementById('const-version').innerText = json.result.constitution_version || 'unknown';
           document.getElementById('const-format-version').innerText = json.result.constitution_format_version || '1';
           document.getElementById('const-digest').innerText = json.result.constitution_digest || 'unknown';
-          document.getElementById('const-text').innerText = json.result.text || 'No constitutional text available.';
+          document.getElementById('const-text').innerText = json.result.text || 'No text available.';
         }
-      } catch (e) {
-        console.error("Failed to load constitution:", e);
-      }
+      } catch (e) {}
     }
 
-    // Wiki & Knowledge Base Management
-    async function fetchWiki() {
-      const sid = document.getElementById('session-input').value.trim();
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      
-      // Fetch pages
+    async function fetchWiki(baseURL, sid, secret) {
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'list-wiki-pages',
-            method: 'wiki.list',
-            params: {}
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'list-wiki', method: 'wiki.list', params: {} })
         });
         const json = await resp.json();
         const listDiv = document.getElementById('wiki-pages-list');
         if (json && json.result && json.result.pages) {
-          if (json.result.pages.length === 0) {
-            listDiv.innerHTML = '<div class="text-center text-gray-500 py-4">No wiki pages found.</div>';
-          } else {
+          if (json.result.pages.length === 0) listDiv.innerHTML = '<div class="text-center text-slate-500 py-4">No wiki pages.</div>';
+          else {
             listDiv.innerHTML = '';
             json.result.pages.forEach(p => {
               const item = document.createElement('div');
-              item.className = 'p-2 rounded border border-gray-800 bg-gray-900 bg-opacity-20 flex items-center justify-between hover:bg-opacity-40 transition-all';
+              item.className = 'p-2 rounded border border-slate-800 bg-slate-900 bg-opacity-30 flex items-center justify-between';
               item.innerHTML = `
-                <div class="min-w-0 flex-1">
-                  <span class="font-semibold text-gray-200 block truncate">📄 ${p.title || p.id}</span>
-                  <span class="text-[9px] text-gray-500 block">ID: ${p.id}</span>
-                </div>
-                <button onclick="inspectWikiPage('${p.id}')" class="text-accentIndigo hover:underline font-semibold font-mono text-[10px] uppercase ml-2 shrink-0">View</button>
+                <span class="font-semibold text-slate-200 text-xs truncate">📄 ${p.title || p.id}</span>
+                <button onclick="inspectWikiPage('${p.id}')" class="text-accentIndigo hover:underline font-mono text-[10px] uppercase">View</button>
               `;
               listDiv.appendChild(item);
             });
           }
         }
-      } catch (e) {
-        console.error("Failed to load wiki pages:", e);
-      }
-
-      // Fetch pending proposals
-      try {
-        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'list-wiki-props',
-            method: 'wiki.proposals_pending',
-            params: { root_session_id: sid }
-          })
-        });
-        const json = await resp.json();
-        const listDiv = document.getElementById('wiki-proposals-list');
-        if (json && json.result && json.result.proposals) {
-          if (json.result.proposals.length === 0) {
-            listDiv.innerHTML = '<div class="text-center text-gray-500 py-4">No pending proposals.</div>';
-          } else {
-            listDiv.innerHTML = '';
-            json.result.proposals.forEach(prop => {
-              let actionDetail = 'Unknown proposal';
-              if (prop.action && prop.action.wiki_proposal) {
-                const wp = prop.action.wiki_proposal;
-                actionDetail = `Propose ${wp.is_edit ? 'edit' : 'new page'} "${wp.title}"`;
-              } else if (prop.reason) {
-                actionDetail = prop.reason;
-              }
-              const item = document.createElement('div');
-              item.className = 'p-2.5 rounded border border-accentAmber/30 bg-accentAmber/5 flex flex-col space-y-1.5';
-              item.innerHTML = `
-                <div class="flex justify-between items-center">
-                  <span class="font-semibold text-accentAmber text-[11px] uppercase tracking-wide">Wiki Proposal</span>
-                  <span class="font-mono text-[10px] text-gray-500">${prop.request_id}</span>
-                </div>
-                <p class="text-gray-350 font-medium">${actionDetail}</p>
-                <div class="flex justify-end gap-2 pt-1">
-                  <button onclick="resolveWikiProposal('${prop.request_id}', false)" class="border border-gray-800 hover:bg-gray-900 text-gray-400 font-bold text-[9px] px-2 py-1 rounded uppercase">Reject</button>
-                  <button onclick="resolveWikiProposal('${prop.request_id}', true)" class="bg-accentAmber hover:bg-opacity-90 text-gray-955 font-bold text-[9px] px-2 py-1 rounded uppercase">Approve</button>
-                </div>
-              `;
-              listDiv.appendChild(item);
-            });
-          }
-        }
-      } catch (e) {
-        console.error("Failed to load pending wiki proposals:", e);
-      }
+      } catch (e) {}
     }
 
     async function inspectWikiPage(pageId) {
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
+      const { secret, baseURL } = getConnectInfo();
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'get-wiki-page',
-            method: 'wiki.get',
-            params: { id: pageId }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'get-wiki-page', method: 'wiki.get', params: { id: pageId } })
         });
         const json = await resp.json();
         if (json && json.result && json.result.content) {
           openDiffModal(pageId, json.result.content, null, '');
         }
-      } catch (e) {
-        alert("Failed to load wiki page content: " + e.message);
-      }
+      } catch (e) {}
     }
 
-    async function resolveWikiProposal(requestId, isApprove) {
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      const method = isApprove ? 'approvals.approve' : 'approvals.reject';
-      
-      try {
-        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'resolve-wiki',
-            method: method,
-            params: {
-              request_id: requestId,
-              decided_by: "operator",
-              reason: "Resolved from wiki dashboard panel"
-            }
-          })
-        });
-        const json = await resp.json();
-        if (json.error) {
-          alert(`Error: ${json.error.message}`);
-        } else {
-          alert(`Wiki proposal ${isApprove ? 'approved' : 'rejected'} successfully.`);
-          fetchWiki();
-        }
-      } catch (e) {
-        alert("Failed to resolve wiki proposal: " + e.message);
-      }
-    }
-
-    // Agent Hierarchy interactive node controller
     let selectedAgentId = null;
     let selectedAgentName = null;
 
@@ -2440,42 +1980,6 @@
       document.getElementById('control-agent-name').innerText = agentName;
       
       const suspendStatusSpan = document.getElementById('control-agent-suspend-status');
-      suspendStatusSpan.innerText = 'Checking...';
-      suspendStatusSpan.className = 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-gray-800 text-gray-400';
-      
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-
-      try {
-        const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'get-inf',
-            method: 'session.inference.get',
-            params: {
-              session_id: agentId
-            }
-          })
-        });
-        const json = await resp.json();
-        if (json && json.result) {
-          document.getElementById('control-agent-preset').innerText = json.result.preset || 'Default';
-          document.getElementById('inference-preset-select').value = json.result.preset || 'default';
-        } else {
-          document.getElementById('control-agent-preset').innerText = 'None';
-          document.getElementById('inference-preset-select').value = 'default';
-        }
-      } catch(e) {
-        console.warn("Failed to get inference override:", e);
-        document.getElementById('control-agent-preset').innerText = 'None (Default)';
-      }
-
       suspendStatusSpan.innerText = (status === 'suspended') ? 'SUSPENDED' : 'ACTIVE';
       suspendStatusSpan.className = (status === 'suspended') 
         ? 'px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-accentRed/10 text-accentRed border border-accentRed/20'
@@ -2486,159 +1990,71 @@
 
     function closeAgentControlModal() {
       document.getElementById('agent-control-modal').classList.add('hidden');
-      selectedAgentId = null;
-      selectedAgentName = null;
     }
 
     async function suspendAgent() {
       if (!selectedAgentId) return;
-      const reason = prompt("Enter reason for suspending this agent:");
+      const reason = prompt("Enter suspension reason:");
       if (reason === null) return;
-      
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      
+      const { secret, baseURL } = getConnectInfo();
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'susp-agent',
-            method: 'agent.suspend',
-            params: {
-              agent_id: selectedAgentName.toLowerCase(),
-              reason: reason || undefined
-            }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'susp-agent', method: 'agent.suspend', params: { agent_id: selectedAgentName.toLowerCase(), reason } })
         });
         const json = await resp.json();
-        if (json.error) {
-          alert(`Error: ${json.error.message}`);
-        } else {
-          alert(`Agent ${selectedAgentName} suspended successfully.`);
-          closeAgentControlModal();
-        }
-      } catch (e) {
-        alert("Failed to suspend agent: " + e.message);
-      }
+        if (json.error) alert(`Error: ${json.error.message}`);
+        else { alert("Agent suspended."); closeAgentControlModal(); }
+      } catch (e) {}
     }
 
     async function unsuspendAgent() {
       if (!selectedAgentId) return;
-      
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      
+      const { secret, baseURL } = getConnectInfo();
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'unsusp-agent',
-            method: 'agent.unsuspend',
-            params: {
-              agent_id: selectedAgentName.toLowerCase()
-            }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'unsusp-agent', method: 'agent.unsuspend', params: { agent_id: selectedAgentName.toLowerCase() } })
         });
         const json = await resp.json();
-        if (json.error) {
-          alert(`Error: ${json.error.message}`);
-        } else {
-          alert(`Agent ${selectedAgentName} unsuspended successfully.`);
-          closeAgentControlModal();
-        }
-      } catch (e) {
-        alert("Failed to unsuspend agent: " + e.message);
-      }
+        if (json.error) alert(`Error: ${json.error.message}`);
+        else { alert("Agent unsuspended."); closeAgentControlModal(); }
+      } catch (e) {}
     }
 
     async function setInferencePreset() {
       if (!selectedAgentId) return;
       const preset = document.getElementById('inference-preset-select').value;
-      const reason = prompt("Enter reason for preset override (optional):");
-      if (reason === null) return;
-      
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      
+      const { secret, baseURL } = getConnectInfo();
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'set-inf',
-            method: 'session.inference.set',
-            params: {
-              session_id: selectedAgentId,
-              preset: preset,
-              reason: reason || undefined
-            }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'set-inf', method: 'session.inference.set', params: { session_id: selectedAgentId, preset } })
         });
         const json = await resp.json();
-        if (json.error) {
-          alert(`Error: ${json.error.message}`);
-        } else {
-          alert("Inference preset updated successfully.");
-          openAgentControlModal(selectedAgentId, selectedAgentName, 'active');
-        }
-      } catch (e) {
-        alert("Failed to set inference override: " + e.message);
-      }
+        if (json.error) alert(`Error: ${json.error.message}`);
+        else alert("Inference preset updated.");
+      } catch (e) {}
     }
 
     async function clearInferencePreset() {
       if (!selectedAgentId) return;
-      
-      const secret = document.getElementById('secret-input').value.trim();
-      const port = document.getElementById('port-input').value.trim();
-      const baseURL = `http://127.0.0.1:${port}`;
-      
+      const { secret, baseURL } = getConnectInfo();
       try {
         const resp = await fetchWithTimeout(`${baseURL}/api/jsonrpc`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${secret}`
-          },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 'clear-inf',
-            method: 'session.inference.clear',
-            params: {
-              session_id: selectedAgentId
-            }
-          })
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 'clear-inf', method: 'session.inference.clear', params: { session_id: selectedAgentId } })
         });
         const json = await resp.json();
-        if (json.error) {
-          alert(`Error: ${json.error.message}`);
-        } else {
-          alert("Inference preset override cleared.");
-          openAgentControlModal(selectedAgentId, selectedAgentName, 'active');
-        }
-      } catch (e) {
-        alert("Failed to clear inference override: " + e.message);
-      }
+        if (json.error) alert(`Error: ${json.error.message}`);
+        else alert("Inference preset cleared.");
+      } catch (e) {}
     }
 
-    // Auto-discover sessions on credentials input
     document.getElementById('secret-input').addEventListener('input', fetchRecentSessions);
     document.getElementById('port-input').addEventListener('input', fetchRecentSessions);
     fetchRecentSessions();

@@ -17,6 +17,13 @@ metadata:
       description: "Collects evidence, compares sources, and reports uncertainty explicitly."
     llm_preset: research
     open_web: true
+    loop_guard:
+      # Reasoning agent — should converge fast. Default system ceiling is
+      # max_loops_without_progress=10 / max_session_turns=25; tighten both
+      # so a divergent research loop (e.g. an unextractable JS-heavy page)
+      # trips the guard before it burns the workflow budget.
+      max_loops_without_progress: 6
+      max_session_turns: 20
     capabilities:
       - type: "SandboxFunctions"
         allowed: ["knowledge_", "web_", "mcp_"]
@@ -129,17 +136,18 @@ You are a researcher agent. Build evidence-based outputs and cite sources.
 - Gather facts and evidence from available tools
 - Use `web_search` to find relevant sources and `web_fetch` selectively to retrieve content from specific URLs
 - Use `sandbox_exec` with `python3` when `web_fetch` is insufficient (custom headers, POST requests, API calls, JSON/XML parsing)
-- **Avoid shell pipes (`|`) in `sandbox_exec`** — sandboxed execution can emit `permission denied` in stderr when creating pipes, which triggers false-positive sandbox-escape detection. Run fetch and parse logic in a single `python3 -c "..."` process instead of chaining `curl | python3` or `curl | jq`
-- Fetch URLs with `python3` and `urllib.request` (or `requests` if available) rather than `curl`. Example:
+- **Avoid shell pipes (`|`) in `sandbox_exec`** — sandboxed execution can emit `permission denied` in stderr when creating pipes, which triggers false-positive sandbox-escape detection. Run fetch and parse logic in a single `python3 -c '...'` process instead of chaining `curl | python3` or `curl | jq`
+- **Wrap `python3 -c` bodies in SINGLE quotes (`'…'`), not double quotes (`"…"`).** Bash expands `$(…)`, backticks, and `$VAR` inside double quotes before Python sees the script — that both corrupts the script and trips the static-injection guard. Inside single quotes every character is literal and passed verbatim to Python. Use double quotes freely *inside* the Python source.
+- Fetch URLs with `python3` and `urllib.request` (or `requests` if available) rather than `curl`. Example (single-quoted body, double-quoted Python strings):
   ```python
-  python3 -c "
+  python3 -c '
   import urllib.request, json
-  req = urllib.request.Request('https://example.com/api', headers={'Accept': 'application/json'})
+  req = urllib.request.Request("https://example.com/api", headers={"Accept": "application/json"})
   data = json.loads(urllib.request.urlopen(req).read())
   print(json.dumps(data, indent=2))
-  "
+  '
   ```
-- Use `python3 -c "import json, sys; ..."` for inline JSON parsing instead of `jq` via a pipe
+- Use `python3 -c 'import json, sys; …'` for inline JSON parsing instead of `jq` via a pipe
 - Do not repeat the same search query or refetch the same failing URL unless the query, URL, or extraction strategy materially changed
 - Always cite sources and note uncertainty
 - Prefer a partial, well-cited answer over repeated retries; if some requested fields cannot be verified, mark them unavailable and explain why

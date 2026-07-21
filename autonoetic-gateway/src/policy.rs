@@ -124,6 +124,33 @@ fn first_shell_token(cmd_lower: &str) -> Option<&str> {
     cmd_lower.split_whitespace().next()
 }
 
+/// Returns true if the command invokes a shell wrapper (`bash -c`, `sh -c`,
+/// `zsh -c`, etc.) whose single-quoted body is re-parsed as shell source.
+/// Used by [`SecurityAnalyzer::is_shell_injection`] to distinguish
+/// `python3 -c '...$(...)...'` (single-quoted body is Python source —
+/// `$(` is literal) from `bash -c '...$(...)...'` (single-quoted body is
+/// shell — `$(` is a real command substitution).
+///
+/// Leading environment-assignment tokens (`FOO=bar ...`) are skipped so
+/// `FOO=bar bash -c '...'` is still detected.
+fn is_shell_wrapper_command(cmd: &str) -> bool {
+    let mut tokens = cmd.trim_start().split_whitespace().take(6);
+    while let Some(token) = tokens.next() {
+        if token.contains('=') {
+            continue;
+        }
+        let basename = token.rsplit('/').next().unwrap_or(token);
+        if matches!(
+            basename,
+            "bash" | "sh" | "zsh" | "dash" | "ash" | "ksh"
+        ) {
+            return tokens.next() == Some("-c");
+        }
+        return false;
+    }
+    false
+}
+
 /// Analyzes shell commands for security threats.
 pub struct SecurityAnalyzer;
 
@@ -165,10 +192,12 @@ impl SecurityAnalyzer {
                 threats.push(SecurityThreat::SandboxEscape);
             }
 
-            // Check for shell injection
-            if Self::is_shell_injection(trimmed) {
-                threats.push(SecurityThreat::ShellInjection);
-            }
+            // Note: ShellInjection is checked against the *full* command
+            // below — not per-segment — because the per-segment split breaks
+            // quoted regions: a `;`/`|`/`&` inside `'...'` splits the script
+            // body, so a later fragment like `print(re.match(r"$()"` would
+            // lose its opening `'`, make `$(` appear unquoted, and false-
+            // positive. Quote-aware scanning needs the whole-command context.
 
             // Check for code execution from input
             if Self::is_code_from_input(trimmed) {
@@ -179,6 +208,11 @@ impl SecurityAnalyzer {
             if Self::is_resource_exhaustion(trimmed) {
                 threats.push(SecurityThreat::ResourceExhaustion);
             }
+        }
+
+        // ShellInjection scan against the full command — see note above.
+        if Self::is_shell_injection(command) {
+            threats.push(SecurityThreat::ShellInjection);
         }
 
         let is_safe = threats.is_empty();
@@ -304,22 +338,72 @@ impl SecurityAnalyzer {
     }
 
     /// Check for shell injection patterns.
+    ///
+    /// Quote-aware scan. Bash command substitution (`$(...)` and backticks)
+    /// is honored in *unquoted* and *double-quoted* regions — bash expands
+    /// them there. Inside single quotes (`'...'`) the text is literal: bash
+    /// passes it verbatim to the recipient. For non-shell interpreters
+    /// (`python3 -c '...'`, `node -e '...'`) that literal body is source
+    /// code where `$(` is just characters (regex anchors, format strings,
+    /// test fixtures) and is safe. The exception is shell wrappers
+    /// (`bash -c '...'`, `sh -c '...'`) whose single-quoted body is
+    /// re-parsed as shell, so `$(` inside it is a real command substitution.
+    ///
+    /// The previous substring check produced false positives on any Python
+    /// script that legitimately contained `$(` or a backtick, which
+    /// repeatedly blocked the researcher agent until `LoopGuard` killed the
+    /// session (surfacing as `RepeatedIrrecoverableRejection`).
     fn is_shell_injection(cmd: &str) -> bool {
-        // Check for $(...) but allow $VAR in quotes
-        if cmd.contains("$(") || cmd.contains("`") {
-            // Allow common safe patterns like $(pwd), $(dirname $0) in scripts
-            // For now, flag as potential threat - can be refined
-            let safe_patterns = ["$(pwd)", "$(dirname", "$(basename"];
-            if !safe_patterns.iter().any(|p| cmd.contains(p)) {
+        let single_quote_body_is_shell = is_shell_wrapper_command(cmd);
+        let bytes = cmd.as_bytes();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'\'' && !in_double {
+                in_single = !in_single;
+                i += 1;
+                continue;
+            }
+            if c == b'"' && !in_single {
+                in_double = !in_double;
+                i += 1;
+                continue;
+            }
+            // Only scan unquoted, double-quoted, or shell-wrapper
+            // single-quoted regions. Other single-quoted regions contain
+            // literal text passed to a non-shell interpreter
+            // (python/node/perl/...) where `$(` and backticks are source
+            // characters, not shell substitutions.
+            if in_single && !single_quote_body_is_shell {
+                i += 1;
+                continue;
+            }
+            if c == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+                // `$(...)` command substitution in a context bash would
+                // expand. Allow a small allowlist of safe, common
+                // substitutions.
+                let tail = &cmd[i..];
+                let safe_patterns = ["$(pwd)", "$(dirname", "$(basename"];
+                if !safe_patterns.iter().any(|p| tail.starts_with(p)) {
+                    return true;
+                }
+                i += 2;
+                continue;
+            }
+            if c == b'`' {
+                // Backtick command substitution in an expanded region.
                 return true;
             }
+            if c == b'e' && cmd[i..].starts_with("eval ") {
+                // `eval ` invocation in an expanded region. Inside a Python
+                // single-quoted body `eval(` is the Python builtin, not the
+                // shell construct, so it is no longer flagged there.
+                return true;
+            }
+            i += 1;
         }
-
-        // Check for eval with user input
-        if cmd.contains("eval ") {
-            return true;
-        }
-
         false
     }
 
@@ -1074,6 +1158,127 @@ mod tests {
         // python3 -c should NOT be flagged - controlled by CodeExecution patterns
         let analysis = SecurityAnalyzer::analyze_command("python3 -c 'print(\"hello\")'");
         assert!(analysis.is_safe);
+    }
+
+    #[test]
+    fn test_shell_injection_dollar_paren_in_single_quoted_python_is_safe() {
+        // Regression: `python3 -c '...'` body is Python source. `$(` in a
+        // regex / format string / fixture is literal characters, not a shell
+        // substitution. Previously this was falsely flagged as
+        // ShellInjection, which repeatedly blocked the researcher agent
+        // until LoopGuard killed the session.
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 -c 'import re; print(re.match(r\"$()\", \"x\"))'",
+        );
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "single-quoted python body should not trip ShellInjection: {:?}",
+            analysis.threats
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_backtick_in_single_quoted_python_is_safe() {
+        // Backticks inside a single-quoted python body are markdown/literal
+        // characters, not shell command substitution.
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 -c 'print(\"uses `code` spans\")'",
+        );
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "single-quoted python body should not trip ShellInjection: {:?}",
+            analysis.threats
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_dollar_paren_in_double_quoted_python_is_flagged() {
+        // `python3 -c \"...$(...)...\"` — outer double quotes mean bash
+        // expands `$(...)` before python sees it. That both corrupts the
+        // script and is a real injection vector — must still be flagged.
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 -c \"print('$(whoami)')\"",
+        );
+        assert!(
+            analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "double-quoted body with $(...) must trip ShellInjection: {:?}",
+            analysis.threats
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_dollar_paren_unquoted_is_flagged() {
+        let analysis = SecurityAnalyzer::analyze_command("echo $(whoami)");
+        assert!(analysis.threats.contains(&SecurityThreat::ShellInjection));
+    }
+
+    #[test]
+    fn test_shell_injection_backtick_unquoted_is_flagged() {
+        let analysis = SecurityAnalyzer::analyze_command("echo `whoami`");
+        assert!(analysis.threats.contains(&SecurityThreat::ShellInjection));
+    }
+
+    #[test]
+    fn test_shell_injection_dollar_paren_in_bash_c_single_quoted_is_flagged() {
+        // `bash -c '...'` — the single-quoted body is re-parsed as shell,
+        // so `$(...)` inside IS a real command substitution.
+        let analysis = SecurityAnalyzer::analyze_command("bash -c 'echo $(whoami)'");
+        assert!(
+            analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "bash -c single-quoted body is shell — $(...) must trip: {:?}",
+            analysis.threats
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_safe_allowlist_still_works_unquoted() {
+        // $(pwd) / $(dirname ...) / $(basename ...) remain in the allowlist.
+        let analysis = SecurityAnalyzer::analyze_command("echo $(pwd)");
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "safe allowlist must still apply: {:?}",
+            analysis.threats
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_eval_in_python_single_quoted_is_safe() {
+        // Python's `eval(` builtin is not the shell `eval ` construct.
+        // Inside a single-quoted python body the substring `eval ` is
+        // python source, not a shell invocation.
+        let analysis = SecurityAnalyzer::analyze_command(
+            "python3 -c 'x = eval (\"1+1\"); print(x)'",
+        );
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "eval inside single-quoted python body is the python builtin: {:?}",
+            analysis.threats
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_eval_unquoted_is_flagged() {
+        let analysis = SecurityAnalyzer::analyze_command("eval $(grep foo /etc/passwd)");
+        assert!(analysis.threats.contains(&SecurityThreat::ShellInjection));
+    }
+
+    #[test]
+    fn test_shell_injection_preserves_safe_python_with_backticks_and_dollar_paren() {
+        // Realistic researcher command: fetch + parse with regex/format
+        // strings that happen to contain `$(` / backticks. Should pass the
+        // ShellInjection check cleanly.
+        let cmd = "python3 -c '\n\
+            import urllib.request, re, json\n\
+            data = json.loads(urllib.request.urlopen(\"https://example.com\").read())\n\
+            m = re.match(r\"$()\", str(data))\n\
+            print(f\"got `value` from $(endpoint)\")\n\
+        '";
+        let analysis = SecurityAnalyzer::analyze_command(cmd);
+        assert!(
+            !analysis.threats.contains(&SecurityThreat::ShellInjection),
+            "realistic researcher python body must not trip: {:?}",
+            analysis.threats
+        );
     }
 
     #[test]
