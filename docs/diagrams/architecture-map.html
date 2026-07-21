@@ -1,0 +1,1256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonoetic — System Architecture</title>
+<style>
+  :root {
+    --ink: #171b21;
+    --ink-soft: #2b323d;
+    --paper: #eef1f4;
+    --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec;
+    --line: #c7cdd6;
+    --line-strong: #a7b0bd;
+    --muted: #5b6472;
+    --accent: #2a4d8f;
+    --accent-soft: #dbe4f5;
+    --rule: #a05a12;
+    --rule-soft: #f3e3cf;
+    --right: #0f6e63;
+    --right-soft: #d9ece8;
+    --oblig: #6a4c93;
+    --oblig-soft: #e7e0f2;
+    --served: #9c3f4d;
+    --served-soft: #f2dde0;
+    --ok: #1c7a4a;
+    --warn: #a6740b;
+    --bad: #a13a3a;
+    --debt: #5b6472;
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e7eaef;
+      --ink-soft: #c7cedb;
+      --paper: #11151c;
+      --paper-raised: #171d27;
+      --paper-sunken: #0c0f14;
+      --line: #2c3441;
+      --line-strong: #3c4657;
+      --muted: #93a0b3;
+      --accent: #85a8f2;
+      --accent-soft: #1c2a44;
+      --rule: #e0a355;
+      --rule-soft: #34281a;
+      --right: #5cc7b6;
+      --right-soft: #17322e;
+      --oblig: #c1a3ec;
+      --oblig-soft: #291f3a;
+      --served: #e3919b;
+      --served-soft: #35222a;
+      --ok: #4caf7d;
+      --warn: #d3a53f;
+      --bad: #dd7272;
+      --debt: #93a0b3;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ink: #e7eaef;
+    --ink-soft: #c7cedb;
+    --paper: #11151c;
+    --paper-raised: #171d27;
+    --paper-sunken: #0c0f14;
+    --line: #2c3441;
+    --line-strong: #3c4657;
+    --muted: #93a0b3;
+    --accent: #85a8f2;
+    --accent-soft: #1c2a44;
+    --rule: #e0a355;
+    --rule-soft: #34281a;
+    --right: #5cc7b6;
+    --right-soft: #17322e;
+    --oblig: #c1a3ec;
+    --oblig-soft: #291f3a;
+    --served: #e3919b;
+    --served-soft: #35222a;
+    --ok: #4caf7d;
+    --warn: #d3a53f;
+    --bad: #dd7272;
+    --debt: #93a0b3;
+  }
+  :root[data-theme="light"] {
+    --ink: #171b21;
+    --ink-soft: #2b323d;
+    --paper: #eef1f4;
+    --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec;
+    --line: #c7cdd6;
+    --line-strong: #a7b0bd;
+    --muted: #5b6472;
+    --accent: #2a4d8f;
+    --accent-soft: #dbe4f5;
+    --rule: #a05a12;
+    --rule-soft: #f3e3cf;
+    --right: #0f6e63;
+    --right-soft: #d9ece8;
+    --oblig: #6a4c93;
+    --oblig-soft: #e7e0f2;
+    --served: #9c3f4d;
+    --served-soft: #f2dde0;
+    --ok: #1c7a4a;
+    --warn: #a6740b;
+    --bad: #a13a3a;
+    --debt: #5b6472;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .page {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  /* ---------- Title block ---------- */
+  .titleblock {
+    border-bottom: 3px double var(--line-strong);
+    padding: 48px 0 22px;
+    margin-bottom: 8px;
+  }
+  .titleblock .kicker {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+  .titleblock h1 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: clamp(2rem, 5vw, 2.9rem);
+    margin: 0 0 10px;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  .titleblock .dek {
+    font-size: 1.05rem;
+    color: var(--ink-soft);
+    max-width: 62ch;
+    margin: 0 0 22px;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 28px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    border-top: 1px solid var(--line);
+    padding-top: 14px;
+  }
+  .meta-row strong { color: var(--ink-soft); font-weight: 600; }
+
+  /* ---------- Sheet (panel) ---------- */
+  .sheet {
+    padding: 46px 0 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sheet:last-of-type { border-bottom: none; }
+  .sheet-head { margin-bottom: 22px; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+  .sheet h2 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 1.7rem;
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+  .sheet .dek {
+    color: var(--muted);
+    max-width: 66ch;
+    margin: 0 0 28px;
+  }
+
+  /* ---------- generic boxes ---------- */
+  .box {
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 16px 18px;
+  }
+  .box h3 {
+    font-family: var(--font-body);
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin: 0 0 6px;
+    letter-spacing: .01em;
+  }
+  .box p { margin: 0; color: var(--ink-soft); font-size: 0.92rem; }
+  .box .fine { color: var(--muted); font-size: 0.82rem; margin-top: 8px; }
+
+  .badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 1px 7px;
+    border-radius: 3px;
+    border: 1px solid var(--line-strong);
+    color: var(--ink-soft);
+    background: var(--paper-sunken);
+    white-space: nowrap;
+  }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+
+  .tone-rule   { border-left: 3px solid var(--rule); }
+  .tone-right  { border-left: 3px solid var(--right); }
+  .tone-oblig  { border-left: 3px solid var(--oblig); }
+  .tone-served { border-left: 3px dashed var(--served); }
+  .tone-accent { border-left: 3px solid var(--accent); }
+
+  .tone-rule .badge   { color: var(--rule);  background: var(--rule-soft);  border-color: transparent; }
+  .tone-right .badge  { color: var(--right); background: var(--right-soft); border-color: transparent; }
+  .tone-oblig .badge  { color: var(--oblig); background: var(--oblig-soft); border-color: transparent; }
+  .tone-served .badge { color: var(--served); background: var(--served-soft); border-color: transparent; }
+
+  .kicker-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+  .tone-rule .kicker-chip   { color: var(--rule); }
+  .tone-right .kicker-chip  { color: var(--right); }
+  .tone-oblig .kicker-chip  { color: var(--oblig); }
+  .tone-served .kicker-chip { color: var(--served); }
+
+  /* ---------- flow diagrams ---------- */
+  .flow {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .flow > .box { flex: 1 1 200px; }
+  .connector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    min-width: 64px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-align: center;
+    letter-spacing: .02em;
+    padding: 0 4px;
+  }
+  .connector .glyph { font-size: 20px; color: var(--line-strong); line-height: 1; margin: 2px 0; }
+  .connector.vert { flex-direction: row; min-height: 40px; min-width: 0; padding: 6px 0; }
+  .connector.vert .glyph { margin: 0 8px; }
+
+  .stack { display: flex; flex-direction: column; gap: 4px; }
+
+  /* ---------- grid of cards (constitution / offices) ---------- */
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .grid4 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 760px) {
+    .grid2, .grid4 { grid-template-columns: 1fr; }
+    .flow { flex-direction: column; }
+    .connector { min-width: 0; min-height: 34px; flex-direction: row; }
+    .connector .glyph { transform: rotate(90deg); margin: 0 8px; }
+  }
+
+  .rr-ratio {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    margin-top: 4px;
+  }
+  .rr-bar { height: 10px; border-radius: 2px; }
+  .rr-bar.rights { background: var(--right); }
+  .rr-bar.rules { background: var(--rule); }
+  .rr-label { font-size: 11px; color: var(--muted); margin-top: 6px; }
+
+  .status-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    padding: 1px 6px 1px 4px;
+    border-radius: 3px;
+  }
+  .status-tag .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .status-enforced .dot { background: var(--ok); }
+  .status-partial .dot { background: var(--warn); }
+  .status-missing .dot { background: var(--bad); }
+  .status-debt .dot { background: var(--debt); }
+  .status-enforced { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+  .status-partial { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+  .status-missing { color: var(--bad); background: color-mix(in srgb, var(--bad) 14%, transparent); }
+  .status-debt { color: var(--debt); background: color-mix(in srgb, var(--debt) 14%, transparent); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-bottom: 22px;
+    padding: 10px 14px;
+    background: var(--paper-sunken);
+    border-radius: 3px;
+    border: 1px solid var(--line);
+  }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; }
+
+  .quote {
+    font-family: var(--font-display);
+    font-style: italic;
+    font-size: 1.15rem;
+    color: var(--ink-soft);
+    border-left: 3px solid var(--accent);
+    padding: 4px 0 4px 20px;
+    margin: 24px 0;
+    max-width: 66ch;
+  }
+
+  .para {
+    max-width: 66ch;
+    color: var(--ink-soft);
+    margin: 0 0 20px;
+  }
+  .para strong { color: var(--ink); }
+
+  /* ---------- relationship graph ---------- */
+  .graphwrap {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--paper-raised);
+    padding: 10px;
+  }
+  svg.graph { width: 100%; min-width: 1000px; height: auto; display: block; }
+  svg.graph text { font-family: var(--font-body); }
+
+  .gnode rect { fill: var(--paper-raised); stroke: var(--line-strong); stroke-width: 1.5; }
+  .gnode .t { fill: var(--ink); font-weight: 700; font-size: 14.5px; }
+  .gnode .s { fill: var(--muted); font-size: 11px; }
+  .gnode .r { fill: var(--ink-soft); font-size: 12px; }
+  .gnode .r .rid { font-family: var(--font-mono); font-weight: 700; }
+  .gnode.hub rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2.2; }
+  .gnode.law rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.8; }
+  .gnode.inst rect { fill: color-mix(in srgb, var(--accent-soft) 45%, var(--paper-raised)); }
+  .gnode.adv rect { fill: var(--paper-sunken); stroke-dasharray: 5 3; }
+
+  .edge { fill: none; stroke: var(--line-strong); stroke-width: 1.7; marker-end: url(#gm-arrow); }
+  .edge.rules { stroke: var(--rule); }
+  .edge.rights { stroke: var(--right); }
+  .edge.oblig  { stroke: var(--oblig); }
+  .edge.loop   { stroke: var(--accent); stroke-width: 2.6; }
+  .edge.adv    { stroke: var(--muted); stroke-dasharray: 6 4; stroke-width: 1.5; }
+
+  .elabel {
+    fill: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    stroke: var(--paper-raised);
+    stroke-width: 4px;
+    paint-order: stroke;
+    text-anchor: middle;
+  }
+  .zlabel {
+    fill: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .1em;
+    stroke: var(--paper-raised);
+    stroke-width: 4px;
+    paint-order: stroke;
+  }
+
+  .graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-top: 16px;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .graph-legend .item { display: flex; align-items: center; gap: 8px; }
+  .graph-legend .ln { width: 26px; height: 0; border-top-width: 3px; border-top-style: solid; flex: none; }
+  .graph-legend .ln.rules { border-color: var(--rule); }
+  .graph-legend .ln.rights { border-color: var(--right); }
+  .graph-legend .ln.oblig { border-color: var(--oblig); }
+  .graph-legend .ln.flow { border-color: var(--line-strong); }
+  .graph-legend .ln.adv { border-color: var(--muted); border-top-style: dashed; }
+  .graph-legend .ln.loop { border-color: var(--accent); border-top-width: 4px; }
+
+  .subhead {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 30px 0 12px;
+  }
+
+  table.reg {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.87rem;
+  }
+  table.reg th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--line-strong);
+  }
+  table.reg td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+    color: var(--ink-soft);
+  }
+  table.reg tr:last-child td { border-bottom: none; }
+
+  footer.colophon {
+    margin-top: 40px;
+    padding-top: 24px;
+    border-top: 3px double var(--line-strong);
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  footer.colophon .quote { margin-top: 0; }
+  footer.colophon ul { padding-left: 18px; margin: 10px 0; columns: 2; column-gap: 32px; }
+  footer.colophon li { margin-bottom: 4px; break-inside: avoid; }
+  footer.colophon code { font-family: var(--font-mono); font-size: 0.85em; }
+
+  @media (max-width: 640px) {
+    footer.colophon ul { columns: 1; }
+  }
+</style>
+
+</head>
+<body>
+<div class="page">
+
+  <header class="titleblock">
+    <div class="kicker">Reference diagram · governed autonomy runtime</div>
+    <h1>Autonoetic — System Architecture</h1>
+    <p class="dek">How a constitution binds three parties instead of one, and the standing institutions —
+      ombudsman, steward, curator, sentinels — that keep it correctable while nobody is watching.</p>
+    <div class="meta-row">
+      <span><strong>Constitution</strong> 2026.07.19</span>
+      <span><strong>Rights</strong> 18 enforced</span>
+      <span><strong>Rules</strong> 179 enforced</span>
+      <span><strong>Entrenched core</strong> 6 clauses</span>
+      <span><strong>Storage</strong> SQLite + content-addressed (SHA-256)</span>
+    </div>
+  </header>
+
+  <!-- ================= A. FIRST PRINCIPLES ================= -->
+  <section class="sheet" id="philosophy">
+    <div class="sheet-head">
+      <div class="eyebrow">§ A — First Principles</div>
+      <h2>Self-knowing as a runtime service, among equals under one law</h2>
+      <p class="dek">The name is Endel Tulving's — <em>autonoetic consciousness</em>, the capacity to
+        place oneself in one's own past and future. Autonoetic makes no claim about machine
+        consciousness. The claim is narrower and mechanical: rather than hoping the model is
+        self-aware, the gateway hands every agent a <strong>verified self-model, every turn</strong>.</p>
+    </div>
+
+    <p class="para">An agent reasoning from a false self-model — a misremembered budget, an invented
+      capability, a lost thread of what it already did — makes bad decisions no amount of prompting
+      fixes. So self-knowledge is not left to emerge as a hoped-for property; it is delivered as five
+      standing guarantees, each backed by a specific clause:</p>
+
+    <div class="box" style="padding:6px 18px;">
+      <table class="reg">
+        <thead>
+          <tr><th style="width:26%">Capacity</th><th>How the runtime guarantees it</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>A truthful past</strong></td>
+            <td>Right to read its own hash-chained causal chain <span class="badge">Ri-0.2</span>;
+              checkpoints and session forking let it revisit — and even branch — its own history.</td>
+          </tr>
+          <tr>
+            <td><strong>A truthful present</strong></td>
+            <td>A signed per-turn state attestation <span class="badge">P-6.23</span>: budget,
+              capabilities, pending gates, spawn depth, and the constitution digest in force —
+              taught to be <em>more authoritative than the agent's own memory</em>.</td>
+          </tr>
+          <tr>
+            <td><strong>Its normative standing</strong></td>
+            <td>The full constitution readable by digest <span class="badge">Ri-0.10</span>; every
+              rejection names the rule it enforced <span class="badge">Ri-0.3</span>.</td>
+          </tr>
+          <tr>
+            <td><strong>A bounded future</strong></td>
+            <td>Budgets known truthfully in real time <span class="badge">Ri-0.4</span>; a closed,
+              enumerated list of the ways a session can end <span class="badge">Ri-0.12</span>.</td>
+          </tr>
+          <tr>
+            <td><strong>A continuous identity</strong></td>
+            <td>Non-repudiable attribution <span class="badge">Ri-0.11</span>; portable identity via
+              cognitive capsules and the right to emigrate <span class="badge">Ri-0.17</span>;
+              immutable, audited revisions.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="quote">An agent with a truthful self-model reasons better <em>and</em> can be held
+      responsible legitimately — and both hold regardless of one's views on machine consciousness.</p>
+
+    <div class="subhead">The relational move — where the self-model comes from</div>
+    <div class="grid2">
+      <div class="box tone-accent">
+        <h3>A community of equals</h3>
+        <p>Autonoetic treats humans, AI agents, and plain scripts as the same kind of actor: all are
+          principals under one constitution, owed the same rights, held to the same rules. Reasoner,
+          enforcer, and decider are <strong>seats, not identities</strong> — a human or an agent may
+          occupy any of them, differing only in authority and voting weight, never in the law that
+          binds them.</p>
+        <p class="fine">Because the office is defined before its occupant, enfranchising agents later
+          is a parameter change, not a re-architecture.</p>
+      </div>
+      <div class="box tone-accent">
+        <h3>Self-awareness is relational; trust is structural</h3>
+        <p>An agent knows itself not by introspection but because its interactions with others are
+          recorded, attributed to it non-repudiably, and readable back
+          (<span class="badge">Ri-0.2</span> <span class="badge">Ri-0.11</span>). And it cooperates
+          safely with parties it cannot inspect — another agent, a human, a federated peer — because
+          both provably operate under the same law (the constitution-digest handshake), <em>not</em>
+          because either holds a theory of the other's mind.</p>
+        <p class="fine">Membership in the community <em>is</em> operating under the shared, verifiable
+          law. That is exactly what makes a mixed human / AI / script community possible.</p>
+      </div>
+    </div>
+
+    <div class="subhead">The four commitments the whole design answers to</div>
+    <div class="grid4">
+      <div class="box tone-right">
+        <span class="kicker-chip">Legitimacy</span>
+        <h3>Correctability over perfection</h3>
+        <p>The enforcer is fallible by nature. Authority is legitimate not because it is right but
+          because its errors are reportable, attributable, and correctable — so the clauses that
+          enable correction are entrenched.</p>
+      </div>
+      <div class="box tone-oblig">
+        <span class="kicker-chip">Power</span>
+        <h3>Democratic trajectory</h3>
+        <p>The operator holds most power today; that is a starting condition, not the design.
+          Seats-before-occupants is what makes spreading it inward a parameter change rather than a
+          revolution.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">Purpose</span>
+        <h3>End-user primacy</h3>
+        <p>Not a sovereign society of agents — a chartered profession, externally accountable to the
+          served party, whose refusal is absolute and sits outside the profession's own rules
+          (§12 · U-*).</p>
+      </div>
+      <div class="box tone-rule">
+        <span class="kicker-chip">Change</span>
+        <h3>Iterative constitutionalism</h3>
+        <p>The first version need not be right; it must make its own improvement lawful. Versioned,
+          digest-pinned, signed — amendable only through the process, never by silent erosion.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= B. SEPARATION OF POWERS ================= -->
+  <section class="sheet" id="powers">
+    <div class="sheet-head">
+      <div class="eyebrow">§ B — Foundation</div>
+      <h2>Three seats, not one authority</h2>
+      <p class="dek">Reasoner, enforcer, and decider are <em>occupant-agnostic seats</em> — a human or an
+        agent may hold any of them, subject to the same capability grant and the same obligations
+        (<span class="badge">P-2.20 GateDecider</span>). Nothing sensitive or scarce is ever touched
+        by the reasoner directly.</p>
+    </div>
+
+    <div class="flow">
+      <div class="box tone-accent">
+        <span class="kicker-chip">Reasoner</span>
+        <h3>Agent</h3>
+        <p>Low-privilege. Reads its own SKILL.md, state, memory, and causal chain. Emits intent
+          verbs — <em>execute, spawn, store, schedule, recall, request</em> — and nothing else.</p>
+        <p class="fine">Cannot: touch secrets, open sockets, write files outside scope, set timers, or self-attribute an action to someone else.</p>
+      </div>
+      <div class="connector"><span>proposes</span><span class="glyph">→</span><span>JSON-RPC / HTTP</span></div>
+      <div class="box tone-accent">
+        <span class="kicker-chip">Enforcer</span>
+        <h3>Gateway</h3>
+        <p>Sole high-privilege executor. Policy engine validates the proposal against declared
+          capabilities, then the execution engine runs it in a sandbox and the causal chain
+          records it. A narrow rule enforcer — it never routes or plans on the agent's behalf.</p>
+        <p class="fine">Rule Zero: if a rule exists it applies to every agent, without exception — not even the planner.</p>
+      </div>
+      <div class="connector"><span>gates on</span><span class="glyph">→</span><span>stakes / risk</span></div>
+      <div class="box tone-accent">
+        <span class="kicker-chip">Decider</span>
+        <h3>Human operator or agent-decider</h3>
+        <p>Resolves approval, escalation, and clarification gates. Owes a motivated, attributed
+          decision (<span class="badge">O-1</span> <span class="badge">O-2</span>) in return for
+          the full decision context the gateway owes it (<span class="badge">Ri-0.15</span>).</p>
+        <p class="fine">An agent may hold this seat only via the <span class="badge">GateDecider</span> capability — same duties as a human, differing only in authority and voting weight.</p>
+      </div>
+    </div>
+
+    <div class="connector vert" style="margin: 6px auto; max-width:300px;"><span class="glyph">↓</span><span>on approval, execution resumes with the real tool result</span></div>
+
+    <div class="grid2">
+      <div class="box">
+        <h3>Execution surface</h3>
+        <p>Sandbox (bubblewrap / docker / microvm / wasm), Secret Vault (ephemeral env-var
+          injection, zeroized after use), network host allowlists, content store.</p>
+      </div>
+      <div class="box">
+        <h3>Audit surface</h3>
+        <p>Hash-chained causal chain, mirrored to <span class="badge">causal_events</span> and
+          <span class="badge">execution_traces</span> — every proposal, decision, and effect is
+          reconstructable afterward, non-repudiably.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= B. THE CONSTITUTION ================= -->
+  <section class="sheet" id="constitution">
+    <div class="sheet-head">
+      <div class="eyebrow">§ C — The Law</div>
+      <h2>Bind-direction: every clause binds exactly one party</h2>
+      <p class="dek">Most agent-safety frameworks are rules-only — constraint with an enforcer that owes
+        nothing. Autonoetic tags each clause by <em>who it binds</em>, which is what turns constraint
+        into a social contract: a right is not a favour, it's what makes the rules legitimate.</p>
+    </div>
+
+    <div class="grid4">
+      <div class="box tone-rule">
+        <span class="kicker-chip">Binds the Agent</span>
+        <h3>§1–§11 Rules · P-*</h3>
+        <p>A finite, named list of forbidden actions. Everything not forbidden is permitted.</p>
+        <div class="badge-row">
+          <span class="badge">P-1.1 capability match</span>
+          <span class="badge">P-7.19 no polling</span>
+          <span class="badge">P-8.1 chain integrity</span>
+          <span class="badge">P-9.15 one door</span>
+        </div>
+      </div>
+      <div class="box tone-right">
+        <span class="kicker-chip">Binds the Gateway</span>
+        <h3>§0 Bill of Rights · Ri-*</h3>
+        <p>Unconditional entitlements the enforcer owes every agent — revocable only by amendment.</p>
+        <div class="badge-row">
+          <span class="badge">Ri-0.2 read own chain</span>
+          <span class="badge">Ri-0.3 named rejection</span>
+          <span class="badge">Ri-0.8 propose</span>
+          <span class="badge">Ri-0.11 non-repudiation</span>
+        </div>
+      </div>
+      <div class="box tone-oblig">
+        <span class="kicker-chip">Binds the Decider</span>
+        <h3>§O Obligations · O-*</h3>
+        <p>Whoever exercises authority over an agent owes duties mirroring the agent's own.</p>
+        <div class="badge-row">
+          <span class="badge">O-1 motivated decision</span>
+          <span class="badge">O-2 attributed decision</span>
+          <span class="badge">O-6 adjudicate proposals</span>
+          <span class="badge">O-7 adjudicate flags</span>
+        </div>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">Binds the Community</span>
+        <h3>§12 Rights of the Served · U-*</h3>
+        <p>Toward the end-user a session runs on behalf of. Declared now, deliberately unenforced —
+          the debt is named, not hidden.</p>
+        <div class="badge-row">
+          <span class="badge">U-1 refuse a result</span>
+          <span class="badge">U-2 plain-language account</span>
+          <span class="badge">U-3 exit + delete data</span>
+        </div>
+        <p class="fine">Status: <span class="status-tag status-missing"><span class="dot"></span>missing</span> — the sequencing gate before decider power spreads to agents.</p>
+      </div>
+    </div>
+
+    <div class="subhead">Rights vs. rules — the design ratio</div>
+    <div class="box">
+      <div class="rr-ratio">
+        <div class="rr-bar rights" style="width:9%"></div><div class="rr-bar rules" style="width:91%"></div>
+      </div>
+      <p class="rr-label">18 rights against 179 rules. A constitution heavy on rules and light on
+        rights is one to watch — amendments that widen this gap deserve scrutiny by design.
+        When a rule appears to conflict with a right, <strong>the right wins</strong>: never a silent
+        override, always an operator escalation.</p>
+    </div>
+
+    <div class="subhead">The entrenched correction core</div>
+    <div class="box tone-accent">
+      <p><span class="badge">Ri-0.2</span> <span class="badge">Ri-0.3</span> <span class="badge">Ri-0.8</span>
+        <span class="badge">Ri-0.11</span> <span class="badge">O-1</span> <span class="badge">P-8.1</span>
+        — the machinery every other correction is argued through: read your own history, know why you
+        were denied, be able to propose, be non-repudiably attributed, have your proposal's decider
+        owe a reason, and trust the chain isn't rewritten.</p>
+      <p class="fine">These may be <em>strengthened</em> by the ordinary amendment process. Weakening or
+        removing one additionally requires a dated, explicit justification recorded in that version's
+        <code>RATIFY.md</code> — procedural friction, not a cryptographic lock, backstopped by a test that
+        fails loudly if an entrenched clause silently drops out of the register.</p>
+    </div>
+  </section>
+
+  <!-- ================= C. ENFORCEMENT & CORRECTION ================= -->
+  <section class="sheet" id="enforcement">
+    <div class="sheet-head">
+      <div class="eyebrow">§ D — Measuring the Gap</div>
+      <h2>"A rule without a test is a wish; a right without a test is a lie"</h2>
+      <p class="dek">The distance between the constitution's text and what the gateway actually does is
+        not asserted — it's a standing, queryable quantity, rebuilt from the same evidence every
+        other correction argues from.</p>
+    </div>
+
+    <div class="legend">
+      <div class="item"><span class="swatch" style="background:var(--ok)"></span>Enforced — code + pinned test</div>
+      <div class="item"><span class="swatch" style="background:var(--warn)"></span>Partial — enforced in part</div>
+      <div class="item"><span class="swatch" style="background:var(--bad)"></span>Missing — declared, not built</div>
+      <div class="item"><span class="swatch" style="background:var(--debt)"></span>Design debt — precondition laid first</div>
+    </div>
+
+    <div class="flow">
+      <div class="box">
+        <h3>Causal chain</h3>
+        <p>Hash-chained JSONL. Every event carries the <span class="badge">P-x.y</span> /
+          <span class="badge">Ri-x.y</span> IDs it enforced.</p>
+      </div>
+      <div class="connector"><span class="glyph">→</span><span>mirrored</span></div>
+      <div class="box">
+        <h3>causal_events (SQLite)</h3>
+        <p><code>enforced_rules</code> column per row. Placeholder <span class="badge">R+++3</span>
+          means "no clause enforced here."</p>
+      </div>
+      <div class="connector"><span class="glyph">→</span><span>reverse-mapped</span></div>
+      <div class="box">
+        <h3>enforcement_register</h3>
+        <p><code>clause_of_rule()</code> attributes each ID to its owning principle/right. Unknown
+          IDs surface as <code>unattributed</code>, never silently dropped.</p>
+      </div>
+      <div class="connector"><span class="glyph">→</span><span>tallied</span></div>
+      <div class="box tone-accent">
+        <h3>Contract health</h3>
+        <p><code>trace contract-health</code> — how often each clause has actually fired, by clause,
+          since any date.</p>
+      </div>
+    </div>
+
+    <div class="grid2" style="margin-top:14px;">
+      <div class="box tone-served">
+        <h3>DISCRETION LEAK</h3>
+        <p>A place the gateway itself improvised — normalized malformed input (P-5.2), authored a
+          repair prompt (P-5.8) — named in prose at the site, not hidden as "helpful defaulting."
+          Aggregated into a standing agenda the Steward reads (§ D).</p>
+      </div>
+      <div class="box">
+        <h3>Civic health</h3>
+        <p>Whether agents actually exercised the rights that bind the gateway on their behalf —
+          repeated denials of the same rule become an <em>amendment invitation</em>, not just a log line.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= D. BACKGROUND OFFICES ================= -->
+  <section class="sheet" id="offices">
+    <div class="sheet-head">
+      <div class="eyebrow">§ E — Standing Institutions</div>
+      <h2>Offices, not universal virtue</h2>
+      <p class="dek">Most agents get only the cheap reflex layer — file a flag, receive a denial that
+        names its rule. The active civic labor runs in <strong>scheduled institutional sessions</strong>,
+        each a seat with duties attached, occupiable by an agent or a human. Every office is
+        advisory-first: it recommends or drafts; the operator approval queue is the backstop for
+        everything filed.</p>
+    </div>
+
+    <div class="box tone-accent" style="margin-bottom:16px;">
+      <span class="kicker-chip">Root · cron 4h</span>
+      <h3>evolution-orchestrator.default</h3>
+      <p>Wakes, reads its high-water mark, finds newly completed sessions, and coordinates the loop
+        below. Caps itself: max 2 agents evolved per run, foundational agents (planner, coder,
+        evaluators, itself) permanently exempt.</p>
+    </div>
+
+    <div class="connector vert" style="margin: 0 auto 16px; max-width:200px;"><span class="glyph">↓</span><span>spawns</span></div>
+
+    <div class="grid2">
+      <div class="box tone-right">
+        <span class="kicker-chip">Ombudsman office · cron 2h</span>
+        <h3>ombudsman.default</h3>
+        <p>Works the <span class="badge">anomaly_flag</span> queue (any agent may file one,
+          capability-free — <span class="badge">Ri-0.18</span>). Prioritizes SLA-breached flags,
+          adjudicates directly via <span class="badge">anomaly_adjudicate</span>
+          (<em>confirmed / dismissed / deferred / under_review</em>), discharging <span class="badge">O-7</span>.</p>
+        <p class="fine">Backstop: operator can revoke <span class="badge">AnomalyAdjudicate</span>, or
+          require terminal co-sign, falling the office back to advisory admin-proposals.</p>
+      </div>
+      <div class="box tone-oblig">
+        <span class="kicker-chip">Curator office · spawned per cycle</span>
+        <h3>memory-curator.default</h3>
+        <p>Leaf agent — no spawn. Distills sessions into effective/error/approach patterns, scores
+          every observed agent on six signals, flags systemic gaps. Owns the <strong>lesson
+          graduation policy</strong>: a lesson graduates only at ≥3 sessions, ≥2 agents, actionable,
+          not already covered.</p>
+        <p class="fine">Every drop / promote / flag decision becomes a <code>curator.decision</code>
+          causal event — "why was this memory dropped" always has a direct answer.</p>
+      </div>
+      <div class="box tone-oblig">
+        <span class="kicker-chip">Steward office · triggered or direct</span>
+        <h3>evolution-steward.default</h3>
+        <p>Judges the curator's evidence: evolve or skip, instructions-level or code-level fix,
+          delegates enactment to <code>agent-factory.default</code> (evaluator + auditor gates —
+          never edits SKILL.md directly). Also reads contract health, civic health, and the
+          DISCRETION LEAK register to <strong>draft and file amendments</strong> —
+          <span class="badge">add_rule</span> <span class="badge">modify_rule</span>
+          <span class="badge">add_right</span> <span class="badge">modify_right</span> only.</p>
+        <p class="fine">Removal kinds (<span class="badge">remove_rule</span>
+          <span class="badge">remove_right</span>) are deliberately outside its grant — those delegate
+          to the second seat below.</p>
+      </div>
+      <div class="box tone-rule">
+        <span class="kicker-chip">Second seat · operator-invoked</span>
+        <h3>governance-author.default</h3>
+        <p>Translates natural-language operator intent directly into structured
+          <span class="badge">constitution_propose_amendment</span> calls. Holds the full
+          <span class="badge">["*"]</span> scope, including removals — the high-stakes direction gets
+          the more deliberate author, not the automated sweep.</p>
+      </div>
+    </div>
+
+    <p class="fine" style="margin-top:14px;">Systemic gaps the curator can't fix in instructions or code
+      route two ways: <span class="badge">admin_proposal_create</span> for the operator, or to
+      <span class="badge">code-issue-proposer.default</span>, which files a scoped issue against the
+      gateway's own code under a bounded capability profile. Post-hoc quality control runs in
+      parallel: <span class="badge">outcome-grader.default</span> independently grades session
+      completion, and <span class="badge">improvement-orchestrator.default</span> runs statistical
+      A/B replays between two agent revisions before either is trusted further.</p>
+  </section>
+
+  <!-- ================= E. AMENDMENT LIFECYCLE ================= -->
+  <section class="sheet" id="amendment">
+    <div class="sheet-head">
+      <div class="eyebrow">§ F — Changing the Law</div>
+      <h2>Constitutional change is a first-class, audited operation</h2>
+      <p class="dek">The act of amending the constitution is itself governed by the constitution —
+        deliberately. A system that cannot lawfully change its own rules either ossifies or suffers
+        a revolution; one that can change them without constraint has no rules.</p>
+    </div>
+
+    <div class="stack">
+      <div class="flow">
+        <div class="box tone-right">
+          <span class="kicker-chip">1 · Propose</span>
+          <h3>Ri-0.8</h3>
+          <p>Any agent holding <span class="badge">ConstitutionalProposal</span>, or a human PR.
+            Durable id, cannot be silently dropped.</p>
+        </div>
+        <div class="connector"><span class="glyph">→</span></div>
+        <div class="box">
+          <span class="kicker-chip">2 · Review</span>
+          <h3>Test + sign-off</h3>
+          <p>A failing→passing test named to the rule id; a second human or the auditor agent
+            confirms text matches enforcement; §0 changes need an extra operator sign-off.</p>
+        </div>
+        <div class="connector"><span class="glyph">→</span></div>
+        <div class="box tone-oblig">
+          <span class="kicker-chip">3 · Adjudicate</span>
+          <h3>O-6, on a clock</h3>
+          <p>The review authority owes a recorded <em>approved / rejected / deferred / under_review</em>
+            decision inside a bounded SLA. Missing the window stamps a breach — the decision is
+            still owed, not discharged.</p>
+        </div>
+      </div>
+      <div class="connector vert" style="margin: 0 auto; max-width:200px;"><span class="glyph">↓</span></div>
+      <div class="flow">
+        <div class="box tone-accent">
+          <span class="kicker-chip">4 · Enact</span>
+          <h3>Digest &amp; lock</h3>
+          <p><span class="badge">constitution_digest</span> changes with any canonical text change,
+            pinned into <code>gateway-constitution.lock.json</code>. Gateway startup verifies the
+            lock and refuses to boot on mismatch.</p>
+        </div>
+        <div class="connector"><span class="glyph">→</span></div>
+        <div class="box">
+          <span class="kicker-chip">5 · Propagate</span>
+          <h3>Federation handshake</h3>
+          <p>Peer gateways observe the digest change through the OFP handshake — constitutional
+            pluralism via compatible-set / superset semantics, never a silent divergence.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= F. MEMORY ================= -->
+  <section class="sheet" id="memory">
+    <div class="sheet-head">
+      <div class="eyebrow">§ G — What the Institutions Read</div>
+      <h2>Memory architecture</h2>
+      <p class="dek">Two tiers, one evidentiary spine. Everything the offices in § D act on is
+        derived from what's written here — nothing is judged from an agent's unverified say-so.</p>
+    </div>
+
+    <div class="grid2">
+      <div class="box">
+        <h3>Tier 1 · Working memory</h3>
+        <p>Agent-local content store — <code>state/</code>, <code>history/</code>,
+          <code>skills/</code>. <code>content_write</code> / <code>resolve</code> /
+          <code>artifact_build</code>. Root-session visibility by default; artifacts are the
+          mandatory boundary before anything is reviewed, installed, or executed.</p>
+      </div>
+      <div class="box">
+        <h3>Tier 2 · Durable knowledge</h3>
+        <p>Gateway-managed facts with provenance — owner, writer, source ref, content hash,
+          visibility (<em>private / session / global</em>), retention. <code>knowledge_store</code> /
+          <code>recall</code> / <code>search</code> / <code>digest_query</code>.</p>
+      </div>
+      <div class="box tone-accent">
+        <h3>Causal chain + checkpoints</h3>
+        <p>Hash-chained audit trail; a runnable snapshot at <em>every</em> yield point. Approval-gated
+          turns suspend to a signed continuation and resume with the real tool result — no synthetic
+          retries. Sessions fork from any checkpoint into an independent lineage
+          (<code>session_fork_lineage</code>).</p>
+      </div>
+      <div class="box">
+        <h3>Live digest</h3>
+        <p><code>digest.md</code> — a real-time, human-readable narrative per session. What the
+          curator reads first, before raw execution traces; also the spine of the Session Room.</p>
+      </div>
+    </div>
+
+    <div class="connector vert" style="margin: 18px auto; max-width:640px;"><span class="glyph">↓</span><span>curator distills, every cycle</span></div>
+
+    <div class="flow">
+      <div class="box"><h3>Session activity</h3><p>Causal chain + live digest, per completed session.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box tone-oblig"><h3>memory-curator</h3><p>Patterns, agent scores, systemic gaps, graduation candidates.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box"><h3>Tier 2 knowledge</h3><p>Durable, global-visibility learnings every agent can recall.</p></div>
+    </div>
+  </section>
+
+  <!-- ================= G. OBSERVATIONAL LAYERS ================= -->
+  <section class="sheet" id="observers">
+    <div class="sheet-head">
+      <div class="eyebrow">§ H — Advisory Only, By Constitutional Design</div>
+      <h2>Judgment layers that watch but never gate</h2>
+      <p class="dek">A judgment layer that can block execution becomes an unaccountable second
+        executor. Both observers below are constrained to advisory-only by name — only the
+        LoopGuard's mechanical budgets ever halt a session.</p>
+    </div>
+
+    <div class="grid2">
+      <div class="box tone-served">
+        <span class="kicker-chip">Ri-0.16 · gateway mechanism</span>
+        <h3>Divergence Sentinel</h3>
+        <p>A gateway-side classifier (<code>trajectory_health.rs</code>) that labels session
+          trajectory — <em>Healthy / Watching / Diverging / Critical</em> — and emits a non-blocking
+          operator alert. Only a confirmed <span class="badge">FeedbackIgnored</span> signal (the same
+          error repeated after actionable feedback) can push past <em>Watching</em>. The
+          <code>watchdog.default</code> agent is the observer that reviews sessions in this space.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">System tier · read-only</span>
+        <h3>Security Sentinel</h3>
+        <p>No <span class="badge">NetworkAccess</span>, no <span class="badge">CodeExecution</span>.
+          Append-only <code>security_findings</code>; a frozen baseline runs every sweep alongside
+          the live checks and never auto-promotes, so a regression surfaces as a disagreement, not
+          a silent miss.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= I. THE SYSTEM AS ONE GRAPH ================= -->
+  <section class="sheet" id="graph">
+    <div class="sheet-head">
+      <div class="eyebrow">§ I — The Whole, Wired Together</div>
+      <h2>The system as one correction loop</h2>
+      <p class="dek">Every part above connects into a single cycle. The constitution binds the three
+        runtime parties; their actions are recorded as evidence; the standing institutions read that
+        evidence; what they find becomes proposals; adjudicated proposals amend the constitution —
+        and the loop closes. Read it clockwise from the top.</p>
+    </div>
+
+    <div class="graphwrap">
+      <svg class="graph" viewBox="0 0 1240 1040" role="img"
+           aria-label="Directed graph of Autonoetic's architecture: the constitution binds agent, gateway and decider; runtime actions are recorded to the causal chain and mirrored into the enforcement register, contract health and the discretion-leak register; scheduled institutions (orchestrator, curator, steward, ombudsman, governance author) read that evidence and file amendment proposals, which the decider adjudicates and which amend the constitution, closing the loop.">
+        <defs>
+          <marker id="gm-arrow" viewBox="0 0 10 10" refX="8.5" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+          </marker>
+        </defs>
+
+        <!-- zone labels (placed in the gaps between bands) -->
+        <text class="zlabel" x="366" y="30">THE LAW</text>
+        <text class="zlabel" x="28" y="236">RUNTIME</text>
+        <text class="zlabel" x="28" y="432">EVIDENCE &amp; MEMORY</text>
+        <text class="zlabel" x="28" y="706">STANDING INSTITUTIONS · scheduled</text>
+        <text class="zlabel" x="28" y="884">CHANGE</text>
+
+        <!-- ============ EDGES (drawn first, tuck under nodes) ============ -->
+        <!-- bind directions -->
+        <path class="edge rules"  d="M500,200 L246,250"/>
+        <path class="edge rights" d="M620,200 L620,250"/>
+        <path class="edge oblig"  d="M740,200 L1000,250"/>
+        <!-- runtime triad -->
+        <path class="edge" d="M320,290 L493,290"/>
+        <path class="edge" d="M745,286 L918,286"/>
+        <path class="edge" d="M920,312 L747,312"/>
+        <!-- record to evidence + memory -->
+        <path class="edge" d="M556,346 L220,470"/>
+        <path class="edge" d="M642,346 L648,600"/>
+        <!-- evidence spine -->
+        <path class="edge" d="M310,518 L358,518"/>
+        <path class="edge" d="M600,518 L648,518"/>
+        <path class="edge" d="M192,566 L392,600"/>
+        <!-- observers (advisory) -->
+        <path class="edge adv" d="M890,518 L938,518"/>
+        <!-- institutions pipeline -->
+        <path class="edge" d="M300,778 L333,778"/>
+        <path class="edge" d="M540,778 L573,778"/>
+        <path class="edge" d="M615,637 L512,730"/>
+        <!-- governance reads -->
+        <path class="edge" d="M726,566 L690,730"/>
+        <path class="edge" d="M540,674 L648,732"/>
+        <path class="edge" d="M804,566 L882,730"/>
+        <!-- change -->
+        <path class="edge" d="M677,826 L655,908"/>
+        <path class="edge" d="M1085,826 L800,908"/>
+        <path class="edge loop" d="M1045,346 C1236,520 1236,862 832,946"/>
+        <!-- loop close: proposals amend the constitution -->
+        <path class="edge loop" d="M470,958 C40,940 40,120 338,124"/>
+
+        <!-- ============ NODES ============ -->
+        <!-- THE LAW -->
+        <g class="gnode law">
+          <rect x="340" y="40" width="560" height="162" rx="8"/>
+          <text class="t" x="620" y="72" text-anchor="middle">CONSTITUTION</text>
+          <text class="s" x="620" y="90" text-anchor="middle">versioned · signed · digest-pinned · federated</text>
+          <text class="r" x="368" y="118"><tspan class="rid">Rules  P-*</tspan>  →  bind the Agent</text>
+          <text class="r" x="368" y="140"><tspan class="rid">Rights  Ri-*</tspan>  →  bind the Gateway</text>
+          <text class="r" x="368" y="162"><tspan class="rid">Obligations  O-*</tspan>  →  bind the Decider</text>
+          <text class="r" x="368" y="184" style="opacity:.62; font-style:italic"><tspan class="rid">Served  U-*</tspan>  →  bind the Community (declared, unenforced)</text>
+        </g>
+
+        <!-- RUNTIME -->
+        <g class="gnode hub">
+          <rect x="70" y="250" width="250" height="92" rx="7"/>
+          <text class="t" x="195" y="290" text-anchor="middle">Agent</text>
+          <text class="s" x="195" y="310" text-anchor="middle">reasoner · low privilege</text>
+        </g>
+        <g class="gnode hub">
+          <rect x="495" y="250" width="250" height="92" rx="7"/>
+          <text class="t" x="620" y="290" text-anchor="middle">Gateway</text>
+          <text class="s" x="620" y="310" text-anchor="middle">enforcer · Lawful Executor</text>
+        </g>
+        <g class="gnode hub">
+          <rect x="920" y="250" width="250" height="92" rx="7"/>
+          <text class="t" x="1045" y="290" text-anchor="middle">Decider</text>
+          <text class="s" x="1045" y="310" text-anchor="middle">operator or agent-decider</text>
+        </g>
+
+        <!-- EVIDENCE + MEMORY -->
+        <g class="gnode">
+          <rect x="70" y="470" width="240" height="96" rx="7"/>
+          <text class="t" x="190" y="510" text-anchor="middle">Causal chain</text>
+          <text class="s" x="190" y="530" text-anchor="middle">hash-chained, append-only</text>
+        </g>
+        <g class="gnode">
+          <rect x="360" y="470" width="240" height="96" rx="7"/>
+          <text class="t" x="480" y="510" text-anchor="middle">Enforcement register</text>
+          <text class="s" x="480" y="530" text-anchor="middle">clause_of_rule()</text>
+        </g>
+        <g class="gnode">
+          <rect x="650" y="470" width="240" height="96" rx="7"/>
+          <text class="t" x="770" y="510" text-anchor="middle">Contract health</text>
+          <text class="s" x="770" y="530" text-anchor="middle">enforcement tally by clause</text>
+        </g>
+        <g class="gnode">
+          <rect x="335" y="600" width="230" height="74" rx="7"/>
+          <text class="t" x="450" y="632" text-anchor="middle" style="font-size:13px">Discretion-leak register</text>
+          <text class="s" x="450" y="651" text-anchor="middle">gateway's own lapses</text>
+        </g>
+        <g class="gnode">
+          <rect x="600" y="600" width="240" height="74" rx="7"/>
+          <text class="t" x="720" y="632" text-anchor="middle" style="font-size:13px">Memory &amp; digest</text>
+          <text class="s" x="720" y="651" text-anchor="middle">Tier-1/2 · digest · checkpoints</text>
+        </g>
+        <g class="gnode adv">
+          <rect x="940" y="470" width="230" height="96" rx="7"/>
+          <text class="t" x="1055" y="505" text-anchor="middle" style="font-size:13px">Sentinels</text>
+          <text class="s" x="1055" y="524" text-anchor="middle">divergence + security</text>
+          <text class="s" x="1055" y="540" text-anchor="middle">observe · never block</text>
+        </g>
+
+        <!-- INSTITUTIONS -->
+        <g class="gnode inst">
+          <rect x="70" y="730" width="230" height="96" rx="7"/>
+          <text class="t" x="185" y="770" text-anchor="middle" style="font-size:13px">Evolution orchestrator</text>
+          <text class="s" x="185" y="790" text-anchor="middle">root · cron 4h</text>
+        </g>
+        <g class="gnode inst">
+          <rect x="335" y="730" width="205" height="96" rx="7"/>
+          <text class="t" x="437" y="770" text-anchor="middle" style="font-size:13px">Memory curator</text>
+          <text class="s" x="437" y="790" text-anchor="middle">distil · score · graduate</text>
+        </g>
+        <g class="gnode inst">
+          <rect x="573" y="730" width="207" height="96" rx="7"/>
+          <text class="t" x="676" y="764" text-anchor="middle" style="font-size:13px">Evolution steward</text>
+          <text class="s" x="676" y="783" text-anchor="middle">evolve agents ·</text>
+          <text class="s" x="676" y="799" text-anchor="middle">draft amendments</text>
+        </g>
+        <g class="gnode inst">
+          <rect x="815" y="730" width="160" height="96" rx="7"/>
+          <text class="t" x="895" y="770" text-anchor="middle" style="font-size:13px">Ombudsman</text>
+          <text class="s" x="895" y="790" text-anchor="middle">adjudicate flags</text>
+        </g>
+        <g class="gnode inst">
+          <rect x="1000" y="730" width="170" height="96" rx="7"/>
+          <text class="t" x="1085" y="764" text-anchor="middle" style="font-size:13px">Governance author</text>
+          <text class="s" x="1085" y="783" text-anchor="middle">removals ·</text>
+          <text class="s" x="1085" y="799" text-anchor="middle">full scope</text>
+        </g>
+
+        <!-- CHANGE -->
+        <g class="gnode hub">
+          <rect x="470" y="910" width="360" height="96" rx="7"/>
+          <text class="t" x="650" y="950" text-anchor="middle">Proposals &amp; adjudication</text>
+          <text class="s" x="650" y="971" text-anchor="middle">propose Ri-0.8  →  decide O-6 (on an SLA)</text>
+        </g>
+
+        <!-- ============ EDGE LABELS ============ -->
+        <text class="elabel" x="372" y="220">Rules</text>
+        <text class="elabel" x="664" y="232">Rights</text>
+        <text class="elabel" x="878" y="220">Obligations</text>
+        <text class="elabel" x="406" y="281">proposes</text>
+        <text class="elabel" x="832" y="276">gates · Ri-0.15</text>
+        <text class="elabel" x="832" y="330">O-1 · O-2 decision</text>
+        <text class="elabel" x="360" y="404">records all · Ri-0.11</text>
+        <text class="elabel" x="712" y="456">writes</text>
+        <text class="elabel" x="334" y="506">enforced_rules</text>
+        <text class="elabel" x="624" y="506">reverse-map</text>
+        <text class="elabel" x="270" y="600">self-reports</text>
+        <text class="elabel" x="914" y="506">observe</text>
+        <text class="elabel" x="316" y="766">spawns</text>
+        <text class="elabel" x="556" y="766">flags · graduations</text>
+        <text class="elabel" x="520" y="690">reads sessions</text>
+        <text class="elabel" x="742" y="648">reads health</text>
+        <text class="elabel" x="560" y="708">D.3 agenda</text>
+        <text class="elabel" x="872" y="648">flag queue · Ri-0.18</text>
+        <text class="elabel" x="612" y="874">drafts</text>
+        <text class="elabel" x="958" y="874">removals</text>
+        <text class="elabel" x="1195" y="640" transform="rotate(90 1195 640)">adjudicates · O-6</text>
+        <text class="elabel" x="66" y="540" transform="rotate(-90 66 540)">amendment → new signed version → digest</text>
+      </svg>
+    </div>
+
+    <div class="graph-legend">
+      <div class="item"><span class="ln rules"></span>Rules bind agent</div>
+      <div class="item"><span class="ln rights"></span>Rights bind gateway</div>
+      <div class="item"><span class="ln oblig"></span>Obligations bind decider</div>
+      <div class="item"><span class="ln flow"></span>Data / control flow</div>
+      <div class="item"><span class="ln adv"></span>Advisory — never blocks</div>
+      <div class="item"><span class="ln loop"></span>Amendment loop</div>
+    </div>
+
+    <p class="para" style="margin-top:22px;">Two things the shape makes visible. First, the
+      <strong>constitution is both source and sink</strong>: it binds the runtime at the top, and the
+      amendment loop feeds a changed law back into it at the bottom — the only cycle in the system
+      that can alter the rules everything else runs under. Second, the institutions and sentinels
+      <strong>only ever read evidence and propose</strong>; not one of them holds a wire that enacts
+      change directly. Every arrow that actually changes state passes through the gateway or a
+      decider. That is the separation of powers drawn as topology, not prose.</p>
+  </section>
+
+  <footer class="colophon">
+    <p class="quote">"An imperfect enforcer plus entrenched correction machinery beats a perfect
+      enforcer that cannot be corrected — and a community whose members can truthfully know
+      themselves, verify each other's law, and lawfully change their shared rules can be trusted
+      with progressively more of its own governance, so long as the people it serves can always
+      say no."</p>
+    <p>Compiled from the repository's own documentation and agent manifests. Source material:</p>
+    <ul>
+      <li><code>README.md</code></li>
+      <li><code>docs/philosophy.md</code></li>
+      <li><code>docs/ARCHITECTURE.md</code></li>
+      <li><code>docs/separation-of-powers.md</code></li>
+      <li><code>docs/constitution/versions/2026.07.19/constitution.md</code></li>
+      <li><code>docs/constitution/enforcement-register.md</code></li>
+      <li><code>docs/design/citizenship-as-a-runtime-service.md</code> (Parts B, D, F)</li>
+      <li><code>agents/governance/ombudsman.default/SKILL.md</code></li>
+      <li><code>agents/governance/governance-author.default/SKILL.md</code></li>
+      <li><code>agents/evolution/evolution-steward.default/SKILL.md</code></li>
+      <li><code>agents/evolution/memory-curator.default/SKILL.md</code></li>
+      <li><code>agents/evolution/evolution-orchestrator.default/SKILL.md</code></li>
+    </ul>
+  </footer>
+
+</div>
+
+</body>
+</html>

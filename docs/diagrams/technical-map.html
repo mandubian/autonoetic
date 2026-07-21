@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonoetic — The Technical Map</title>
+<style>
+  :root {
+    --ink: #171b21;
+    --ink-soft: #2b323d;
+    --paper: #eef1f4;
+    --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec;
+    --line: #c7cdd6;
+    --line-strong: #a7b0bd;
+    --muted: #5b6472;
+    --accent: #2a4d8f;
+    --accent-soft: #dbe4f5;
+    --rule: #a05a12;
+    --rule-soft: #f3e3cf;
+    --right: #0f6e63;
+    --right-soft: #d9ece8;
+    --oblig: #6a4c93;
+    --oblig-soft: #e7e0f2;
+    --served: #9c3f4d;
+    --served-soft: #f2dde0;
+    --ok: #1c7a4a;
+    --warn: #a6740b;
+    --bad: #a13a3a;
+    --debt: #5b6472;
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e7eaef; --ink-soft: #c7cedb; --paper: #11151c; --paper-raised: #171d27;
+      --paper-sunken: #0c0f14; --line: #2c3441; --line-strong: #3c4657; --muted: #93a0b3;
+      --accent: #85a8f2; --accent-soft: #1c2a44; --rule: #e0a355; --rule-soft: #34281a;
+      --right: #5cc7b6; --right-soft: #17322e; --oblig: #c1a3ec; --oblig-soft: #291f3a;
+      --served: #e3919b; --served-soft: #35222a; --ok: #4caf7d; --warn: #d3a53f;
+      --bad: #dd7272; --debt: #93a0b3;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e7eaef; --ink-soft: #c7cedb; --paper: #11151c; --paper-raised: #171d27;
+    --paper-sunken: #0c0f14; --line: #2c3441; --line-strong: #3c4657; --muted: #93a0b3;
+    --accent: #85a8f2; --accent-soft: #1c2a44; --rule: #e0a355; --rule-soft: #34281a;
+    --right: #5cc7b6; --right-soft: #17322e; --oblig: #c1a3ec; --oblig-soft: #291f3a;
+    --served: #e3919b; --served-soft: #35222a; --ok: #4caf7d; --warn: #d3a53f;
+    --bad: #dd7272; --debt: #93a0b3;
+  }
+  :root[data-theme="light"] {
+    --ink: #171b21; --ink-soft: #2b323d; --paper: #eef1f4; --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec; --line: #c7cdd6; --line-strong: #a7b0bd; --muted: #5b6472;
+    --accent: #2a4d8f; --accent-soft: #dbe4f5; --rule: #a05a12; --rule-soft: #f3e3cf;
+    --right: #0f6e63; --right-soft: #d9ece8; --oblig: #6a4c93; --oblig-soft: #e7e0f2;
+    --served: #9c3f4d; --served-soft: #f2dde0; --ok: #1c7a4a; --warn: #a6740b;
+    --bad: #a13a3a; --debt: #5b6472;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper); color: var(--ink); font-family: var(--font-body);
+    font-size: 16px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent-soft); color: var(--ink); }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .page { max-width: 1000px; margin: 0 auto; padding: 0 24px 96px; }
+
+  .titleblock { border-bottom: 3px double var(--line-strong); padding: 48px 0 22px; margin-bottom: 8px; }
+  .titleblock .kicker {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 10px;
+  }
+  .titleblock h1 {
+    font-family: var(--font-display); font-weight: 600; font-size: clamp(2rem, 5vw, 2.9rem);
+    margin: 0 0 10px; text-wrap: balance; letter-spacing: -0.01em;
+  }
+  .titleblock .dek { font-size: 1.05rem; color: var(--ink-soft); max-width: 64ch; margin: 0 0 22px; }
+  .titleblock .companion {
+    font-size: .92rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 14px;
+  }
+
+  .sheet { padding: 46px 0 8px; border-bottom: 1px solid var(--line); }
+  .sheet:last-of-type { border-bottom: none; }
+  .sheet-head { margin-bottom: 22px; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--accent); display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  }
+  .eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .sheet h2 { font-family: var(--font-display); font-weight: 600; font-size: 1.7rem; margin: 0 0 8px; text-wrap: balance; }
+  .sheet .dek { color: var(--muted); max-width: 66ch; margin: 0 0 28px; }
+
+  .box { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 3px; padding: 16px 18px; }
+  .box h3 { font-family: var(--font-body); font-size: 0.95rem; font-weight: 700; margin: 0 0 6px; }
+  .box p { margin: 0; color: var(--ink-soft); font-size: 0.92rem; }
+  .box .fine { color: var(--muted); font-size: 0.82rem; margin-top: 8px; }
+
+  .badge {
+    display: inline-block; font-family: var(--font-mono); font-size: 11.5px; padding: 1px 7px;
+    border-radius: 3px; border: 1px solid var(--line-strong); color: var(--ink-soft);
+    background: var(--paper-sunken); white-space: nowrap;
+  }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+
+  .tone-rule   { border-left: 3px solid var(--rule); }
+  .tone-right  { border-left: 3px solid var(--right); }
+  .tone-oblig  { border-left: 3px solid var(--oblig); }
+  .tone-served { border-left: 3px dashed var(--served); }
+  .tone-accent { border-left: 3px solid var(--accent); }
+  .kicker-chip { font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; }
+  .tone-rule .kicker-chip { color: var(--rule); }
+  .tone-right .kicker-chip { color: var(--right); }
+  .tone-oblig .kicker-chip { color: var(--oblig); }
+  .tone-served .kicker-chip { color: var(--served); }
+  .tone-accent .kicker-chip { color: var(--accent); }
+
+  .flow { display: flex; align-items: stretch; gap: 4px; flex-wrap: wrap; }
+  .flow > .box { flex: 1 1 190px; }
+  .connector {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    flex: 0 0 auto; min-width: 60px; color: var(--muted); font-family: var(--font-mono);
+    font-size: 10.5px; text-align: center; padding: 0 4px;
+  }
+  .connector .glyph { font-size: 20px; color: var(--line-strong); line-height: 1; margin: 2px 0; }
+  .connector.vert { flex-direction: row; min-height: 38px; min-width: 0; padding: 6px 0; }
+  .connector.vert .glyph { margin: 0 8px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  @media (max-width: 820px) { .grid3, .grid4 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 640px) { .grid2, .grid3, .grid4 { grid-template-columns: 1fr; } .flow { flex-direction: column; } .connector { min-width: 0; min-height: 32px; flex-direction: row; } .connector .glyph { transform: rotate(90deg); margin: 0 8px; } }
+
+  .subhead {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); margin: 32px 0 12px; display: flex; align-items: center; gap: 10px;
+  }
+  .subhead::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  .para { max-width: 66ch; color: var(--ink-soft); margin: 0 0 20px; }
+  .para strong { color: var(--ink); }
+
+  table.reg { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+  table.reg th {
+    text-align: left; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid var(--line-strong);
+  }
+  table.reg td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink-soft); }
+  table.reg tr:last-child td { border-bottom: none; }
+  table.reg code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
+
+  /* layered substrate */
+  .layer { position: relative; }
+  .layer .lstripe { }
+
+  /* tool catalog */
+  .catcard { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 3px; padding: 14px 16px; }
+  .catcard > h3 {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    font-size: 0.9rem; font-weight: 700; margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  }
+  .catcard > h3 .count { font-family: var(--font-mono); font-size: 11px; color: var(--muted); font-weight: 600; }
+  .trow { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--line); flex-wrap: wrap; }
+  .trow:last-child { border-bottom: none; }
+  .trow code { font-family: var(--font-mono); font-size: 12px; font-weight: 700; color: var(--ink); flex: 0 0 auto; }
+  .trow .desc { color: var(--muted); font-size: 12.5px; flex: 1 1 130px; min-width: 120px; }
+  .trow .tmeta { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-left: auto; }
+  .gate { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-soft); background: var(--paper-sunken); border-radius: 3px; padding: 0 5px; white-space: nowrap; }
+  .gate.free { color: var(--muted); }
+  .tdot { width: 9px; height: 9px; border-radius: 50%; flex: none; display: inline-block; }
+  .tdot.core { background: var(--right); }
+  .tdot.wf { background: var(--accent); }
+  .tdot.sp { background: var(--rule); }
+
+  .tierlegend { display: flex; flex-wrap: wrap; gap: 10px 20px; margin-bottom: 22px; padding: 12px 16px; background: var(--paper-sunken); border: 1px solid var(--line); border-radius: 3px; font-size: 12.5px; color: var(--muted); }
+  .tierlegend .item { display: flex; align-items: center; gap: 7px; }
+  .tierlegend b { color: var(--ink-soft); font-weight: 700; }
+
+  /* agent roster */
+  .agent { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 3px; padding: 12px 14px; border-left: 3px solid var(--line-strong); }
+  .agent h4 { margin: 0 0 3px; font-size: 0.9rem; font-weight: 700; font-family: var(--font-mono); color: var(--ink); }
+  .agent .role { color: var(--ink-soft); font-size: 0.86rem; margin: 0 0 8px; }
+  .agent .caps { display: flex; flex-wrap: wrap; gap: 5px; }
+  .agent .caps .badge { font-size: 10.5px; padding: 0 5px; }
+  .agent.lead { border-left-color: var(--accent); }
+  .agent.spec { border-left-color: var(--right); }
+  .agent.evo { border-left-color: var(--oblig); }
+  .agent.gov { border-left-color: var(--rule); }
+  .agent.sys { border-left-color: var(--served); }
+  .agent .tag { font-family: var(--font-mono); font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .pill { display:inline-block; font-family: var(--font-mono); font-size: 10px; padding: 0 5px; border-radius: 3px; background: var(--accent-soft); color: var(--accent); margin-left: 6px; }
+
+  footer.colophon { margin-top: 40px; padding-top: 24px; border-top: 3px double var(--line-strong); font-size: 0.85rem; color: var(--muted); }
+  footer.colophon code { font-family: var(--font-mono); font-size: 0.85em; }
+  footer.colophon ul { padding-left: 18px; margin: 10px 0; columns: 2; column-gap: 32px; }
+  footer.colophon li { margin-bottom: 4px; break-inside: avoid; }
+  @media (max-width: 640px) { footer.colophon ul { columns: 1; } }
+</style>
+
+</head>
+<body>
+<div class="page">
+
+  <header class="titleblock">
+    <div class="kicker">Technical companion · runtime infrastructure</div>
+    <h1>Autonoetic — The Technical Map</h1>
+    <p class="dek">Beneath the constitution sits the machinery that makes it real: how a proposed tool
+      call becomes a sandboxed effect, where everything is stored, what can never be quietly changed,
+      and the full catalog of tools and default agents that operate on it.</p>
+    <p class="companion">Companion to the governance map (<em>Autonoetic — System Architecture</em>).
+      Where that page answers <em>why the rules are legitimate</em>, this one answers <em>how the
+      runtime actually executes, stores, and recovers</em>.</p>
+  </header>
+
+  <!-- ================= A. INFRASTRUCTURE ================= -->
+  <section class="sheet" id="infra">
+    <div class="sheet-head">
+      <div class="eyebrow">§ A — The Substrate</div>
+      <h2>From proposed intent to sandboxed, audited effect</h2>
+      <p class="dek">The agent proposes; the gateway validates, executes in isolation, records the
+        result, and — if it failed — feeds a structured error back for repair. Every layer below is
+        something the agent asks for but never touches directly.</p>
+    </div>
+
+    <div class="subhead">The tool-call lifecycle</div>
+    <div class="stack">
+      <div class="box tone-accent">
+        <span class="kicker-chip">Reason</span>
+        <h3>Agent — proposes a tool call</h3>
+        <p>A typed intent (<span class="mono">content_write</span>, <span class="mono">sandbox_exec</span>,
+          <span class="mono">agent_spawn</span>…) sent over JSON-RPC. The agent holds no execution
+          authority; it holds permission to <em>ask</em>.</p>
+      </div>
+      <div class="connector vert"><span class="glyph">↓</span><span>JSON-RPC intent</span></div>
+      <div class="box tone-accent">
+        <span class="kicker-chip">Gate</span>
+        <h3>Tool dispatch &amp; policy</h3>
+        <p>Three checks in order: <strong>tier filter</strong> (Core / Workflow / Specialized surface),
+          <strong>capability gate</strong> (<span class="mono">policy.can_invoke_tool</span>), and an
+          <strong>approval gate</strong> if the action is privileged — which suspends the turn to a
+          signed checkpoint and resumes with the real result.</p>
+      </div>
+      <div class="connector vert"><span class="glyph">↓</span><span>validated</span></div>
+      <div class="box tone-accent">
+        <span class="kicker-chip">Execute</span>
+        <h3>Sandbox execution</h3>
+        <p>Code runs in one of four drivers, network-off by default. Secrets are injected as ephemeral
+          env vars at this moment and zeroized after — never entering the agent's context.</p>
+      </div>
+      <div class="connector vert"><span class="glyph">↓</span><span>structured result · {ok, error_type, repair_hint}</span></div>
+      <div class="box tone-accent">
+        <span class="kicker-chip">Persist &amp; recover</span>
+        <h3>Record → (repair loop)</h3>
+        <p>The effect and its result are written to the causal chain and content store. On failure the
+          typed error is fed back in-session for a bounded repair attempt; the LoopGuard halts only on
+          mechanical budgets.</p>
+      </div>
+    </div>
+
+    <div class="subhead">Sandbox drivers — isolation is mechanical</div>
+    <div class="grid4">
+      <div class="box tone-right">
+        <span class="kicker-chip">default</span>
+        <h3>bubblewrap</h3>
+        <p><span class="mono">--unshare-all</span>, read-only root, workspace bind-mount. Network is
+          <strong>off unless</strong> the agent declares non-empty <span class="mono">NetworkAccess.hosts</span>.</p>
+      </div>
+      <div class="box tone-right">
+        <span class="kicker-chip">containerized</span>
+        <h3>docker</h3>
+        <p><span class="mono">--network none</span> hardcoded (always network-off), workspace volume,
+          no inherited gateway env; extra mounts are read-only.</p>
+      </div>
+      <div class="box">
+        <span class="kicker-chip">vm · stubbed</span>
+        <h3>microvm</h3>
+        <p>Firecracker; dependency bootstrap not yet implemented. Network isolation
+          <strong>not guaranteed</strong> — the one driver that can't promise it.</p>
+      </div>
+      <div class="box tone-right">
+        <span class="kicker-chip">in-process</span>
+        <h3>wasm</h3>
+        <p>In-process <span class="mono">wasmtime</span>, WASI Preview 1. No network, no host
+          dependency. Bounded: 20 B fuel units + 512 MiB. JS agents compile here via Javy.</p>
+      </div>
+    </div>
+
+    <div class="subhead">Storage — three classes, one discipline</div>
+    <div class="grid3">
+      <div class="box">
+        <h3>Transactional · SQLite</h3>
+        <p>Fast-moving state in <span class="mono">gateway.db</span> (+ <span class="mono">knowledge.db</span>):
+          revisions &amp; aliases, approvals &amp; workflow events, causal-event mirror &amp; execution
+          traces, memories &amp; tags, published reports (FTS5), scheduled jobs.</p>
+      </div>
+      <div class="box">
+        <h3>Content-addressed · immutable</h3>
+        <p>Content store keyed by SHA-256 (<span class="mono">content/sha256/ab/c123…</span>); the layer
+          store holds dependency trees as <span class="mono">tar.zst</span>, deduplicated by digest and
+          mounted at build-declared paths.</p>
+      </div>
+      <div class="box">
+        <h3>Append-only · JSONL</h3>
+        <p>The causal chain (<span class="mono">history/causal_chain.jsonl</span>), hash-chained and
+          mirrored into the queryable <span class="mono">causal_events</span> table. Retention:
+          traces 30 d, events 90 d (0 = forever), pruned on startup.</p>
+      </div>
+    </div>
+
+    <div class="subhead">Credentials — the vault the agent never reads</div>
+    <div class="grid2">
+      <div class="box tone-served">
+        <h3>Storage &amp; ceremony</h3>
+        <p>AES-256-GCM with a per-entry nonce; master key from env or key file.
+          <span class="mono">credential_setup</span> runs a human-in-the-loop ceremony: a
+          <span class="mono">user_prompt</span> step suspends to an approval and the operator enters
+          the secret masked — the LLM proposes the flow but never sees the value.</p>
+      </div>
+      <div class="box tone-served">
+        <h3>Injection &amp; refresh</h3>
+        <p>At execution the gateway injects the secret <strong>server-side</strong> — into an HTTP
+          header / query / body (response redacted), or as a sandbox env var via
+          <span class="mono">credential_env</span> — then zeroizes it. On a <span class="mono">401</span>
+          it attempts a single OAuth auto-refresh. Nothing crosses into agent context.</p>
+      </div>
+    </div>
+
+    <div class="subhead">Immutability — five distinct guarantees</div>
+    <div class="grid3">
+      <div class="box tone-accent">
+        <h3>Immutable revisions</h3>
+        <p>Each <span class="mono">agent_revisions</span> row is content-addressed by
+          <span class="mono">content_digest</span> (status <span class="mono">candidate → ready →
+          rejected/archived</span>). Running sessions stay pinned; promotion never mutates a revision.</p>
+      </div>
+      <div class="box tone-accent">
+        <h3>Content-addressed by hash</h3>
+        <p>Any change to a blob yields a new SHA-256 handle. Blobs are never overwritten — editing is
+          re-storing under a new address.</p>
+      </div>
+      <div class="box tone-accent">
+        <h3>Append-only causal chain</h3>
+        <p>The hash-chained audit trail can be extended but not rewritten; <span class="mono">entry_hash</span>
+          / <span class="mono">prev_hash</span> make tampering detectable.</p>
+      </div>
+      <div class="box tone-accent">
+        <h3>Insert-only findings</h3>
+        <p>The <span class="mono">security_findings</span> table is insert-only; only triage state may
+          change after a finding is written.</p>
+      </div>
+      <div class="box tone-accent">
+        <h3>Signed capsules</h3>
+        <p>A cognitive capsule is revision-pinned, closure-complete, secret-free, content-addressed and
+          <strong>Ed25519-signed</strong> — a portable identity that can't be silently altered.</p>
+      </div>
+      <div class="box">
+        <h3>runtime.lock</h3>
+        <p>The pinned execution closure (locked layers + artifacts). A session binds a revision
+          <em>and</em> its <span class="mono">runtime_lock_hash</span>, so a run is reproducible.</p>
+      </div>
+    </div>
+
+    <div class="subhead">Birth of an agent — the one lawful door</div>
+    <div class="flow">
+      <div class="box"><h3>content_write</h3><p>Author SKILL.md + files in working memory.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box"><h3>artifact_build</h3><p>Bundle into an immutable, digest-identified AgentBundle.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box"><h3>revision_create</h3><p>Canonicalize SKILL.md + runtime.lock; status <span class="mono">candidate</span>.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box tone-oblig"><h3>promotion gates</h3><p>capability-delta → sentinel → safety governor → FullJury.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box tone-accent"><h3>revision_promote</h3><p>Alias moves to the new revision — the only activation path.</p></div>
+    </div>
+
+    <div class="subhead">Error taxonomy &amp; the repair loop</div>
+    <div class="grid2">
+      <div class="box">
+        <h3>Typed failures</h3>
+        <p>Every failed call returns <span class="mono">{ ok:false, error_type, message, repair_hint? }</span>.
+          The <span class="mono">error_type</span> enum:</p>
+        <div class="badge-row">
+          <span class="badge">validation</span><span class="badge">permission</span>
+          <span class="badge">resource</span><span class="badge">execution</span>
+          <span class="badge">conflict</span><span class="badge">quota_exceeded</span>
+          <span class="badge">not_found</span><span class="badge">timeout</span>
+          <span class="badge">fatal</span>
+        </div>
+        <p class="fine">Per-kind retry is pre-committed: <span class="mono">transient_env</span> → bounded
+          retry + backoff; <span class="mono">capability_denied</span> → no retry (use the lawful next
+          moves); <span class="mono">input_contract</span> → repair once;
+          <span class="mono">output_contract_unmet</span> → re-delegate / decompose / escalate, never blind-retry.</p>
+      </div>
+      <div class="box tone-rule">
+        <h3>LoopGuard — the only thing that halts</h3>
+        <p>Judgment layers observe; only the LoopGuard stops a session, on mechanical budgets:</p>
+        <div class="badge-row">
+          <span class="badge">tool_failure_budget · P-7.5</span>
+          <span class="badge">no_meaningful_progress · P-7.7</span>
+          <span class="badge">rotating_polling · P-7.19</span>
+          <span class="badge">child_failure_budget · P-7.20</span>
+          <span class="badge">repeated_irrecoverable_rejection</span>
+          <span class="badge">repeated_spawn_identity</span>
+        </div>
+        <p class="fine"><span class="mono">permission</span> errors are excluded from the failure budget;
+          <span class="mono">fatal</span> aborts immediately. The divergence Sentinel only escalates on a
+          confirmed <span class="mono">FeedbackIgnored</span> — the same error repeated after actionable
+          feedback — distinguishing a stuck agent from productive repair.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= B. TOOLS ================= -->
+  <section class="sheet" id="tools">
+    <div class="sheet-head">
+      <div class="eyebrow">§ B — What an Agent Can Ask For</div>
+      <h2>The native tool surface</h2>
+      <p class="dek">Tools are exposed by <strong>tier</strong> (a prefix rule in
+        <span class="mono">config/tools.yaml</span>) and then gated by <strong>capability</strong>.
+        A tool appears only if its tier is exposed <em>and</em> the agent holds its gating capability;
+        capability-free tools (marked <span class="mono">—</span>) are available whenever their tier is.</p>
+    </div>
+
+    <div class="tierlegend">
+      <div class="item"><span class="tdot core"></span><b>Core</b> — foundational surface, always exposed</div>
+      <div class="item"><span class="tdot wf"></span><b>Workflow</b> — orchestration &amp; coordination</div>
+      <div class="item"><span class="tdot sp"></span><b>Specialized</b> — privileged / role-specific (default tier)</div>
+      <div class="item"><span class="gate">Capability</span> = the grant that unlocks it · <span class="gate free">—</span> = no capability needed</div>
+    </div>
+
+    <div class="grid2">
+      <div class="catcard">
+        <h3>Content &amp; working memory <span class="count">Core</span></h3>
+        <div class="trow"><code>content_write</code><span class="desc">write/overwrite a content handle</span><span class="tmeta"><span class="gate">WriteAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>content_patch</code><span class="desc">structured edit of existing content</span><span class="tmeta"><span class="gate">WriteAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>resolve</code><span class="desc">single front door to fetch any handle</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>artifact_build</code><span class="desc">bundle handles into an immutable artifact</span><span class="tmeta"><span class="gate">WriteAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>artifact_inspect</code><span class="desc">read an artifact's metadata/contents</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Durable knowledge <span class="count">Core · Workflow</span></h3>
+        <div class="trow"><code>knowledge_store</code><span class="desc">persist a durable fact with visibility</span><span class="tmeta"><span class="gate">WriteAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>knowledge_recall</code><span class="desc">fetch a fact by id</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>knowledge_search</code><span class="desc">semantic / tag search over facts</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>digest_query</code><span class="desc">search rolled-up session digests</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>digest_annotate</code><span class="desc">attach a note to a digest</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Execution &amp; artifacts <span class="count">Core</span></h3>
+        <div class="trow"><code>sandbox_exec</code><span class="desc">run code in the sandbox</span><span class="tmeta"><span class="gate">CodeExecution</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>artifact_exec</code><span class="desc">execute a prepared artifact</span><span class="tmeta"><span class="gate">ArtifactExecution</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>artifact_prepare</code><span class="desc">one-pass preflight → deployment ticket</span><span class="tmeta"><span class="gate">ArtifactExecution</span><span class="tdot core"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Agent lifecycle &amp; delegation <span class="count">Workflow</span></h3>
+        <div class="trow"><code>agent_spawn</code><span class="desc">spawn a child agent/session</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>agent_message</code><span class="desc">message another agent</span><span class="tmeta"><span class="gate">AgentMessage</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>agent_list</code><span class="desc">list agents</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>agent_discover</code><span class="desc">find agents by role/capability</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>agent_inspect</code><span class="desc">inspect an agent's manifest/state</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>self_describe</code><span class="desc">report own capabilities/role/state</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>workflow_wait</code><span class="desc">block until a task reaches a state</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>workflow_state</code><span class="desc">read workflow/task state</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>workflow_cancel_task</code><span class="desc">cancel an in-flight task</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>approval_status / _list / _withdraw</code><span class="desc">inspect / withdraw approval requests</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Revision &amp; promotion <span class="count">Specialized</span></h3>
+        <div class="trow"><code>agent_revision_create</code><span class="desc">create a new revision</span><span class="tmeta"><span class="gate">AgentRevision</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>agent_revision_create_from_intent</code><span class="desc">create a revision from NL intent</span><span class="tmeta"><span class="gate">AgentRevision</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>agent_revision_promote</code><span class="desc">move the alias / activate</span><span class="tmeta"><span class="gate">AgentRevision</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>agent_revision_rollback</code><span class="desc">roll alias back to a prior revision</span><span class="tmeta"><span class="gate">AgentRevision</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>agent_revision_inspect / list / diff / schema</code><span class="desc">inspect, list, diff, spec-schema</span><span class="tmeta"><span class="gate">AgentRevision</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>skill_install</code><span class="desc">parse SKILL.md → Candidate (never auto-promoted)</span><span class="tmeta"><span class="gate">SkillInstall</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>skill_normalize</code><span class="desc">normalize API docs into a skill</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>promotion_record</code><span class="desc">record a jury/federation verdict</span><span class="tmeta"><span class="gate">PromoteWith</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>promotion_query</code><span class="desc">read promotion status</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>eval_suite_publish / _update</code><span class="desc">publish/update an eval suite</span><span class="tmeta"><span class="gate">Evaluation</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>eval_run / _compare / _report</code><span class="desc">run, compare, report evals</span><span class="tmeta"><span class="gate">Evaluation</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>improvement_ab_replay</code><span class="desc">A/B replay of two revisions</span><span class="tmeta"><span class="gate">Evaluation</span><span class="tdot sp"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Constitution &amp; anomaly <span class="count">Core</span></h3>
+        <div class="trow"><code>constitution_read</code><span class="desc">read the law by digest (Ri-0.10)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>constitution_propose_amendment</code><span class="desc">file an amendment proposal (Ri-0.8)</span><span class="tmeta"><span class="gate">ConstitutionalProposal</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>anomaly_flag</code><span class="desc">report an anomaly — capability-free (Ri-0.18)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>anomaly_adjudicate</code><span class="desc">ombudsman decision on a flag (O-7)</span><span class="tmeta"><span class="gate">AnomalyAdjudicate</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>sentinel_suppress</code><span class="desc">suppress a sentinel signal</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>admin_proposal_create / _list</code><span class="desc">systemic-gap proposal to the operator</span><span class="tmeta"><span class="gate">ApprovalQueue</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>attack_pattern_propose / _list</code><span class="desc">red-team attack-pattern registry</span><span class="tmeta"><span class="gate">SecurityRedTeam</span><span class="tdot sp"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Observability &amp; learning <span class="count">Specialized</span></h3>
+        <div class="trow"><code>execution_search</code><span class="desc">search past executions (own history)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>observability_search</code><span class="desc">search cross-session reports</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>observability_read</code><span class="desc">read a report by URI</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>observability_read_reasoning</code><span class="desc">read redacted reasoning (accountable)</span><span class="tmeta"><span class="gate">ReasoningAudit</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>quality_trend_report</code><span class="desc">quality trend over time</span><span class="tmeta"><span class="gate">Read/Eval…</span><span class="tdot sp"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Scheduling <span class="count">Workflow</span></h3>
+        <div class="trow"><code>scheduler_cron_create</code><span class="desc">schedule a recurring agent run</span><span class="tmeta"><span class="gate">SchedulerAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>scheduler_cron_list</code><span class="desc">list schedules</span><span class="tmeta"><span class="gate">SchedulerAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>scheduler_cron_pause / _resume / _cancel</code><span class="desc">control a schedule</span><span class="tmeta"><span class="gate">SchedulerAccess</span><span class="tdot wf"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Escalation, session &amp; user <span class="count">mixed</span></h3>
+        <div class="trow"><code>session_escalate</code><span class="desc">escalate to operator/parent (blocking for human)</span><span class="tmeta"><span class="gate free">—</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>session_search / session_peek</code><span class="desc">find / peek at sessions</span><span class="tmeta"><span class="gate free">—</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>federation_escalate</code><span class="desc">send verdicts to the promotion gate</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>user_ask</code><span class="desc">ask the end-user a question</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>user_interaction_status</code><span class="desc">status of a pending question</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>user_profile_read / update / share / revoke</code><span class="desc">manage user-profile data</span><span class="tmeta"><span class="gate">UserProfileAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>credential_check / request / refresh / setup</code><span class="desc">vault onboarding flow</span><span class="tmeta"><span class="gate">CredentialAccess</span><span class="tdot wf"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Plan, workbench &amp; validation <span class="count">Workflow</span></h3>
+        <div class="trow"><code>planframe_propose / get / list / approve / amend / history</code><span class="desc">structured plan lifecycle</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>workbench_status / diff / checkpoint / checkout / reconcile / discard</code><span class="desc">dev workbench ops</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>artifact_project</code><span class="desc">project-scoped artifact workspace</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>validation_waive / _waivers</code><span class="desc">waive / list validation gates</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
+      </div>
+
+      <div class="catcard">
+        <h3>Platform &amp; I/O <span class="count">mixed</span></h3>
+        <div class="trow"><code>tool_discover</code><span class="desc">expand the tool surface on demand</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>wiki_list / wiki_get</code><span class="desc">read platform docs</span><span class="tmeta"><span class="gate free">—</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>wiki_propose</code><span class="desc">propose a docs edit</span><span class="tmeta"><span class="gate">WikiContribute</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>web_search / web_fetch / web_call</code><span class="desc">web I/O</span><span class="tmeta"><span class="gate">NetworkAccess</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>github_issue_create</code><span class="desc">open a GitHub issue</span><span class="tmeta"><span class="gate">GithubIssueCreate</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>capsule_export</code><span class="desc">export a cognitive capsule</span><span class="tmeta"><span class="gate">Capsule/SelfExport</span><span class="tdot sp"></span></span></div>
+        <div class="trow"><code>capsule_import</code><span class="desc">import a capsule</span><span class="tmeta"><span class="gate">CapsuleExport</span><span class="tdot sp"></span></span></div>
+      </div>
+    </div>
+
+    <div class="box tone-served" style="margin-top:16px;">
+      <h3>Not part of the tool surface</h3>
+      <p><span class="mono">agent_install</span> was removed (P-9.2): agents are seeded only through
+        revision-create + promote, never a one-shot install. <span class="mono">emergency_stop</span> is
+        a capability and runtime trigger, not a callable LLM tool. There are no
+        <span class="mono">constitution_resolve_proposal</span>, <span class="mono">anomaly_resolve</span>,
+        <span class="mono">session_fork</span>, or <span class="mono">admin_escalation_*</span> native
+        tools — those flows run through operator/CLI/RPC surfaces, not the agent's tool registry.</p>
+    </div>
+  </section>
+
+  <!-- ================= C. AGENTS ================= -->
+  <section class="sheet" id="agents">
+    <div class="sheet-head">
+      <div class="eyebrow">§ C — Who Does the Work</div>
+      <h2>The default agent roster</h2>
+      <p class="dek">Every reference bundle is a <em>reasoning</em> agent (LLM-driven, not a fixed
+        script) under one constitution. They divide into five tiers by function. The gateway requires
+        an explicit target — there is no implicit fallback — and the planner routes down a
+        delegation ladder.</p>
+    </div>
+
+    <div class="subhead">The delegation ladder — how the planner routes</div>
+    <div class="flow">
+      <div class="box tone-accent"><span class="kicker-chip">1 · direct</span><h3>Foundational match</h3><p>Intent maps to a known specialist → route straight to it.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box"><span class="kicker-chip">2 · discover</span><h3>discovery.default</h3><p>Unknown intent → semantic match over installed agents → spawn the best candidate.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box tone-oblig"><span class="kicker-chip">3 · build</span><h3>agent-factory.default</h3><p>No candidate → build a new agent end-to-end through the one lawful door.</p></div>
+      <div class="connector"><span class="glyph">→</span></div>
+      <div class="box"><span class="kicker-chip">4 · schedule</span><h3>scheduler_cron</h3><p>Recurring need → factory + a cron schedule so it runs unattended.</p></div>
+    </div>
+
+    <div class="subhead">Lead — orchestration</div>
+    <div class="grid2">
+      <div class="agent lead">
+        <h4>planner.default <span class="tag">singleton · smart</span></h4>
+        <p class="role">Front door for ambiguous goals: interprets, routes to specialists, synthesizes results.</p>
+        <div class="caps"><span class="badge">AgentSpawn ×10</span><span class="badge">CredentialAccess</span><span class="badge">SchedulerAccess</span><span class="badge">AgentMessage</span></div>
+      </div>
+      <div class="agent lead">
+        <h4>planner.collaborative <span class="tag">singleton · smart</span></h4>
+        <p class="role">PlanFrame-aware lead: proposes structured plans and a workbench projection for a human to co-edit.</p>
+        <div class="caps"><span class="badge">AgentSpawn ×10</span><span class="badge">PlanFrameAccess</span><span class="badge">CredentialAccess</span></div>
+      </div>
+    </div>
+
+    <div class="subhead">Specialists — the hands</div>
+    <div class="grid3">
+      <div class="agent spec"><h4>researcher.default</h4><p class="role">Gathers evidence, compares sources, reports uncertainty.</p><div class="caps"><span class="badge">NetworkAccess</span><span class="badge">CodeExecution</span></div></div>
+      <div class="agent spec"><h4>architect.default</h4><p class="role">Defines structure, interfaces, trade-offs; decomposes tasks.</p><div class="caps"><span class="badge">read-only</span></div></div>
+      <div class="agent spec"><h4>packager.default</h4><p class="role">Resolves build-time deps into artifact layers.</p><div class="caps"><span class="badge">CodeExecution</span><span class="badge">NetworkAccess</span></div></div>
+      <div class="agent spec"><h4>executor.default</h4><p class="role">Small deterministic shell/script tasks, no durable artifact.</p><div class="caps"><span class="badge">CodeExecution</span><span class="badge">ArtifactExecution</span></div></div>
+      <div class="agent spec"><h4>coder.default</h4><p class="role">Produces durable, tested, auditable code/artifacts.</p><div class="caps"><span class="badge">ArtifactExecution</span><span class="badge">AgentMessage</span></div></div>
+      <div class="agent spec"><h4>debugger.default</h4><p class="role">Isolates root causes, proposes fixes.</p><div class="caps"><span class="badge">CodeExecution</span></div></div>
+      <div class="agent spec"><h4>registration.default</h4><p class="role">Registrar: multi-step human-in-loop credential ceremonies.</p><div class="caps"><span class="badge">CredentialAccess</span><span class="badge">NetworkAccess</span></div></div>
+      <div class="agent spec"><h4>credential_onboarding.default</h4><p class="role">Non-singleton variant of the registrar flow.</p><div class="caps"><span class="badge">CredentialAccess</span></div></div>
+      <div class="agent spec"><h4>discovery.default</h4><p class="role">Semantic agent discovery → ranked candidates + recommendation.</p><div class="caps"><span class="badge">agent_ / knowledge_</span></div></div>
+      <div class="agent spec"><h4>watchdog.default</h4><p class="role">Observer of trajectory divergence; read-only, no execution.</p><div class="caps"><span class="badge">ReadAccess</span><span class="badge">AgentMessage</span></div></div>
+      <div class="agent spec"><h4>watchdog-fast.default</h4><p class="role">Tool-free single-completion divergence judge (validation).</p><div class="caps"><span class="badge">no tools</span></div></div>
+      <div class="agent spec"><h4>improvement-orchestrator.default</h4><p class="role">A/B replay of baseline vs candidate revisions.</p><div class="caps"><span class="badge">Evaluation</span></div></div>
+      <div class="agent spec"><h4>outcome-grader.default</h4><p class="role">Independent post-session completion verdict; no tools.</p><div class="caps"><span class="badge">observer-only</span></div></div>
+    </div>
+
+    <div class="subhead">Promotion federation — the jury that gates installs</div>
+    <div class="flow">
+      <div class="box tone-right"><h3>static_evaluator</h3><p>Static source review — correctness, credential flow, contracts. No sandbox/network.</p></div>
+      <div class="box tone-right"><h3>unit_test_runner</h3><p>Runs the artifact's tests in a no-network sandbox (P-3.10).</p></div>
+      <div class="box tone-right"><h3>sealed_evaluator</h3><p>Dynamic run in a sealed, fixture-proxied sandbox.</p></div>
+      <div class="connector"><span class="glyph">→</span><span>verdicts</span></div>
+      <div class="box tone-oblig"><h3>auditor</h3><p>Security / risk / reproducibility — the gate. FullJury requires distinct identities + operator approval.</p></div>
+    </div>
+
+    <div class="subhead">Evolution — the self-improvement loop</div>
+    <div class="grid3">
+      <div class="agent evo"><h4>evolution-orchestrator.default</h4><p class="role">Root cron orchestrator; spawns curator + steward, files systemic-gap proposals.</p><div class="caps"><span class="badge">AgentSpawn ×10</span><span class="badge">SchedulerAccess</span><span class="badge">ApprovalQueue</span></div></div>
+      <div class="agent evo"><h4>memory-curator.default</h4><p class="role">Distils learnings, scores agents, owns lesson graduation. No spawn.</p><div class="caps"><span class="badge">singleton</span><span class="badge">read *</span></div></div>
+      <div class="agent evo"><h4>evolution-steward.default</h4><p class="role">Evolve/skip decisions; drafts constructive amendments (Steward office).</p><div class="caps"><span class="badge">ConstitutionalProposal</span><span class="badge">AgentSpawn ×5</span></div></div>
+      <div class="agent evo"><h4>agent-factory.default</h4><p class="role">Owns agent creation end-to-end: design → code → package → gate → install.</p><div class="caps"><span class="badge">AgentSpawn ×10</span></div></div>
+      <div class="agent evo"><h4>specialized_builder.default</h4><p class="role">Installs durable agents (revision create + promote).</p><div class="caps"><span class="badge">AgentRevision</span><span class="badge">AgentSpawn ×5</span></div></div>
+      <div class="agent evo"><h4>agent-adapter.default</h4><p class="role">Generates wrapper agents to bridge I/O gaps.</p><div class="caps"><span class="badge">CodeExecution</span></div></div>
+      <div class="agent evo"><h4>code-issue-proposer.default</h4><p class="role">Files scoped GitHub issues for gateway-code root causes; never edits code.</p><div class="caps"><span class="badge">GithubIssueCreate</span></div></div>
+    </div>
+
+    <div class="subhead">Governance &amp; system offices</div>
+    <div class="grid2">
+      <div class="agent gov"><h4>ombudsman.default <span class="pill">office</span></h4><p class="role">Works the anomaly-flag queue, chases O-7 SLA breaches, adjudicates via <span class="mono">anomaly_adjudicate</span>. Cron 2 h.</p><div class="caps"><span class="badge">AnomalyAdjudicate</span><span class="badge">SchedulerAccess</span></div></div>
+      <div class="agent gov"><h4>governance-author.default <span class="pill">office</span></h4><p class="role">Turns operator intent into amendment proposals; holds the full scope incl. removals.</p><div class="caps"><span class="badge">ConstitutionalProposal *</span></div></div>
+      <div class="agent sys"><h4>security_sentinel.default</h4><p class="role">Periodic read-only audit of agents/artifacts/gateway; emits structured findings.</p><div class="caps"><span class="badge">read-only</span></div></div>
+      <div class="agent sys"><h4>security_sentinel_baseline.default</h4><p class="role">Frozen deterministic sentinel; stable regression reference, no LLM.</p><div class="caps"><span class="badge">frozen</span></div></div>
+      <div class="agent sys"><h4>security_redteam.default</h4><p class="role">Proposes adversarial attack patterns; structurally barred from targeting itself.</p><div class="caps"><span class="badge">SecurityRedTeam</span></div></div>
+      <div class="agent sys"><h4>autonoetic.digest <span class="pill">internal</span></h4><p class="role">Gateway-internal post-session digest: narrative + extracted memories.</p><div class="caps"><span class="badge">system</span></div></div>
+    </div>
+
+    <div class="box tone-rule" style="margin-top:20px;">
+      <h3>Never auto-evolved — the foundational exemption</h3>
+      <p>The evolution loop may not touch its own load-bearing agents. Exempt:
+        <span class="mono">planner, coder, sealed_evaluator, static_evaluator, unit_test_runner,
+        auditor, specialized_builder, agent-factory, evolution-orchestrator, memory-curator,
+        evolution-steward, agent-adapter</span>. Enforced by the orchestrator's instructions, with the
+        gateway's eval-run gate (protected agents require a passing eval to promote) as the mechanical
+        backstop.</p>
+    </div>
+  </section>
+
+  <footer class="colophon">
+    <p>Compiled from the repository's source and documentation:</p>
+    <ul>
+      <li><code>docs/ARCHITECTURE.md</code> (storage, sandbox, error taxonomy)</li>
+      <li><code>autonoetic-gateway/src/sandbox.rs</code></li>
+      <li><code>autonoetic-gateway/src/vault.rs</code>, <code>runtime/tools/credential.rs</code></li>
+      <li><code>config/tools.yaml</code> (tool tiers)</li>
+      <li><code>autonoetic-gateway/src/runtime/tools/</code></li>
+      <li><code>docs/AGENTS.md</code> (roles, routing, tools)</li>
+      <li><code>docs/agent-prompt-guidance.md</code></li>
+      <li><code>docs/iteration-repair-validation-runbook.md</code></li>
+      <li><code>docs/wasm-execution-tier.md</code></li>
+      <li><code>docs/protected-agents.md</code></li>
+      <li>the <code>agents/</code> bundle tree (SKILL.md frontmatter)</li>
+    </ul>
+  </footer>
+
+</div>
+
+</body>
+</html>
