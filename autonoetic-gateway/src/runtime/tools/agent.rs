@@ -709,7 +709,14 @@ the single join already does that."
                 agent_id: target_agent_id.clone(),
                 session_id: child_delegation_path.clone(),
                 parent_session_id: resolved_session_id.clone(),
-                status: TaskRunStatus::Running,
+                // Created `Pending`: the task is queued, not yet executing.
+                // `process_queued_workflow_tasks` flips it to `Running` when it
+                // acquires the claim. (Previously the row was created `Running`
+                // and a `Running → Pending` update was refused by the
+                // transition guard — an "illegal transition" warning on every
+                // spawn, and a queued-not-started task that
+                // `workflow.cancel_task` could not cancel.)
+                status: TaskRunStatus::Pending,
                 created_at: ts.clone(),
                 updated_at: ts.clone(),
                 source_agent_id: Some(source_agent_id.clone()),
@@ -826,17 +833,6 @@ the single join already does that."
                 credential_bindings: args.credential_bindings,
             };
             crate::scheduler::enqueue_task(gw_config, gateway_store.as_deref(), &queued)?;
-
-            let _ = crate::scheduler::update_task_run_status(
-                gw_config,
-                gateway_store.as_deref(),
-                &workflow_id,
-                &task_id,
-                TaskRunStatus::Pending,
-                Some("queued".to_string()),
-                None,
-                None,
-            );
 
             let mut resp = serde_json::json!({
                 "ok": true,

@@ -161,6 +161,31 @@ The planner is not "done" when it delegates:
 9. The parent resumes from `WaitingForChild` with structured child-state context; `workflow_wait` remains available for explicit inspection/debugging when desired
 10. When planner session closes normally: workflow becomes `Completed` (if all join tasks terminal and no active/queued work remains)
 
+### Child-Wait Suspend/Resume Contract
+
+The park, wake, and recovery paths all evaluate **one shared predicate**
+(`workflow_store::session_has_non_terminal_children`): a session suspends as
+`WaitingForChild` only when tasks **it spawned** (rows with
+`parent_session_id == <session>`) are still non-terminal-for-join. It is
+parent-scoped and status-authoritative by design:
+
+- A leaf task that finishes while a **sibling** is still running completes
+  normally — it has no wait set, and parking it deadlocks the workflow (no
+  wake path targets siblings).
+- The predicate never reads `active_task_ids`/`queued_task_ids`
+  (denormalized; terminal entries are pruned on save and repaired per tick).
+
+When any task reaches a terminal-for-join status (including `Stale` from an
+approval timeout), `update_task_run_status` runs a **condition-based wake
+scan** (`wake_paused_child_wait_tasks`): every `Paused` task checkpointed as
+`paused_child_wait` whose wait set is now empty becomes `Runnable` and is
+re-queued with a wake notice (not its original kickoff message). A per-tick
+janitor (`reconcile_paused_child_wait_tasks`) repeats the scan as a safety net
+for missed transitions, fails child-wait tasks orphaned in terminal workflows,
+and repairs `active_task_ids` drift. The stuck-task sweeper completes
+interrupted `Running → Paused` child-wait transitions instead of skipping
+them forever.
+
 ### Workflow Completion
 
 A workflow transitions from `Resumable` to `Completed` when the root (planner)

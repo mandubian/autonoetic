@@ -3579,23 +3579,37 @@ impl AgentExecutor {
                 }));
             }
 
-            let waiting_for_child_info = results.last().and_then(|(id, _name, result_json)| {
-                let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
-                if parsed.get("waiting_for_child").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let workflow_id = parsed
-                        .get("workflow_id")
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                        .or_else(|| self.workflow_id.clone())
-                        .unwrap_or_default();
-                    Some((id.clone(), workflow_id))
-                } else {
-                    None
-                }
-            });
+            // Scan the WHOLE batch for a `waiting_for_child` result, not just
+            // the last one: a `workflow_wait` earlier in a parallel tool batch
+            // must suspend the turn too. When several results carry the flag,
+            // the last one wins; every other executed result is committed as
+            // completed so it is not re-run on resume.
+            let waiting_for_child_info = results
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, (id, _name, result_json))| {
+                    let parsed = serde_json::from_str::<serde_json::Value>(result_json).ok()?;
+                    if parsed.get("waiting_for_child").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let workflow_id = parsed
+                            .get("workflow_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                            .or_else(|| self.workflow_id.clone())
+                            .unwrap_or_default();
+                        Some((idx, id.clone(), workflow_id))
+                    } else {
+                        None
+                    }
+                });
 
-            if let Some((pending_call_id, workflow_id)) = waiting_for_child_info {
-                let completed_results = results[..results.len() - 1].to_vec();
+            if let Some((pending_idx, pending_call_id, workflow_id)) = waiting_for_child_info {
+                let completed_results: Vec<_> = results
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| *idx != pending_idx)
+                    .map(|(_, r)| r.clone())
+                    .collect();
                 let remaining_calls = tool_calls[results.len()..].to_vec();
 
                 let pending_tc = tool_calls
@@ -4158,6 +4172,25 @@ impl AgentExecutor {
     }
 }
 
+/// Decide whether a session ending its turn must suspend as `WaitingForChild`
+/// instead of completing.
+///
+/// The predicate is **parent-scoped and status-authoritative**: it returns
+/// `Some` only when the session itself spawned workflow tasks that are still
+/// non-terminal (`session_has_non_terminal_children`). It deliberately does
+/// NOT:
+/// - consult `WorkflowRun.active_task_ids`/`queued_task_ids` (denormalized
+///   lists that drift — `save_task_run` appends on every save, `dequeue_task`
+///   is the only remover), or
+/// - park on *siblings*/cousins in the same workflow. A leaf task that
+///   finishes while a sibling is still running completes normally; parking it
+///   deadlocked the workflow (session-d484ea13: static_evaluator parked on the
+///   auditor sibling, and the parent-only wake could never match it).
+///
+/// The wake side (`wake_paused_child_wait_tasks`) and the scheduler janitor
+/// (`reconcile_paused_child_wait_tasks`) evaluate the SAME predicate, so a
+/// task is only ever parked when a future child terminal transition — or the
+/// janitor — can wake it.
 fn waiting_for_child_yield_reason(
     config: &GatewayConfig,
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -4169,43 +4202,16 @@ fn waiting_for_child_yield_reason(
         &root_session_id,
     )
     .ok()??;
-    let workflow = crate::scheduler::workflow_store::load_workflow_run(config, store, &workflow_id)
-        .ok()??;
 
-    // Exclude this session's own task from the active/queued checks — a running
-    // agent should not treat its own task as a "child" it is waiting for.
-    // The session's own task_id is resolved via the workflow store so that
-    // lead agents (which have no task row) get None and preserve the original
-    // behaviour of checking all active/queued task IDs.
-    let own_task_id = crate::scheduler::workflow_store::resolve_task_id_for_session(
+    let has_children = crate::scheduler::workflow_store::session_has_non_terminal_children(
         config,
         store,
         &workflow_id,
         session_id,
     )
-    .ok()
-    .flatten();
+    .ok()?;
 
-    let has_other_active = match &own_task_id {
-        Some(own) => {
-            workflow.active_task_ids.iter().any(|t| t != own)
-                || workflow.queued_task_ids.iter().any(|t| t != own)
-        }
-        None => {
-            !workflow.active_task_ids.is_empty() || !workflow.queued_task_ids.is_empty()
-        }
-    };
-
-    // `WaitingChildren` alone is not sufficient: it is set when the current
-    // task is enqueued and cleared only when the task reaches a terminal
-    // status. If the sole active task IS the caller, WaitingChildren is a
-    // stale label — `has_other_active` (above) is the real signal.
-    let is_waiting = matches!(
-        workflow.status,
-        autonoetic_types::workflow::WorkflowRunStatus::BlockedApproval
-    ) || has_other_active;
-
-    if !is_waiting {
+    if !has_children {
         return None;
     }
 
@@ -5651,6 +5657,106 @@ mod divergence_robustness_tests {
             reason.is_none(),
             "waiting_for_child_yield_reason must return None when WaitingChildren \
              is set but the sole active task belongs to the caller, got: {:?}",
+            reason
+        );
+    }
+
+    /// Sibling-deadlock regression (session-d484ea13): a leaf task that ends
+    /// its turn while a SIBLING is still active must NOT yield WaitingForChild
+    /// — it spawned nothing, so nothing will ever wake it. The park predicate
+    /// is parent-scoped: only non-terminal tasks the session itself spawned
+    /// count. Conversely, the spawning parent (root) MUST yield while any of
+    /// its children are non-terminal.
+    #[test]
+    fn waiting_for_child_yield_reason_ignores_active_siblings() {
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).expect("agent dir should create");
+
+        let config = autonoetic_types::config::GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..autonoetic_types::config::GatewayConfig::default()
+        };
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("store should open"),
+        );
+
+        let root_session = "root-sibling-park";
+        let leaf_session = format!("{root_session}/static_evaluator.x");
+        let sibling_session = format!("{root_session}/auditor.y");
+
+        let run = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            Some("planner.default"),
+        )
+        .expect("workflow should be created");
+        let wf_id = run.workflow_id.clone();
+
+        let mk = |task_id: &str, session_id: &str| TaskRun {
+            task_id: task_id.to_string(),
+            workflow_id: wf_id.clone(),
+            agent_id: "executor.x".to_string(),
+            session_id: session_id.to_string(),
+            parent_session_id: root_session.to_string(),
+            status: TaskRunStatus::Running,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: Some("work".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        crate::scheduler::workflow_store::save_task_run(
+            &config,
+            Some(store.as_ref()),
+            &mk("task-leaf", &leaf_session),
+        )
+        .expect("leaf task should save");
+        crate::scheduler::workflow_store::save_task_run(
+            &config,
+            Some(store.as_ref()),
+            &mk("task-sibling", &sibling_session),
+        )
+        .expect("sibling task should save");
+
+        // The leaf spawned nothing: an active sibling must NOT park it.
+        let reason = super::waiting_for_child_yield_reason(
+            &config,
+            Some(store.as_ref()),
+            &leaf_session,
+        );
+        assert!(
+            reason.is_none(),
+            "leaf session must NOT yield WaitingForChild on an active sibling, got: {:?}",
+            reason
+        );
+
+        // The root planner spawned both tasks: it MUST yield while they run.
+        let reason = super::waiting_for_child_yield_reason(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+        );
+        assert!(
+            matches!(
+                reason,
+                Some(super::YieldReason::WaitingForChild { .. })
+            ),
+            "root session must yield WaitingForChild while its spawned children are \
+             non-terminal, got: {:?}",
             reason
         );
     }

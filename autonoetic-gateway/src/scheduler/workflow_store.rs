@@ -805,6 +805,15 @@ pub fn append_scheduled_job_cancelled_workflow_event(
 }
 
 /// Write or replace a task record and refresh `workflow.active_task_ids`.
+///
+/// `active_task_ids` is a denormalized "still in flight" list: only
+/// non-terminal-for-join tasks belong in it. Terminal tasks must not be
+/// (re-)added — otherwise failed/succeeded tasks linger as phantom "active"
+/// entries that block workflow completion (`try_complete_workflow`) and,
+/// historically, over-triggered the child-wait park predicate. Removal of
+/// the saved task on terminal saves, and repair of pre-existing drift, is
+/// handled here and by the scheduler janitor
+/// (`reconcile_paused_child_wait_tasks`).
 pub fn save_task_run(
     config: &GatewayConfig,
     store: Option<&GatewayStore>,
@@ -823,7 +832,9 @@ pub fn save_task_run(
 
     let mut run = load_workflow_run(config, Some(store), &task.workflow_id)?
         .ok_or_else(|| anyhow::anyhow!("workflow '{}' not found", task.workflow_id))?;
-    if !run.active_task_ids.contains(&task.task_id) {
+    if task.status.is_terminal_for_join() {
+        run.active_task_ids.retain(|id| id != &task.task_id);
+    } else if !run.active_task_ids.contains(&task.task_id) {
         run.active_task_ids.push(task.task_id.clone());
     }
     run.updated_at = now_rfc3339();
@@ -1455,31 +1466,36 @@ pub fn update_task_run_status(
             }
         }
 
-        // #845 follow-up: when a child reaches a terminal state, wake any
-        // Paused parent task in the same workflow so the scheduler picks it
-        // up and resumes the parent session. Without this transition, Fix 2's
-        // `Paused` state has no return path — the parent would sit Paused
-        // forever and the workflow would deadlock (the join blocks on the
-        // non-terminal Paused task). `process_queued_workflow_tasks` skips
-        // Paused tasks (scheduler.rs:1532), and `process_pending_notifications`
-        // delivers the ChildStateNotification via event.ingest which the
-        // router reroutes to the *root* planner (router.rs:1093), so neither
-        // path wakes the intermediate parent. We do it here, atomically with
-        // the child's terminal transition.
-        if status.is_terminal() && !task.parent_session_id.is_empty() {
-            if let Err(e) = wake_paused_parent_on_child_terminal(
+        // #845 follow-up: when a task reaches a terminal-for-join state (this
+        // includes `Stale`, so approval-timed-out children also unblock
+        // parked tasks), re-evaluate every Paused child-wait task in the
+        // workflow and wake those whose wait set is now empty. Without this
+        // transition, Fix 2's `Paused` state has no return path — the task
+        // would sit Paused forever and the workflow would deadlock (the join
+        // blocks on the non-terminal Paused task).
+        // `process_queued_workflow_tasks` skips Paused tasks
+        // (scheduler.rs:1532), and `process_pending_notifications` delivers
+        // the ChildStateNotification via event.ingest which the router
+        // reroutes to the *root* planner (router.rs:1093), so neither path
+        // wakes the parked task. The scan is workflow-scoped and
+        // condition-based: it wakes any parked task whose own wait set is
+        // empty, not just the terminating task's direct parent — a task
+        // parked because of a *sibling* must also be woken (session-d484ea13
+        // deadlock). We do it here, atomically with the terminal transition.
+        if status.is_terminal_for_join() {
+            if let Err(e) = wake_paused_child_wait_tasks(
                 config,
                 store,
                 workflow_id,
-                &task.parent_session_id,
+                task_id,
                 &task.session_id,
             ) {
                 tracing::warn!(
                     target: "workflow",
                     workflow_id = %workflow_id,
-                    parent_session_id = %task.parent_session_id,
+                    task_id = %task_id,
                     error = %e,
-                    "Failed to wake Paused parent task after child terminal transition"
+                    "Failed to wake Paused child-wait tasks after terminal transition"
                 );
             }
         }
@@ -1488,12 +1504,44 @@ pub fn update_task_run_status(
     Ok(())
 }
 
-/// #845 follow-up — wake a `Paused` parent task when one of its children
-/// reaches a terminal state, so the scheduler can pick it up and resume the
-/// parent session.
+/// Shared park/wake predicate: does this session have any non-terminal
+/// workflow tasks that it spawned (i.e. rows whose `parent_session_id` is this
+/// session)? Rows with an empty `parent_session_id` are attributed to the root
+/// session, matching the notification fallback in `update_task_run_status`.
+///
+/// This is deliberately parent-scoped and status-authoritative:
+/// - it does NOT consult `WorkflowRun.active_task_ids`/`queued_task_ids`
+///   (denormalized lists that can drift — `save_task_run` appends on every
+///   save while `dequeue_task` is the only remover);
+/// - it does NOT count siblings or cousins in the same workflow. A leaf task
+///   that finishes while a sibling is still running has no wait set and must
+///   complete normally, not park (the session-d484ea13 deadlock).
+///
+/// The SAME predicate backs all three sides of the suspend/resume machinery so
+/// they can never disagree again: the EndTurn/MaxTokens park predicate
+/// (`lifecycle::waiting_for_child_yield_reason`), the child-wait wake scan
+/// (`wake_paused_child_wait_tasks`), and the scheduler janitor
+/// (`reconcile_paused_child_wait_tasks`).
+pub(crate) fn session_has_non_terminal_children(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    let tasks = list_task_runs_for_workflow(config, store, workflow_id)?;
+    let root_session_id = crate::runtime::content_store::root_session_id(session_id);
+    Ok(tasks.iter().any(|t| {
+        (t.parent_session_id == session_id
+            || (t.parent_session_id.is_empty() && session_id == root_session_id))
+            && !t.status.is_terminal_for_join()
+    }))
+}
+
+/// #845 follow-up — wake `Paused` child-wait tasks whose wait set is now empty,
+/// so the scheduler can pick them up and resume their sessions.
 ///
 /// Fix 2 (`run_durable_workflow_task::suspended_for_child_wait` branch) marks
-/// the parent task `Paused` when it ends its turn with pending async children.
+/// a task `Paused` when its session ends its turn with pending async children.
 /// But nothing else transitions `Paused` back to `Runnable` on child
 /// completion:
 /// - `process_queued_workflow_tasks` (scheduler.rs:1532) explicitly skips
@@ -1506,26 +1554,36 @@ pub fn update_task_run_status(
 ///
 /// This helper closes the gap. It is invoked from `update_task_run_status`
 /// right after the child-state notification is emitted, so the wake happens
-/// atomically with the child's terminal transition.
+/// atomically with the child's terminal transition, and from the scheduler
+/// janitor (`reconcile_paused_child_wait_tasks`) as a safety net for any
+/// missed transition.
+///
+/// The scan is **workflow-scoped and condition-based** (sibling-deadlock fix):
+/// rather than waking only the terminating task's direct parent (which
+/// stranded tasks parked because of a *sibling*), every `Paused` task parked
+/// in `"paused_child_wait"` re-evaluates its own wait set via
+/// `session_has_non_terminal_children` — the same predicate that parked it —
+/// and wakes only when that set is empty. A parked task whose children are
+/// still running stays parked, no matter which sibling resolved.
 ///
 /// To avoid masking `Paused`-for-user-input tasks (which have their own
 /// wake-up via `interaction_answer.rs:343`), the helper inspects the task's
 /// checkpoint `step` field and only wakes tasks parked in
 /// `"paused_child_wait"` (the label Fix 2 writes). A `Paused` task without a
 /// checkpoint, or with any other step, is left untouched.
-fn wake_paused_parent_on_child_terminal(
+pub(crate) fn wake_paused_child_wait_tasks(
     config: &GatewayConfig,
     store: Option<&GatewayStore>,
     workflow_id: &str,
-    parent_session_id: &str,
-    child_session_id: &str,
+    triggered_by_task_id: &str,
+    triggered_by_session_id: &str,
 ) -> anyhow::Result<()> {
     let Some(store) = store else {
         return Ok(());
     };
     let tasks = list_task_runs_for_workflow(config, Some(store), workflow_id)?;
     for mut task in tasks {
-        if task.session_id != parent_session_id || task.status != TaskRunStatus::Paused {
+        if task.status != TaskRunStatus::Paused {
             continue;
         }
 
@@ -1543,6 +1601,15 @@ fn wake_paused_parent_on_child_terminal(
             None => false,
         };
         if !is_child_wait {
+            continue;
+        }
+
+        // Condition-based wake: only wake when the parked session's own wait
+        // set (non-terminal children it spawned) is empty. The resumed turn
+        // re-evaluates the same predicate at EndTurn, so a spurious wake is
+        // harmless — but skipping one is a deadlock, so we never gate on
+        // which task triggered this scan.
+        if session_has_non_terminal_children(config, Some(store), workflow_id, &task.session_id)? {
             continue;
         }
 
@@ -1566,8 +1633,9 @@ fn wake_paused_parent_on_child_terminal(
                 agent_id: Some(task.agent_id.clone()),
                 payload: serde_json::json!({
                     "status": "runnable",
-                    "reason": "child_terminal_wake",
-                    "triggered_by_child_session": child_session_id,
+                    "reason": "child_wait_set_empty",
+                    "triggered_by_task_id": triggered_by_task_id,
+                    "triggered_by_child_session": triggered_by_session_id,
                 }),
                 occurred_at: now_rfc3339(),
             },
@@ -1576,12 +1644,135 @@ fn wake_paused_parent_on_child_terminal(
         tracing::info!(
             target: "workflow",
             workflow_id = %workflow_id,
-            parent_task_id = %task.task_id,
-            parent_session_id = %parent_session_id,
-            "Woke Paused parent task: child reached terminal state, re-queueing for execution (Ri-0.14 / #845 follow-up)"
+            woken_task_id = %task.task_id,
+            woken_session_id = %task.session_id,
+            triggered_by_task_id = %triggered_by_task_id,
+            "Woke Paused child-wait task: wait set empty, re-queueing for execution (Ri-0.14 / #845 follow-up)"
         );
-        break;
     }
+    Ok(())
+}
+
+/// Safety-net janitor for the workflow suspend/resume machinery, run every
+/// scheduler tick via `scheduler::reconcile_paused_child_wait_tasks`.
+///
+/// `Paused` tasks parked in `paused_child_wait` are normally woken by
+/// `wake_paused_child_wait_tasks` atomically with a child's terminal
+/// transition — but any missed transition (crash between the status save and
+/// the wake, state written by older builds, a sibling-parked task from the
+/// pre-fix parent-only wake) used to strand the task — and the workflow join
+/// — forever, because `process_queued_workflow_tasks` skips Paused tasks and
+/// no sweeper covered them.
+///
+/// For every workflow run:
+/// 1. Repair drifted `active_task_ids` (drop terminal-for-join entries that
+///    were never dequeued, re-add live ones) so completion logic
+///    (`try_complete_workflow`) and operators see the truth.
+/// 2. If the workflow run itself is terminal, fail any task still parked in
+///    `paused_child_wait` — its wait can never be answered.
+/// 3. Otherwise re-run the condition-based wake scan: any parked task whose
+///    own wait set (non-terminal children it spawned, per
+///    `session_has_non_terminal_children`) is empty is marked `Runnable`.
+pub(crate) fn reconcile_paused_child_wait_tasks(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+) -> anyhow::Result<()> {
+    let workflows_root = workflows_root(config).join("runs");
+    if !workflows_root.is_dir() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(&workflows_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let wf_id = entry.file_name().to_string_lossy().to_string();
+        let Some(run) = load_workflow_run(config, store, &wf_id)? else {
+            continue;
+        };
+        let tasks = list_task_runs_for_workflow(config, store, &wf_id)?;
+
+        // 1. Repair active_task_ids drift.
+        {
+            use std::collections::HashSet;
+            let live: HashSet<&str> = tasks
+                .iter()
+                .filter(|t| !t.status.is_terminal_for_join())
+                .map(|t| t.task_id.as_str())
+                .collect();
+            let mut repaired: Vec<String> = run
+                .active_task_ids
+                .iter()
+                .filter(|id| live.contains(id.as_str()))
+                .cloned()
+                .collect();
+            for t in &tasks {
+                if live.contains(t.task_id.as_str()) && !repaired.contains(&t.task_id) {
+                    repaired.push(t.task_id.clone());
+                }
+            }
+            if repaired != run.active_task_ids {
+                tracing::info!(
+                    target: "workflow",
+                    workflow_id = %wf_id,
+                    before = ?run.active_task_ids,
+                    after = ?repaired,
+                    "Repaired drifted workflow active_task_ids"
+                );
+                let mut run_mut = run.clone();
+                run_mut.active_task_ids = repaired;
+                run_mut.updated_at = now_rfc3339();
+                save_workflow_run(config, store, &run_mut)?;
+            }
+        }
+
+        // 2. Terminal workflow: fail orphaned parked child-wait tasks.
+        if run.status.is_terminal() {
+            for task in &tasks {
+                if task.status != TaskRunStatus::Paused {
+                    continue;
+                }
+                let is_child_wait = load_task_checkpoint(config, store, &wf_id, &task.task_id)
+                    .ok()
+                    .flatten()
+                    .map(|cp| cp.step == "paused_child_wait")
+                    .unwrap_or(false);
+                if !is_child_wait {
+                    continue;
+                }
+                tracing::info!(
+                    target: "workflow",
+                    workflow_id = %wf_id,
+                    task_id = %task.task_id,
+                    "Failing orphaned child-wait task: workflow is terminal"
+                );
+                if let Err(e) = update_task_run_status(
+                    config,
+                    store,
+                    &wf_id,
+                    &task.task_id,
+                    TaskRunStatus::Failed,
+                    Some("workflow terminated while parked in child-wait".to_string()),
+                    None,
+                    None,
+                ) {
+                    tracing::warn!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        task_id = %task.task_id,
+                        error = %e,
+                        "Failed to fail orphaned child-wait task"
+                    );
+                }
+            }
+            continue;
+        }
+
+        // 3. Condition-based wake scan (safety net for missed transitions).
+        wake_paused_child_wait_tasks(config, store, &wf_id, "janitor", "scheduler")?;
+    }
+
     Ok(())
 }
 
@@ -6904,5 +7095,428 @@ mod tests {
             None,
         );
         assert_eq!(notif.failure_class, Some(FailureClass::OutputContractUnmet));
+    }
+
+    // ------------------------------------------------------------------
+    // Child-wait suspend/resume robustness (sibling-deadlock fix)
+    // ------------------------------------------------------------------
+
+    /// A queued-not-started (`Pending`) task can be finalized directly —
+    /// operator force-complete, abnormal close, or singleton-slot release on
+    /// a bypassed scheduler. Refusing Pending → Succeeded/Failed silently
+    /// strands singleton slots (the transition guard is an Ok-noop).
+    #[test]
+    fn update_task_run_status_allows_pending_to_terminal() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "pending-terminal-root", None).unwrap();
+        let session = "pending-terminal-root/x".to_string();
+        save_task_run(
+            &cfg,
+            Some(&store),
+            &mk_task(&wf.workflow_id, "task-pending", &session, "pending-terminal-root", TaskRunStatus::Pending),
+        )
+        .unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf.workflow_id,
+            "task-pending",
+            TaskRunStatus::Succeeded,
+            Some("finalized without running".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf.workflow_id, "task-pending")
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, TaskRunStatus::Succeeded);
+    }
+
+    fn child_wait_setup() -> (tempfile::TempDir, GatewayConfig, crate::scheduler::gateway_store::GatewayStore) {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        (dir, cfg, store)
+    }
+
+    fn mk_task(
+        workflow_id: &str,
+        task_id: &str,
+        session_id: &str,
+        parent_session_id: &str,
+        status: TaskRunStatus,
+    ) -> TaskRun {
+        TaskRun {
+            task_id: task_id.to_string(),
+            workflow_id: workflow_id.to_string(),
+            agent_id: "agent.default".to_string(),
+            session_id: session_id.to_string(),
+            parent_session_id: parent_session_id.to_string(),
+            status,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        }
+    }
+
+    /// The park/wake predicate is parent-scoped and status-authoritative:
+    /// a session's wait set is exactly the non-terminal tasks IT spawned —
+    /// never siblings, never terminal children.
+    #[test]
+    fn session_has_non_terminal_children_is_parent_scoped() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-pred";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let leaf = format!("{root}/static_evaluator");
+        let sibling = format!("{root}/auditor");
+        // The leaf's own task (parent = root) and a running sibling (parent = root).
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-leaf", &leaf, root, TaskRunStatus::Running)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-sibling", &sibling, root, TaskRunStatus::Running)).unwrap();
+
+        // The leaf spawned nothing: no wait set, even though a sibling is active.
+        assert!(
+            !session_has_non_terminal_children(&cfg, Some(&store), &wf_id, &leaf).unwrap(),
+            "leaf session must NOT park on an active sibling (session-d484ea13 deadlock)"
+        );
+        // The root spawned both: it DOES have a wait set.
+        assert!(
+            session_has_non_terminal_children(&cfg, Some(&store), &wf_id, root).unwrap(),
+            "root session must park while its spawned children are non-terminal"
+        );
+
+        // Once the children are terminal-for-join, the root's wait set empties.
+        update_task_run_status(&cfg, Some(&store), &wf_id, "task-leaf", TaskRunStatus::Succeeded, None, None, None).unwrap();
+        update_task_run_status(&cfg, Some(&store), &wf_id, "task-sibling", TaskRunStatus::Failed, None, None, None).unwrap();
+        assert!(
+            !session_has_non_terminal_children(&cfg, Some(&store), &wf_id, root).unwrap(),
+            "terminal children must not count toward the wait set"
+        );
+    }
+
+    /// Production deadlock repro (session-d484ea13): a task parked in
+    /// `paused_child_wait` because a SIBLING was active must be woken when the
+    /// last sibling reaches a terminal state — the wake is condition-based,
+    /// not direct-parent-scoped.
+    #[test]
+    fn sibling_terminal_transition_wakes_parked_task_with_empty_wait_set() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-sibling-wake";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let parked_session = format!("{root}/static_evaluator");
+        let sibling_session = format!("{root}/auditor");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-parked", &parked_session, root, TaskRunStatus::Paused)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-sibling", &sibling_session, root, TaskRunStatus::Running)).unwrap();
+        checkpoint_task(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-parked",
+            "paused_child_wait".to_string(),
+            serde_json::json!({"status": "paused", "reason": "awaiting_async_child_completion"}),
+        )
+        .unwrap();
+
+        update_task_run_status(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-sibling",
+            TaskRunStatus::Succeeded,
+            Some("audit pass".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf_id, "task-parked").unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskRunStatus::Runnable,
+            "sibling-parked task with an empty wait set must wake on the sibling's terminal transition"
+        );
+    }
+
+    /// A parked task that still has non-terminal children of its OWN must stay
+    /// parked when a sibling resolves, and wake only when its own wait set
+    /// empties.
+    #[test]
+    fn parked_task_with_running_children_not_woken_by_sibling() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-real-children";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let parent_session = format!("{root}/agent-factory");
+        let own_child_session = format!("{parent_session}/builder");
+        let sibling_session = format!("{root}/auditor");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-parent", &parent_session, root, TaskRunStatus::Paused)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-own-child", &own_child_session, &parent_session, TaskRunStatus::Running)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-sibling", &sibling_session, root, TaskRunStatus::Running)).unwrap();
+        checkpoint_task(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-parent",
+            "paused_child_wait".to_string(),
+            serde_json::json!({"status": "paused"}),
+        )
+        .unwrap();
+
+        // Sibling resolves: parent still has a running child → stays Paused.
+        update_task_run_status(&cfg, Some(&store), &wf_id, "task-sibling", TaskRunStatus::Succeeded, None, None, None).unwrap();
+        let after_sibling = load_task_run(&cfg, Some(&store), &wf_id, "task-parent").unwrap().unwrap();
+        assert_eq!(
+            after_sibling.status,
+            TaskRunStatus::Paused,
+            "parked task with running children must NOT wake on a sibling's transition"
+        );
+
+        // Own child resolves: wait set empty → wakes.
+        update_task_run_status(&cfg, Some(&store), &wf_id, "task-own-child", TaskRunStatus::Succeeded, None, None, None).unwrap();
+        let after_child = load_task_run(&cfg, Some(&store), &wf_id, "task-parent").unwrap().unwrap();
+        assert_eq!(
+            after_child.status,
+            TaskRunStatus::Runnable,
+            "parked task must wake once its own wait set empties"
+        );
+    }
+
+    /// An approval-timed-out (Stale) child must also wake eligible parked
+    /// tasks — `Stale` is terminal-for-join even though not fully terminal.
+    #[test]
+    fn stale_child_wakes_parked_task_with_empty_wait_set() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-stale-wake";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let parked_session = format!("{root}/evaluator");
+        let child_session = format!("{root}/coder");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-parked", &parked_session, root, TaskRunStatus::Paused)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-child", &child_session, root, TaskRunStatus::AwaitingApproval)).unwrap();
+        checkpoint_task(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-parked",
+            "paused_child_wait".to_string(),
+            serde_json::json!({"status": "paused"}),
+        )
+        .unwrap();
+
+        update_task_run_status(&cfg, Some(&store), &wf_id, "task-child", TaskRunStatus::Stale, None, None, None).unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf_id, "task-parked").unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskRunStatus::Runnable,
+            "Stale (approval timeout) is terminal-for-join and must wake parked tasks"
+        );
+    }
+
+    /// One terminal event wakes ALL eligible parked tasks, not just the first.
+    #[test]
+    fn single_terminal_event_wakes_all_eligible_parked_tasks() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-multi-wake";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        for (task_id, session) in [
+            ("task-parked-1", format!("{root}/evaluator")),
+            ("task-parked-2", format!("{root}/auditor")),
+        ] {
+            save_task_run(&cfg, Some(&store), &mk_task(&wf_id, task_id, &session, root, TaskRunStatus::Paused)).unwrap();
+            checkpoint_task(
+                &cfg,
+                Some(&store),
+                &wf_id,
+                task_id,
+                "paused_child_wait".to_string(),
+                serde_json::json!({"status": "paused"}),
+            )
+            .unwrap();
+        }
+        let sibling_session = format!("{root}/coder");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-sibling", &sibling_session, root, TaskRunStatus::Running)).unwrap();
+
+        update_task_run_status(&cfg, Some(&store), &wf_id, "task-sibling", TaskRunStatus::Succeeded, None, None, None).unwrap();
+
+        for task_id in ["task-parked-1", "task-parked-2"] {
+            let after = load_task_run(&cfg, Some(&store), &wf_id, task_id).unwrap().unwrap();
+            assert_eq!(
+                after.status,
+                TaskRunStatus::Runnable,
+                "every eligible parked task must wake on the same terminal event ({task_id})"
+            );
+        }
+    }
+
+    /// Terminal saves must not (re-)add the task to `active_task_ids`;
+    /// non-terminal saves must.
+    #[test]
+    fn save_task_run_keeps_terminal_tasks_out_of_active_task_ids() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-active-hygiene";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+        let session = format!("{root}/coder");
+
+        let task = mk_task(&wf_id, "task-x", &session, root, TaskRunStatus::Running);
+        save_task_run(&cfg, Some(&store), &task).unwrap();
+        let run = load_workflow_run(&cfg, Some(&store), &wf_id).unwrap().unwrap();
+        assert!(run.active_task_ids.contains(&"task-x".to_string()));
+
+        let mut terminal = task.clone();
+        terminal.status = TaskRunStatus::Failed;
+        save_task_run(&cfg, Some(&store), &terminal).unwrap();
+        let run = load_workflow_run(&cfg, Some(&store), &wf_id).unwrap().unwrap();
+        assert!(
+            !run.active_task_ids.contains(&"task-x".to_string()),
+            "terminal save must remove the task from active_task_ids"
+        );
+    }
+
+    /// Janitor: a parked child-wait task whose wait set is empty is woken even
+    /// when no terminal transition fired (missed-wake safety net).
+    #[test]
+    fn janitor_wakes_orphaned_child_wait_task() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-janitor-wake";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let parked_session = format!("{root}/evaluator");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-parked", &parked_session, root, TaskRunStatus::Paused)).unwrap();
+        checkpoint_task(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-parked",
+            "paused_child_wait".to_string(),
+            serde_json::json!({"status": "paused"}),
+        )
+        .unwrap();
+
+        reconcile_paused_child_wait_tasks(&cfg, Some(&store)).unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf_id, "task-parked").unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskRunStatus::Runnable,
+            "janitor must wake a parked child-wait task whose wait set is empty"
+        );
+    }
+
+    /// Janitor: a parked task with running children stays parked.
+    #[test]
+    fn janitor_keeps_parked_task_with_running_children() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-janitor-keep";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let parent_session = format!("{root}/agent-factory");
+        let child_session = format!("{parent_session}/builder");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-parent", &parent_session, root, TaskRunStatus::Paused)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-child", &child_session, &parent_session, TaskRunStatus::Running)).unwrap();
+        checkpoint_task(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-parent",
+            "paused_child_wait".to_string(),
+            serde_json::json!({"status": "paused"}),
+        )
+        .unwrap();
+
+        reconcile_paused_child_wait_tasks(&cfg, Some(&store)).unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf_id, "task-parent").unwrap().unwrap();
+        assert_eq!(after.status, TaskRunStatus::Paused);
+    }
+
+    /// Janitor: a child-wait task parked in a terminal workflow can never be
+    /// answered — fail it instead of stranding it forever.
+    #[test]
+    fn janitor_fails_child_wait_task_in_terminal_workflow() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-janitor-terminal";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let parked_session = format!("{root}/evaluator");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-parked", &parked_session, root, TaskRunStatus::Paused)).unwrap();
+        checkpoint_task(
+            &cfg,
+            Some(&store),
+            &wf_id,
+            "task-parked",
+            "paused_child_wait".to_string(),
+            serde_json::json!({"status": "paused"}),
+        )
+        .unwrap();
+
+        let mut run = load_workflow_run(&cfg, Some(&store), &wf_id).unwrap().unwrap();
+        run.status = autonoetic_types::workflow::WorkflowRunStatus::Completed;
+        save_workflow_run(&cfg, Some(&store), &run).unwrap();
+
+        reconcile_paused_child_wait_tasks(&cfg, Some(&store)).unwrap();
+
+        let after = load_task_run(&cfg, Some(&store), &wf_id, "task-parked").unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            TaskRunStatus::Failed,
+            "child-wait task parked in a terminal workflow must be failed, not stranded"
+        );
+    }
+
+    /// Janitor: drifted `active_task_ids` (terminal entries never dequeued,
+    /// live entries lost) is repaired in place.
+    #[test]
+    fn janitor_repairs_active_task_ids_drift() {
+        let (_dir, cfg, store) = child_wait_setup();
+        let root = "root-janitor-drift";
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), root, None).unwrap();
+        let wf_id = wf.workflow_id.clone();
+
+        let live_session = format!("{root}/coder");
+        let dead_session = format!("{root}/auditor");
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-live", &live_session, root, TaskRunStatus::Running)).unwrap();
+        save_task_run(&cfg, Some(&store), &mk_task(&wf_id, "task-dead", &dead_session, root, TaskRunStatus::Succeeded)).unwrap();
+
+        // Corrupt: dead entry present, live entry missing.
+        let mut run = load_workflow_run(&cfg, Some(&store), &wf_id).unwrap().unwrap();
+        run.active_task_ids = vec!["task-dead".to_string()];
+        save_workflow_run(&cfg, Some(&store), &run).unwrap();
+
+        reconcile_paused_child_wait_tasks(&cfg, Some(&store)).unwrap();
+
+        let run = load_workflow_run(&cfg, Some(&store), &wf_id).unwrap().unwrap();
+        assert_eq!(
+            run.active_task_ids,
+            vec!["task-live".to_string()],
+            "janitor must drop terminal entries and re-add live ones"
+        );
     }
 }

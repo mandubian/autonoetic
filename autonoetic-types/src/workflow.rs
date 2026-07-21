@@ -150,7 +150,11 @@ impl TaskRunStatus {
         }
         match (self, next) {
             (Succeeded | Failed | Aborted | Cancelled, _) => false,
-            (Pending, Runnable | Cancelled) => true,
+            // A queued-not-started task can be finalized without ever
+            // running (operator force-complete, abnormal session close,
+            // singleton-slot release on a bypassed scheduler). Refusing
+            // these would silently strand singleton slots and queue rows.
+            (Pending, Runnable | Cancelled | Succeeded | Failed) => true,
             (Pending, _) => false,
             (Runnable, Running | Cancelled | Failed) => true,
             (Runnable, _) => false,

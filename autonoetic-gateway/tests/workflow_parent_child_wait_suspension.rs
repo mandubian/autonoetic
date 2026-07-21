@@ -217,7 +217,10 @@ fn join_satisfies_after_paused_task_eventually_succeeds() -> anyhow::Result<()> 
 /// `process_queued_workflow_tasks` skips Paused (scheduler.rs:1532), and the
 /// ChildStateNotification is rerouted to the root planner (router.rs:1093) so
 /// the intermediate parent never sees it. The wake-up is implemented in
-/// `update_task_run_status` via `wake_paused_parent_on_child_terminal`.
+/// `update_task_run_status` via `wake_paused_child_wait_tasks` — a
+/// workflow-scoped, condition-based scan that wakes every parked child-wait
+/// task whose own wait set (non-terminal children it spawned) is empty,
+/// backstopped by the per-tick janitor `reconcile_paused_child_wait_tasks`.
 #[test]
 fn child_terminal_transition_wakes_paused_parent_task() -> anyhow::Result<()> {
     let (_temp, config, store) = setup()?;

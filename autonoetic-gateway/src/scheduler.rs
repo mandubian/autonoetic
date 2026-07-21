@@ -309,6 +309,12 @@ async fn run_scheduler_tick_common(
         tracing::warn!(error = %e, "Failed to check stuck running tasks");
     }
 
+    // Janitor: re-evaluate Paused child-wait tasks and repair active_task_ids
+    // drift, so a missed wake can never deadlock a workflow permanently.
+    if let Err(e) = reconcile_paused_child_wait_tasks(execution.clone()).await {
+        tracing::warn!(error = %e, "Failed to reconcile paused child-wait tasks");
+    }
+
     // Orphan-child reaper: cancel children of terminated parent sessions (R+12)
     if let Err(e) = reap_orphaned_sessions(execution.clone()).await {
         tracing::warn!(error = %e, "Failed to reap orphaned sessions");
@@ -900,14 +906,24 @@ async fn check_stuck_running_tasks(
                 continue;
             }
 
-            // Skip sessions whose LATEST checkpoint is WaitingForChild — the
-            // parent is legitimately waiting for async children, not stuck.
-            // Closes the narrow race between save_yield_checkpoint and the
-            // Paused transition (#848, site 9). If the checkpoint cannot be
-            // read/verified, conservatively skip the sweep this cycle rather
-            // than risk killing a waiting parent.
+            // Sessions whose LATEST checkpoint is WaitingForChild are mid-
+            // transition into Paused — the parent is legitimately waiting for
+            // async children, not stuck. Closes the narrow race between
+            // save_yield_checkpoint and the Paused transition (#848, site 9).
+            //
+            // The exemption is BOUNDED: if the Running → Paused transition
+            // died after the yield checkpoint was written, the task would sit
+            // in Running, unqueued, skipped by this sweeper forever. When the
+            // task is otherwise stale (past the stuck timeout AND its claim
+            // heartbeat is stale), complete the interrupted pause here —
+            // Paused + `paused_child_wait` checkpoint + dequeue — exactly what
+            // the suspended_for_child_wait branch (spawn_task_execution) does.
+            // The janitor (reconcile_paused_child_wait_tasks) then owns
+            // re-evaluation. If the checkpoint cannot be read/verified,
+            // conservatively skip this cycle rather than risk killing a
+            // waiting parent.
             if !task.session_id.is_empty() {
-                let skip = match crate::runtime::checkpoint::load_latest_checkpoint(
+                let waiting_for_child = match crate::runtime::checkpoint::load_latest_checkpoint(
                     &config,
                     &task.session_id,
                 ) {
@@ -925,16 +941,79 @@ async fn check_stuck_running_tasks(
                             error = %e,
                             "Stuck-task sweeper skipping task: latest checkpoint unreadable"
                         );
-                        true
+                        // Conservative: never touch a task whose checkpoint
+                        // cannot be verified.
+                        continue;
                     }
                 };
-                if skip {
-                    tracing::debug!(
+                if waiting_for_child {
+                    let updated_at = chrono::DateTime::parse_from_rfc3339(&task.updated_at)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&chrono::Utc));
+                    let elapsed_wait_secs = updated_at
+                        .map(|ts| (now - ts).num_seconds() as u64)
+                        .unwrap_or(0);
+                    let claim_opt = workflow_store::load_task_claim(
+                        &config,
+                        store,
+                        &wf_id,
+                        &task.task_id,
+                    )
+                    .ok()
+                    .flatten();
+                    let claim_fresh = claim_opt.as_ref().map_or(false, |claim| {
+                        !workflow_store::claim_is_stale(claim, stale_after_secs)
+                    });
+                    if elapsed_wait_secs < stale_after_secs || claim_fresh {
+                        tracing::debug!(
+                            target: "workflow",
+                            task_id = %task.task_id,
+                            workflow_id = %wf_id,
+                            "Stuck-task sweeper skipping session with WaitingForChild checkpoint"
+                        );
+                        continue;
+                    }
+
+                    tracing::info!(
                         target: "workflow",
                         task_id = %task.task_id,
                         workflow_id = %wf_id,
-                        "Stuck-task sweeper skipping session with WaitingForChild checkpoint"
+                        session_id = %task.session_id,
+                        elapsed_secs = elapsed_wait_secs,
+                        "Completing interrupted child-wait pause for stale Running task (#848 race)"
                     );
+                    if let Err(e) = workflow_store::update_task_run_status(
+                        &config,
+                        store,
+                        &wf_id,
+                        &task.task_id,
+                        autonoetic_types::workflow::TaskRunStatus::Paused,
+                        Some("paused: awaiting async child completion".to_string()),
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(
+                            target: "workflow",
+                            task_id = %task.task_id,
+                            workflow_id = %wf_id,
+                            error = %e,
+                            "Failed to complete interrupted child-wait pause"
+                        );
+                        continue;
+                    }
+                    let _ = workflow_store::checkpoint_task(
+                        &config,
+                        store,
+                        &wf_id,
+                        &task.task_id,
+                        "paused_child_wait".to_string(),
+                        serde_json::json!({
+                            "status": "paused",
+                            "reason": "awaiting_async_child_completion",
+                            "completed_by": "stuck_task_sweeper",
+                        }),
+                    );
+                    let _ = workflow_store::dequeue_task(&config, store, &wf_id, &task.task_id);
                     continue;
                 }
             }
@@ -2621,6 +2700,20 @@ async fn spawn_task_execution(
     }
 }
 
+/// Safety-net janitor for the workflow suspend/resume machinery.
+///
+/// Thin scheduler wrapper around
+/// `workflow_store::reconcile_paused_child_wait_tasks` (which holds the logic
+/// and the unit tests). Runs every tick — see the store-level function for
+/// the full rationale.
+pub async fn reconcile_paused_child_wait_tasks(
+    execution: Arc<crate::execution::GatewayExecutionService>,
+) -> anyhow::Result<()> {
+    let config = execution.config();
+    let store = execution.gateway_store();
+    workflow_store::reconcile_paused_child_wait_tasks(&config, store.as_deref())
+}
+
 /// Scan all workflows for Runnable tasks (approval-unblocked) and execute them.
 ///
 /// When a task is unblocked by approval resolution (AwaitingApproval → Runnable),
@@ -2689,14 +2782,36 @@ pub async fn process_runnable_workflow_tasks(
                 continue;
             }
 
+            // Child-wait wakes resume the session from its WaitingForChild
+            // checkpoint, which already carries the full conversation history.
+            // Re-injecting the original kickoff message would duplicate the
+            // instruction in that history and risks re-executing side effects
+            // — send a wake notice instead.
+            let is_child_wait_wake = workflow_store::load_task_checkpoint(
+                &config,
+                store,
+                &wf_id,
+                &task.task_id,
+            )
+            .ok()
+            .flatten()
+            .map(|cp| cp.step == "paused_child_wait")
+            .unwrap_or(false);
+            let message = if is_child_wait_wake {
+                "[gateway child state notification] All spawned child tasks have resolved. \
+                 Continue and produce your final result."
+                    .to_string()
+            } else {
+                task.message
+                    .clone()
+                    .unwrap_or_else(|| format!("Resume after approval: {}", task.session_id))
+            };
+
             let queued = autonoetic_types::workflow::QueuedTaskRun {
                 task_id: task.task_id.clone(),
                 workflow_id: wf_id.clone(),
                 agent_id: task.agent_id.clone(),
-                message: task
-                    .message
-                    .clone()
-                    .unwrap_or_else(|| format!("Resume after approval: {}", task.session_id)),
+                message,
                 child_session_id: task.session_id.clone(),
                 parent_session_id: task.parent_session_id.clone(),
                 source_agent_id: task.source_agent_id.clone().unwrap_or_default(),
