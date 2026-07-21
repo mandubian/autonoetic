@@ -1454,8 +1454,132 @@ pub fn update_task_run_status(
                 }
             }
         }
+
+        // #845 follow-up: when a child reaches a terminal state, wake any
+        // Paused parent task in the same workflow so the scheduler picks it
+        // up and resumes the parent session. Without this transition, Fix 2's
+        // `Paused` state has no return path — the parent would sit Paused
+        // forever and the workflow would deadlock (the join blocks on the
+        // non-terminal Paused task). `process_queued_workflow_tasks` skips
+        // Paused tasks (scheduler.rs:1532), and `process_pending_notifications`
+        // delivers the ChildStateNotification via event.ingest which the
+        // router reroutes to the *root* planner (router.rs:1093), so neither
+        // path wakes the intermediate parent. We do it here, atomically with
+        // the child's terminal transition.
+        if status.is_terminal() && !task.parent_session_id.is_empty() {
+            if let Err(e) = wake_paused_parent_on_child_terminal(
+                config,
+                store,
+                workflow_id,
+                &task.parent_session_id,
+            ) {
+                tracing::warn!(
+                    target: "workflow",
+                    workflow_id = %workflow_id,
+                    parent_session_id = %task.parent_session_id,
+                    error = %e,
+                    "Failed to wake Paused parent task after child terminal transition"
+                );
+            }
+        }
     }
 
+    Ok(())
+}
+
+/// #845 follow-up — wake a `Paused` parent task when one of its children
+/// reaches a terminal state, so the scheduler can pick it up and resume the
+/// parent session.
+///
+/// Fix 2 (`run_durable_workflow_task::suspended_for_child_wait` branch) marks
+/// the parent task `Paused` when it ends its turn with pending async children.
+/// But nothing else transitions `Paused` back to `Runnable` on child
+/// completion:
+/// - `process_queued_workflow_tasks` (scheduler.rs:1532) explicitly skips
+///   `Paused` tasks and dequeues them;
+/// - `process_pending_notifications` delivers the ChildStateNotification via
+///   `event.ingest`, which the router reroutes to the *root* planner session
+///   (router.rs:1093) — the intermediate parent never receives it;
+/// - `TaskNotifyRegistry::notify_session` is fired but never awaited in
+///   production code.
+///
+/// This helper closes the gap. It is invoked from `update_task_run_status`
+/// right after the child-state notification is emitted, so the wake happens
+/// atomically with the child's terminal transition.
+///
+/// To avoid masking `Paused`-for-user-input tasks (which have their own
+/// wake-up via `interaction_answer.rs:343`), the helper inspects the task's
+/// checkpoint `step` field and only wakes tasks parked in
+/// `"paused_child_wait"` (the label Fix 2 writes). A `Paused` task without a
+/// checkpoint, or with any other step, is left untouched.
+fn wake_paused_parent_on_child_terminal(
+    config: &GatewayConfig,
+    store: Option<&GatewayStore>,
+    workflow_id: &str,
+    parent_session_id: &str,
+) -> anyhow::Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let tasks = list_task_runs_for_workflow(config, Some(store), workflow_id)?;
+    for mut task in tasks {
+        if task.session_id != parent_session_id || task.status != TaskRunStatus::Paused {
+            continue;
+        }
+
+        // Only wake tasks that are explicitly parked for child-wait. Other
+        // Paused tasks (e.g. user_input via run_durable_workflow_task's
+        // earlier branch) have their own wake-up paths and must not be
+        // disturbed by an unrelated child's terminal transition.
+        let is_child_wait = match load_task_checkpoint(
+            config,
+            Some(store),
+            workflow_id,
+            &task.task_id,
+        )? {
+            Some(cp) => cp.step == "paused_child_wait",
+            None => false,
+        };
+        if !is_child_wait {
+            continue;
+        }
+
+        // Transition Paused → Runnable directly via `save_task_run` rather
+        // than recursing through `update_task_run_status`: a Runnable
+        // transition would otherwise emit another "workflow.child.resolved"
+        // notification to the *grandparent`, misleading it into thinking
+        // the parent has finished. We are merely unpausing, not resolving.
+        task.status = TaskRunStatus::Runnable;
+        task.updated_at = now_rfc3339();
+        save_task_run(config, Some(store), &task)?;
+
+        append_workflow_event(
+            config,
+            Some(store),
+            &WorkflowEventRecord {
+                event_id: new_event_id(),
+                workflow_id: workflow_id.to_string(),
+                task_id: Some(task.task_id.clone()),
+                event_type: "task.updated".to_string(),
+                agent_id: Some(task.agent_id.clone()),
+                payload: serde_json::json!({
+                    "status": "runnable",
+                    "reason": "child_terminal_wake",
+                    "triggered_by_child_session": parent_session_id,
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )?;
+
+        tracing::info!(
+            target: "workflow",
+            workflow_id = %workflow_id,
+            parent_task_id = %task.task_id,
+            parent_session_id = %parent_session_id,
+            "Woke Paused parent task: child reached terminal state, re-queueing for execution (Ri-0.14 / #845 follow-up)"
+        );
+        break;
+    }
     Ok(())
 }
 
