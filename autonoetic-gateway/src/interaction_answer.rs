@@ -380,8 +380,21 @@ pub async fn answer_and_orchestrate_resume(
                         }),
                     );
                     unblocked = true;
-                    crate::scheduler::process_runnable_workflow_tasks(Arc::clone(execution))
-                        .await?;
+                    // Best-effort nudge: the interaction is already persisted as
+                    // Answered, so a transient scheduling error here must not
+                    // fail the call (a client retry would early-return and never
+                    // re-run the nudge). The background tick eventually picks the
+                    // Runnable task up regardless.
+                    if let Err(e) =
+                        crate::scheduler::process_runnable_workflow_tasks(Arc::clone(execution))
+                            .await
+                    {
+                        tracing::warn!(
+                            target: "workflow",
+                            error = %e,
+                            "Failed to process runnable workflow tasks after interaction answer"
+                        );
+                    }
                 }
             }
         }
