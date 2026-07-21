@@ -149,7 +149,10 @@ fn sse_session_status_terminal(resp: &JsonRpcResponse) -> bool {
         return true;
     };
     match serde_json::from_value::<AsyncIngestResult>(val.clone()) {
-        Ok(parsed) => !matches!(parsed.status, AsyncIngestStatus::Processing),
+        Ok(parsed) => !matches!(
+            parsed.status,
+            AsyncIngestStatus::Processing | AsyncIngestStatus::SuspendedChildWait
+        ),
         Err(_) => true,
     }
 }

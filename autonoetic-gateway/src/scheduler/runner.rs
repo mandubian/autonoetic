@@ -101,7 +101,7 @@ pub async fn handle_due_wake(
     );
 
     let mut outcome = "skipped".to_string();
-    let result = if matches!(reason, WakeReason::ApprovalResolved { .. }) {
+    let result: Option<anyhow::Result<(String, bool)>> = if matches!(reason, WakeReason::ApprovalResolved { .. }) {
         let request_id = match &reason {
             WakeReason::ApprovalResolved { request_id } => request_id,
             _ => unreachable!(),
@@ -119,7 +119,8 @@ pub async fn handle_due_wake(
         Some(
             execution
                 .execute_background_action(agent_id, session_id, &decision.action, agent_dir)
-                .await,
+                .await
+                .map(|s| (s, false)),
         )
     } else if let Some(action) = reevaluation.pending_scheduled_action.clone() {
         if action.requires_approval() {
@@ -212,7 +213,8 @@ pub async fn handle_due_wake(
             Some(
                 execution
                     .execute_background_action(agent_id, session_id, &action, agent_dir)
-                    .await,
+                    .await
+                    .map(|s| (s, false)),
             )
         }
     } else if matches!(background.mode, BackgroundMode::Reasoning) && allow_reasoning {
@@ -234,7 +236,12 @@ pub async fn handle_due_wake(
                     &[],
                 )
                 .await
-                .map(|spawn| spawn.assistant_reply.unwrap_or_default()),
+                .map(|spawn| {
+                    let is_suspended = spawn.suspended_for_approval.is_some()
+                        || spawn.suspended_for_user_input
+                        || spawn.suspended_for_child_wait;
+                    (spawn.assistant_reply.unwrap_or_default(), is_suspended)
+                }),
         )
     } else {
         None
@@ -253,20 +260,34 @@ pub async fn handle_due_wake(
     super::decision::mark_reason_processed(&mut state, &reason);
 
     match result {
-        Some(Ok(result_body)) => {
-            state.retry_not_before = None;
-            state.approval_blocked = false;
-            clear_reevaluation_after_success(agent_dir, &reason)?;
-            save_background_state(&state_path, &state)?;
-            let _ = trace_session.log_completed(
-                "background.wake",
-                None,
-                Some(serde_json::json!({
-                    "agent_id": agent_id,
-                    "reason": &reason,
-                    "result_len": result_body.len()
-                })),
-            );
+        Some(Ok((result_body, is_suspended))) => {
+            if is_suspended {
+                // Suspended: leave retry/reevaluation state intact so the
+                // background agent can resume after the child resolves.
+                save_background_state(&state_path, &state)?;
+                let _ = trace_session.log_skipped(
+                    "background.wake",
+                    "suspended",
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "reason": &reason,
+                    })),
+                );
+            } else {
+                state.retry_not_before = None;
+                state.approval_blocked = false;
+                clear_reevaluation_after_success(agent_dir, &reason)?;
+                save_background_state(&state_path, &state)?;
+                let _ = trace_session.log_completed(
+                    "background.wake",
+                    None,
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "reason": &reason,
+                        "result_len": result_body.len()
+                    })),
+                );
+            }
         }
         Some(Err(error)) => {
             let retry_after = now + Duration::seconds(effective_interval as i64);

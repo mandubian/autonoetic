@@ -188,6 +188,12 @@ pub enum WireResponse {
         /// Optional cross-gateway causal correlation reference.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_event_ref: Option<PeerEventRef>,
+        /// Whether the agent is suspended (waiting for children, approval, or user input).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suspended: Option<bool>,
+        /// The kind of suspension, if any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suspension_kind: Option<String>,
     },
     /// Acknowledgement for `chain_attestation`.
     #[serde(rename = "chain_attestation_ack")]

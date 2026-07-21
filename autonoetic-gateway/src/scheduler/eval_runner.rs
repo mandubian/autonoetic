@@ -245,11 +245,14 @@ async fn execute_case(
         )
         .await;
 
-    let (reply, artifacts_count) = match &result {
+    let (reply, artifacts_count, is_suspended) = match &result {
         Ok(spawn) => {
             let reply = spawn.assistant_reply.clone().unwrap_or_default();
             let artifacts = spawn.artifacts.len() as usize;
-            (reply, artifacts)
+            let is_suspended = spawn.suspended_for_approval.is_some()
+                || spawn.suspended_for_user_input
+                || spawn.suspended_for_child_wait;
+            (reply, artifacts, is_suspended)
         }
         Err(e) => {
             return Ok(EvalCaseResultRecord {
@@ -263,6 +266,22 @@ async fn execute_case(
             });
         }
     };
+
+    if is_suspended {
+        return Ok(EvalCaseResultRecord {
+            eval_run_id: run.eval_run_id.clone(),
+            case_id: case.case_id.clone(),
+            status: "suspended".to_string(),
+            score: None,
+            session_id: Some(eval_session_id),
+            notes: Some("Agent suspended during eval; assertions not run".to_string()),
+            output_json: serde_json::json!({
+                "suspended": true,
+                "reply_len": reply.len(),
+                "artifacts_count": artifacts_count,
+            }),
+        });
+    }
 
     let mut all_passed = true;
     let mut notes_parts = Vec::new();

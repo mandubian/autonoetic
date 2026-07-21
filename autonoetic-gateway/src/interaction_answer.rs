@@ -329,35 +329,58 @@ pub async fn answer_and_orchestrate_resume(
             workflow_store::load_task_run(cfg.as_ref(), Some(store.as_ref()), wf_id, t_id)?
         {
             if task.status == TaskRunStatus::Paused {
-                if let Some(fu) = follow {
-                    task.message = Some(fu.to_string());
-                }
-                task.updated_at = chrono::Utc::now().to_rfc3339();
-                workflow_store::save_task_run(cfg.as_ref(), Some(store.as_ref()), &task)?;
+                // Defensive check: only resume if this task was paused for user
+                // input, not for child-wait. The checkpoint step distinguishes
+                // the two (`paused` vs `paused_child_wait`).
+                let is_child_wait = workflow_store::load_task_checkpoint(
+                    cfg.as_ref(),
+                    Some(store.as_ref()),
+                    wf_id,
+                    t_id,
+                )
+                .ok()
+                .flatten()
+                .map(|cp| cp.step == "paused_child_wait")
+                .unwrap_or(false);
+                if is_child_wait {
+                    // Task is waiting for async children, not user input.
+                    // Do not resume; the child terminal transition will wake it.
+                    tracing::debug!(
+                        target: "interaction",
+                        interaction_id = %interaction.interaction_id,
+                        task_id = %t_id,
+                        "Skipping resume: task is paused for child-wait, not user input"
+                    );
+                } else {
+                    if let Some(fu) = follow {
+                        task.message = Some(fu.to_string());
+                    }
+                    task.updated_at = chrono::Utc::now().to_rfc3339();
+                    workflow_store::save_task_run(cfg.as_ref(), Some(store.as_ref()), &task)?;
 
-                workflow_store::update_task_run_status(
-                    cfg.as_ref(),
-                    Some(store.as_ref()),
-                    wf_id,
-                    t_id,
-                    TaskRunStatus::Runnable,
-                    Some("user interaction answered; resuming task".to_string()),
-                    None,
-                    None,
-                )?;
-                let _ = workflow_store::checkpoint_task(
-                    cfg.as_ref(),
-                    Some(store.as_ref()),
-                    wf_id,
-                    t_id,
-                    "user_interaction_answered".to_string(),
-                    serde_json::json!({
-                        "interaction_id": interaction.interaction_id,
-                        "status": "answered",
-                    }),
-                );
-                unblocked = true;
-                crate::scheduler::process_runnable_workflow_tasks(Arc::clone(execution)).await?;
+                    workflow_store::update_task_run_status(
+                        cfg.as_ref(),
+                        Some(store.as_ref()),
+                        wf_id,
+                        t_id,
+                        TaskRunStatus::Runnable,
+                        Some("user interaction answered; resuming task".to_string()),
+                        None,
+                        None,
+                    )?;
+                    let _ = workflow_store::checkpoint_task(
+                        cfg.as_ref(),
+                        Some(store.as_ref()),
+                        wf_id,
+                        t_id,
+                        "user_interaction_answered".to_string(),
+                        serde_json::json!({
+                            "interaction_id": interaction.interaction_id,
+                            "status": "answered",
+                        }),
+                    );
+                    unblocked = true;
+                }
             }
         }
         // Async `agent_spawn` children are drained by `process_queued_workflow_tasks` (background
