@@ -1510,6 +1510,105 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             };
             format!("loop guard tripped: {reason}{rule}")
         }
+        "session.start" => format!(
+            "session started{}",
+            field("trigger_type").map(|t| format!(" ({t})")).unwrap_or_default()
+        ),
+        "session.end" => format!(
+            "session ended: {}",
+            one_line(&field("reason").unwrap_or_else(|| "no reason".into()), 100)
+        ),
+        "security.escape_threshold" => {
+            let level = field("level").unwrap_or_default();
+            let count = p.as_ref().and_then(|v| v.get("count")).and_then(|x| x.as_u64()).unwrap_or(0);
+            let threshold = p.as_ref().and_then(|v| v.get("threshold")).and_then(|x| x.as_u64()).unwrap_or(0);
+            format!("escape threshold reached: {count}/{threshold} attempts ({level})")
+        }
+        // Operator commented on a live file (#XXX) — Attention: an issue the
+        // agent should address. Location + body so the row reads as a
+        // sentence, not the bare event type.
+        "operator.comment" => {
+            let name = field("name").unwrap_or_default();
+            let line_start = p.as_ref().and_then(|v| v.get("line_start")).and_then(|x| x.as_u64());
+            let line_end = p.as_ref().and_then(|v| v.get("line_end")).and_then(|x| x.as_u64());
+            let loc = match (line_start, line_end) {
+                (Some(s), Some(e)) if s != e => format!(":{s}-{e}"),
+                (Some(s), _) => format!(":{s}"),
+                _ => String::new(),
+            };
+            format!("comment on {name}{loc}: {}", one_line(&field("body").unwrap_or_default(), 100))
+        }
+        "digest_annotate" => format!(
+            "{}: {}",
+            field("type").unwrap_or_else(|| "note".into()),
+            one_line(&field("content").unwrap_or_default(), 140)
+        ),
+        "workflow.started" => format!(
+            "workflow started{}",
+            field("lead_agent_id").map(|a| format!(" (lead: {a})")).unwrap_or_default()
+        ),
+        "workflow.completed" => {
+            let n = p
+                .as_ref()
+                .and_then(|v| v.get("join_task_ids"))
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            format!("workflow completed ({n} joined task{})", if n == 1 { "" } else { "s" })
+        }
+        "envelope.proposed" => {
+            let hosts = p
+                .as_ref()
+                .and_then(|v| v.get("hosts"))
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            if hosts.is_empty() {
+                "network envelope proposed".into()
+            } else {
+                format!("network envelope proposed: {hosts}")
+            }
+        }
+        "envelope.locked" => {
+            let hosts = p
+                .as_ref()
+                .and_then(|v| v.get("hosts"))
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", "))
+                .unwrap_or_default();
+            let grants = p.as_ref().and_then(|v| v.get("grants_materialized")).and_then(|x| x.as_u64()).unwrap_or(0);
+            let grant_word = if grants == 1 { "grant" } else { "grants" };
+            if hosts.is_empty() {
+                format!("network envelope locked ({grants} {grant_word})")
+            } else {
+                format!("network envelope locked: {hosts} ({grants} {grant_word})")
+            }
+        }
+        // Reserved — no emitter today (failures use `tool.completed` with
+        // `ok:false`); kept so a future dedicated failure event renders sanely.
+        "tool.failed" => {
+            let tool_name = field("tool_name").or_else(|| field("tool")).unwrap_or_else(|| "tool".into());
+            format!("{tool_name} failed: {}", one_line(&field("error").unwrap_or_default(), 120))
+        }
+        "llm.retry" => {
+            let attempt = p.as_ref().and_then(|v| v.get("attempt")).and_then(|x| x.as_u64()).unwrap_or(0);
+            let max = p.as_ref().and_then(|v| v.get("max_retries")).and_then(|x| x.as_u64()).unwrap_or(0);
+            format!("LLM retry {attempt}/{max}")
+        }
+        // Not emitted by the gateway today (reserved alongside their sibling
+        // lifecycle events); classified in `event_tier` for forward-compat.
+        "plan.rejected" => format!(
+            "plan rejected ({}){}",
+            field("plan_id").unwrap_or_default(),
+            field("reason").map(|r| format!(" — {}", one_line(&r, 100))).unwrap_or_default()
+        ),
+        "approval.withdrawn" => format!("approval withdrawn ({})", field("request_id").unwrap_or_default()),
+        "escalation.approved" => format!("escalation approved ({})", field("revision_id").unwrap_or_default()),
+        "escalation.rejected" => format!(
+            "escalation rejected ({}){}",
+            field("revision_id").unwrap_or_default(),
+            field("reason").map(|r| format!(" — {}", one_line(&r, 100))).unwrap_or_default()
+        ),
         other => other.to_string(),
     }
 }
@@ -2125,6 +2224,43 @@ pub enum EventTier {
     Routine,
 }
 
+/// Checkpoint-tier event types (see [`EventTier::Checkpoint`]). Single source
+/// of truth for `event_tier` — also walked by a test asserting every one of
+/// these has a real `summarize()` arm (not the raw-string fallback).
+const CHECKPOINT_EVENT_TYPES: &[&str] = &[
+    "plan.pending", "plan.approved", "plan.rejected", "plan.withdrawn",
+    "approval.pending", "approval.approved", "approval.rejected",
+    "approval.cancelled", "approval.withdrawn",
+    "escalation.pending", "escalation.approved", "escalation.rejected",
+    "user.ask.pending",
+    "operator.message",
+    "session.start", "session.end",
+    "workbench.created", "workbench.reconciled", "workbench.discarded",
+    "runtime.lock_drift",
+    "divergence.intervention",
+    "security.escape_threshold",
+    "wiki.proposed", "wiki.promoted", "wiki.rejected", "wiki.withdrawn",
+];
+
+/// Significant-tier event types (see [`EventTier::Significant`]). Single
+/// source of truth for `event_tier` — also walked by a test asserting every
+/// one of these has a real `summarize()` arm (not the raw-string fallback).
+const SIGNIFICANT_EVENT_TYPES: &[&str] = &[
+    "agent.message", "digest_annotate",
+    "llm.request_failed", "llm.empty_response", "llm.retry",
+    "tool.failed", "guard.tripped",
+    "session.emergency_stop", "security.sandbox_escape",
+];
+
+/// Routine-tier event types (see [`EventTier::Routine`]).
+const ROUTINE_EVENT_TYPES: &[&str] = &[
+    "turn.start", "turn.end", "llm.round", "agent.reasoning",
+    "tool.requested",
+    "workflow.child_state", "workflow.join_satisfied", "workflow.signal",
+    "workflow.started", "workflow.completed",
+    "scheduled_job.triggered", "scheduled_job.completed", "scheduled_job.failed",
+];
+
 /// `tool.completed` for these state-changing tools is Significant (shown
 /// individually); every other `tool.completed` is Routine (folded).
 const SIGNIFICANT_TOOL_NAMES: &[&str] = &[
@@ -2151,39 +2287,21 @@ const SIGNIFICANT_TOOL_NAMES: &[&str] = &[
 /// event type renders individually (never folds) until it is consciously
 /// classified here. Folding is opt-in for known plumbing only.
 pub fn event_tier(entry: &SessionTimelineEntry) -> EventTier {
-    match entry.event_type.as_str() {
-        // ── Checkpoints: operator decisions, gates, boundaries. Jump targets. ──
-        "plan.pending" | "plan.approved" | "plan.rejected" | "plan.withdrawn"
-        | "approval.pending" | "approval.approved" | "approval.rejected"
-        | "approval.cancelled" | "approval.withdrawn"
-        | "escalation.pending" | "escalation.approved" | "escalation.rejected"
-        | "user.ask.pending"
-        | "operator.message"
-        | "session.start" | "session.end"
-        | "workbench.created" | "workbench.reconciled" | "workbench.discarded"
-        | "runtime.lock_drift"
-        | "divergence.intervention"
-        | "security.escape_threshold"
-        | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" | "wiki.withdrawn" => {
-            EventTier::Checkpoint
-        }
-        // ── Significant: agent output, audits, and failures. Never folded. ──
-        "agent.message" | "digest_annotate"
-        | "llm.request_failed" | "llm.empty_response" | "llm.retry"
-        | "tool.failed" | "guard.tripped"
-        | "session.emergency_stop" | "security.sandbox_escape" => EventTier::Significant,
-        "tool.completed" => tool_completed_tier(entry),
-        // ── Routine: known plumbing only. Folded into collapsed runs. ──
-        "turn.start" | "turn.end" | "llm.round" | "agent.reasoning"
-        | "tool.requested"
-        | "workflow.child_state" | "workflow.join_satisfied" | "workflow.signal"
-        | "workflow.started" | "workflow.completed"
-        | "scheduled_job.triggered" | "scheduled_job.completed" | "scheduled_job.failed" => {
-            EventTier::Routine
-        }
-        // Unknown event type: render individually (never fold) until classified.
-        _ => EventTier::Significant,
+    let et = entry.event_type.as_str();
+    if CHECKPOINT_EVENT_TYPES.contains(&et) {
+        return EventTier::Checkpoint;
     }
+    if SIGNIFICANT_EVENT_TYPES.contains(&et) {
+        return EventTier::Significant;
+    }
+    if et == "tool.completed" {
+        return tool_completed_tier(entry);
+    }
+    if ROUTINE_EVENT_TYPES.contains(&et) {
+        return EventTier::Routine;
+    }
+    // Unknown event type: render individually (never fold) until classified.
+    EventTier::Significant
 }
 
 /// `tool.completed` is Significant only for a state-changing tool; routine
@@ -2975,6 +3093,31 @@ mod tests {
             "tool.requested", "workflow.child_state", "workflow.join_satisfied",
         ] {
             assert_eq!(event_tier(&mk(et)), EventTier::Routine, "{et} should be routine");
+        }
+    }
+
+    #[test]
+    fn checkpoint_and_significant_types_have_a_real_summary() {
+        // Anti-drift guard: every event type classified as Checkpoint or
+        // Significant in `event_tier` (i.e. consciously made non-foldable —
+        // meant to always be seen) must also have a real `summarize()` arm.
+        // Otherwise it silently falls through to the `other => other.to_string()`
+        // fallback and the operator sees the raw event_type string instead of
+        // a sentence — this happened for `operator.comment`, `session.start`,
+        // `security.escape_threshold`, and others before this test existed.
+        for et in CHECKPOINT_EVENT_TYPES.iter().chain(SIGNIFICANT_EVENT_TYPES.iter()) {
+            let e = entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                serde_json::json!({}),
+            );
+            let summary = summarize(&e);
+            assert_ne!(
+                &summary, et,
+                "{et} falls back to the raw event_type string in summarize() — add a match arm"
+            );
         }
     }
 
