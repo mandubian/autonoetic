@@ -1761,15 +1761,34 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                         cap_preview(&ids.join(", "), 80)
                     }),
                 Some(_) => {
-                    // Show result content as preview, not full payload
-                    p.as_ref()
-                        .and_then(|v| v.get("result"))
-                        .and_then(|r| {
-                            // Structured result: try to extract a text preview
-                            r.get("stdout").and_then(|x| x.as_str()).map(|o| cap_preview(o, 120))
-                                .or_else(|| r.as_str().map(|s| cap_preview(s, 120)))
-                        })
+                    // `result` is normally a JSON-encoded *string* (see
+                    // `log_tool_completed_with_approval`, used by every tool).
+                    // Parse it once so `stdout`/`summary` lookups actually run:
+                    // previously `r.as_str()` on the *unparsed* string always
+                    // matched first, so every non-special-cased tool (~50+ of
+                    // them) showed the raw truncated JSON dump and never
+                    // reached `extract_tool_summary` below — same class of bug
+                    // as sandbox_exec's `stdout` miss, but affecting the
+                    // generic fallback used by most tools in the system.
+                    let result_val = p.as_ref().and_then(|v| v.get("result")).and_then(|r| {
+                        match r {
+                            serde_json::Value::String(raw) => {
+                                serde_json::from_str::<serde_json::Value>(raw).ok()
+                            }
+                            serde_json::Value::Object(_) => Some(r.clone()),
+                            _ => None,
+                        }
+                    });
+                    result_val
+                        .as_ref()
+                        .and_then(|r| r.get("stdout").and_then(|x| x.as_str()).map(|o| cap_preview(o, 120)))
                         .or_else(|| extract_tool_summary(p.as_ref()).map(|s| cap_preview(&s, 120)))
+                        .or_else(|| {
+                            // Last resort: no stdout, no summary field found —
+                            // show the raw result text so there's still
+                            // *something* rather than nothing.
+                            s("result").map(|r| cap_preview(&r, 120))
+                        })
                 }
                 None => None,
             }
@@ -4386,6 +4405,29 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("build the weather skill"));
+    }
+
+    #[test]
+    fn render_spec_generic_tool_completed_prefers_summary_over_raw_json() {
+        // Any tool without an explicit detail_preview arm (the vast majority —
+        // ~50+ tools) falls to the generic `Some(_)` branch. `result` is a
+        // JSON-encoded string here, matching real gateway emission
+        // (`log_tool_completed_with_approval`). Before the fix, the raw
+        // string always won the race against `extract_tool_summary` and the
+        // operator saw `{"summary":"found 3 matching skills","ok":true,...`
+        // instead of the plain-English summary.
+        let raw_result =
+            serde_json::json!({ "ok": true, "summary": "found 3 matching skills" }).to_string();
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({ "tool_name": "knowledge_search", "result": raw_result }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("expected a detail preview");
+        assert_eq!(detail, "found 3 matching skills", "got: {detail}");
     }
 
     #[test]
