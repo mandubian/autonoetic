@@ -269,6 +269,8 @@ fn test_encode_decode_all_message_types() {
             kind: WireMessageKind::Response(WireResponse::AgentResponse {
                 text: "Hi".into(),
                 peer_event_ref: None,
+                suspended: None,
+                suspension_kind: None,
             }),
         },
         WireMessage {

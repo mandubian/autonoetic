@@ -900,37 +900,30 @@ async fn check_stuck_running_tasks(
                 continue;
             }
 
-            // Skip sessions that have a WaitingForChild checkpoint — the parent
-            // is legitimately waiting for async children, not stuck.
+            // Skip sessions whose LATEST checkpoint is WaitingForChild — the
+            // parent is legitimately waiting for async children, not stuck.
+            // Closes the narrow race between save_yield_checkpoint and the
+            // Paused transition (#848, site 9).
             if !task.session_id.is_empty() {
-                let checkpoint_dir = gateway_dir
-                    .join("sessions")
-                    .join(&task.session_id)
-                    .join("checkpoints");
-                if checkpoint_dir.exists() {
-                    if let Ok(entries) = std::fs::read_dir(&checkpoint_dir) {
-                        let has_waiting_for_child = entries
-                            .filter_map(|e| e.ok())
-                            .filter_map(|e| {
-                                let content = std::fs::read_to_string(e.path()).ok()?;
-                                serde_json::from_str::<serde_json::Value>(&content).ok()
-                            })
-                            .any(|v| {
-                                v.get("yield_reason")
-                                    .and_then(|y| y.get("kind"))
-                                    .and_then(|k| k.as_str())
-                                    == Some("WaitingForChild")
-                            });
-                        if has_waiting_for_child {
-                            tracing::debug!(
-                                target: "workflow",
-                                task_id = %task.task_id,
-                                workflow_id = %wf_id,
-                                "Stuck-task sweeper skipping session with WaitingForChild checkpoint"
-                            );
-                            continue;
-                        }
-                    }
+                let waiting_for_child =
+                    crate::runtime::checkpoint::load_latest_checkpoint(&config, &task.session_id)
+                        .ok()
+                        .flatten()
+                        .map(|cp| {
+                            matches!(
+                                cp.yield_reason,
+                                crate::runtime::checkpoint::YieldReason::WaitingForChild { .. }
+                            )
+                        })
+                        .unwrap_or(false);
+                if waiting_for_child {
+                    tracing::debug!(
+                        target: "workflow",
+                        task_id = %task.task_id,
+                        workflow_id = %wf_id,
+                        "Stuck-task sweeper skipping session with WaitingForChild checkpoint"
+                    );
+                    continue;
                 }
             }
 

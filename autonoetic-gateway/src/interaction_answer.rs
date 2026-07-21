@@ -380,6 +380,8 @@ pub async fn answer_and_orchestrate_resume(
                         }),
                     );
                     unblocked = true;
+                    crate::scheduler::process_runnable_workflow_tasks(Arc::clone(execution))
+                        .await?;
                 }
             }
         }
