@@ -323,6 +323,8 @@ impl MessageRouter {
             WireMessageKind::Response(WireResponse::AgentResponse {
                 text,
                 peer_event_ref,
+                suspended: _,
+                suspension_kind: _,
             }) => {
                 let _ = emit_federation_message_event(
                     self.gateway_store.clone(),

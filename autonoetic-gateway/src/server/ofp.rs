@@ -850,6 +850,18 @@ async fn handle_inbound_connection(
                         {
                             Ok(result) => {
                                 let text = result.assistant_reply.unwrap_or_default();
+                                let suspended = result.suspended_for_approval.is_some()
+                                    || result.suspended_for_user_input
+                                    || result.suspended_for_child_wait;
+                                let suspension_kind = if result.suspended_for_approval.is_some() {
+                                    Some("approval".to_string())
+                                } else if result.suspended_for_user_input {
+                                    Some("user_input".to_string())
+                                } else if result.suspended_for_child_wait {
+                                    Some("child_wait".to_string())
+                                } else {
+                                    None
+                                };
                                 let local_peer_event_ref = emit_federation_message_event(
                                     gateway_store.clone(),
                                     &local_node_id,
@@ -868,6 +880,8 @@ async fn handle_inbound_connection(
                                     kind: WireMessageKind::Response(WireResponse::AgentResponse {
                                         text,
                                         peer_event_ref: Some(local_peer_event_ref),
+                                        suspended: Some(suspended),
+                                        suspension_kind,
                                     }),
                                 }
                             }

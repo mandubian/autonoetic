@@ -1571,7 +1571,10 @@ impl GatewayExecutionService {
                     }
                 };
 
-                if repaired.suspended_for_approval.is_some() || repaired.suspended_for_user_input {
+                if repaired.suspended_for_approval.is_some()
+                    || repaired.suspended_for_user_input
+                    || repaired.suspended_for_child_wait
+                {
                     tracing::warn!(
                         target: "response_validation",
                         agent_id = %agent_id,
@@ -1818,7 +1821,10 @@ impl GatewayExecutionService {
         workflow_id: Option<&str>,
         task_id: Option<&str>,
     ) -> anyhow::Result<SpawnResult> {
-        if result.suspended_for_approval.is_some() || result.suspended_for_user_input {
+        if result.suspended_for_approval.is_some()
+            || result.suspended_for_user_input
+            || result.suspended_for_child_wait
+        {
             return Ok(result);
         }
 
@@ -1917,6 +1923,7 @@ impl GatewayExecutionService {
 
                     if repaired.suspended_for_approval.is_some()
                         || repaired.suspended_for_user_input
+                        || repaired.suspended_for_child_wait
                     {
                         break;
                     }

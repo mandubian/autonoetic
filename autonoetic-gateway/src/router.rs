@@ -41,6 +41,7 @@ pub enum AsyncIngestStatus {
     Completed,
     SuspendedApproval,
     SuspendedUserInput,
+    SuspendedChildWait,
     Failed,
 }
 
@@ -434,6 +435,8 @@ impl JsonRpcRouter {
             AsyncIngestStatus::SuspendedApproval
         } else if spawn_result.suspended_for_user_input {
             AsyncIngestStatus::SuspendedUserInput
+        } else if spawn_result.suspended_for_child_wait {
+            AsyncIngestStatus::SuspendedChildWait
         } else {
             AsyncIngestStatus::Completed
         };
@@ -450,7 +453,11 @@ impl JsonRpcRouter {
             .iter()
             .map(|k| serde_json::to_value(k).unwrap_or_default())
             .collect();
-        entry.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        entry.completed_at = if matches!(entry.status, AsyncIngestStatus::SuspendedChildWait) {
+            None
+        } else {
+            Some(chrono::Utc::now().to_rfc3339())
+        };
     }
 
     /// Check whether a plan step's `depends_on` are all Completed.
@@ -979,12 +986,20 @@ impl JsonRpcRouter {
                 {
                     Ok((result, _trace_session)) => {
                         if let Some(source_agent_id) = params.source_agent_id.as_deref() {
+                            let task_status = if result.suspended_for_approval.is_some()
+                                || result.suspended_for_user_input
+                                || result.suspended_for_child_wait
+                            {
+                                TaskStatus::Claimed
+                            } else {
+                                TaskStatus::Completed
+                            };
                             let _ = append_delegation_task_entry(
                                 self.config.as_ref(),
                                 source_agent_id,
                                 &agent_id,
                                 "agent_spawn",
-                                TaskStatus::Completed,
+                                task_status,
                                 Some(serde_json::json!({
                                     "session_id": result.session_id.clone(),
                                     "assistant_reply": result.assistant_reply.clone(),
@@ -1210,12 +1225,20 @@ impl JsonRpcRouter {
                             match result {
                                 Ok((spawn_result, _)) => {
                                     if let Some(source) = source_agent_id {
+                                        let task_status = if spawn_result.suspended_for_approval.is_some()
+                                            || spawn_result.suspended_for_user_input
+                                            || spawn_result.suspended_for_child_wait
+                                        {
+                                            TaskStatus::Claimed
+                                        } else {
+                                            TaskStatus::Completed
+                                        };
                                         let _ = append_delegation_task_entry(
                                             config.as_ref(),
                                             &source,
                                             &target_agent_id_clone,
                                             "event.ingest",
-                                            TaskStatus::Completed,
+                                            task_status,
                                             Some(serde_json::json!({
                                                 "session_id": spawn_result.session_id.clone(),
                                                 "assistant_reply": spawn_result.assistant_reply.clone(),
@@ -1269,12 +1292,20 @@ impl JsonRpcRouter {
                     {
                         Ok((result, _trace_session)) => {
                             if let Some(source_agent_id) = params.source_agent_id.as_deref() {
+                                let task_status = if result.suspended_for_approval.is_some()
+                                    || result.suspended_for_user_input
+                                    || result.suspended_for_child_wait
+                                {
+                                    TaskStatus::Claimed
+                                } else {
+                                    TaskStatus::Completed
+                                };
                                 let _ = append_delegation_task_entry(
                                     self.config.as_ref(),
                                     source_agent_id,
                                     &target_agent_id,
                                     "event.ingest",
-                                    TaskStatus::Completed,
+                                    task_status,
                                     Some(serde_json::json!({
                                         "session_id": result.session_id.clone(),
                                         "assistant_reply": result.assistant_reply.clone(),

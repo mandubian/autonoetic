@@ -900,6 +900,40 @@ async fn check_stuck_running_tasks(
                 continue;
             }
 
+            // Skip sessions that have a WaitingForChild checkpoint — the parent
+            // is legitimately waiting for async children, not stuck.
+            if !task.session_id.is_empty() {
+                let checkpoint_dir = gateway_dir
+                    .join("sessions")
+                    .join(&task.session_id)
+                    .join("checkpoints");
+                if checkpoint_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&checkpoint_dir) {
+                        let has_waiting_for_child = entries
+                            .filter_map(|e| e.ok())
+                            .filter_map(|e| {
+                                let content = std::fs::read_to_string(e.path()).ok()?;
+                                serde_json::from_str::<serde_json::Value>(&content).ok()
+                            })
+                            .any(|v| {
+                                v.get("yield_reason")
+                                    .and_then(|y| y.get("kind"))
+                                    .and_then(|k| k.as_str())
+                                    == Some("WaitingForChild")
+                            });
+                        if has_waiting_for_child {
+                            tracing::debug!(
+                                target: "workflow",
+                                task_id = %task.task_id,
+                                workflow_id = %wf_id,
+                                "Stuck-task sweeper skipping session with WaitingForChild checkpoint"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let updated_at = chrono::DateTime::parse_from_rfc3339(&task.updated_at)
                 .ok()
                 .map(|dt| dt.with_timezone(&chrono::Utc));
@@ -2156,6 +2190,58 @@ async fn spawn_task_execution(
                     target: "workflow",
                     task_id = %t_id,
                     "Task paused after non-terminal yield"
+                );
+                finish_active_row("stopped");
+                return;
+            }
+
+            // Parent session suspended waiting for async child(ren) to complete
+            // (the agent spawned async=true children then ended its turn —
+            // Ri-0.14 / docs/AGENTS.md "Sequential / single child" pattern).
+            // The session checkpoint is already labelled `WaitingForChild` and
+            // the auto-resume machinery (signal-triggered) will re-wake this
+            // task when a child transitions. Until then, the task MUST stay
+            // non-terminal: marking it `Succeeded` here would (a) fire the
+            // workflow child-resolved notification prematurely, (b) cause the
+            // root planner to conclude the install pipeline is done when its
+            // own follow-up steps (smoke-test, promote, …) never ran, and
+            // (c) leak the candidate-revision-only state to operators as
+            // "completed" (#845).
+            if spawn_result.suspended_for_child_wait {
+                let summary = Some("paused: awaiting async child completion".to_string());
+                if let Err(e) = workflow_store::update_task_run_status(
+                    &cfg,
+                    store,
+                    &wf_id,
+                    &t_id,
+                    autonoetic_types::workflow::TaskRunStatus::Paused,
+                    summary,
+                    None,
+                    None,
+                ) {
+                    tracing::warn!(
+                        target: "workflow",
+                        error = %e,
+                        task_id = %t_id,
+                        "Failed to persist paused (child wait) workflow task status"
+                    );
+                }
+                let _ = workflow_store::checkpoint_task(
+                    &cfg,
+                    store,
+                    &wf_id,
+                    &t_id,
+                    "paused_child_wait".to_string(),
+                    serde_json::json!({
+                        "status": "paused",
+                        "reason": "awaiting_async_child_completion",
+                    }),
+                );
+                let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
+                tracing::info!(
+                    target: "workflow",
+                    task_id = %t_id,
+                    "Task paused: parent ended turn with pending async children (WaitingForChild / Ri-0.14)"
                 );
                 finish_active_row("stopped");
                 return;

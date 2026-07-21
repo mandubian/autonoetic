@@ -125,6 +125,31 @@ fn inject_approval_ref_into_history(
 }
 
 /// Ensures `close_session` runs when `execute_with_history` fails so session report / digest finalize.
+///
+/// #847: distinguish recoverable yields (saved checkpoint with a resumable
+/// `YieldReason`) from real errors before picking the close outcome.
+/// `save_and_yield` writes a resumable checkpoint and returns `Err`, so the
+/// wrapper sees `Err` for *every* yield — `BudgetExhausted`,
+/// `MaxTurnsReached`, `ManualStop`, `Error(_)`. Closing these as
+/// `SpawnExecuteError` (the pre-#847 behavior) cascades destructively:
+/// - `close_session` calls `delete_session_grants` on the root (line 763),
+///   destroying operator-approved grants the resume will need;
+/// - `fail_running_tasks_for_session` (line 781) fails the parent's own task;
+/// - for a root session, `fail_workflow_for_root_session(mark_workflow_failed=true)`
+///   (line 847) fails **every non-terminal task in the workflow**, including
+///   in-flight async children, and finalizes their transcripts as `failed`.
+///
+/// The result: a root planner that trips its own budget after spawning async
+/// children sees the entire workflow marked `Failed` instead of a budget
+/// pause, and only `retry_workflow_task` can recover.
+///
+/// The fix: peek at the latest checkpoint. If its `yield_reason` is one of
+/// the recoverable yields (per `should_auto_resume_checkpoint_yield_reason`),
+/// close with `ExecuteLoopSuspended` — an outcome that is `is_suspended()=true`
+/// and `is_error()=false`, so all three failure cascades are skipped. Real
+/// errors (no checkpoint, or non-recoverable yield reasons like
+/// `EmergencyStop` / `ParentTerminated`) keep the pre-#847 `SpawnExecuteError`
+/// behavior.
 pub(crate) async fn execute_with_history_close_on_error(
     runtime: &mut AgentExecutor,
     history: &mut Vec<Message>,
@@ -132,10 +157,55 @@ pub(crate) async fn execute_with_history_close_on_error(
     match runtime.execute_with_history(history).await {
         Ok(o) => Ok(o),
         Err(e) => {
-            let _ = runtime.close_session(SessionCloseOutcome::SpawnExecuteError);
+            let outcome = close_outcome_for_error(runtime);
+            if outcome != SessionCloseOutcome::SpawnExecuteError {
+                tracing::info!(
+                    target: "lifecycle",
+                    session_id = %runtime.session_id.as_deref().unwrap_or(""),
+                    yield_reason = ?latest_checkpoint_yield_reason(runtime),
+                    "Closing recoverable yield as suspended (not SpawnExecuteError) — workflow and grants preserved (#847)"
+                );
+            }
+            let _ = runtime.close_session(outcome);
             Err(e)
         }
     }
+}
+
+/// Pick the close outcome for an `execute_with_history` error based on the
+/// latest checkpoint's `yield_reason`. Recoverable yields (per
+/// `should_auto_resume_checkpoint_yield_reason`) map to `ExecuteLoopSuspended`
+/// so `close_session` skips the grant-deletion, task-failure, and
+/// workflow-failure cascades; everything else maps to `SpawnExecuteError`
+/// (pre-#847 behavior).
+fn close_outcome_for_error(runtime: &AgentExecutor) -> SessionCloseOutcome {
+    latest_checkpoint_yield_reason(runtime)
+        .as_ref()
+        .map(|reason| {
+            crate::runtime::session_resume::should_auto_resume_checkpoint_yield_reason(reason)
+        })
+        .map(|recoverable| {
+            if recoverable {
+                SessionCloseOutcome::ExecuteLoopSuspended
+            } else {
+                SessionCloseOutcome::SpawnExecuteError
+            }
+        })
+        .unwrap_or(SessionCloseOutcome::SpawnExecuteError)
+}
+
+/// Load the latest checkpoint's `yield_reason` for the current session, if
+/// available. Returns `None` when no checkpoint exists (a true spawn-time
+/// failure) or when the session has no configured gateway store.
+fn latest_checkpoint_yield_reason(
+    runtime: &AgentExecutor,
+) -> Option<crate::runtime::checkpoint::YieldReason> {
+    let config = runtime.config.as_ref()?;
+    let session_id = runtime.session_id.as_deref()?;
+    let cp = crate::runtime::checkpoint::load_latest_checkpoint(config, session_id)
+        .ok()
+        .flatten()?;
+    Some(cp.yield_reason)
 }
 
 use autonoetic_types::session_outcome::SessionCloseOutcome;
@@ -5349,5 +5419,228 @@ mod tests {
         // Should be overwritten with the new ref.
         assert_eq!(args["approval_ref"], "apr-new");
         assert_eq!(args["command"], "curl http://api.example.com");
+    }
+
+    // ---------------------------------------------------------------------
+    // #847 — close_outcome_for_error: recoverable yields must NOT cascade
+    // to workflow failure / grant deletion / task failure.
+    // ---------------------------------------------------------------------
+
+    use crate::runtime::checkpoint::{save_checkpoint, SessionCheckpoint, YieldReason};
+    use crate::runtime::guard::LoopGuard;
+    use autonoetic_types::session_outcome::SessionCloseOutcome;
+    use std::sync::Arc as StdArc;
+
+    fn test_agent_executor(
+        temp: &tempfile::TempDir,
+        config: &autonoetic_types::config::GatewayConfig,
+        session_id: &str,
+    ) -> AgentExecutor {
+        let manifest = autonoetic_types::agent::AgentManifest {
+            version: "1.0".to_string(),
+            runtime: autonoetic_types::agent::RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+            },
+            agent: autonoetic_types::agent::AgentIdentity {
+                id: "test-agent".to_string(),
+                name: "test-agent".to_string(),
+                description: "test".to_string(),
+                singleton: false,
+            },
+            capabilities: vec![],
+            llm_overrides: None,
+            llm_preset: None,
+            llm_config: None,
+            limits: None,
+            background: None,
+            disclosure: None,
+            io: None,
+            middleware: None,
+            execution_mode: Default::default(),
+            script_entry: None,
+            script_input_mode: Default::default(),
+            gateway_url: None,
+            gateway_token: None,
+            allowed_tool_tiers: vec![],
+            excluded_tools: vec![],
+            agentskills_import: None,
+            compression: None,
+            open_web: false,
+            sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+        };
+        // A driver that never gets used (we don't call execute_with_history).
+        struct NoopDriver;
+        #[async_trait::async_trait]
+        impl crate::llm::LlmDriver for NoopDriver {
+            async fn complete(
+                &self,
+                _req: &crate::llm::CompletionRequest,
+            ) -> anyhow::Result<crate::llm::CompletionResponse> {
+                anyhow::bail!("noop driver should never be called in these tests")
+            }
+        }
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            StdArc::new(NoopDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.config = Some(StdArc::new(config.clone()));
+        runtime.session_id = Some(session_id.to_string());
+        runtime
+    }
+
+    fn save_test_checkpoint(
+        config: &autonoetic_types::config::GatewayConfig,
+        session_id: &str,
+        yield_reason: YieldReason,
+    ) {
+        let checkpoint = SessionCheckpoint {
+            history: vec![],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: session_id.to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 0,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 0,
+            estimated_cost_usd: 0.0,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        save_checkpoint(config, &checkpoint).expect("checkpoint should save");
+    }
+
+    fn test_config(temp: &tempfile::TempDir) -> autonoetic_types::config::GatewayConfig {
+        autonoetic_types::config::GatewayConfig {
+            agents_dir: temp.path().join("agents"),
+            ..autonoetic_types::config::GatewayConfig::default()
+        }
+    }
+
+    /// Recoverable yields must close as suspended (not SpawnExecuteError), so
+    /// close_session skips the grant-deletion, task-failure, and
+    /// workflow-failure cascades.
+    ///
+    /// Note: `MaxTurnsReached` is intentionally excluded. It is NOT in
+    /// `should_auto_resume_checkpoint_yield_reason`'s auto-resume list —
+    /// auto-resuming a max-turns-reached session would trip the guard again
+    /// immediately. The proper fix for MaxTurnsReached is an
+    /// ApprovalRequired-style gate suspension (tracked separately).
+    #[test]
+    fn close_outcome_for_error_recoverable_yields_close_as_suspended() {
+        for reason in [
+            YieldReason::BudgetExhausted,
+            YieldReason::ManualStop,
+            YieldReason::Error("transient LLM error".to_string()),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let config = test_config(&temp);
+            let session_id = format!("session-recoverable-{:?}", reason);
+            save_test_checkpoint(&config, &session_id, reason.clone());
+            let runtime = test_agent_executor(&temp, &config, &session_id);
+            let outcome = close_outcome_for_error(&runtime);
+            assert_eq!(
+                outcome,
+                SessionCloseOutcome::ExecuteLoopSuspended,
+                "recoverable yield {:?} must close as suspended (not SpawnExecuteError)",
+                reason
+            );
+        }
+    }
+
+    /// Non-recoverable yield reasons must keep the pre-#847 SpawnExecuteError
+    /// behavior: EmergencyStop is an intentional operator circuit breaker,
+    /// ParentTerminated is an intentional cascade, and MaxTurnsReached is
+    /// outside the auto-resume convention (needs operator intervention, not
+    /// silent resume — tracked as a separate follow-up).
+    #[test]
+    fn close_outcome_for_error_non_recoverable_yields_close_as_error() {
+        for reason in [
+            YieldReason::EmergencyStop {
+                stop_id: "stop-1".to_string(),
+            },
+            YieldReason::ParentTerminated {
+                parent_session_id: "parent-1".to_string(),
+                reason: "operator".to_string(),
+            },
+            YieldReason::MaxTurnsReached,
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let config = test_config(&temp);
+            let session_id = format!("session-nonrecoverable-{:?}", reason);
+            save_test_checkpoint(&config, &session_id, reason.clone());
+            let runtime = test_agent_executor(&temp, &config, &session_id);
+            let outcome = close_outcome_for_error(&runtime);
+            assert_eq!(
+                outcome,
+                SessionCloseOutcome::SpawnExecuteError,
+                "non-recoverable yield {:?} must keep SpawnExecuteError",
+                reason
+            );
+        }
+    }
+
+    /// No checkpoint means a true spawn-time failure — keep SpawnExecuteError.
+    #[test]
+    fn close_outcome_for_error_no_checkpoint_closes_as_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = test_config(&temp);
+        let runtime = test_agent_executor(&temp, &config, "session-no-checkpoint");
+        let outcome = close_outcome_for_error(&runtime);
+        assert_eq!(
+            outcome,
+            SessionCloseOutcome::SpawnExecuteError,
+            "no checkpoint must keep SpawnExecuteError (true spawn-time failure)"
+        );
+    }
+
+    /// Suspended outcome must skip all three failure cascades in
+    /// `close_session` (grants deletion, task failure, workflow failure).
+    /// This is a property test on `SessionCloseOutcome`'s discriminators.
+    #[test]
+    fn suspended_outcome_skips_failure_cascades() {
+        let suspended = SessionCloseOutcome::ExecuteLoopSuspended;
+        assert!(suspended.is_suspended());
+        assert!(!suspended.is_error());
+        assert!(!suspended.is_completed());
+
+        // The discriminators that drive the cascades in close_session:
+        // - line 763: `if !outcome.is_suspended()` → skips delete_session_grants
+        // - line 781: `if outcome.is_error()` → skips fail_running_tasks_for_session
+        // - line 835: `else if outcome.is_error()` → skips fail_workflow_for_root_session
+        let spawn_err = SessionCloseOutcome::SpawnExecuteError;
+        assert!(!spawn_err.is_suspended());
+        assert!(spawn_err.is_error());
+        assert!(!spawn_err.is_completed());
     }
 }

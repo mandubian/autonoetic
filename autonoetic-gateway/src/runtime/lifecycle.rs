@@ -1610,6 +1610,13 @@ impl AgentExecutor {
             );
         }
         let mut latest_assistant_text: Option<String> = None;
+        // Tracks whether the EndTurn branch decided to suspend as WaitingForChild
+        // (pending async children). The post-loop outcome builder inspects this
+        // to return `TurnOutcome::WaitingForChild` instead of `Completed`. Without
+        // it, an agent that spawns async children and ends its turn would be
+        // marked task-completed prematurely — its own follow-up steps (smoke
+        // test, promote, ...) would never run (#845).
+        let mut end_turn_waiting_for_child = false;
         let has_declared_output_contract = self
             .manifest
             .io
@@ -2837,6 +2844,17 @@ impl AgentExecutor {
                             &session_id,
                         ) {
                             turn_yield_reason = waiting_reason;
+                            // Propagate the suspension decision to the post-loop
+                            // outcome builder. The checkpoint below is already
+                            // labelled `WaitingForChild`; this flag ensures the
+                            // returned `TurnOutcome` matches so the scheduler
+                            // keeps the task non-terminal (Ri-0.14).
+                            if matches!(
+                                turn_yield_reason,
+                                YieldReason::WaitingForChild { .. }
+                            ) {
+                                end_turn_waiting_for_child = true;
+                            }
                         }
 
                         // Durable planner checkpoint at turn end
@@ -2910,6 +2928,42 @@ impl AgentExecutor {
 
                         history.push(assistant_msg);
                     }
+
+                    // #846: same premature-complete guard as EndTurn (issue
+                    // #845). Truncated (`MaxTokens`) or non-standard
+                    // (`Other("content_filter")` / `Other("model_length")` /
+                    // …) provider stops can still occur after the agent has
+                    // spawned async children. Without this check the loop
+                    // `break`s and the post-loop outcome builder returns
+                    // `Completed`, which the scheduler marks `Succeeded` —
+                    // orphaning the in-flight children and losing their
+                    // follow-up work (smoke-test → promote, etc.).
+                    //
+                    // This arm previously saved no checkpoint at all, so a
+                    // crash here also lost the partial turn. Mirror the
+                    // EndTurn arm: consult `waiting_for_child_yield_reason`
+                    // and, when pending children exist, save a
+                    // `WaitingForChild` checkpoint and flag the post-loop
+                    // outcome builder to return `TurnOutcome::WaitingForChild`.
+                    if let Some(cfg) = self.config.as_ref() {
+                        if let Some(waiting_reason) = waiting_for_child_yield_reason(
+                            cfg,
+                            self.gateway_store.as_deref(),
+                            &session_id,
+                        ) {
+                            let _ = self.save_yield_checkpoint(
+                                history,
+                                &turn_id,
+                                waiting_reason,
+                                None,
+                            );
+                            if let Some(config) = self.config.as_ref() {
+                                let _ = prune_checkpoints(config, &session_id, 3);
+                            }
+                            end_turn_waiting_for_child = true;
+                        }
+                    }
+
                     tracer.log_stopped(&format!("{:?}", response.stop_reason));
                     let _ = tracer.end_digest_turn();
                     break;
@@ -2929,7 +2983,18 @@ impl AgentExecutor {
             reply.as_deref(),
         );
 
-        let outcome = Ok(TurnOutcome::Completed(reply));
+        // If the EndTurn branch suspended with pending async children, return
+        // the WaitingForChild outcome so the scheduler keeps the task non-terminal
+        // and the auto-resume machinery can wake the parent when a child
+        // transitions. The reply text is intentionally dropped: it was an
+        // in-progress narrative ("dispatched → waiting → next-step"), not the
+        // task's final output. The parent's final reply is produced on resume
+        // once the children it was waiting on have resolved.
+        let outcome = if end_turn_waiting_for_child {
+            Ok(TurnOutcome::WaitingForChild)
+        } else {
+            Ok(TurnOutcome::Completed(reply))
+        };
         self.last_history = history.clone();
         outcome
     }
@@ -4574,6 +4639,194 @@ mod tests {
         };
         assert_eq!(reply.as_deref(), Some("recovered reply"));
         assert_eq!(*calls.lock().expect("mutex should lock"), 2);
+    }
+
+    struct MaxTokensDriver;
+
+    #[async_trait::async_trait]
+    impl LlmDriver for MaxTokensDriver {
+        async fn complete(
+            &self,
+            _request: &CompletionRequest,
+        ) -> anyhow::Result<CompletionResponse> {
+            Ok(CompletionResponse {
+                text: "partial narrative, then the model got truncated…".to_string(),
+                tool_calls: vec![],
+                reasoning_content: None,
+                reasoning_details: None,
+                stop_reason: StopReason::MaxTokens,
+                usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// #846: the `StopReason::MaxTokens | Other(_)` arm must consult
+    /// `waiting_for_child_yield_reason` (the same check the EndTurn arm
+    /// performs) so a parent that spawned async children and then got
+    /// truncated is NOT returned as `TurnOutcome::Completed`. Otherwise the
+    /// scheduler would mark the task `Succeeded` while its children are
+    /// still running — same premature-complete pattern as #845's EndTurn bug.
+    #[tokio::test]
+    async fn test_execute_with_history_maxtokens_suspends_when_children_pending() {
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
+
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(agents_dir.join("test-agent"))
+            .expect("agent dir should create");
+
+        let config = autonoetic_types::config::GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..autonoetic_types::config::GatewayConfig::default()
+        };
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("store should open"),
+        );
+
+        // Seed a workflow with an active (non-terminal) task so that
+        // `waiting_for_child_yield_reason` returns Some(WaitingForChild).
+        // `ensure_workflow_for_root_session` also writes the root→workflow
+        // index that `resolve_workflow_id_for_root_session` consults.
+        let root_session = "root-maxtokens";
+        let run = crate::scheduler::workflow_store::ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            Some("test-agent"),
+        )
+        .expect("workflow should be created");
+        let wf_id = run.workflow_id.clone();
+        // Mark the workflow as WaitingChildren with an active task so the
+        // helper's `is_waiting` check fires.
+        let mut run = crate::scheduler::workflow_store::load_workflow_run(
+            &config,
+            Some(store.as_ref()),
+            &wf_id,
+        )
+        .expect("workflow should load")
+        .expect("workflow should exist");
+        run.status = WorkflowRunStatus::WaitingChildren;
+        run.active_task_ids = vec!["task-pending".to_string()];
+        run.join_task_ids = vec!["task-pending".to_string()];
+        crate::scheduler::workflow_store::save_workflow_run(
+            &config,
+            Some(store.as_ref()),
+            &run,
+        )
+        .expect("workflow should save");
+
+        let task = TaskRun {
+            task_id: "task-pending".to_string(),
+            workflow_id: wf_id.clone(),
+            agent_id: "child-agent".to_string(),
+            session_id: format!("{root_session}/child-agent-1"),
+            parent_session_id: root_session.to_string(),
+            status: TaskRunStatus::Running,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_agent_id: Some("test-agent".to_string()),
+            result_summary: None,
+            join_group: None,
+            message: Some("pending child".to_string()),
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+        crate::scheduler::workflow_store::save_task_run(
+            &config,
+            Some(store.as_ref()),
+            &task,
+        )
+        .expect("task should save");
+
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(MaxTokensDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.config = Some(Arc::new(config));
+        runtime.gateway_store = Some(store);
+        // The reasoning loop reads `session_id` from the constructor path; set
+        // it explicitly so `waiting_for_child_yield_reason` resolves the
+        // workflow for this session.
+        runtime.session_id = Some(root_session.to_string());
+
+        let mut history = vec![
+            Message::system("System prompt"),
+            Message::user("Hello"),
+        ];
+        let outcome = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("execution should succeed");
+
+        match outcome {
+            TurnOutcome::WaitingForChild => {}
+            other => panic!(
+                "expected WaitingForChild on MaxTokens with pending async children (#846), got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Negative case for #846: with NO pending async children, `MaxTokens`
+    /// still completes normally — the new guard must not over-suspend.
+    #[tokio::test]
+    async fn test_execute_with_history_maxtokens_completes_without_children() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let agents_dir = temp.path().join("agents");
+        std::fs::create_dir_all(agents_dir.join("test-agent"))
+            .expect("agent dir should create");
+
+        let config = autonoetic_types::config::GatewayConfig {
+            agents_dir,
+            ..autonoetic_types::config::GatewayConfig::default()
+        };
+        let gateway_dir = crate::execution::gateway_root_dir(&config);
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("store should open"),
+        );
+
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(MaxTokensDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.config = Some(Arc::new(config));
+        runtime.gateway_store = Some(store);
+
+        let mut history = vec![
+            Message::system("System prompt"),
+            Message::user("Hello"),
+        ];
+        let outcome = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("execution should succeed");
+
+        match outcome {
+            TurnOutcome::Completed(_) => {}
+            other => panic!(
+                "expected Completed on MaxTokens without pending children, got {:?}",
+                other
+            ),
+        }
     }
 
     struct CaptureSystemDriver {
