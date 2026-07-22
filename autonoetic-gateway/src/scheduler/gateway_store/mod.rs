@@ -146,6 +146,8 @@ pub struct GatewayStore {
     pub task_notify: crate::scheduler::task_notify::TaskNotifyRegistry,
     /// Session-scoped result cache for pure read tools (issue #289).
     pub session_read_cache: crate::runtime::session_read_cache::SessionReadCacheRegistry,
+    /// Per-session, per-host `sandbox_exec` probe budget (issue #853).
+    pub host_probe_budget: crate::runtime::host_probe_budget::HostProbeBudgetRegistry,
     /// Buffered live-digest timeline inserts. Flushed when the buffer is full,
     /// before reads of the timeline, or on drop. This batches high-frequency
     /// observability writes (turn/tool/agent events) into fewer transactions.
@@ -190,6 +192,8 @@ impl GatewayStore {
             task_notify: crate::scheduler::task_notify::TaskNotifyRegistry::new(),
             session_read_cache:
                 crate::runtime::session_read_cache::SessionReadCacheRegistry::default(),
+            host_probe_budget:
+                crate::runtime::host_probe_budget::HostProbeBudgetRegistry::default(),
             live_digest_buffer: Mutex::new(Vec::with_capacity(LIVE_DIGEST_BUFFER_CAPACITY)),
             config: Mutex::new(None),
             flood_alerted_roots: Mutex::new(std::collections::HashSet::new()),

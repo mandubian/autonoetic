@@ -1169,6 +1169,38 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             )
         };
 
+        // Per-host `sandbox_exec` probe budget (#853). Refuse a probe against a
+        // host this session has already exhausted its budget on — the
+        // mechanical backstop for the "stop retrying one dead host" guidance
+        // the rotating-poll guard misses (each retry ships a different script,
+        // so the `(tool, args)` fingerprint never repeats). Checked BEFORE
+        // approval/execution so the wasted probe never runs.
+        if let (Some(store), Some(sid)) = (gateway_store.as_ref(), session_id) {
+            if store.host_probe_budget.cap() > 0 {
+                let probe_hosts = crate::runtime::approved_exec_cache::normalize_targets(
+                    &remote_analysis.detected_patterns,
+                );
+                for host in &probe_hosts {
+                    if let Some(strikes) = store.host_probe_budget.exhausted(sid, host) {
+                        return Ok(autonoetic_types::tool_error::ToolError::quota_exceeded(
+                            format!(
+                                "host {host} has been probed {strikes} time(s) this session \
+                                 without new information — the per-host fetch budget \
+                                 (max_probes_per_host={}) is exhausted for it",
+                                store.host_probe_budget.cap()
+                            ),
+                            Some(format!(
+                                "Stop retrying {host}. Switch to a different source/host, or \
+                                 return status: partial with what you already have. A re-spawn \
+                                 with different instructions gets a fresh budget."
+                            )),
+                        )
+                        .to_error_response());
+                    }
+                }
+            }
+        }
+
         if declared_remote_access.is_none() && remote_analysis.requires_approval {
             let undeclared: Vec<serde_json::Value> = remote_analysis
                 .detected_patterns
@@ -2447,6 +2479,54 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                         root_session_id = root,
                         "envelope proposal after sandbox_exec failed"
                     );
+                }
+            }
+        }
+
+        // Per-host probe-budget accounting (#853). Classify this probe against
+        // each targeted host — a failure or a success repeating content already
+        // seen from that host is a "strike"; a novel success is progress and
+        // resets the count. When a host first reaches the strike cap, surface an
+        // operator triage signal; the NEXT probe of it is refused up top.
+        if let (Some(store), Some(sid)) = (gateway_store.as_ref(), session_id) {
+            if store.host_probe_budget.cap() > 0 {
+                let probe_hosts = crate::runtime::approved_exec_cache::normalize_targets(
+                    &remote_analysis.detected_patterns,
+                );
+                if !probe_hosts.is_empty() {
+                    let probe_ok = body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let stdout_str = body.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+                    let output_hash =
+                        crate::runtime::host_probe_budget::content_hash(stdout_str);
+                    let root = root_session_id.as_deref().unwrap_or(sid);
+                    for host in &probe_hosts {
+                        if let crate::runtime::host_probe_budget::ProbeOutcome::Strike {
+                            strikes,
+                            reached_cap,
+                            ..
+                        } = store
+                            .host_probe_budget
+                            .record(sid, host, probe_ok, &output_hash)
+                        {
+                            if reached_cap {
+                                if let Err(e) = store.emit_host_probe_budget_exhausted_event(
+                                    sid,
+                                    root,
+                                    &manifest.agent.id,
+                                    host,
+                                    strikes,
+                                    store.host_probe_budget.cap(),
+                                ) {
+                                    tracing::warn!(
+                                        target: "sandbox_exec",
+                                        error = %e,
+                                        host = %host,
+                                        "Failed to emit host_budget_exhausted event (#853)"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

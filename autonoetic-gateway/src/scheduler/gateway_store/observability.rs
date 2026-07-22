@@ -1728,6 +1728,91 @@ impl GatewayStore {
         Ok(())
     }
 
+    /// Surface a per-host `sandbox_exec` probe-budget trip (issue #853) to the
+    /// operator: a causal event plus an Attention-altitude timeline entry, so a
+    /// researcher stuck re-probing one host reads as a triage item at the root,
+    /// not only as the agent's own tool error. Mirrors `emit_escape_threshold_event`.
+    /// Emitted once, at the moment the host reaches the strike cap.
+    pub fn emit_host_probe_budget_exhausted_event(
+        &self,
+        session_id: &str,
+        root_session_id: &str,
+        agent_id: &str,
+        host: &str,
+        strikes: u32,
+        cap: usize,
+    ) -> Result<()> {
+        let now = chrono::Utc::now();
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("host-budget-{}", uuid::Uuid::new_v4()),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: now.timestamp_millis().max(0) as u64,
+            timestamp: now.to_rfc3339(),
+            category: "sandbox".to_string(),
+            action: "sandbox.host_budget_exhausted".to_string(),
+            status: "active".to_string(),
+            // Observational: a mechanical resource cap, not a numbered
+            // constitutional clause — carries the baseline attribution
+            // placeholder so it does not inflate any clause's contract-health.
+            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+            target: Some(host.to_string()),
+            payload: Some(
+                serde_json::json!({
+                    "session_id": session_id,
+                    "root_session_id": root_session_id,
+                    "host": host,
+                    "strikes": strikes,
+                    "max_probes_per_host": cap,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some(format!(
+                "host {} probed {} times this session without new information (cap {})",
+                host, strikes, cap
+            )),
+        };
+        self.create_causal_event(&event)?;
+
+        let timeline_root = if root_session_id.is_empty() {
+            session_id
+        } else {
+            root_session_id
+        };
+        if !timeline_root.is_empty() {
+            let (principal, seat) =
+                crate::runtime::session_timeline::actor_from_kind_id("system", "gateway");
+            let timeline_event = crate::runtime::session_timeline::build_timeline_event(
+                timeline_root.to_string(),
+                session_id.to_string(),
+                None,
+                &principal,
+                &seat,
+                "sandbox.host_budget_exhausted",
+                None,
+                Some(serde_json::json!({
+                    "host": host,
+                    "strikes": strikes,
+                    "max_probes_per_host": cap,
+                    "session_id": session_id,
+                })),
+                autonoetic_types::session_timeline::TimelineRefs::default(),
+            );
+            if let Err(e) = self.create_live_digest_event(&timeline_event) {
+                tracing::debug!(
+                    target: "session_timeline",
+                    error = %e,
+                    "host_budget_exhausted timeline emit failed"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn sessions_exceeding_escape_threshold(
         &self,
         threshold: usize,

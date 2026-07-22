@@ -121,6 +121,14 @@ approval_timeout_secs: 3600
 # Filings beyond the cap are rejected loudly with anomaly_flag_flood (never
 # silently dropped); terminal adjudications free capacity.
 # max_pending_anomaly_flags_per_reporter: 50
+# Per-host sandbox_exec probe budget (#853). Max "wasted" probes against one
+# host per session before the (N+1)th is refused with host_budget_exhausted.
+# A probe is wasted when it fails, or succeeds returning content already seen
+# from that host (the SPA/rate-limited retry loop the rotating-poll guard
+# misses because each script differs); a novel success resets the count.
+# Scoped per exact session_id (a re-spawn gets a fresh budget). 0 disables.
+# Default: 3.
+# max_probes_per_host: 3
 # Optional: heartbeat interval for Running workflow tasks (seconds).
 # Keeps task updated_at fresh during long-running child execution/finalization.
 # If omitted, derives from background_tick_secs (clamped 1..=5). Valid range: 1..=30.

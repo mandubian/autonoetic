@@ -1101,6 +1101,19 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_pending_anomaly_flags_per_reporter")]
     pub max_pending_anomaly_flags_per_reporter: usize,
 
+    /// Maximum number of "wasted" `sandbox_exec` probes against a single host
+    /// per session before the budget trips (issue #853). A probe is wasted when
+    /// it fails, or when it succeeds but returns content already seen from that
+    /// host (the SPA/rate-limited-endpoint retry loop the rotating-poll guard
+    /// misses because each script differs). A novel success resets the count.
+    /// On the `(N+1)`th wasted probe the `sandbox_exec` is refused with
+    /// `host_budget_exhausted`, telling the agent to switch sources or return
+    /// `status: partial`. Scoped per exact `session_id`, so a re-spawn with
+    /// different instructions gets a fresh budget. Set to 0 to disable.
+    /// Default: 3.
+    #[serde(default = "default_max_probes_per_host")]
+    pub max_probes_per_host: u32,
+
     /// Default TTL in seconds for auto-generated session approval grants.
     /// When an approval is resolved and a grant is auto-inserted without an
     /// explicit `--ttl`/`--until` override, `expires_at` is set to
@@ -2709,6 +2722,10 @@ fn default_max_pending_anomaly_flags_per_reporter() -> usize {
     50
 }
 
+fn default_max_probes_per_host() -> u32 {
+    3
+}
+
 fn default_grant_ttl_secs() -> u64 {
     86400
 }
@@ -3358,6 +3375,7 @@ impl Default for GatewayConfig {
             max_pending_approvals_per_root: default_max_pending_approvals_per_root(),
             max_pending_escalations_per_root: default_max_pending_escalations_per_root(),
             max_pending_anomaly_flags_per_reporter: default_max_pending_anomaly_flags_per_reporter(),
+            max_probes_per_host: default_max_probes_per_host(),
             default_grant_ttl_secs: default_grant_ttl_secs(),
             escape_attempt_degrade_threshold: default_escape_attempt_degrade_threshold(),
             escape_attempt_emergency_threshold: default_escape_attempt_emergency_threshold(),

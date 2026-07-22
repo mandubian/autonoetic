@@ -103,6 +103,9 @@ impl GatewayServer {
         gateway_store.set_escalation_flood_cap(self.config.max_pending_escalations_per_root);
         gateway_store
             .set_anomaly_flag_flood_cap(self.config.max_pending_anomaly_flags_per_reporter);
+        gateway_store
+            .host_probe_budget
+            .set_cap(self.config.max_probes_per_host as usize);
 
         // Seed the built-in civic eval suite (#772 E.1). Idempotent.
         if let Err(e) = crate::runtime::civic_evals::ensure_civic_eval_suite(

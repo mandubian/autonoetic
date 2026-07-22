@@ -957,6 +957,12 @@ impl AgentExecutor {
                     }
                 }
             }
+            // #853: free this session's per-host probe budget. Keyed by the
+            // exact session id, so a closing child releases its own budget
+            // (not just the root) — a re-spawn then starts fresh.
+            if let Some(gs) = self.gateway_store.as_ref() {
+                gs.host_probe_budget.clear_session(&session_id);
+            }
         }
 
         // Transition workflow tasks to Failed when a child session dies
