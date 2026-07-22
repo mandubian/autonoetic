@@ -297,6 +297,56 @@ impl NativeTool for ArtifactBuildTool {
             .to_error_response());
         }
 
+        // Same fail-fast rationale for malformed SKILL.md frontmatter: a
+        // manifest missing its closing '---' delimiter parses as "no
+        // frontmatter" downstream (gray_matter), surfacing dozens of turns
+        // later inside federation_escalate's capability load. Validate here so
+        // the builder gets an immediate, actionable error.
+        if kind == autonoetic_types::artifact::ArtifactKind::AgentBundle {
+            match store.resolve_files(&bundle.artifact_id) {
+                Ok(files) => {
+                    if let Some((_, skill_bytes)) =
+                        files.iter().find(|(name, _)| name == "SKILL.md")
+                    {
+                        let skill_text = String::from_utf8_lossy(skill_bytes);
+                        if let Err(e) =
+                            crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
+                        {
+                            return Ok(ToolError::validation(
+                                format!(
+                                    "agent_bundle artifact has an unreadable SKILL.md — its \
+                                     YAML frontmatter cannot be parsed: {e}. The artifact cannot \
+                                     be installed or federation-reviewed until the manifest is \
+                                     fixed."
+                                ),
+                                Some(
+                                    "Rewrite SKILL.md with valid YAML frontmatter and rebuild. \
+                                     The frontmatter must open with a line containing only '---' \
+                                     and close with a matching '---' line, e.g.:\n\
+                                     ---\n\
+                                     autonoetic:\n  agent_id: my-agent\n  ...\n\
+                                     ---\n\
+                                     Then content_write the corrected SKILL.md and call \
+                                     artifact_build again.",
+                                ),
+                            )
+                            .to_error_response());
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Ok(ToolError::resource(
+                        format!(
+                            "artifact was built but its files could not be re-read for SKILL.md \
+                             validation: {e}"
+                        ),
+                        None::<String>,
+                    )
+                    .to_error_response());
+                }
+            }
+        }
+
         let root = crate::runtime::content_store::root_session_id(sid);
         let (scope_type, scope_id) = match config {
             Some(cfg) => {
@@ -566,9 +616,13 @@ mod tests {
         std::fs::create_dir_all(&gateway_dir).unwrap();
         let content_store = ContentStore::new(&gateway_dir).unwrap();
         for name in names {
-            let handle = content_store
-                .write(format!("-- {name}\n").as_bytes())
-                .unwrap();
+            let content = if *name == "SKILL.md" {
+                // Minimal valid YAML frontmatter so build-time validation passes.
+                "---\nautonoetic:\n  agent_id: fixture-agent\n---\n".to_string()
+            } else {
+                format!("-- {name}\n")
+            };
+            let handle = content_store.write(content.as_bytes()).unwrap();
             content_store
                 .register_name("session-1/coder.default-x", name, &handle)
                 .unwrap();
@@ -646,6 +700,66 @@ mod tests {
 
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["ok"], true, "expected success: {parsed}");
+    }
+
+    #[test]
+    fn agent_bundle_with_unclosed_skill_md_frontmatter_is_rejected_at_build_time() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let content_store = ContentStore::new(&gateway_dir).unwrap();
+        let main_handle = content_store.write(b"-- main.py\n").unwrap();
+        content_store
+            .register_name("session-1/coder.default-x", "main.py", &main_handle)
+            .unwrap();
+        // Opening '---' but no closing '---' — the exact failure mode from
+        // session-ea3df271 where the coder's SKILL.md reached
+        // federation_escalate before anyone noticed.
+        let bad_skill = content_store
+            .write(b"---\nautonoetic:\n  agent_id: broken\n  dependencies:\n    - requests\n")
+            .unwrap();
+        content_store
+            .register_name("session-1/coder.default-x", "SKILL.md", &bad_skill)
+            .unwrap();
+        let gateway_store = GatewayStore::open(&gateway_dir).unwrap();
+        let gs = std::sync::Arc::new(gateway_store);
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactBuildTool;
+
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "inputs": ["main.py", "SKILL.md"],
+                    "entrypoints": ["main.py"],
+                    "kind": "agent_bundle"
+                })
+                .to_string(),
+                Some("session-1/coder.default-x"),
+                None,
+                None,
+                Some(gs.clone()),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], false, "expected rejection: {parsed}");
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("frontmatter"),
+            "message should name the frontmatter problem: {message}"
+        );
+
+        // No ref may be minted for the rejected bundle.
+        let refs = gs
+            .list_artifact_refs_for_scope(ArtifactRefScopeType::Session, "session-1")
+            .unwrap();
+        assert!(refs.is_empty(), "rejected bundle must not mint a ref");
     }
 }
 

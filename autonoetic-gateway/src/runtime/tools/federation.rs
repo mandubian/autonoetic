@@ -416,11 +416,7 @@ impl NativeTool for FederationEscalateTool {
                 )
                 .map_err(|e| {
                     anyhow::anyhow!(
-                        "revision '{}' is not seeded and the artifact's SKILL.md is unreadable: {}. \
-                         The escalation for a new agent binds to the artifact, so its SKILL.md \
-                         must be readable — pass the artifact_ref (ar.*) from artifact_build, \
-                         or seed the revision first (agent_revision_create) and re-escalate \
-                         with its 'rev_sha256:...' id",
+                        "revision '{}' is not seeded and the artifact's SKILL.md is unreadable: {}",
                         canonical_revision_id, e
                     )
                 })
@@ -461,12 +457,36 @@ impl NativeTool for FederationEscalateTool {
                 Err(e) => {
                     // Fail closed (#746 review): same rationale as above — an
                     // unreadable capability set must not weaken the gate.
+                    //
+                    // Speak in the caller's terms: agents know the ar.* ref they
+                    // passed, never the internal art_* id or the derived
+                    // 'unseeded:' revision handle. Lead with the concrete fix so
+                    // the agent repairs the manifest and retries this same tool
+                    // call instead of pivoting to unrelated work (session-ea3df271).
+                    let caller_ref = args
+                        .artifact_ref
+                        .as_deref()
+                        .filter(|r| !r.is_empty())
+                        .unwrap_or(args.artifact_id.as_str());
+                    let fix_hint = if revision_seeded {
+                        "Fix: the seeded revision's SKILL.md is unreadable — re-create the \
+                         revision with agent_revision_create using a SKILL.md whose YAML \
+                         frontmatter opens with a '---' line and closes with a matching '---' \
+                         line, then re-escalate with the new revision_id."
+                    } else {
+                        "The escalation reads capabilities from the artifact's SKILL.md YAML \
+                         frontmatter, which must open with a '---' line and close with a \
+                         matching '---' line. Fix: content_write a corrected SKILL.md with \
+                         valid frontmatter, rebuild with artifact_build, then call \
+                         federation_escalate again with the new artifact_ref. Do not continue \
+                         to other work — repair the manifest and retry this same call."
+                    };
                     return Ok(autonoetic_types::tool_error::ToolError::execution(
                         format!(
-                            "could not load declared capabilities for '{}' rev '{}': {}. \
-                             Refusing to downgrade the promotion review to jury-only \
-                             (R++2 fail-closed); fix the underlying error and re-escalate.",
-                            args.agent_id, canonical_revision_id, e
+                            "could not load declared capabilities for '{}' from artifact \
+                             '{}': {}. Refusing to downgrade the promotion review to \
+                             jury-only (R++2 fail-closed). {}",
+                            args.agent_id, caller_ref, e, fix_hint
                         ),
                         None::<String>,
                     )
