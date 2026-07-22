@@ -2533,22 +2533,77 @@ fn flush_run(
     }
 }
 
-/// Brief breakdown of a collapsed run: the top event types by count. Sorted by
-/// count desc, then name asc for deterministic output.
+/// Brief breakdown of a collapsed run. When the run contains tool calls, name
+/// the tools that ran (e.g. `calls: read×2, grep, sandbox_exec`) so a folded row
+/// still tells the operator *which* tools were invoked — the fact that a tool
+/// was called is never hidden, only compacted. Falls back to an event-type
+/// breakdown for runs with no tool activity (pure llm/turn plumbing).
 fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    // Count distinct tool invocations by name. A single call emits both
+    // `tool.requested` and `tool.completed`; dedupe them by `call_id` so one call
+    // counts once. Without a call_id (older rows), count `tool.requested` only.
+    let mut tool_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen_calls: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let mut non_tool = 0usize;
     for e in run {
-        *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+        match e.event_type.as_str() {
+            "tool.requested" | "tool.completed" => {
+                let Some(p) = parse_entry_payload(e) else {
+                    non_tool += 1;
+                    continue;
+                };
+                let tool = payload_field_str(&p, "tool_name").unwrap_or_else(|| "tool".into());
+                let call_id = payload_field_str(&p, "call_id");
+                let count_it = match (&call_id, e.event_type.as_str()) {
+                    // With a call_id, count the first of the request/completion pair.
+                    (Some(id), _) => seen_calls.insert((tool.clone(), id.clone())),
+                    // Without one, count the request (the completion would double it).
+                    (None, "tool.requested") => true,
+                    (None, _) => false,
+                };
+                if count_it {
+                    *tool_counts.entry(tool).or_insert(0) += 1;
+                }
+            }
+            _ => non_tool += 1,
+        }
     }
-    let mut ordered: Vec<(&str, usize)> = counts.into_iter().collect();
-    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let parts: Vec<String> = ordered
+
+    if tool_counts.is_empty() {
+        // No tool activity — fall back to an event-type breakdown.
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for e in run {
+            *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+        }
+        let mut ordered: Vec<(&str, usize)> = counts.into_iter().collect();
+        ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let parts: Vec<String> = ordered
+            .iter()
+            .take(3)
+            .map(|(k, c)| format!("{k}×{c}"))
+            .collect();
+        let more = if ordered.len() > 3 { ", …" } else { "" };
+        return format!("routine events ({}{})", parts.join(", "), more);
+    }
+
+    let mut ordered: Vec<(String, usize)> = tool_counts.into_iter().collect();
+    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let shown = ordered.len().min(3);
+    let mut parts: Vec<String> = ordered
         .iter()
-        .take(3)
-        .map(|(k, c)| format!("{k}×{c}"))
+        .take(shown)
+        .map(|(k, c)| if *c > 1 { format!("{k}×{c}") } else { k.clone() })
         .collect();
-    let more = if ordered.len() > 3 { ", …" } else { "" };
-    format!("routine events ({}{})", parts.join(", "), more)
+    if ordered.len() > shown {
+        parts.push(format!("+{}", ordered.len() - shown));
+    }
+    let extra = if non_tool > 0 {
+        format!(" · +{non_tool}")
+    } else {
+        String::new()
+    };
+    format!("calls: {}{}", parts.join(", "), extra)
 }
 
 /// Multi-line detail view of a single event for the drill-down pane: metadata,
@@ -3069,6 +3124,52 @@ mod tests {
             payload: Some(payload.to_string()),
             refs: TimelineRefs::default(),
         }
+    }
+
+    #[test]
+    fn collapsed_summary_names_the_tools_that_ran() {
+        // A folded run should still tell the operator which tools were called,
+        // deduping request+completion of the same call by call_id.
+        let mk = |et: &str, tool: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Detail,
+                serde_json::json!({ "tool_name": tool, "call_id": call_id }),
+            )
+        };
+        let run = vec![
+            mk("tool.requested", "read", "c1"),
+            mk("tool.completed", "read", "c1"),
+            mk("tool.requested", "read", "c2"),
+            mk("tool.completed", "read", "c2"),
+            mk("tool.requested", "grep", "c3"),
+            mk("tool.completed", "grep", "c3"),
+        ];
+        let refs: Vec<&SessionTimelineEntry> = run.iter().collect();
+        let summary = collapsed_summary(&refs);
+        assert!(summary.starts_with("calls:"), "got: {summary}");
+        assert!(summary.contains("read×2"), "got: {summary}");
+        assert!(summary.contains("grep"), "got: {summary}");
+        assert!(!summary.contains("grep×"), "grep ran once, no count: {summary}");
+    }
+
+    #[test]
+    fn collapsed_summary_falls_back_to_event_types_without_tools() {
+        let mk = |et: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Detail,
+                serde_json::json!({}),
+            )
+        };
+        let run = vec![mk("llm.round"), mk("llm.round"), mk("turn.start")];
+        let refs: Vec<&SessionTimelineEntry> = run.iter().collect();
+        let summary = collapsed_summary(&refs);
+        assert!(summary.starts_with("routine events"), "got: {summary}");
     }
 
     #[test]

@@ -293,7 +293,7 @@ impl<'a> ToolCallProcessor<'a> {
                 }
             };
             let canonical_tool = canonical_tool_name(&tc.name);
-            tracer.log_tool_requested(canonical_tool, &tc.arguments, intent.as_deref())?;
+            tracer.log_tool_requested(canonical_tool, &tc.arguments, intent.as_deref(), Some(&tc.id))?;
 
             // Execute tool call, handling errors appropriately
             let result = match self.execute_tool_call(tc, agent_dir, gateway_dir).await {
@@ -304,6 +304,7 @@ impl<'a> ToolCallProcessor<'a> {
                         &res,
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
+                        Some(&tc.id),
                     )?;
                     if !output.cache_hit {
                         self.record_execution_trace(
@@ -341,6 +342,7 @@ impl<'a> ToolCallProcessor<'a> {
                         &error_json,
                         Some(&tc.arguments),
                         approval_ref.as_deref(),
+                        Some(&tc.id),
                     )?;
                     let trace_id = self.record_execution_trace(
                         tc,
