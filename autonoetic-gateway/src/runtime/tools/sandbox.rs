@@ -1182,20 +1182,13 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 );
                 for host in &probe_hosts {
                     if let Some(strikes) = store.host_probe_budget.exhausted(sid, host) {
-                        return Ok(autonoetic_types::tool_error::ToolError::quota_exceeded(
-                            format!(
-                                "host {host} has been probed {strikes} time(s) this session \
-                                 without new information — the per-host fetch budget \
-                                 (max_probes_per_host={}) is exhausted for it",
-                                store.host_probe_budget.cap()
+                        return Ok(
+                            crate::runtime::host_probe_budget::host_budget_exhausted_response(
+                                host,
+                                strikes,
+                                store.host_probe_budget.cap(),
                             ),
-                            Some(format!(
-                                "Stop retrying {host}. Switch to a different source/host, or \
-                                 return status: partial with what you already have. A re-spawn \
-                                 with different instructions gets a fresh budget."
-                            )),
-                        )
-                        .to_error_response());
+                        );
                     }
                 }
             }

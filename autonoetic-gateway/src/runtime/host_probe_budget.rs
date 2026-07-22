@@ -111,6 +111,31 @@ pub fn content_hash(output: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Stable machine-readable code (P-5.11) on the rejection a `sandbox_exec`
+/// probe gets when its host's budget is exhausted. Consumers (and the agent's
+/// own error handling) match on this rather than parsing the message string.
+pub const HOST_BUDGET_EXHAUSTED_CODE: &str = "host_budget_exhausted";
+
+/// Build the `sandbox_exec` rejection returned when a host's probe budget is
+/// exhausted: a `quota_exceeded` tool error carrying [`HOST_BUDGET_EXHAUSTED_CODE`]
+/// and a remedy pointing the agent at a different source / `status: partial`.
+pub fn host_budget_exhausted_response(host: &str, strikes: u32, cap: usize) -> String {
+    autonoetic_types::tool_error::ToolError::quota_exceeded(
+        format!(
+            "host {host} has been probed {strikes} time(s) this session without new \
+             information — the per-host fetch budget (max_probes_per_host={cap}) is \
+             exhausted for it"
+        ),
+        Some(format!(
+            "Stop retrying {host}. Switch to a different source/host, or return \
+             status: partial with what you already have. A re-spawn with different \
+             instructions gets a fresh budget."
+        )),
+    )
+    .with_code(HOST_BUDGET_EXHAUSTED_CODE)
+    .to_error_response()
+}
+
 impl HostProbeBudgetRegistry {
     /// Set the per-host strike cap (`0` disables). Called once at startup from
     /// `config.max_probes_per_host`.
@@ -295,6 +320,22 @@ mod tests {
         assert_eq!(r.exhausted(S, "api.open-meteo.com"), None);
         // Different session (e.g. a re-spawn) starts fresh — the recovery path.
         assert_eq!(r.exhausted("root-x/researcher.default-zzzz9999", H), None);
+    }
+
+    #[test]
+    fn exhausted_response_carries_stable_code() {
+        // The rejection must expose `host_budget_exhausted` as the stable
+        // machine-readable `error` code (P-5.11), not only in the message —
+        // docs and the researcher SKILL.md tell agents to match on it.
+        let json = host_budget_exhausted_response("open-meteo.com", 3, 3);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error_type"], "quota_exceeded");
+        assert_eq!(v["error"], HOST_BUDGET_EXHAUSTED_CODE);
+        assert!(
+            v["message"].as_str().unwrap_or("").contains("open-meteo.com"),
+            "message should name the exhausted host"
+        );
     }
 
     #[test]
