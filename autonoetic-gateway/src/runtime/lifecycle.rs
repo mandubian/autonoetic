@@ -1961,7 +1961,8 @@ impl AgentExecutor {
                                     .iter()
                                     .map(|a| a.strategy.clone())
                                     .collect();
-                                if let Err(e) = report.lock().unwrap().record_context_governor(
+                                let mut writer = report.lock().unwrap_or_else(|e| e.into_inner());
+                                if let Err(e) = writer.record_context_governor(
                                     total_tokens,
                                     ctx.breakdown.total_tokens,
                                     &strategy_names,
