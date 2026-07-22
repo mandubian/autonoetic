@@ -2100,6 +2100,30 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
     }
 }
 
+/// The most useful text to copy for a timeline row. For tool rows this is the
+/// actionable token — the command, path, artifact ref, or agent id in
+/// `args_preview` (so `Y` grabs exactly what you'd paste into a shell or a ref
+/// lookup). For everything else it's the visible content: headline plus detail.
+pub fn row_copy_text(entry: &SessionTimelineEntry) -> String {
+    if matches!(entry.event_type.as_str(), "tool.completed" | "tool.requested") {
+        if let Some(p) = parse_entry_payload(entry) {
+            if let Some(kp) = payload_field_str(&p, "args_preview").filter(|s| !s.is_empty()) {
+                return kp;
+            }
+            // tool.requested carries raw `arguments`; extract the key param.
+            let tool = payload_field_str(&p, "tool_name").unwrap_or_default();
+            if let Some(kp) = extract_tool_key_param(&Some(p), &tool) {
+                return kp;
+            }
+        }
+    }
+    let spec = render_spec(entry);
+    match spec.detail {
+        Some(d) if !d.trim().is_empty() => format!("{}\n{}", spec.headline, d),
+        _ => spec.headline,
+    }
+}
+
 /// Backwards-compat: one-line rendering, used by the CLI viewer and tests.
 pub fn render_line(entry: &SessionTimelineEntry) -> String {
     let summary = summarize(entry);
@@ -3124,6 +3148,33 @@ mod tests {
             payload: Some(payload.to_string()),
             refs: TimelineRefs::default(),
         }
+    }
+
+    #[test]
+    fn row_copy_text_prefers_tool_token_else_visible_text() {
+        // Tool row → the actionable token (args_preview), not the headline chrome.
+        let exec = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "sandbox_exec",
+                "args_preview": "pytest -k integration",
+                "result": r#"{"ok":true,"stdout":"3 passed"}"#
+            }),
+        );
+        assert_eq!(row_copy_text(&exec), "pytest -k integration");
+
+        // Non-tool row → visible headline + detail.
+        let msg = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message": "delegating to the coder now" }),
+        );
+        assert!(row_copy_text(&msg).contains("delegating to the coder"));
     }
 
     #[test]
