@@ -42,7 +42,12 @@ fn fill_promotion_role_if_missing(metadata: &mut serde_json::Value, target_agent
         .get("require_promotion_record")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    if !requires_gate || metadata.get("promotion_role").is_some() {
+    let role_present = metadata
+        .get("promotion_role")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !requires_gate || role_present {
         return;
     }
     if let Some(role) = autonoetic_types::promotion::PromotionRole::for_agent_id(target_agent_id) {
@@ -1772,6 +1777,23 @@ mod promotion_role_derivation_tests {
             "promotion_role": "auditor"
         });
         fill_promotion_role_if_missing(&mut meta, "unit_test_runner.default");
+        assert_eq!(meta["promotion_role"], "auditor");
+    }
+
+    #[test]
+    fn derives_when_role_is_null_or_empty() {
+        let mut meta = serde_json::json!({
+            "require_promotion_record": true,
+            "promotion_role": null
+        });
+        fill_promotion_role_if_missing(&mut meta, "auditor.default");
+        assert_eq!(meta["promotion_role"], "auditor");
+
+        let mut meta = serde_json::json!({
+            "require_promotion_record": true,
+            "promotion_role": ""
+        });
+        fill_promotion_role_if_missing(&mut meta, "auditor.default");
         assert_eq!(meta["promotion_role"], "auditor");
     }
 

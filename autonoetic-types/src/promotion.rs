@@ -390,7 +390,7 @@ mod promotion_record_tests {
         );
         assert!(PromotionRole::for_agent_id("coder.default").is_none());
         assert!(PromotionRole::for_agent_id("planner.default").is_none());
-        // Revision-suffixed ids still resolve on the base name.
+        // Bare ids without a `.default` suffix resolve the same way.
         assert_eq!(
             PromotionRole::for_agent_id("unit_test_runner").map(|r| r.as_str()),
             Some("unit_test_runner")
