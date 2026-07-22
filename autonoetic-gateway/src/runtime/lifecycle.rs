@@ -823,6 +823,11 @@ impl AgentExecutor {
         let requested_window = approved_windows.saturating_add(1);
         let payload = serde_json::json!({
             "child_session_id": session_id,
+            // `turn_id` is session-scoped; this event is keyed to the ROOT
+            // session, so the child's turn lives in the payload rather than the
+            // event's `turn_id` field (which would otherwise mix a child turn
+            // into a root-session event).
+            "child_turn_id": turn_id,
             "child_agent_id": self.manifest.agent.id,
             "approved_windows": approved_windows,
             "requested_window": requested_window,
@@ -837,7 +842,9 @@ impl AgentExecutor {
             // Keyed to the root session so it surfaces at the root, not buried
             // in the child's own trace.
             session_id: root.clone(),
-            turn_id: Some(turn_id.to_string()),
+            // None: this event belongs to the root session, but the child turn
+            // is session-scoped — see `child_turn_id` in the payload.
+            turn_id: None,
             event_seq: 0,
             timestamp: chrono::Utc::now().to_rfc3339(),
             category: "session".to_string(),

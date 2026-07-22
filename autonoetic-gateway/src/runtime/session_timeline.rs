@@ -633,6 +633,7 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "llm.empty_response"
         | "guard.tripped"
         | "session.emergency_stop"
+        | "session.turn_hard_cap"
         | "security.sandbox_escape"
         | "tool.failed" => Altitude::Error,
 
@@ -655,6 +656,10 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "wiki.rejected"
         | "divergence.intervention"
         | "runtime.lock_drift"
+        // A delegated child crossing into another continuation window is an
+        // advisory "the operator/planner should look" signal (#854), not a
+        // failure — it wants an eye, not an alarm.
+        | "session.continuation_window_extended"
         | "security.escape_threshold" => Altitude::Attention,
 
         // ─── Normal: visible progress (the default floor). ───

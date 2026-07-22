@@ -290,8 +290,10 @@ pub(crate) fn effective_max_session_turns(
 }
 
 /// Resolve the absolute per-session turn **hard cap** — the ceiling that
-/// continuation approvals cannot lift (issue #854). Returns `0` when the soft
-/// limit is disabled (`system_soft == 0`), disabling the hard cap in lockstep.
+/// continuation approvals cannot lift (issue #854). Returns `0` (disabling the
+/// hard cap in lockstep) whenever the *effective soft limit* is `0` — i.e. the
+/// system soft limit is `0`, or a per-agent `max_session_turns` override
+/// reduces it to `0`.
 ///
 /// Resolution:
 /// 1. The **system ceiling** is `system_hard` when configured, else
@@ -308,10 +310,14 @@ pub(crate) fn effective_max_session_turns_hard(
     system_hard: Option<u32>,
     declaration: Option<&LoopGuardDeclaration>,
 ) -> u32 {
-    if system_soft == 0 {
+    let effective_soft = effective_max_session_turns(system_soft, declaration);
+    // No soft limit ⇒ no hard cap. Covers both a disabled system limit
+    // (`system_soft == 0`) and a per-agent override that clamps the effective
+    // soft limit to 0. (`effective_soft > 0` also guarantees `system_soft > 0`,
+    // so the ceiling arithmetic below is safe.)
+    if effective_soft == 0 {
         return 0;
     }
-    let effective_soft = effective_max_session_turns(system_soft, declaration);
     let system_ceiling = system_hard
         .unwrap_or_else(|| system_soft.saturating_mul(2))
         .max(system_soft);
