@@ -2245,9 +2245,13 @@ fn pending_tool_summary(entries: &[SessionTimelineEntry]) -> PendingSummary {
         }
     }
     let names = open.iter().map(|(_, n, _)| n.clone()).collect();
-    let oldest_turn = open.iter().find_map(|(_, _, t)| *t);
+    // Age is measured from the genuinely-oldest still-open call (the first, since
+    // `open` is chronological). If *that* call has no turn, the oldest age is
+    // unknown — don't substitute a younger request's turn, which would understate
+    // it. `l >= o` so a call requested this same turn reports 0 (known), not None.
+    let oldest_turn = open.first().and_then(|(_, _, t)| *t);
     let age_turns = match (latest_turn, oldest_turn) {
-        (Some(l), Some(o)) if l > o => Some(l - o),
+        (Some(l), Some(o)) if l >= o => Some(l - o),
         _ => None,
     };
     PendingSummary { names, age_turns }
@@ -3650,28 +3654,35 @@ pub fn run(
                         // artifact ref, a failing command, or an error message.
                         KeyCode::Char('Y') => {
                             if detail.is_none() {
-                                let entry = view_indexed.get(selected).and_then(|(_, src)| {
-                                    let idx = match src {
-                                        RowSource::Single(i) => *i,
-                                        RowSource::Run { start, .. } => *start,
-                                    };
-                                    view_visible.get(idx)
-                                });
-                                match (entry, clipboard.as_mut()) {
-                                    (Some(e), Some(cb)) => {
-                                        let text = render::row_copy_text(e);
-                                        match cb.set_text(&text) {
-                                            Ok(_) => {
-                                                status = Some(format!(
-                                                    "copied: {}",
-                                                    render::one_line(&text, 60)
-                                                ))
-                                            }
-                                            Err(_) => {
-                                                status = Some("✗ clipboard write failed".into())
-                                            }
+                                // Copy what the selected row shows: a collapsed run
+                                // yields its visible summary; a Line yields the
+                                // actionable token (command/path/ref/id) or its text.
+                                let copy_text = view_indexed.get(selected).and_then(|(row, src)| {
+                                    match row {
+                                        RenderedRow::Collapsed { count, summary, .. } => {
+                                            Some(format!("{count} {summary}"))
+                                        }
+                                        RenderedRow::Line(_) => {
+                                            let idx = match src {
+                                                RowSource::Single(i) => *i,
+                                                RowSource::Run { start, .. } => *start,
+                                            };
+                                            view_visible.get(idx).map(render::row_copy_text)
                                         }
                                     }
+                                });
+                                match (copy_text, clipboard.as_mut()) {
+                                    (Some(text), Some(cb)) => match cb.set_text(&text) {
+                                        Ok(_) => {
+                                            status = Some(format!(
+                                                "copied: {}",
+                                                render::one_line(&text, 60)
+                                            ))
+                                        }
+                                        Err(_) => {
+                                            status = Some("✗ clipboard write failed".into())
+                                        }
+                                    },
                                     (_, None) => {
                                         status = Some("✗ clipboard unavailable".into())
                                     }
@@ -9164,6 +9175,29 @@ mod tests {
         assert_eq!(summary.names, vec!["workflow_wait".to_string()]);
         // Requested in turn 2, latest turn is 4 → 2 turns waiting.
         assert_eq!(summary.age_turns, Some(2));
+    }
+
+    #[test]
+    fn pending_age_is_measured_from_oldest_open_call() {
+        // Oldest open call is c1 (turn 1); c2 (turn 3) is newer. Age must track
+        // c1, not the first-with-a-turn. Latest turn is 3 → age 2, not 0.
+        let entries = vec![
+            tool_entry("tool.requested", Some("turn-000001"), "workflow_wait", Some("c1")),
+            tool_entry("tool.requested", Some("turn-000003"), "workflow_wait", Some("c2")),
+        ];
+        assert_eq!(pending_tool_summary(&entries).age_turns, Some(2));
+    }
+
+    #[test]
+    fn pending_age_is_zero_when_requested_this_turn() {
+        // A call opened in the latest turn is known to be 0 turns old (not unknown).
+        let entries = vec![tool_entry(
+            "tool.requested",
+            Some("turn-000005"),
+            "workflow_wait",
+            Some("c1"),
+        )];
+        assert_eq!(pending_tool_summary(&entries).age_turns, Some(0));
     }
 
     #[test]
