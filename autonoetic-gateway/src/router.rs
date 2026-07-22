@@ -2911,6 +2911,38 @@ impl JsonRpcRouter {
             }
 
             // Session fork - fork a session from a snapshot
+            // List the turns that have a runnable checkpoint — the points a
+            // session can be forked from. The room marks these on the timeline
+            // so the operator can see where `/fork --at-turn N` (or `F`) will work.
+            "session.checkpoints" => {
+                #[derive(Deserialize)]
+                struct CheckpointsParams {
+                    source_session_id: String,
+                }
+                let params: CheckpointsParams = match serde_json::from_value(req.params.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for session.checkpoints: {}", e),
+                        );
+                    }
+                };
+                let turn_ids = crate::runtime::checkpoint::list_checkpoints(
+                    &self.config,
+                    &params.source_session_id,
+                )
+                .unwrap_or_default();
+                let turns: Vec<u64> = turn_ids
+                    .iter()
+                    .filter_map(|id| id.strip_prefix("turn-").and_then(|n| n.parse::<u64>().ok()))
+                    .collect();
+                return JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({ "turn_ids": turn_ids, "turns": turns }),
+                );
+            }
             "session.fork" => {
                 #[derive(Deserialize)]
                 struct ForkParams {

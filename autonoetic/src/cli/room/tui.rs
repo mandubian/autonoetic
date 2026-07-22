@@ -615,8 +615,8 @@ fn build_header(
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
     }
-    // In-flight async tool calls: `⋯2 spawn,workflow_wait`.
-    if let Some(chip) = pending_chip(&stats.pending_calls) {
+    // In-flight async tool calls: `⋯2 spawn,workflow_wait Δ3t`.
+    if let Some(chip) = pending_chip(&stats.pending_calls, stats.pending_age_turns) {
         right_parts.push(chip);
     }
     let floor_ind = format!("{}{}", render::altitude_glyph(floor), floor.as_str());
@@ -639,12 +639,17 @@ fn build_header(
     }
 }
 
-/// Header chip for in-flight async tool calls: `⋯N name1,name2` (up to two
+/// Turns-since-request beyond which a still-pending call is flagged stale (`!`).
+const STALE_PENDING_TURNS: u64 = 5;
+
+/// Header chip for in-flight async tool calls: `⋯N name1,name2 Δ3t` (up to two
 /// distinct names). The count `N` is total pending calls; the trailing `,…`
 /// appears only when there are more *distinct* tool names than shown — repeated
 /// calls of a displayed tool (e.g. 3×workflow_wait → `⋯3 workflow_wait`) don't
-/// add one. Empty names are skipped. Returns `None` when nothing is pending.
-fn pending_chip(pending: &[String]) -> Option<String> {
+/// add one. `Δ{n}t` is how many turns the oldest call has been waiting, with a
+/// trailing `!` once it exceeds `STALE_PENDING_TURNS`. Empty names are skipped.
+/// Returns `None` when nothing is pending.
+fn pending_chip(pending: &[String], age_turns: Option<u64>) -> Option<String> {
     if pending.is_empty() {
         return None;
     }
@@ -659,7 +664,14 @@ fn pending_chip(pending: &[String]) -> Option<String> {
     }
     let shown = distinct.len().min(MAX_NAMES);
     let more = if distinct.len() > shown { ",…" } else { "" };
-    Some(format!("⋯{n} {}{}", distinct[..shown].join(","), more))
+    let age = match age_turns {
+        Some(t) if t >= 1 => {
+            let stale = if t > STALE_PENDING_TURNS { "!" } else { "" };
+            format!(" Δ{t}t{stale}")
+        }
+        _ => String::new(),
+    };
+    Some(format!("⋯{n} {}{}{}", distinct[..shown].join(","), more, age))
 }
 
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
@@ -2115,9 +2127,12 @@ struct SessionStats {
     /// continuations). Surfaced as a subtle header chip so a launched-but-not-
     /// returned tool is never silently lost between request and response.
     pending_calls: Vec<String>,
+    /// Turns since the oldest still-open call was requested (see `PendingSummary`).
+    pending_age_turns: Option<u64>,
 }
 
 fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
+    let pending = pending_tool_summary(entries);
     let mut stats = SessionStats {
         total_input: 0,
         total_output: 0,
@@ -2126,7 +2141,8 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         context_total_pct: 0.0,
         context_samples: 0,
         context_window: None,
-        pending_calls: pending_tool_calls(entries),
+        pending_calls: pending.names,
+        pending_age_turns: pending.age_turns,
     };
     for e in entries {
         if e.event_type != "llm.round" {
@@ -2183,49 +2199,94 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
 /// without one fall back to matching a completion to the earliest open request
 /// of the same tool name (FIFO). Non-async calls complete in the same batch, so
 /// this list is normally empty — a non-empty result means real in-flight work.
-fn pending_tool_calls(entries: &[SessionTimelineEntry]) -> Vec<String> {
-    // Open calls with a call_id: id -> tool_name (insertion order preserved).
-    let mut open_by_id: Vec<(String, String)> = Vec::new();
-    // Open calls without a call_id, per tool name: a FIFO count.
-    let mut open_anon: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    // Anon requests in arrival order, for a stable pending list.
-    let mut anon_order: Vec<String> = Vec::new();
+struct PendingSummary {
+    /// Tool names of still-open calls, in request (chronological) order.
+    names: Vec<String>,
+    /// How many turns ago the *oldest* still-open call was requested, measured
+    /// against the latest turn seen. `None` when nothing is pending or turns are
+    /// unknown. A large value flags a call that has been waiting a long time.
+    age_turns: Option<u64>,
+}
+
+fn pending_tool_summary(entries: &[SessionTimelineEntry]) -> PendingSummary {
+    // Open calls in chronological order: (call_id, tool_name, requested_turn).
+    // A completion removes the first matching open call (by call_id, else by
+    // name for rows predating call_id). Chronological order means the first
+    // still-open entry is the oldest.
+    let mut open: Vec<(Option<String>, String, Option<u64>)> = Vec::new();
+    let mut latest_turn: Option<u64> = None;
     for e in entries {
+        let turn = e.turn_id.as_deref().and_then(turn_number_of);
+        if let Some(t) = turn {
+            latest_turn = Some(latest_turn.map_or(t, |m| m.max(t)));
+        }
         let ty = e.event_type.as_str();
         if ty != "tool.requested" && ty != "tool.completed" {
             continue;
         }
         let tool = payload_field_str(e, "tool_name").unwrap_or_else(|| "tool".into());
         let call_id = payload_field_str(e, "call_id");
-        match (ty, call_id) {
-            ("tool.requested", Some(id)) => open_by_id.push((id, tool)),
-            ("tool.completed", Some(id)) => open_by_id.retain(|(oid, _)| oid != &id),
-            ("tool.requested", None) => {
-                *open_anon.entry(tool.clone()).or_insert(0) += 1;
-                anon_order.push(tool);
-            }
-            ("tool.completed", None) => {
-                if let Some(c) = open_anon.get_mut(&tool) {
-                    if *c > 0 {
-                        *c -= 1;
-                    }
+        match ty {
+            "tool.requested" => open.push((call_id, tool, turn)),
+            "tool.completed" => {
+                let pos = match &call_id {
+                    Some(id) => open
+                        .iter()
+                        .position(|(oid, _, _)| oid.as_deref() == Some(id.as_str())),
+                    None => open
+                        .iter()
+                        .position(|(oid, n, _)| oid.is_none() && n == &tool),
+                };
+                if let Some(p) = pos {
+                    open.remove(p);
                 }
             }
             _ => {}
         }
     }
-    let mut pending: Vec<String> = open_by_id.into_iter().map(|(_, tool)| tool).collect();
-    // Append still-open anon calls in arrival order, honouring remaining counts.
-    let mut remaining = open_anon;
-    for tool in anon_order {
-        if let Some(c) = remaining.get_mut(&tool) {
-            if *c > 0 {
-                *c -= 1;
-                pending.push(tool);
-            }
+    let names = open.iter().map(|(_, n, _)| n.clone()).collect();
+    let oldest_turn = open.iter().find_map(|(_, _, t)| *t);
+    let age_turns = match (latest_turn, oldest_turn) {
+        (Some(l), Some(o)) if l > o => Some(l - o),
+        _ => None,
+    };
+    PendingSummary { names, age_turns }
+}
+
+/// View-row indices whose content matches `query` (case-insensitive). Searches
+/// the rendered one-line text plus the raw payload, so it finds both visible
+/// text and hidden fields (agent ids, refs). Collapsed runs match if any of
+/// their underlying entries match, so folded content is still discoverable.
+fn compute_search_matches(
+    indexed: &[(RenderedRow, RowSource)],
+    visible: &[SessionTimelineEntry],
+    query: &str,
+) -> Vec<usize> {
+    let q = query.to_lowercase();
+    let haystack = |e: &SessionTimelineEntry| -> String {
+        let mut s = render::render_line(e).to_lowercase();
+        if let Some(p) = &e.payload {
+            s.push('\n');
+            s.push_str(&p.to_lowercase());
         }
-    }
-    pending
+        s
+    };
+    indexed
+        .iter()
+        .enumerate()
+        .filter_map(|(vi, (_, src))| {
+            let matched = match src {
+                RowSource::Single(i) => {
+                    visible.get(*i).map(|e| haystack(e).contains(&q)).unwrap_or(false)
+                }
+                RowSource::Run { start, len } => visible
+                    .get(*start..start + len)
+                    .map(|slice| slice.iter().any(|e| haystack(e).contains(&q)))
+                    .unwrap_or(false),
+            };
+            matched.then_some(vi)
+        })
+        .collect()
 }
 
 fn avg_context_pct(stats: &SessionStats) -> Option<f64> {
@@ -2350,6 +2411,20 @@ pub fn run(
     // checkpoints (plan/approval/escalation/operator/session boundaries).
     // Recomputed each frame after coalescing; the `[` / `]` keys jump across.
     let mut checkpoint_rows: Vec<usize> = Vec::new();
+    // View-row indices at Attention altitude or above (failures, gates,
+    // interventions) — the `e` / `E` keys jump across these to reach problems.
+    let mut attention_rows: Vec<usize> = Vec::new();
+    // Turn numbers with a runnable checkpoint (forkable). Refreshed alongside
+    // the timeline; used to mark turn dividers distinctly.
+    let mut forkable_turns: HashSet<u64> = HashSet::new();
+    // In-timeline text search. `search_input` is the buffer while typing (Ctrl+F);
+    // `search_query` is the committed term. `search_matches` (view-row indices) is
+    // recomputed each frame; `n`/`N` cycle `search_current` through it.
+    let mut search_input: Option<String> = None;
+    let mut search_query: Option<String> = None;
+    let mut search_matches: Vec<usize> = Vec::new();
+    let mut search_current: usize = 0;
+    let mut search_needs_jump = false;
     let mut detail: Option<DetailPane> = None;
     let mut detail_scroll: u16 = 0; // vertical scroll offset for detail pane
     let mut detail_h_scroll: u16 = 0; // horizontal scroll offset for detail pane
@@ -2799,6 +2874,45 @@ pub fn run(
                             }
                             KeyCode::Char(c) => buf.push(c),
                             _ => {}
+                        }
+                        continue;
+                    }
+
+                    // Search-typing mode (opened with Ctrl+F): capture the query
+                    // until Enter (commit) or Esc (cancel). Matches are computed
+                    // each frame from the committed query.
+                    if search_input.is_some() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                search_input = None;
+                                status = Some("search cancelled".to_string());
+                            }
+                            KeyCode::Enter => {
+                                let q = search_input.take().unwrap_or_default().trim().to_string();
+                                if q.is_empty() {
+                                    search_query = None;
+                                    search_matches.clear();
+                                    status = Some("search cleared".to_string());
+                                } else {
+                                    search_query = Some(q);
+                                    search_current = 0;
+                                    search_needs_jump = true;
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                if let Some(b) = search_input.as_mut() {
+                                    b.pop();
+                                }
+                            }
+                            KeyCode::Char(c) => {
+                                if let Some(b) = search_input.as_mut() {
+                                    b.push(c);
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Some(b) = &search_input {
+                            status = Some(format!("search: {b}▏  (Enter find · Esc cancel)"));
                         }
                         continue;
                     }
@@ -3268,6 +3382,12 @@ pub fn run(
                                 detail_h_scroll = 0;
                                 session_pick_list = None;
                                         wiki_request_ids = None;
+                            } else if search_query.is_some() {
+                                // Clear an active search before falling through to
+                                // the emergency-stop arming path.
+                                search_query = None;
+                                search_matches.clear();
+                                status = Some("search cleared".to_string());
                             } else if estop_armed(&estop_armed_until) {
                                 // Double-Esc within the arm window → emergency stop
                                 disarm_estop(&mut estop_armed_until, &mut status);
@@ -3342,6 +3462,28 @@ pub fn run(
                                     detail_h_scroll = 0;
                                     status = Some(format!("wiki proposal {request_id} — Esc to close"));
                                 }
+                            }
+                        }
+                        // n/N cycle search matches when a search is active. Guards
+                        // give these priority over the gate `n` (reject) below; the
+                        // matches vec is recomputed each frame from `search_query`.
+                        KeyCode::Char('n') if search_query.is_some() => {
+                            if search_matches.is_empty() {
+                                status = Some("no matches".to_string());
+                            } else {
+                                search_current = (search_current + 1) % search_matches.len();
+                                selected = search_matches[search_current];
+                                follow = false;
+                            }
+                        }
+                        KeyCode::Char('N') if search_query.is_some() => {
+                            if search_matches.is_empty() {
+                                status = Some("no matches".to_string());
+                            } else {
+                                search_current = (search_current + search_matches.len() - 1)
+                                    % search_matches.len();
+                                selected = search_matches[search_current];
+                                follow = false;
                             }
                         }
                         // y/n: approve/reject the selected pending approval; y on a
@@ -3502,6 +3644,41 @@ pub fn run(
                             }
                         }
                         KeyCode::Char('s') => squash = !squash,
+                        // Y: copy the selected row to the clipboard — the
+                        // actionable token for a tool row (command/path/ref/id),
+                        // else the row's visible text. Handy for grabbing an
+                        // artifact ref, a failing command, or an error message.
+                        KeyCode::Char('Y') => {
+                            if detail.is_none() {
+                                let entry = view_indexed.get(selected).and_then(|(_, src)| {
+                                    let idx = match src {
+                                        RowSource::Single(i) => *i,
+                                        RowSource::Run { start, .. } => *start,
+                                    };
+                                    view_visible.get(idx)
+                                });
+                                match (entry, clipboard.as_mut()) {
+                                    (Some(e), Some(cb)) => {
+                                        let text = render::row_copy_text(e);
+                                        match cb.set_text(&text) {
+                                            Ok(_) => {
+                                                status = Some(format!(
+                                                    "copied: {}",
+                                                    render::one_line(&text, 60)
+                                                ))
+                                            }
+                                            Err(_) => {
+                                                status = Some("✗ clipboard write failed".into())
+                                            }
+                                        }
+                                    }
+                                    (_, None) => {
+                                        status = Some("✗ clipboard unavailable".into())
+                                    }
+                                    (None, _) => {}
+                                }
+                            }
+                        }
                         // [ / ]: jump to the previous / next first-class
                         // checkpoint (plan, approval, escalation, operator
                         // message, session start). Makes the decision narrative
@@ -3527,6 +3704,39 @@ pub fn run(
                                     selected = n;
                                 } else if let Some(&first) = checkpoint_rows.first() {
                                     selected = first; // wrap to the start
+                                }
+                            }
+                        }
+                        // e / E: jump to the next / previous Attention row —
+                        // failures, gates, and interventions — so problems are
+                        // reachable without hunting. Wraps around; `[`/`]` remain
+                        // for the checkpoint (decision) narrative.
+                        KeyCode::Char('e') => {
+                            if detail.is_none() {
+                                if attention_rows.is_empty() {
+                                    status = Some("no attention rows (errors/gates) in view".to_string());
+                                } else {
+                                    follow = false;
+                                    selected = attention_rows
+                                        .iter()
+                                        .find(|&&r| r > selected)
+                                        .copied()
+                                        .unwrap_or_else(|| attention_rows[0]); // wrap to start
+                                }
+                            }
+                        }
+                        KeyCode::Char('E') => {
+                            if detail.is_none() {
+                                if attention_rows.is_empty() {
+                                    status = Some("no attention rows (errors/gates) in view".to_string());
+                                } else {
+                                    follow = false;
+                                    selected = attention_rows
+                                        .iter()
+                                        .rev()
+                                        .find(|&&r| r < selected)
+                                        .copied()
+                                        .unwrap_or_else(|| *attention_rows.last().unwrap()); // wrap to end
                                 }
                             }
                         }
@@ -4079,6 +4289,12 @@ pub fn run(
                             follow = true;
                             detail = None;
                         }
+                        // Ctrl+F opens search typing; guarded arm must precede the
+                        // plain `f` (follow) arm since the match ignores modifiers.
+                        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            search_input = Some(String::new());
+                            status = Some("search: ▏  (type, Enter find · Esc cancel)".to_string());
+                        }
                         KeyCode::Char('f') | KeyCode::Char(' ') => {
                             follow = !follow;
                             if follow {
@@ -4391,6 +4607,29 @@ pub fn run(
                     needs_redraw = true;
                 }
             }
+
+            // Refresh the forkable-turn set when the timeline grew (new
+            // checkpoints appear with new yield points). Cheap, non-critical RPC.
+            if entries_changed {
+                match rpc(
+                    client,
+                    "session.checkpoints",
+                    serde_json::json!({ "source_session_id": &*root_session_id }),
+                ) {
+                    Ok(value) => {
+                        if let Some(arr) = value.get("turns").and_then(|v| v.as_array()) {
+                            let new_set: HashSet<u64> =
+                                arr.iter().filter_map(|v| v.as_u64()).collect();
+                            if new_set != forkable_turns {
+                                forkable_turns = new_set;
+                                needs_redraw = true;
+                            }
+                        }
+                    }
+                    Err(e) if e.to_string() == "__room_quit__" => break 'room,
+                    Err(_) => {} // non-critical; dividers just won't mark forkable
+                }
+            }
         }
 
         // Session status poll runs even when we skip rendering so the TUI keeps
@@ -4525,7 +4764,7 @@ pub fn run(
                 extra_inflight_rows.insert(row_idx);
             }
         }
-        let turn_boundaries = annotate_turns_and_in_flight(
+        let mut turn_boundaries = annotate_turns_and_in_flight(
             &mut indexed,
             &visible,
             &entries,
@@ -4535,6 +4774,16 @@ pub fn run(
             &*root_session_id,
             &spawn_lineage,
         );
+        // Repurpose the boundary flag to mean "this turn is forkable" so the
+        // divider can render distinctly. (Presence in the map still means "draw
+        // a divider here"; the bool now carries forkability.)
+        for (row_idx, forkable) in turn_boundaries.iter_mut() {
+            let turn = match indexed.get(*row_idx).map(|(r, _)| r) {
+                Some(RenderedRow::Line(spec)) => spec.turn_index.map(|n| n as u64),
+                _ => None,
+            };
+            *forkable = turn.is_some_and(|t| forkable_turns.contains(&t));
+        }
         let rows: Vec<RenderedRow> = indexed.iter().map(|(r, _)| r.clone()).collect();
         let pending_plan_count =
             unresolved_pending_plan_ids(&entries, &resolved, &acted).len();
@@ -4552,6 +4801,43 @@ pub fn run(
                 _ => None,
             })
             .collect();
+
+        // Attention view-rows — failures and other high-altitude events the
+        // operator should be able to jump to directly (`e` / `E`). Uses the
+        // rendered row's altitude so collapsed runs (always Detail) are excluded.
+        attention_rows = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(vi, row)| match row {
+                RenderedRow::Line(spec) if spec.altitude >= Altitude::Attention => Some(vi),
+                _ => None,
+            })
+            .collect();
+
+        // Recompute search matches each frame so they track the live timeline.
+        if let Some(q) = search_query.clone() {
+            search_matches = compute_search_matches(&indexed, &visible, &q);
+            if search_matches.is_empty() {
+                status = Some(format!("search \"{q}\": no matches (Esc clear)"));
+            } else {
+                if search_needs_jump {
+                    search_current = 0;
+                    selected = search_matches[0];
+                    follow = false;
+                    search_needs_jump = false;
+                }
+                if search_current >= search_matches.len() {
+                    search_current = 0;
+                }
+                status = Some(format!(
+                    "search \"{q}\": {}/{}  (n/N cycle · Esc clear)",
+                    search_current + 1,
+                    search_matches.len()
+                ));
+            }
+        } else {
+            search_matches.clear();
+        }
 
         // Keep an open plan-review pane aligned with the latest pending revision
         // (e.g. v2 amend while v1 review was still on screen).
@@ -5516,23 +5802,28 @@ fn build_rich_row_lines(
     show_reasoning: bool,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if turn_boundaries.contains_key(&row_index) {
+    if let Some(&forkable) = turn_boundaries.get(&row_index) {
         let total_w = content_w + glyph_w + label_w + rail_w + 2;
-        let bar = if let Some(l) = &spec.turn_label {
-            let prefix = format!("── turn {l} ");
-            let fill = total_w.saturating_sub(prefix.chars().count());
-            format!("{prefix}{}", "─".repeat(fill))
-        } else if let Some(n) = spec.turn_index {
-            let prefix = format!("── turn {n} ");
-            let fill = total_w.saturating_sub(prefix.chars().count());
-            format!("{prefix}{}", "─".repeat(fill))
+        // Forkable turns (a runnable checkpoint exists) get a heavier rule, a
+        // `⑂` marker, and a brighter colour so the operator can see at a glance
+        // where `F` / `/fork --at-turn N` will actually work.
+        let (rule, tag, style) = if forkable {
+            ('═', " ⑂ fork", Style::default().fg(Color::Cyan))
         } else {
-            "─".repeat(total_w)
+            ('─', "", Style::default().fg(Color::DarkGray))
         };
-        lines.push(Line::from(Span::styled(
-            bar,
-            Style::default().fg(Color::DarkGray),
-        )));
+        let label = spec
+            .turn_label
+            .clone()
+            .or_else(|| spec.turn_index.map(|n| n.to_string()));
+        let bar = if let Some(l) = label {
+            let prefix = format!("{rule}{rule} turn {l}{tag} ");
+            let fill = total_w.saturating_sub(prefix.chars().count());
+            format!("{prefix}{}", rule.to_string().repeat(fill))
+        } else {
+            rule.to_string().repeat(total_w)
+        };
+        lines.push(Line::from(Span::styled(bar, style)));
     }
     let rail_style = Style::default().fg(row_rail_color(spec));
     let rail_block = "▌".repeat(rail_w);
@@ -5648,7 +5939,8 @@ fn is_divider_line(line: &Line) -> bool {
         && line
             .spans
             .first()
-            .map(|s| s.content.starts_with('─'))
+            // `─` for ordinary turn dividers, `═` for forkable ones.
+            .map(|s| s.content.starts_with('─') || s.content.starts_with('═'))
             .unwrap_or(false)
 }
 
@@ -8864,9 +9156,14 @@ mod tests {
             tool_entry("tool.requested", Some("turn-000002"), "workflow_wait", Some("c2")),
             tool_entry("tool.requested", Some("turn-000002"), "agent_spawn", Some("c3")),
             tool_entry("tool.completed", Some("turn-000002"), "agent_spawn", Some("c3")),
+            // A later turn with no tool activity advances the clock for age.
+            tool_entry("llm.round", Some("turn-000004"), "", None),
         ];
+        let summary = pending_tool_summary(&entries);
         // Only workflow_wait (c2) stays open.
-        assert_eq!(pending_tool_calls(&entries), vec!["workflow_wait".to_string()]);
+        assert_eq!(summary.names, vec!["workflow_wait".to_string()]);
+        // Requested in turn 2, latest turn is 4 → 2 turns waiting.
+        assert_eq!(summary.age_turns, Some(2));
     }
 
     #[test]
@@ -8877,7 +9174,10 @@ mod tests {
             tool_entry("tool.completed", Some("turn-000001"), "sandbox_exec", None),
         ];
         // Two requested, one completed → one still pending.
-        assert_eq!(pending_tool_calls(&entries), vec!["sandbox_exec".to_string()]);
+        assert_eq!(
+            pending_tool_summary(&entries).names,
+            vec!["sandbox_exec".to_string()]
+        );
     }
 
     #[test]
@@ -8910,22 +9210,69 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_find_visible_text_and_hidden_payload() {
+        let visible = vec![
+            tool_entry("tool.completed", Some("turn-000001"), "sandbox_exec", Some("c1")),
+            tool_entry("tool.completed", Some("turn-000002"), "content_write", Some("c2")),
+        ];
+        let indexed: Vec<(RenderedRow, RowSource)> = visible
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (RenderedRow::Line(render::render_spec(e)), RowSource::Single(i)))
+            .collect();
+        // Matches the tool_name carried in the payload.
+        assert_eq!(
+            compute_search_matches(&indexed, &visible, "content_write"),
+            vec![1]
+        );
+        // Case-insensitive.
+        assert_eq!(
+            compute_search_matches(&indexed, &visible, "SANDBOX_EXEC"),
+            vec![0]
+        );
+        // No match → empty.
+        assert!(compute_search_matches(&indexed, &visible, "zzz-nope").is_empty());
+    }
+
+    #[test]
     fn pending_chip_ellipsis_reflects_distinct_names_not_raw_count() {
-        assert_eq!(pending_chip(&[]), None);
+        assert_eq!(pending_chip(&[], None), None);
         // Three of the same tool → count 3, one name, no ellipsis.
         assert_eq!(
-            pending_chip(&["workflow_wait".into(), "workflow_wait".into(), "workflow_wait".into()]),
+            pending_chip(
+                &["workflow_wait".into(), "workflow_wait".into(), "workflow_wait".into()],
+                None
+            ),
             Some("⋯3 workflow_wait".to_string())
         );
         // Three distinct → two shown, ellipsis for the hidden third.
         assert_eq!(
-            pending_chip(&["a".into(), "b".into(), "c".into()]),
+            pending_chip(&["a".into(), "b".into(), "c".into()], None),
             Some("⋯3 a,b,…".to_string())
         );
         // Exactly two distinct → both shown, no ellipsis.
         assert_eq!(
-            pending_chip(&["a".into(), "b".into()]),
+            pending_chip(&["a".into(), "b".into()], None),
             Some("⋯2 a,b".to_string())
+        );
+    }
+
+    #[test]
+    fn pending_chip_shows_age_and_stale_marker() {
+        // Fresh (age 0) → no Δ suffix.
+        assert_eq!(
+            pending_chip(&["workflow_wait".into()], Some(0)),
+            Some("⋯1 workflow_wait".to_string())
+        );
+        // A few turns waiting → Δ suffix, no stale marker.
+        assert_eq!(
+            pending_chip(&["workflow_wait".into()], Some(3)),
+            Some("⋯1 workflow_wait Δ3t".to_string())
+        );
+        // Beyond the stale threshold → trailing `!`.
+        assert_eq!(
+            pending_chip(&["workflow_wait".into()], Some(9)),
+            Some("⋯1 workflow_wait Δ9t!".to_string())
         );
     }
 
