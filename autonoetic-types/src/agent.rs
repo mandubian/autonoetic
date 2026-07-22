@@ -305,6 +305,13 @@ pub struct LoopGuardDeclaration {
     /// Per-agent session turn limit override (clamped to system ceiling).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_session_turns: Option<u32>,
+    /// Per-agent absolute session-turn ceiling override (clamped to the system
+    /// `max_session_turns_hard`). Unlike `max_session_turns` this ceiling
+    /// **cannot** be lifted by a continuation approval — only emergency-stop or
+    /// operator revoke. When unset it defaults to `2 ×` the effective soft
+    /// limit (clamped to the system ceiling).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_turns_hard: Option<u32>,
 }
 
 impl LoopGuardDeclaration {
@@ -317,6 +324,7 @@ impl LoopGuardDeclaration {
                 max_consecutive_same_progress: Some(1),
                 max_child_failures: Some(5),
                 max_session_turns: None,
+                max_session_turns_hard: None,
             },
         }
     }

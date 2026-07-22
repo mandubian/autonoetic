@@ -22,6 +22,10 @@ const TIMELINE_COVERAGE: &[(&str, Altitude)] = &[
     ("divergence.intervention", Altitude::Attention),
     ("runtime.lock_drift", Altitude::Attention),
     ("guard.tripped", Altitude::Error),
+    // #854: max_session_turns_hard termination (Error) and the advisory
+    // continuation-window signal for a long-running delegated child (Attention).
+    ("session.turn_hard_cap", Altitude::Error),
+    ("session.continuation_window_extended", Altitude::Attention),
 ];
 
 const INTENTIONALLY_EXCLUDED_CAUSAL_CATEGORIES: &[&str] = &[

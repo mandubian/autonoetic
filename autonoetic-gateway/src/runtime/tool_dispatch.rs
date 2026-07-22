@@ -289,6 +289,45 @@ pub(crate) fn effective_max_session_turns(
     }
 }
 
+/// Resolve the absolute per-session turn **hard cap** — the ceiling that
+/// continuation approvals cannot lift (issue #854). Returns `0` (disabling the
+/// hard cap in lockstep) whenever the *effective soft limit* is `0` — i.e. the
+/// system soft limit is `0`, or a per-agent `max_session_turns` override
+/// reduces it to `0`.
+///
+/// Resolution:
+/// 1. The **system ceiling** is `system_hard` when configured, else
+///    `2 × system_soft`; it is never allowed below `system_soft`.
+/// 2. A per-agent `max_session_turns_hard` override is clamped *down* to that
+///    ceiling (operator-controlled safety — an agent can tighten but never
+///    loosen the ceiling).
+/// 3. Absent a per-agent override, the agent's hard cap defaults to `2 ×` its
+///    effective soft limit, itself clamped to the system ceiling.
+/// 4. In all cases the hard cap is floored at the effective soft limit, so the
+///    soft approval gate always has room to fire before the terminal trip.
+pub(crate) fn effective_max_session_turns_hard(
+    system_soft: u32,
+    system_hard: Option<u32>,
+    declaration: Option<&LoopGuardDeclaration>,
+) -> u32 {
+    let effective_soft = effective_max_session_turns(system_soft, declaration);
+    // No soft limit ⇒ no hard cap. Covers both a disabled system limit
+    // (`system_soft == 0`) and a per-agent override that clamps the effective
+    // soft limit to 0. (`effective_soft > 0` also guarantees `system_soft > 0`,
+    // so the ceiling arithmetic below is safe.)
+    if effective_soft == 0 {
+        return 0;
+    }
+    let system_ceiling = system_hard
+        .unwrap_or_else(|| system_soft.saturating_mul(2))
+        .max(system_soft);
+    let agent_hard = match declaration.and_then(|d| d.max_session_turns_hard) {
+        Some(v) => v.min(system_ceiling),
+        None => effective_soft.saturating_mul(2).min(system_ceiling),
+    };
+    agent_hard.max(effective_soft)
+}
+
 // ---------------------------------------------------------------------------
 // Tool tier filtering
 // ---------------------------------------------------------------------------
@@ -884,6 +923,7 @@ mod tier_filter_tests {
 #[cfg(test)]
 mod loop_guard_tests {
     use super::loop_guard_from_config_and_manifest;
+    use super::effective_max_session_turns_hard;
     use autonoetic_types::agent::ExecutionMode;
     use std::path::Path;
 
@@ -925,6 +965,7 @@ mod loop_guard_tests {
             max_consecutive_same_progress: None,
             max_child_failures: None,
             max_session_turns: None,
+            max_session_turns_hard: None,
         };
         let guard = loop_guard_from_config_and_manifest(
             Some(&cfg),
@@ -934,5 +975,65 @@ mod loop_guard_tests {
         );
         assert_eq!(guard.max_loops_without_progress, 2);
         assert_eq!(guard.max_tool_failures, 3);
+    }
+
+    fn decl(
+        soft: Option<u32>,
+        hard: Option<u32>,
+    ) -> autonoetic_types::agent::LoopGuardDeclaration {
+        autonoetic_types::agent::LoopGuardDeclaration {
+            max_session_turns: soft,
+            max_session_turns_hard: hard,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn hard_cap_defaults_to_twice_system_soft_when_unset() {
+        // No declaration, no system hard override ⇒ 2× the system soft limit.
+        assert_eq!(effective_max_session_turns_hard(25, None, None), 50);
+    }
+
+    #[test]
+    fn hard_cap_honours_explicit_system_ceiling() {
+        // System hard override is used verbatim as the ceiling (≥ soft).
+        assert_eq!(effective_max_session_turns_hard(25, Some(30), None), 30);
+        // A configured ceiling below the soft limit is floored at the soft limit
+        // so the soft gate always has room to fire first.
+        assert_eq!(effective_max_session_turns_hard(25, Some(10), None), 25);
+    }
+
+    #[test]
+    fn hard_cap_defaults_to_twice_effective_soft_for_per_agent_soft_override() {
+        // Issue #854 researcher case: per-agent soft=20 under system soft=25 ⇒
+        // default hard = 2×20 = 40 (≤ system ceiling of 2×25 = 50).
+        let d = decl(Some(20), None);
+        assert_eq!(effective_max_session_turns_hard(25, None, Some(&d)), 40);
+    }
+
+    #[test]
+    fn per_agent_hard_override_is_clamped_down_to_system_ceiling() {
+        // Agent asks for 200 but the system ceiling (2×25=50) caps it.
+        let d = decl(None, Some(200));
+        assert_eq!(effective_max_session_turns_hard(25, None, Some(&d)), 50);
+        // Under an explicit system ceiling, the agent is clamped to it.
+        let d2 = decl(None, Some(200));
+        assert_eq!(effective_max_session_turns_hard(25, Some(60), Some(&d2)), 60);
+    }
+
+    #[test]
+    fn per_agent_hard_override_can_tighten_but_is_floored_at_soft() {
+        // A tighter-than-default hard cap is honoured...
+        let d = decl(None, Some(30));
+        assert_eq!(effective_max_session_turns_hard(25, None, Some(&d)), 30);
+        // ...but never drops below the effective soft limit.
+        let d2 = decl(Some(20), Some(5));
+        assert_eq!(effective_max_session_turns_hard(25, None, Some(&d2)), 20);
+    }
+
+    #[test]
+    fn hard_cap_disabled_when_soft_limit_disabled() {
+        assert_eq!(effective_max_session_turns_hard(0, None, None), 0);
+        assert_eq!(effective_max_session_turns_hard(0, Some(100), None), 0);
     }
 }

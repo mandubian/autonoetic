@@ -465,8 +465,19 @@ retention:
 #evidence_mode: errors
 
 # ── Max Session Turns ─────────────────────────────────────────────────
-# Circuit breaker: max turns per session before forced suspension.
+# Soft circuit breaker: max turns per session before a SessionContinue
+# approval is raised. Each operator clearance grants one more window of this
+# size. Per-agent SKILL metadata may lower it (never raise it).
 max_session_turns: 25
+#
+# Absolute per-session turn ceiling that continuation approvals CANNOT lift.
+# Crossing it terminates the session (MaxTurnsReached, a declared
+# budget-exhaustion reason under Ri-0.12); only emergency-stop or operator
+# revoke can intervene. This is the system ceiling for per-agent
+# `max_session_turns_hard` overrides. When unset, defaults to
+# 2 × max_session_turns (so 50 with the default above). Binds delegated
+# (child) sessions exactly as it binds the root.
+#max_session_turns_hard: 50
 
 # ── Loop Guard ───────────────────────────────────────────────────────
 # Per-session circuit breaker for stuck agents. Independent trip conditions:
