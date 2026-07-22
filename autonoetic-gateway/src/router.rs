@@ -3130,6 +3130,18 @@ impl JsonRpcRouter {
                                 })
                             })
                             .collect();
+                        let layers: Vec<serde_json::Value> = bundle
+                            .layers
+                            .iter()
+                            .map(|l| {
+                                serde_json::json!({
+                                    "layer_id": l.layer_id,
+                                    "name": l.name,
+                                    "mount_path": l.mount_path,
+                                    "digest": l.digest,
+                                })
+                            })
+                            .collect();
                         JsonRpcResponse::success(
                             req.id,
                             serde_json::json!({
@@ -3137,6 +3149,7 @@ impl JsonRpcRouter {
                                 "artifact_ref": params.artifact_ref,
                                 "kind": format!("{:?}", bundle.kind),
                                 "files": files,
+                                "layers": layers,
                                 "created_at": bundle.created_at,
                             }),
                         )
@@ -3145,6 +3158,90 @@ impl JsonRpcRouter {
                         req.id,
                         -32000,
                         format!("artifact.list_files failed: {}", e),
+                    ),
+                }
+            }
+
+            "artifact.layer_inspect" => {
+                #[derive(Deserialize)]
+                struct LayerInspectParams {
+                    layer_id: String,
+                    #[serde(default)]
+                    include_files: bool,
+                }
+                let params: LayerInspectParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for artifact.layer_inspect: {}", e),
+                        );
+                    }
+                };
+                let gateway_dir = crate::execution::gateway_root_dir(self.config.as_ref());
+                let layer_store = match crate::layer_store::LayerStore::new(
+                    &gateway_dir,
+                    Default::default(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("layer store open failed: {}", e),
+                        );
+                    }
+                };
+                match layer_store.inspect(&params.layer_id) {
+                    Ok(manifest) => {
+                        // Serialize the manifest fields. `resolved_packages`
+                        // and `approval_scope` use skip_serializing_if so they
+                        // stay absent for layers built before those existed.
+                        let mut payload = serde_json::json!({
+                            "layer_id": manifest.layer_id,
+                            "name": manifest.name,
+                            "digest": manifest.digest,
+                            "file_count": manifest.file_count,
+                            "size_bytes": manifest.size_bytes,
+                            "created_at": manifest.created_at,
+                        });
+                        if !manifest.resolved_packages.is_empty() {
+                            payload["resolved_packages"] = serde_json::to_value(&manifest.resolved_packages)
+                                .unwrap_or(serde_json::Value::Null);
+                        }
+                        if let Some(ref scope) = manifest.approval_scope {
+                            payload["approval_scope"] = serde_json::to_value(scope)
+                                .unwrap_or(serde_json::Value::Null);
+                        }
+                        if params.include_files {
+                            match layer_store.list_files(&params.layer_id, 500) {
+                                Ok((entries, total, truncated)) => {
+                                    let files: Vec<serde_json::Value> = entries
+                                        .iter()
+                                        .map(|e| {
+                                            serde_json::json!({
+                                                "path": e.path,
+                                                "size": e.size,
+                                            })
+                                        })
+                                        .collect();
+                                    payload["files"] = serde_json::Value::Array(files);
+                                    payload["files_total"] = serde_json::json!(total);
+                                    payload["files_truncated"] = serde_json::json!(truncated);
+                                }
+                                Err(e) => {
+                                    payload["files_error"] =
+                                        serde_json::Value::String(format!("{}", e));
+                                }
+                            }
+                        }
+                        JsonRpcResponse::success(req.id, payload)
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("artifact.layer_inspect failed: {}", e),
                     ),
                 }
             }

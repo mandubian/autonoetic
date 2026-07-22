@@ -182,3 +182,65 @@ fn test_artifact_with_different_layers_has_different_id() {
     assert_ne!(bundle1.artifact_id, bundle2.artifact_id);
     assert_ne!(captured1.digest, captured2.digest);
 }
+
+#[test]
+fn test_layered_artifact_layer_files_listable_without_extraction() {
+    // Mirrors what the `artifact.layer_inspect` RPC does: inspect the artifact
+    // manifest for its layer refs, then stream each layer's file listing
+    // without extracting it. This is the integration the room TUI relies on
+    // to show a layer's contents in the detail pane.
+    let td = tempdir().unwrap();
+    let gw_dir = td.path().join(".gateway");
+    fs::create_dir_all(&gw_dir).unwrap();
+
+    let content_store = ContentStore::new(&gw_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gw_dir).unwrap();
+    let layer_store = LayerStore::new(&gw_dir, LayerLimits::default()).unwrap();
+
+    let session_id = "test-session";
+
+    let main_handle = content_store.write(b"import httpx").unwrap();
+    content_store
+        .register_name(session_id, "main.py", &main_handle)
+        .unwrap();
+
+    // A dependency tree captured into a layer.
+    let layer_dir = td.path().join("venv");
+    fs::create_dir_all(layer_dir.join("lib/httpx")).unwrap();
+    fs::write(layer_dir.join("lib/httpx/__init__.py"), b"# httpx").unwrap();
+    fs::write(layer_dir.join("lib/httpx/client.py"), b"# client").unwrap();
+    let captured = layer_store
+        .create_from_dir(&layer_dir, "python-deps", "/opt/venv", None)
+        .unwrap();
+
+    let layers = vec![ArtifactLayer {
+        layer_id: captured.layer_id.clone(),
+        name: captured.name.clone(),
+        mount_path: captured.mount_path.clone(),
+        digest: captured.digest.clone(),
+    }];
+    let bundle = artifact_store
+        .build(&["main.py".to_string()], None, Some(&layers), session_id)
+        .unwrap();
+
+    // Inspect the artifact → its manifest references the layer.
+    let inspected = artifact_store.inspect(&bundle.artifact_id).unwrap();
+    assert_eq!(inspected.layers.len(), 1);
+    let layer_ref = &inspected.layers[0];
+    assert_eq!(layer_ref.layer_id, captured.layer_id);
+
+    // Stream the layer's files without extracting (what the RPC does).
+    let (entries, total, truncated) = layer_store
+        .list_files(&layer_ref.layer_id, 500)
+        .unwrap();
+    assert_eq!(total, 2);
+    assert!(!truncated);
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(paths.iter().any(|p| p.ends_with("__init__.py")));
+    assert!(paths.iter().any(|p| p.ends_with("client.py")));
+
+    // The rich manifest (file_count, size) is also available via inspect().
+    let manifest = layer_store.inspect(&layer_ref.layer_id).unwrap();
+    assert_eq!(manifest.file_count, 2);
+    assert!(manifest.size_bytes > 0);
+}

@@ -1081,11 +1081,22 @@ struct ArtifactFileEntry {
     alias: String,
 }
 
+/// A dependency layer reference shown in the artifact viewer popup.
+#[derive(Clone)]
+struct ArtifactLayerEntry {
+    layer_id: String,
+    name: String,
+    mount_path: String,
+    digest: String,
+}
+
 struct ArtifactViewer {
     artifact_id: String,
     artifact_ref: String,
     kind: String,
     files: Vec<ArtifactFileEntry>,
+    /// Dependency layers attached to this artifact (rendered above files).
+    layers: Vec<ArtifactLayerEntry>,
     selected: usize,
     scroll: u16,
 }
@@ -1124,6 +1135,17 @@ enum LiveContentNode {
         artifact_id: String,
         artifact_ref: String,
     },
+    /// A dependency layer attached to the preceding `Artifact` node.
+    /// Carries back-references like `ArtifactFile` so the `o` handler can act
+    /// on it standalone.
+    ArtifactLayer {
+        layer_id: String,
+        name: String,
+        mount_path: String,
+        digest: String,
+        artifact_id: String,
+        artifact_ref: String,
+    },
     Draft {
         name: String,
         alias: String,
@@ -1153,6 +1175,9 @@ impl LiveContentNode {
             LiveContentNode::ArtifactFile { name, .. } => {
                 format!("  📄 {}", name)
             }
+            LiveContentNode::ArtifactLayer { name, digest, .. } => {
+                format!("  🧱 {} · {}", name, short_digest(digest))
+            }
             LiveContentNode::Draft { name, visibility, .. } => {
                 let vis_tag = match visibility.as_str() {
                     "private" => " 🔒",
@@ -1162,6 +1187,18 @@ impl LiveContentNode {
                 format!("📝 {}{}", name, vis_tag)
             }
         }
+    }
+}
+
+/// Short, human-readable form of a digest for compact TUI display
+/// (e.g. `sha256:abcd1234…` → `abcd1234…`). Falls back to the raw string
+/// when it doesn't start with the `sha256:` prefix.
+fn short_digest(digest: &str) -> String {
+    let core = digest.strip_prefix("sha256:").unwrap_or(digest);
+    if core.len() >= 12 {
+        format!("{}…", &core[..12])
+    } else {
+        core.to_string()
     }
 }
 
@@ -1182,6 +1219,9 @@ struct LiveContentPane {
 /// plan_id is always shown; older versions are hidden by default and can be
 /// toggled with `x` when a plan node is selected.
 folded: std::collections::HashMap<String, bool>,
+/// artifact_id -> folded (children hidden). Defaults to expanded (false),
+/// so artifacts show their files/layers on first open; `x` collapses them.
+artifact_folded: std::collections::HashMap<String, bool>,
 }
 
 impl LiveContentPane {
@@ -1190,6 +1230,7 @@ impl LiveContentPane {
         let mut visible = Vec::new();
         let mut last_plan_id: Option<String> = None;
         let mut last_plan_was_latest = false;
+        let mut last_artifact_id: Option<String> = None;
         for (idx, node) in self.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -1199,11 +1240,13 @@ impl LiveContentPane {
                 } => {
                     last_plan_id = Some(plan_id.clone());
                     last_plan_was_latest = *is_latest;
+                    last_artifact_id = None;
                     if *is_latest || !self.is_folded(plan_id) {
                         visible.push(idx);
                     }
                 }
                 LiveContentNode::PlanStep { .. } => {
+                    last_artifact_id = None;
                     // Only hide steps under a folded older (non-latest) plan.
                     if let Some(ref pid) = last_plan_id {
                         if !last_plan_was_latest && self.is_folded(pid) {
@@ -1212,9 +1255,24 @@ impl LiveContentPane {
                     }
                     visible.push(idx);
                 }
+                LiveContentNode::Artifact { artifact_id, .. } => {
+                    last_plan_id = None;
+                    last_artifact_id = Some(artifact_id.clone());
+                    // Parent is always visible.
+                    visible.push(idx);
+                }
+                LiveContentNode::ArtifactFile { artifact_id, .. }
+                | LiveContentNode::ArtifactLayer { artifact_id, .. } => {
+                    last_artifact_id = Some(artifact_id.clone());
+                    // Hide a file/layer child when its artifact is folded.
+                    if self.is_artifact_folded(artifact_id) {
+                        continue;
+                    }
+                    visible.push(idx);
+                }
                 _ => {
                     last_plan_id = None;
-                    last_plan_was_latest = false;
+                    last_artifact_id = None;
                     visible.push(idx);
                 }
             }
@@ -1265,8 +1323,31 @@ impl LiveContentPane {
         }
     }
 
-    /// Toggle the older-version fold for the plan_id of the currently selected node.
+    /// Toggle the fold for the selected node's parent: older plan versions
+    /// (plan_id-keyed) or an artifact's children (artifact_id-keyed).
     fn toggle_fold(&mut self) {
+        // Artifact case: an Artifact node directly, or an ArtifactFile /
+        // ArtifactLayer child walking back to its nearest preceding Artifact.
+        let artifact_id = match self.nodes.get(self.selected) {
+            Some(LiveContentNode::Artifact { artifact_id, .. }) => Some(artifact_id.clone()),
+            Some(LiveContentNode::ArtifactFile { .. }) | Some(LiveContentNode::ArtifactLayer { .. }) => {
+                self.nodes[..=self.selected]
+                    .iter()
+                    .rev()
+                    .find_map(|n| match n {
+                        LiveContentNode::Artifact { artifact_id, .. } => Some(artifact_id.clone()),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        if let Some(aid) = artifact_id {
+            let entry = self.artifact_folded.entry(aid).or_insert(false);
+            *entry = !*entry;
+            self.clamp_selection_to_visible();
+            return;
+        }
+        // Plan case: a Plan node directly, or a PlanStep walking back.
         let plan_id = match self.nodes.get(self.selected) {
             Some(LiveContentNode::Plan { plan_id, .. }) => plan_id.clone(),
             Some(LiveContentNode::PlanStep { .. }) => {
@@ -1291,6 +1372,12 @@ impl LiveContentPane {
     /// Whether older revisions of `plan_id` are currently folded.
     fn is_folded(&self, plan_id: &str) -> bool {
         self.folded.get(plan_id).copied().unwrap_or(true)
+    }
+
+    /// Whether an artifact's children (files/layers) are currently folded.
+    /// Defaults to expanded (false) — artifacts are visible on first open.
+    fn is_artifact_folded(&self, artifact_id: &str) -> bool {
+        self.artifact_folded.get(artifact_id).copied().unwrap_or(false)
     }
 }
 
@@ -1343,6 +1430,105 @@ fn open_content_draft(
             None
         }
     }
+}
+
+/// Format a byte count as a compact human-readable string (e.g. "1.2 MiB").
+fn humanize_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
+}
+
+/// Build the detail-pane lines for a `artifact.layer_inspect` response.
+/// `name`/`mount_path`/`digest` come from the node (the list_files view); the
+/// richer manifest fields (file_count, size_bytes, resolved_packages,
+/// approval_scope, files) come from the RPC response `v`.
+fn format_layer_inspect_lines(
+    layer_id: &str,
+    name: &str,
+    mount_path: &str,
+    digest: &str,
+    v: &serde_json::Value,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("🧱 Layer: {} [{}]", name, layer_id));
+    lines.push(String::new());
+    lines.push(format!("  digest:      {}", digest));
+    if !mount_path.is_empty() {
+        lines.push(format!("  mount_path:  {}", mount_path));
+    }
+    if let Some(file_count) = v.get("file_count").and_then(|x| x.as_u64()) {
+        lines.push(format!("  file_count:  {}", file_count));
+    }
+    if let Some(size_bytes) = v.get("size_bytes").and_then(|x| x.as_u64()) {
+        lines.push(format!("  size:        {} ({})", humanize_bytes(size_bytes), size_bytes));
+    }
+    if let Some(created_at) = v.get("created_at").and_then(|x| x.as_str()) {
+        lines.push(format!("  created_at:  {}", created_at));
+    }
+
+    // Resolved packages (provenance) — only present for dependency layers.
+    if let Some(packages) = v.get("resolved_packages").and_then(|x| x.as_array()) {
+        if !packages.is_empty() {
+            lines.push(String::new());
+            lines.push(format!("Resolved packages ({}):", packages.len()));
+            for pkg in packages {
+                let pname = pkg.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                let pver = pkg.get("version").and_then(|x| x.as_str()).unwrap_or("?");
+                lines.push(format!("  · {} {}", pname, pver));
+            }
+        }
+    }
+
+    // Approval scope — only present for layers captured with network access.
+    if let Some(scope) = v.get("approval_scope") {
+        if !scope.is_null() {
+            lines.push(String::new());
+            lines.push("Approval scope:".to_string());
+            if let Some(hosts) = scope.get("approved_hosts").and_then(|x| x.as_array()) {
+                let host_list: Vec<&str> = hosts.iter().filter_map(|h| h.as_str()).collect();
+                lines.push(format!("  approved_hosts: {}", host_list.join(", ")));
+            }
+            if let Some(built_by) = scope.get("built_by_agent_id").and_then(|x| x.as_str()) {
+                lines.push(format!("  built_by_agent_id: {}", built_by));
+            }
+            if let Some(captured_at) = scope.get("captured_at").and_then(|x| x.as_str()) {
+                lines.push(format!("  captured_at: {}", captured_at));
+            }
+        }
+    }
+
+    // Capped file listing streamed from the archive (no extraction).
+    if let Some(files) = v.get("files").and_then(|x| x.as_array()) {
+        lines.push(String::new());
+        let total = v.get("files_total").and_then(|x| x.as_u64()).unwrap_or(files.len() as u64);
+        let truncated = v.get("files_truncated").and_then(|x| x.as_bool()).unwrap_or(false);
+        let header = if truncated {
+            format!("Files (showing {}, {} total):", files.len(), total)
+        } else {
+            format!("Files ({}):", total)
+        };
+        lines.push(header);
+        for f in files {
+            let path = f.get("path").and_then(|x| x.as_str()).unwrap_or("?");
+            let size = f.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+            lines.push(format!("  {} ({})", path, humanize_bytes(size)));
+        }
+    } else if let Some(err) = v.get("files_error").and_then(|x| x.as_str()) {
+        lines.push(String::new());
+        lines.push(format!("Files: unavailable ({})", err));
+    }
+
+    lines
 }
 
 /// Open the selected node in the live content pane.
@@ -1412,14 +1598,30 @@ fn open_content_pane_node(
                                 }).collect()
                             })
                             .unwrap_or_default();
-                        if files.is_empty() {
-                            *status = Some("no files in artifact".to_string());
+                        let layers: Vec<ArtifactLayerEntry> = v
+                            .get("layers")
+                            .and_then(|l| l.as_array())
+                            .map(|arr| {
+                                arr.iter().filter_map(|l| {
+                                    let layer_id = l.get("layer_id")?.as_str()?.to_string();
+                                    Some(ArtifactLayerEntry {
+                                        layer_id,
+                                        name: l.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                        mount_path: l.get("mount_path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                        digest: l.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                    })
+                                }).collect()
+                            })
+                            .unwrap_or_default();
+                        if files.is_empty() && layers.is_empty() {
+                            *status = Some("no files or layers in artifact".to_string());
                         } else {
                             *artifact_viewer = Some(ArtifactViewer {
                                 artifact_id,
                                 artifact_ref: artifact_ref.clone(),
                                 kind,
                                 files,
+                                layers,
                                 selected: 0,
                                 scroll: 0,
                             });
@@ -1453,6 +1655,28 @@ fn open_content_pane_node(
                         }
                     }
                     Err(e) => *status = Some(format!("artifact read failed: {e}")),
+                }
+            }
+            LiveContentNode::ArtifactLayer { layer_id, name, mount_path, digest, .. } => {
+                // Inspect the layer's manifest + (capped) file listing, then
+                // render into a detail pane. No extraction — files are streamed
+                // from the compressed archive by the gateway.
+                match rpc(client, "artifact.layer_inspect", serde_json::json!({
+                    "layer_id": layer_id,
+                    "include_files": true,
+                })) {
+                    Ok(v) => {
+                        let lines = format_layer_inspect_lines(
+                            layer_id, name, mount_path, digest, &v,
+                        );
+                        *detail = Some(DetailPane::event(lines, None));
+                        *detail_scroll = 0;
+                        *detail_h_scroll = 0;
+                        *status = Some("layer detail · Esc close".to_string());
+                        *live_content_pane = None;
+                        return true;
+                    }
+                    Err(e) => *status = Some(format!("layer inspect failed: {e}")),
                 }
             }
             LiveContentNode::Draft { name, .. } => {
@@ -4039,6 +4263,28 @@ pub fn run(
                                                     kind,
                                                     name,
                                                 });
+                                                // Dependency layers render before files so deps
+                                                // group under the artifact header. Same response,
+                                                // no extra round-trip.
+                                                if let Some(layers) = v.get("layers").and_then(|l| l.as_array()) {
+                                                    for layer in layers {
+                                                        let layer_id = layer.get("layer_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                                        if layer_id.is_empty() {
+                                                            continue;
+                                                        }
+                                                        let lname = layer.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                                        let mount_path = layer.get("mount_path").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                                        let digest = layer.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                                                        all_nodes.push(LiveContentNode::ArtifactLayer {
+                                                            layer_id,
+                                                            name: lname,
+                                                            mount_path,
+                                                            digest,
+                                                            artifact_id: aid.clone(),
+                                                            artifact_ref: aid.clone(),
+                                                        });
+                                                    }
+                                                }
                                                 if let Some(files) = v.get("files").and_then(|f| f.as_array()) {
                                                     for file in files {
                                                         let fname = file.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
@@ -4112,10 +4358,11 @@ pub fn run(
                                         selected: prev_selected,
                                         scroll: 0,
                                         folded,
+                                        artifact_folded: std::collections::HashMap::new(),
                                     };
                                     pane.clamp_selection_to_visible();
                                     live_content_pane = Some(pane);
-                                    status = Some("content: j/k navigate · Enter/o open · x fold/unfold older versions · Esc close".to_string());
+                                    status = Some("content: j/k navigate · Enter/o open · x fold/unfold · Esc close".to_string());
                                 }
                             }
                         }
@@ -4193,8 +4440,22 @@ pub fn run(
                                                         }).collect()
                                                     })
                                                     .unwrap_or_default();
-                                                if files.is_empty() {
-                                                    status = Some("artifact has no files".to_string());
+                                                let layers: Vec<ArtifactLayerEntry> = v.get("layers")
+                                                    .and_then(|l| l.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter().filter_map(|item| {
+                                                            let layer_id = item.get("layer_id")?.as_str()?.to_string();
+                                                            Some(ArtifactLayerEntry {
+                                                                layer_id,
+                                                                name: item.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                                                mount_path: item.get("mount_path").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                                                digest: item.get("digest").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                                                            })
+                                                        }).collect()
+                                                    })
+                                                    .unwrap_or_default();
+                                                if files.is_empty() && layers.is_empty() {
+                                                    status = Some("artifact has no files or layers".to_string());
                                                 } else {
                                                     let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("unknown").to_string();
                                                     artifact_viewer = Some(ArtifactViewer {
@@ -4202,6 +4463,7 @@ pub fn run(
                                                         artifact_ref,
                                                         kind,
                                                         files,
+                                                        layers,
                                                         selected: 0,
                                                         scroll: 0,
                                                     });
@@ -7266,31 +7528,52 @@ fn draw(
     } else if let Some(ref viewer) = artifact_viewer {
         let area = centered_rect(60, 60, f.area());
         f.render_widget(Clear, area);
-        let lines: Vec<Line> = viewer
-            .files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let marker = if i == viewer.selected { " > " } else { "   " };
-                let style = if i == viewer.selected {
-                    Style::default().fg(Color::Yellow).bg(Color::Black)
-                } else {
-                    Style::default().bg(Color::Black)
-                };
-                Line::from(Span::styled(
-                    format!("{}{}", marker, f.name),
-                    style,
-                ))
-            })
-            .collect();
+        // Build a unified line list: a Layers section (when present) rendered
+        // as non-selectable info lines, followed by the Files section. The
+        // `selected` index only addresses files, so layer + separator lines
+        // are offset accordingly.
+        let mut lines: Vec<Line> = Vec::new();
+        let mut selectable_start = 0usize;
+        if !viewer.layers.is_empty() {
+            for l in &viewer.layers {
+                lines.push(Line::from(Span::styled(
+                    format!("🧱 {} · {}", l.name, short_digest(&l.digest)),
+                    Style::default().fg(Color::Cyan).bg(Color::Black),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("── {} files ──", viewer.files.len()),
+                Style::default().fg(Color::DarkGray).bg(Color::Black),
+            )));
+            selectable_start = lines.len();
+        }
+        for (i, f) in viewer.files.iter().enumerate() {
+            let marker = if i == viewer.selected { " > " } else { "   " };
+            let style = if i == viewer.selected {
+                Style::default().fg(Color::Yellow).bg(Color::Black)
+            } else {
+                Style::default().bg(Color::Black)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}", marker, f.name),
+                style,
+            )));
+        }
+        let layer_tag = if viewer.layers.is_empty() {
+            String::new()
+        } else {
+            format!(" {} layers ·", viewer.layers.len())
+        };
         let title = format!(
-            " {} [{}] {} files [o/Esc] ",
-            viewer.artifact_id, viewer.kind, viewer.files.len()
+            " {} [{}]{} {} files [o/Esc] ",
+            viewer.artifact_id, viewer.kind, layer_tag, viewer.files.len()
         );
         let inner_height = area.height.saturating_sub(2) as usize;
         let max_scroll = lines.len().saturating_sub(inner_height);
-        let scroll = viewer
-            .selected
+        // Scroll so the selected file stays in view, accounting for the layer
+        // header offset.
+        let selected_line = selectable_start + viewer.selected;
+        let scroll = selected_line
             .saturating_sub(inner_height / 2)
             .min(max_scroll) as u16;
         f.render_widget(
@@ -7367,12 +7650,13 @@ fn draw(
         let area = centered_rect(65, 70, f.area());
         f.render_widget(Clear, area);
 
-        // Determine which plan nodes are visible, honoring folding.
-        // The latest version is always shown; older versions are shown only
-        // when their plan_id is unfolded.
+        // Determine which nodes are visible, honoring plan-version folding
+        // and artifact-child folding. Must stay in sync with
+        // `LiveContentPane::visible_indices()`.
         let mut visible_nodes: Vec<(usize, &LiveContentNode)> = Vec::new();
         let mut last_plan_id: Option<String> = None;
         let mut last_plan_was_latest = false;
+        let mut last_artifact_id: Option<String> = None;
         for (idx, node) in pane.nodes.iter().enumerate() {
             match node {
                 LiveContentNode::Plan {
@@ -7382,11 +7666,13 @@ fn draw(
                 } => {
                     last_plan_id = Some(plan_id.clone());
                     last_plan_was_latest = *is_latest;
+                    last_artifact_id = None;
                     if *is_latest || !pane.is_folded(plan_id) {
                         visible_nodes.push((idx, node));
                     }
                 }
                 LiveContentNode::PlanStep { .. } => {
+                    last_artifact_id = None;
                     // Plan steps only appear under the latest plan version;
                     // hide them if the parent plan is a folded older revision.
                     if let Some(ref pid) = last_plan_id {
@@ -7396,9 +7682,23 @@ fn draw(
                     }
                     visible_nodes.push((idx, node));
                 }
+                LiveContentNode::Artifact { artifact_id, .. } => {
+                    last_plan_id = None;
+                    last_artifact_id = Some(artifact_id.clone());
+                    // Parent is always visible.
+                    visible_nodes.push((idx, node));
+                }
+                LiveContentNode::ArtifactFile { artifact_id, .. }
+                | LiveContentNode::ArtifactLayer { artifact_id, .. } => {
+                    last_artifact_id = Some(artifact_id.clone());
+                    if pane.is_artifact_folded(artifact_id) {
+                        continue;
+                    }
+                    visible_nodes.push((idx, node));
+                }
                 _ => {
                     last_plan_id = None;
-                    last_plan_was_latest = false;
+                    last_artifact_id = None;
                     visible_nodes.push((idx, node));
                 }
             }
@@ -7452,12 +7752,43 @@ fn draw(
                         format!("    ▶ {title}")
                     }
                     LiveContentNode::Artifact {
-                        artifact_id: _,
+                        artifact_id,
                         artifact_ref: _,
                         kind,
                         name,
                     } => {
-                        format!("  {name} [{kind}]")
+                        // Count this artifact's direct children (files + layers)
+                        // to decide whether to show a fold hint.
+                        let child_count = pane
+                            .nodes
+                            .iter()
+                            .filter(|n| match n {
+                                LiveContentNode::ArtifactFile { artifact_id: aid, .. }
+                                | LiveContentNode::ArtifactLayer { artifact_id: aid, .. } =>
+                                    aid == artifact_id,
+                                _ => false,
+                            })
+                            .count();
+                        let fold_hint = if child_count > 0 {
+                            if pane.is_artifact_folded(artifact_id) {
+                                format!(" [{child_count} items · x unfold]")
+                            } else {
+                                " [x fold]".to_string()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        format!("  {name} [{kind}]{fold_hint}")
+                    }
+                    LiveContentNode::ArtifactLayer {
+                        layer_id: _,
+                        name,
+                        mount_path: _,
+                        digest,
+                        artifact_id: _,
+                        artifact_ref: _,
+                    } => {
+                        format!("    🧱 {name} · {}", short_digest(digest))
                     }
                     LiveContentNode::ArtifactFile {
                         name,
@@ -8711,6 +9042,7 @@ mod tests {
             selected: 0,
             scroll: 0,
             folded: std::collections::HashMap::from([("plan-1".into(), true)]),
+            artifact_folded: std::collections::HashMap::new(),
         };
 
         let visible = pane.visible_indices();

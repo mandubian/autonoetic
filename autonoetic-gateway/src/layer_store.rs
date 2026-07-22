@@ -31,6 +31,15 @@ const MANIFEST_FILENAME: &str = "manifest.json";
 const ARCHIVE_FILENAME: &str = "contents.tar.zst";
 const INDEX_FILENAME: &str = "index.json";
 
+/// One file entry listed from a layer's compressed archive (no extraction).
+#[derive(Debug, Clone, Serialize)]
+pub struct LayerFileEntry {
+    /// Path inside the archive (relative to the layer root).
+    pub path: String,
+    /// Uncompressed size in bytes.
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerLimits {
     pub max_layer_size_bytes: u64,
@@ -401,6 +410,50 @@ impl LayerStore {
         Ok(manifest)
     }
 
+    /// Stream the file entries from a layer's `contents.tar.zst` **without
+    /// extracting** it. Returns the (capped) entries, the total non-directory
+    /// file count, and whether the listing was truncated at `limit`.
+    ///
+    /// Directory entries (paths ending in `/`) are skipped. The total counts
+    /// every non-directory entry in the archive so `truncated` is accurate
+    /// even when the caller's limit cuts the listing short.
+    pub fn list_files(
+        &self,
+        layer_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<LayerFileEntry>, usize, bool)> {
+        let archive_path = self.layers_dir.join(layer_id).join(ARCHIVE_FILENAME);
+        if !archive_path.exists() {
+            anyhow::bail!("layer '{}' archive not found", layer_id);
+        }
+        let file = File::open(&archive_path)?;
+        let reader = BufReader::new(file);
+        let decoder = zstd::Decoder::new(reader)?;
+        let mut archive = TarArchive::new(decoder);
+
+        let mut entries_out = Vec::new();
+        let mut total = 0usize;
+        let mut truncated = false;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            // Skip directory entries — tar marks them with a trailing `/`.
+            if entry.header().entry_type().is_dir() {
+                continue;
+            }
+            total += 1;
+            if entries_out.len() < limit {
+                let path = entry.path()?.to_string_lossy().to_string();
+                let size = entry.header().size().unwrap_or(0);
+                // Drain so the iterator can advance without reading the body.
+                let _ = entry.read_to_end(&mut Vec::new());
+                entries_out.push(LayerFileEntry { path, size });
+            } else {
+                truncated = true;
+            }
+        }
+        Ok((entries_out, total, truncated))
+    }
+
     pub fn exists_by_digest(&self, digest: &str) -> bool {
         let index = self.index.lock().unwrap();
         index.entries.contains_key(digest)
@@ -706,5 +759,70 @@ mod tests {
             fs::read_to_string(extract_dir.join("a.txt")).unwrap(),
             "content"
         );
+    }
+
+    #[test]
+    fn test_list_files_streams_archive_without_extraction() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+
+        // A source tree with nested directories and files.
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("lib/httpx")).unwrap();
+        fs::write(source.join("lib/httpx/__init__.py"), b"# httpx").unwrap();
+        fs::write(source.join("lib/httpx/client.py"), b"# client").unwrap();
+        fs::write(source.join("main.py"), b"print('hi')").unwrap();
+
+        let captured = store
+            .create_from_dir(&source, "python-deps", "/opt/venv", None)
+            .unwrap();
+
+        // list_files streams the archive — directories are skipped, only
+        // regular files appear, with their uncompressed sizes.
+        let (entries, total, truncated) = store.list_files(&captured.layer_id, 500).unwrap();
+        assert_eq!(total, 3);
+        assert!(!truncated);
+        assert_eq!(entries.len(), 3);
+
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        // All three files present (order is archive order, not sorted).
+        assert!(paths.iter().any(|p| p.ends_with("main.py")));
+        assert!(paths.iter().any(|p| p.ends_with("__init__.py")));
+        assert!(paths.iter().any(|p| p.ends_with("client.py")));
+        // Sizes match uncompressed content lengths.
+        let main = entries.iter().find(|e| e.path.ends_with("main.py")).unwrap();
+        assert_eq!(main.size, b"print('hi')".len() as u64);
+    }
+
+    #[test]
+    fn test_list_files_respects_limit_and_reports_truncation() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+
+        let source = temp.path().join("source");
+        fs::create_dir_all(&source).unwrap();
+        for i in 0..5 {
+            fs::write(source.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let captured = store
+            .create_from_dir(&source, "deps", "/tmp/d", None)
+            .unwrap();
+
+        // Limit below the file count: entries are capped, total is accurate,
+        // and truncated is flagged.
+        let (entries, total, truncated) = store.list_files(&captured.layer_id, 2).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(total, 5);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn test_list_files_missing_layer_errors() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+
+        let err = store.list_files("layer_nope", 10).unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 }
