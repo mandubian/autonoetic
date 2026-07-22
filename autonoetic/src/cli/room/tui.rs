@@ -615,22 +615,9 @@ fn build_header(
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
     }
-    // In-flight async tool calls: `⋯2 spawn,workflow_wait`. Names help identify
-    // what the session is waiting on; cap the list so the header stays compact.
-    if !stats.pending_calls.is_empty() {
-        let n = stats.pending_calls.len();
-        let mut names: Vec<&str> = Vec::new();
-        for name in &stats.pending_calls {
-            let short = name.as_str();
-            if !names.contains(&short) {
-                names.push(short);
-            }
-            if names.len() == 2 {
-                break;
-            }
-        }
-        let more = if n > names.len() { ",…" } else { "" };
-        right_parts.push(format!("⋯{n} {}{}", names.join(","), more));
+    // In-flight async tool calls: `⋯2 spawn,workflow_wait`.
+    if let Some(chip) = pending_chip(&stats.pending_calls) {
+        right_parts.push(chip);
     }
     let floor_ind = format!("{}{}", render::altitude_glyph(floor), floor.as_str());
     right_parts.push(floor_ind);
@@ -650,6 +637,29 @@ fn build_header(
         let pad = avail - left_w - right_w;
         format!("{}{}{}", left, " ".repeat(pad), right)
     }
+}
+
+/// Header chip for in-flight async tool calls: `⋯N name1,name2` (up to two
+/// distinct names). The count `N` is total pending calls; the trailing `,…`
+/// appears only when there are more *distinct* tool names than shown — repeated
+/// calls of a displayed tool (e.g. 3×workflow_wait → `⋯3 workflow_wait`) don't
+/// add one. Empty names are skipped. Returns `None` when nothing is pending.
+fn pending_chip(pending: &[String]) -> Option<String> {
+    if pending.is_empty() {
+        return None;
+    }
+    const MAX_NAMES: usize = 2;
+    let n = pending.len();
+    let mut distinct: Vec<&str> = Vec::new();
+    for name in pending {
+        let short = name.as_str();
+        if !short.is_empty() && !distinct.contains(&short) {
+            distinct.push(short);
+        }
+    }
+    let shown = distinct.len().min(MAX_NAMES);
+    let more = if distinct.len() > shown { ",…" } else { "" };
+    Some(format!("⋯{n} {}{}", distinct[..shown].join(","), more))
 }
 
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
@@ -4518,6 +4528,7 @@ pub fn run(
         let turn_boundaries = annotate_turns_and_in_flight(
             &mut indexed,
             &visible,
+            &entries,
             &open_turns,
             show_reasoning,
             &extra_inflight_rows,
@@ -4840,6 +4851,12 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
     visible: &[SessionTimelineEntry],
+    // Full, unfiltered timeline — used only to build the async back-reference
+    // map. It must not be floor-filtered: a `tool.requested` is `Detail` and is
+    // often filtered out of `visible`, while its `tool.completed` gets bumped to
+    // `Attention` on failure and stays visible. Pass `visible` here when there
+    // is no separate unfiltered slice (e.g. tests).
+    all_entries: &[SessionTimelineEntry],
     open_turns: &HashSet<String>,
     show_reasoning: bool,
     extra_inflight_rows: &HashSet<usize>,
@@ -4879,7 +4896,7 @@ fn annotate_turns_and_in_flight(
     // `tool.completed` that lands in a later turn (async: approval-gated tools,
     // workflow_wait, resumed continuations) can point back to its origin.
     let mut requested_turn: HashMap<String, u64> = HashMap::new();
-    for e in visible {
+    for e in all_entries {
         if e.event_type == "tool.requested" {
             if let (Some(cid), Some(t)) = (
                 payload_field_str(e, "call_id"),
@@ -8727,6 +8744,7 @@ mod tests {
         let boundaries = annotate_turns_and_in_flight(
             &mut rows,
             &[],
+            &[],
             &open,
             true,
             &HashSet::new(),
@@ -8768,7 +8786,7 @@ mod tests {
             spec_with_turn(None, "no turn"),
             spec_with_turn(Some("turn-000005"), "t5"),
         ];
-        annotate_turns_and_in_flight(&mut rows, &[], &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
         let indices: Vec<Option<u32>> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8797,6 +8815,7 @@ mod tests {
         )]);
         annotate_turns_and_in_flight(
             &mut rows,
+            &[],
             &[],
             &HashSet::new(),
             true,
@@ -8875,6 +8894,7 @@ mod tests {
         annotate_turns_and_in_flight(
             &mut rows,
             &visible,
+            &visible,
             &HashSet::new(),
             true,
             &HashSet::new(),
@@ -8884,6 +8904,59 @@ mod tests {
         let RenderedRow::Line(spec) = &rows[0].0 else { panic!("expected line row") };
         assert!(
             spec.headline.contains("⟵ requested T1"),
+            "headline: {}",
+            spec.headline
+        );
+    }
+
+    #[test]
+    fn pending_chip_ellipsis_reflects_distinct_names_not_raw_count() {
+        assert_eq!(pending_chip(&[]), None);
+        // Three of the same tool → count 3, one name, no ellipsis.
+        assert_eq!(
+            pending_chip(&["workflow_wait".into(), "workflow_wait".into(), "workflow_wait".into()]),
+            Some("⋯3 workflow_wait".to_string())
+        );
+        // Three distinct → two shown, ellipsis for the hidden third.
+        assert_eq!(
+            pending_chip(&["a".into(), "b".into(), "c".into()]),
+            Some("⋯3 a,b,…".to_string())
+        );
+        // Exactly two distinct → both shown, no ellipsis.
+        assert_eq!(
+            pending_chip(&["a".into(), "b".into()]),
+            Some("⋯2 a,b".to_string())
+        );
+    }
+
+    #[test]
+    fn back_reference_uses_unfiltered_entries_when_request_below_floor() {
+        // Real-world failure case: the `tool.requested` (Detail) is filtered out
+        // of `visible`, but its failed `tool.completed` (bumped to Attention) is
+        // shown. The map is built from `all_entries`, so the back-reference still
+        // resolves. `visible` here omits the request; `all_entries` includes it.
+        let all_entries = vec![
+            tool_entry("tool.requested", Some("turn-000002"), "sandbox_exec", Some("cX")),
+            tool_entry("tool.completed", Some("turn-000007"), "sandbox_exec", Some("cX")),
+        ];
+        let visible = vec![all_entries[1].clone()];
+        let mut rows: Vec<(RenderedRow, RowSource)> = vec![(
+            RenderedRow::Line(render::render_spec(&visible[0])),
+            RowSource::Single(0),
+        )];
+        annotate_turns_and_in_flight(
+            &mut rows,
+            &visible,
+            &all_entries,
+            &HashSet::new(),
+            true,
+            &HashSet::new(),
+            "r",
+            &HashMap::new(),
+        );
+        let RenderedRow::Line(spec) = &rows[0].0 else { panic!("expected line row") };
+        assert!(
+            spec.headline.contains("⟵ requested T2"),
             "headline: {}",
             spec.headline
         );
@@ -8902,6 +8975,7 @@ mod tests {
         )];
         annotate_turns_and_in_flight(
             &mut rows,
+            &visible,
             &visible,
             &HashSet::new(),
             true,
@@ -8945,7 +9019,7 @@ mod tests {
         ];
         let open: HashSet<String> = HashSet::new();
         let extra: HashSet<usize> = [1].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &extra, "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &open, true, &extra, "root", &HashMap::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8964,7 +9038,7 @@ mod tests {
             spec_with_turn(Some("B"), "late"),
         ];
         let open: HashSet<String> = HashSet::new();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &open, true, &HashSet::new(), "root", &HashMap::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8984,7 +9058,7 @@ mod tests {
             spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, false, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &open, false, &HashSet::new(), "root", &HashMap::new());
         let shown: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -9026,7 +9100,7 @@ mod tests {
         ];
         let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &visible, &open, true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &visible, &visible, &open, true, &HashSet::new(), "root", &HashMap::new());
 
         assert_eq!(rows.len(), 1);
         assert!(
@@ -9064,7 +9138,7 @@ mod tests {
             entry("turn.end", Some("A")),
         ];
         let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
-        annotate_turns_and_in_flight(&mut rows, &visible, &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &visible, &visible, &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
 
         assert!(
             matches!(

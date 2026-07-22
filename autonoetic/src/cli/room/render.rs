@@ -1293,7 +1293,7 @@ fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Opt
     let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
     let key = match tool_name {
         "artifact_inspect" => args.get("artifact_ref").and_then(|x| x.as_str()),
-        "content_write" => args.get("name").and_then(|x| x.as_str()),
+        "content_write" | "content_patch" => args.get("name").and_then(|x| x.as_str()),
         "agent_spawn" => args.get("agent_id").and_then(|x| x.as_str()),
         "sandbox_exec" => args.get("command").and_then(|x| x.as_str()),
         "artifact_exec" => args.get("entrypoint").and_then(|x| x.as_str()),
