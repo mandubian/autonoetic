@@ -638,6 +638,34 @@ pub fn validate_promotion_record(
                 }
             };
 
+            // A record exists for the artifact, but no agent has recorded a
+            // verdict in the requested role slot (e.g. the spawn metadata
+            // named the wrong role, or the child never called
+            // promotion_record). Report this as *missing* (repairable), not
+            // as "recorded pass=false" — the latter sent planners chasing
+            // phantom rejections when the child's real verdict passed under
+            // its own role.
+            if !record.has_role_verdict(promotion_role) {
+                let present = record.roles_with_verdicts();
+                let present_str = if present.is_empty() {
+                    "none".to_string()
+                } else {
+                    present.join(", ")
+                };
+                violations.push(ValidationViolation {
+                    rule: "promotion_record_missing".into(),
+                    message: format!(
+                        "no verdict recorded for role '{}' on artifact '{}' (roles with verdicts: {})",
+                        promotion_role, promotion_artifact_id, present_str
+                    ),
+                    repair_hint: format!(
+                        "Call promotion_record with artifact_id='{}', role='{}', pass=true (or false if validation failed). Example: promotion_record({{\"artifact_id\": \"{}\", \"role\": \"{}\", \"pass\": true}})",
+                        promotion_artifact_id, promotion_role, promotion_artifact_id, promotion_role
+                    ),
+                });
+                return violations;
+            }
+
             if !passed {
                 let findings_summary = if findings.is_empty() {
                     "no findings provided".to_string()
@@ -2372,6 +2400,47 @@ mod tests {
         let violations = validate_promotion_record(None, "art_x", "evaluator");
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule, "promotion_record");
+    }
+
+    #[test]
+    fn test_promotion_record_wrong_role_is_missing_not_failed() {
+        // Regression: a unit_test_runner recorded pass=true under its own role,
+        // but the spawn metadata omitted promotion_role, so the gate defaulted
+        // to "evaluator". Previously this produced a misleading terminal
+        // "evaluator recorded pass=false: no findings provided" error. It must
+        // now be reported as a repairable *missing* verdict that names the
+        // roles that actually recorded.
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::runtime::promotion_store::PromotionStore::new(temp.path()).unwrap();
+        use autonoetic_types::promotion::{Finding, FindingSeverity, PromotionRole};
+        store
+            .record_promotion(
+                "art_utr".to_string(),
+                None,
+                None,
+                PromotionRole::UnitTestRunner,
+                "unit_test_runner.default",
+                true,
+                vec![Finding {
+                    severity: FindingSeverity::Info,
+                    description: "11/11 tests passed".to_string(),
+                    evidence: Some("Ran 11 tests OK".to_string()),
+                }],
+                None,
+                Some("trace-1".to_string()),
+            )
+            .unwrap();
+
+        let violations = validate_promotion_record(Some(temp.path()), "art_utr", "evaluator");
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].rule, "promotion_record_missing");
+        assert!(violations[0].message.contains("evaluator"));
+        assert!(violations[0].message.contains("unit_test_runner"));
+        assert!(!violations[0].message.contains("pass=false"));
+
+        // The correct role still validates cleanly.
+        let violations = validate_promotion_record(Some(temp.path()), "art_utr", "unit_test_runner");
+        assert!(violations.is_empty());
     }
 
     #[test]

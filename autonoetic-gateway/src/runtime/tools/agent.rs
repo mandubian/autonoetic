@@ -31,6 +31,30 @@ fn target_agent_is_singleton(agents_dir: &Path, agent_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// When the caller requests a promotion gate (`require_promotion_record`)
+/// but omits `promotion_role`, derive it mechanically from the target agent
+/// id. The validation gate otherwise defaults to `"evaluator"` and reports a
+/// phantom `pass=false` even when the child recorded a passing verdict under
+/// its own role (observed: unit_test_runner/auditor/static_evaluator tasks
+/// marked Failed despite all three recording `pass=true`).
+fn fill_promotion_role_if_missing(metadata: &mut serde_json::Value, target_agent_id: &str) {
+    let requires_gate = metadata
+        .get("require_promotion_record")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let role_present = metadata
+        .get("promotion_role")
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !requires_gate || role_present {
+        return;
+    }
+    if let Some(role) = autonoetic_types::promotion::PromotionRole::for_agent_id(target_agent_id) {
+        metadata["promotion_role"] = serde_json::json!(role.as_str());
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SpawnAgentArgs {
     agent_id: String,
@@ -697,6 +721,7 @@ the single join already does that."
             if let Some(ref rev_id) = args.revision_id {
                 spawn_metadata["_autonoetic_spawn_revision_id"] = serde_json::json!(rev_id);
             }
+            fill_promotion_role_if_missing(&mut spawn_metadata, &target_agent_id);
             // Persist the RAW spawn message (before [Context]/[Metadata] framing
             // is added for the child) so the smoke-test gate can compare the
             // operator's `smoke_test_input` against what was actually sent,
@@ -1716,6 +1741,74 @@ fn log_io_contract_enforcement(
             session_id = session_id,
             "Failed to persist contract enforcement event"
         );
+    }
+}
+
+#[cfg(test)]
+mod promotion_role_derivation_tests {
+    use super::fill_promotion_role_if_missing;
+
+    #[test]
+    fn derives_role_from_target_agent_when_gate_required() {
+        let mut meta = serde_json::json!({
+            "require_promotion_record": true,
+            "promotion_artifact_ref": "ar.abc123"
+        });
+        fill_promotion_role_if_missing(&mut meta, "unit_test_runner.default");
+        assert_eq!(meta["promotion_role"], "unit_test_runner");
+
+        let mut meta = serde_json::json!({ "require_promotion_record": true });
+        fill_promotion_role_if_missing(&mut meta, "auditor.default");
+        assert_eq!(meta["promotion_role"], "auditor");
+
+        let mut meta = serde_json::json!({ "require_promotion_record": true });
+        fill_promotion_role_if_missing(&mut meta, "static_evaluator.default");
+        assert_eq!(meta["promotion_role"], "static_evaluator");
+
+        let mut meta = serde_json::json!({ "require_promotion_record": true });
+        fill_promotion_role_if_missing(&mut meta, "sealed_evaluator.default");
+        assert_eq!(meta["promotion_role"], "sealed_evaluator");
+    }
+
+    #[test]
+    fn preserves_explicit_promotion_role() {
+        let mut meta = serde_json::json!({
+            "require_promotion_record": true,
+            "promotion_role": "auditor"
+        });
+        fill_promotion_role_if_missing(&mut meta, "unit_test_runner.default");
+        assert_eq!(meta["promotion_role"], "auditor");
+    }
+
+    #[test]
+    fn derives_when_role_is_null_or_empty() {
+        let mut meta = serde_json::json!({
+            "require_promotion_record": true,
+            "promotion_role": null
+        });
+        fill_promotion_role_if_missing(&mut meta, "auditor.default");
+        assert_eq!(meta["promotion_role"], "auditor");
+
+        let mut meta = serde_json::json!({
+            "require_promotion_record": true,
+            "promotion_role": ""
+        });
+        fill_promotion_role_if_missing(&mut meta, "auditor.default");
+        assert_eq!(meta["promotion_role"], "auditor");
+    }
+
+    #[test]
+    fn no_op_without_gate_requirement() {
+        let mut meta = serde_json::json!({ "delegated_role": "coder" });
+        fill_promotion_role_if_missing(&mut meta, "unit_test_runner.default");
+        assert!(meta.get("promotion_role").is_none());
+    }
+
+    #[test]
+    fn no_op_for_non_gate_agent() {
+        let mut meta = serde_json::json!({ "require_promotion_record": true });
+        fill_promotion_role_if_missing(&mut meta, "coder.default");
+        assert!(meta.get("promotion_role").is_none());
     }
 }
 
