@@ -1320,6 +1320,26 @@ fn spawn_headline(agent_id: Option<&str>) -> String {
     }
 }
 
+/// Headline for `sandbox_exec` / `artifact_exec` rows. Leads with `▶` and the
+/// command (sandbox) or `<entrypoint> <args> · <artifact_ref>` (artifact) so the
+/// operator sees *what ran* at a glance; the result/output lands on the `↳`
+/// detail line (see the exec arm of `detail_preview`).
+fn exec_headline(preview: Option<&str>) -> String {
+    match preview.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(cmd) => format!("▶ {cmd}"),
+        None => "▶ run".to_string(),
+    }
+}
+
+/// Headline for `content_write` / `content_patch` rows: `✎ wrote <path>` so a
+/// file creation reads as an action with its target, not a buried `(name)` suffix.
+fn write_headline(verb: &str, path: Option<&str>) -> String {
+    match path.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => format!("✎ {verb} {p}"),
+        None => format!("✎ {verb} file"),
+    }
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -1415,7 +1435,14 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                         .as_deref(),
                 );
             }
-            match extract_tool_key_param(&p, &tool_name) {
+            let kp = extract_tool_key_param(&p, &tool_name);
+            match tool_name.as_str() {
+                "sandbox_exec" | "artifact_exec" => return exec_headline(kp.as_deref()),
+                "content_write" => return write_headline("write", kp.as_deref()),
+                "content_patch" => return write_headline("patch", kp.as_deref()),
+                _ => {}
+            }
+            match kp {
                 Some(kp) => format!("{tool_name} → {kp}"),
                 None => format!("{tool_name} requested"),
             }
@@ -1433,8 +1460,19 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                         .as_deref(),
                 );
             }
+            let key_param = extract_tool_key_param(&p, &tool_name);
+            // Action-first headlines: `▶ <command>` for exec, `✎ wrote <path>`
+            // for file mutations. Output/result stays on the detail line.
+            match tool_name.as_str() {
+                "sandbox_exec" | "artifact_exec" => {
+                    return exec_headline(key_param.as_deref())
+                }
+                "content_write" => return write_headline("wrote", key_param.as_deref()),
+                "content_patch" => return write_headline("patched", key_param.as_deref()),
+                _ => {}
+            }
             let summary = extract_tool_summary(p.as_ref());
-            let key_suffix = extract_tool_key_param(&p, &tool_name)
+            let key_suffix = key_param
                 .map(|kp| format!(" ({kp})"))
                 .unwrap_or_default();
             match summary {
@@ -1721,9 +1759,31 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
             // or args_preview. For artifact_inspect/agent_spawn, show the key
             // argument from args_preview (extracted by the tracer).
             match tool.as_deref() {
-                Some("content_write") => s("args_preview")
-                    .or_else(|| s("name")).or_else(|| s("path"))
-                    .map(|p| cap_preview(&p, 80)),
+                // The path is already in the headline (`✎ wrote <path>`); use the
+                // detail line for the store ref / sandbox path so the operator can
+                // reference the file, and fall back to a result summary. Suppress a
+                // line that would only repeat the path.
+                Some("content_write") | Some("content_patch") => {
+                    let result_obj = p.as_ref().and_then(|v| v.get("result")).and_then(|r| {
+                        match r {
+                            serde_json::Value::String(raw) => {
+                                serde_json::from_str::<serde_json::Value>(raw).ok()
+                            }
+                            serde_json::Value::Object(_) => Some(r.clone()),
+                            _ => None,
+                        }
+                    });
+                    let from_result = |k: &str| {
+                        result_obj
+                            .as_ref()
+                            .and_then(|r| r.get(k).and_then(|x| x.as_str()).map(str::to_string))
+                    };
+                    from_result("summary")
+                        .or_else(|| from_result("sandbox_path"))
+                        .or_else(|| from_result("ref"))
+                        .filter(|d| !d.trim().is_empty())
+                        .map(|d| cap_preview(&d, 80))
+                }
                 Some("artifact_inspect") => s("args_preview")
                     .or_else(|| s("artifact_ref"))
                     .map(|p| cap_preview(&p, 80)),
@@ -3599,8 +3659,9 @@ mod tests {
                 "arguments": r#"{"command":"pytest -k foo"}"#,
             }),
         );
+        // Exec rows lead with `▶ <command>` so the operator sees what ran.
         assert!(
-            render_line(&e).contains("sandbox_exec → pytest -k foo"),
+            render_line(&e).contains("▶ pytest -k foo"),
             "got: {}",
             render_line(&e)
         );
@@ -4444,6 +4505,48 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_artifact_exec_shows_command_in_headline_and_output_in_detail() {
+        // The tracer packs `<entrypoint> <args> · <artifact_ref>` into args_preview;
+        // the headline leads with `▶` so the operator sees what ran, and the detail
+        // carries the captured stdout.
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "artifact_exec",
+                "args_preview": "main.py --fast · ar.abc123",
+                "result": r#"{"ok":true,"command_succeeded":true,"stdout":"42 passed"}"#
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.starts_with('▶'), "headline: {}", spec.headline);
+        assert!(spec.headline.contains("main.py --fast"), "headline: {}", spec.headline);
+        assert!(spec.headline.contains("ar.abc123"), "headline: {}", spec.headline);
+        assert_eq!(spec.detail.as_deref(), Some("42 passed"));
+    }
+
+    #[test]
+    fn render_spec_content_write_detail_shows_ref_not_redundant_path() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "content_write",
+                "args_preview": "skills/weather/SKILL.md",
+                "result": r#"{"ok":true,"sandbox_path":"/tmp/skills/weather/SKILL.md"}"#
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("skills/weather/SKILL.md"));
+        // Detail surfaces the sandbox path (useful, non-redundant), not the name again.
+        assert_eq!(spec.detail.as_deref(), Some("/tmp/skills/weather/SKILL.md"));
+    }
+
+    #[test]
     fn render_spec_extracts_agent_spawn_message_preview() {
         let e = entry(
             SessionRole::Planner,
@@ -4544,11 +4647,14 @@ mod tests {
             }),
         );
         let write_spec = render_spec(&write);
-        assert!(write_spec.headline.contains("skills/weather/SKILL.md"));
-        assert_eq!(
-            write_spec.detail.as_deref(),
-            Some("skills/weather/SKILL.md")
+        // File writes read as `✎ wrote <path>`; the path is in the headline, so
+        // the detail line (which would only repeat it) is suppressed.
+        assert!(
+            write_spec.headline.contains("wrote") && write_spec.headline.contains("skills/weather/SKILL.md"),
+            "headline: {}",
+            write_spec.headline
         );
+        assert_eq!(write_spec.detail.as_deref(), None);
     }
 
     #[test]

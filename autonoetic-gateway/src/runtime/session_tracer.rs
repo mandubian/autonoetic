@@ -1201,20 +1201,44 @@ fn cap_chars(value: &str, max: usize) -> String {
 /// agent id) and does not need truncation.
 fn extract_tool_args_preview(tool_name: &str, arguments: &str) -> Option<String> {
     let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
-    let preview = match tool_name {
-        "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str()),
-        "content_write" => args.get("name").and_then(|v| v.as_str()),
-        "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str()),
-        "sandbox_exec" => args.get("command").and_then(|v| v.as_str()),
-        "artifact_exec" => args.get("entrypoint").and_then(|v| v.as_str()),
+    let preview: String = match tool_name {
+        "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str())?.to_string(),
+        "content_write" | "content_patch" => args.get("name").and_then(|v| v.as_str())?.to_string(),
+        "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str())?.to_string(),
+        "sandbox_exec" => args.get("command").and_then(|v| v.as_str())?.to_string(),
+        // Surface what is actually executed AND where: `<entrypoint> <args> · <artifact_ref>`.
+        // The entrypoint+args lead so they survive the length cap; the artifact ref
+        // (which tells the operator *which* bundle ran) trails.
+        "artifact_exec" => {
+            let entrypoint = args.get("entrypoint").and_then(|v| v.as_str())?;
+            let call_args = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let cmd = if call_args.trim().is_empty() {
+                entrypoint.to_string()
+            } else {
+                format!("{entrypoint} {call_args}")
+            };
+            match args.get("artifact_ref").and_then(|v| v.as_str()) {
+                Some(art) if !art.is_empty() => format!("{cmd} · {art}"),
+                _ => cmd,
+            }
+        }
         _ => return None,
     };
-    preview.map(|s| {
-        if s.len() > 80 {
-            format!("{}…", &s[..79])
-        } else {
-            s.to_string()
-        }
+    // Char-based cap (byte slicing could split a multi-byte boundary and panic).
+    Some(if preview.chars().count() > 80 {
+        let truncated: String = preview.chars().take(79).collect();
+        format!("{truncated}…")
+    } else {
+        preview
     })
 }
 
@@ -1518,10 +1542,20 @@ mod tests {
         assert_eq!(
             extract_tool_args_preview(
                 "artifact_exec",
+                r#"{"artifact_ref":"ar.abc123","entrypoint":"main.py","args":["--fast","x"]}"#
+            )
+            .as_deref(),
+            Some("main.py --fast x · ar.abc123"),
+            "artifact_exec should preview entrypoint + args + which artifact ran"
+        );
+        assert_eq!(
+            extract_tool_args_preview(
+                "artifact_exec",
                 r#"{"artifact_ref":"ar.abc123","entrypoint":"main.py"}"#
             )
             .as_deref(),
-            Some("main.py")
+            Some("main.py · ar.abc123"),
+            "artifact_exec without args still names the artifact"
         );
     }
 

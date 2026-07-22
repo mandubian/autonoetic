@@ -610,7 +610,7 @@ fn build_header(
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
     let mut right_parts = Vec::new();
     if stats.llm_calls > 0 {
-        right_parts.push(format!("{}→{} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
+        right_parts.push(format!("{} → {} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
     }
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
@@ -4749,7 +4749,7 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
     let short = render::agent_id_short(&lineage.target_agent_id);
     match local_turn {
         Some(n) if n > 1 => format!("{}.{}", lineage.spawned_at_turn, n),
-        _ => format!("{}→{}", lineage.spawned_at_turn, short),
+        _ => format!("{} → {}", lineage.spawned_at_turn, short),
     }
 }
 
