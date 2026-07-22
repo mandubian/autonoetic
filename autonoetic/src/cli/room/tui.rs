@@ -446,6 +446,34 @@ fn copy_clipboard(compose: &ComposeInput, clipboard: &mut Option<arboard::Clipbo
     }
 }
 
+/// Copy `text` to the system clipboard via an OSC 52 terminal escape. This is
+/// the fallback when `arboard` has no display server (headless boxes, SSH
+/// without X11/Wayland forwarding): the sequence is interpreted by the terminal
+/// emulator, so the clipboard lands on the machine running the terminal. When
+/// inside tmux, the sequence is wrapped in a DCS passthrough (also requires
+/// `set-clipboard on`). Success here means "written to the terminal", not
+/// "confirmed stored" — terminals that don't support OSC 52 silently ignore it.
+fn copy_via_osc52(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let payload = osc52_sequence(text, std::env::var_os("TMUX").is_some());
+    let mut out = std::io::stdout();
+    out.write_all(payload.as_bytes())?;
+    out.flush()
+}
+
+/// Build the OSC 52 clipboard-set escape for `text`. When `in_tmux`, wrap it in
+/// a tmux DCS passthrough (doubling every ESC in the inner sequence).
+fn osc52_sequence(text: &str, in_tmux: bool) -> String {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let inner = format!("\x1b]52;c;{b64}\x07");
+    if in_tmux {
+        format!("\x1bPtmux;{}\x1b\\", inner.replace('\x1b', "\x1b\x1b"))
+    } else {
+        inner
+    }
+}
+
 /// Drill-down pane: raw event metadata or a structured plan review.
 struct DetailPane {
     /// Pre-rendered lines (markdown expanded once at open — not every frame).
@@ -3671,22 +3699,25 @@ pub fn run(
                                         }
                                     }
                                 });
-                                match (copy_text, clipboard.as_mut()) {
-                                    (Some(text), Some(cb)) => match cb.set_text(&text) {
-                                        Ok(_) => {
-                                            status = Some(format!(
-                                                "copied: {}",
-                                                render::one_line(&text, 60)
-                                            ))
-                                        }
-                                        Err(_) => {
-                                            status = Some("✗ clipboard write failed".into())
-                                        }
-                                    },
-                                    (_, None) => {
-                                        status = Some("✗ clipboard unavailable".into())
+                                if let Some(text) = copy_text {
+                                    // Prefer the OS clipboard (arboard). It needs a
+                                    // display server, so on headless / SSH hosts it's
+                                    // unavailable — fall back to an OSC 52 escape,
+                                    // which routes through the terminal emulator and
+                                    // works remotely when the terminal supports it.
+                                    let via_os = clipboard
+                                        .as_mut()
+                                        .map(|cb| cb.set_text(&text).is_ok())
+                                        .unwrap_or(false);
+                                    let preview = render::one_line(&text, 60);
+                                    if via_os {
+                                        status = Some(format!("copied: {preview}"));
+                                    } else if copy_via_osc52(&text).is_ok() {
+                                        status =
+                                            Some(format!("copied (osc52): {preview}"));
+                                    } else {
+                                        status = Some("✗ copy failed".into());
                                     }
-                                    (None, _) => {}
                                 }
                             }
                         }
@@ -9241,6 +9272,24 @@ mod tests {
             "headline: {}",
             spec.headline
         );
+    }
+
+    #[test]
+    fn osc52_sequence_encodes_and_wraps_for_tmux() {
+        use base64::Engine;
+        let text = "art:sha256:abc123";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+
+        // Bare terminal: OSC 52 set-clipboard, BEL-terminated.
+        let bare = osc52_sequence(text, false);
+        assert_eq!(bare, format!("\x1b]52;c;{b64}\x07"));
+
+        // tmux: DCS passthrough wrapper, every inner ESC doubled, ST-terminated.
+        let wrapped = osc52_sequence(text, true);
+        assert!(wrapped.starts_with("\x1bPtmux;"), "tmux DCS prefix");
+        assert!(wrapped.ends_with("\x1b\\"), "ST terminator");
+        assert!(wrapped.contains(&b64), "payload preserved");
+        assert!(wrapped.contains("\x1b\x1b]52"), "inner ESC doubled");
     }
 
     #[test]

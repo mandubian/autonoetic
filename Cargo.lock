@@ -203,6 +203,7 @@ dependencies = [
  "autonoetic-gateway",
  "autonoetic-mcp",
  "autonoetic-types",
+ "base64",
  "chrono",
  "clap",
  "crossterm",
