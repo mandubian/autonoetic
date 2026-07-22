@@ -172,12 +172,16 @@ fn merge_manifest_llm_hints(cfg: &mut LlmConfig, manifest: Option<&LlmConfig>) {
     if m.thinking.is_some() {
         cfg.thinking = m.thinking.clone();
     }
-    // Preserve manifest temperature when it differs from the preset default (0.2),
-    // including explicit 0.0 (fully deterministic).
-    const PRESET_DEFAULT_TEMPERATURE: f64 = 0.2;
-    if (cfg.temperature - PRESET_DEFAULT_TEMPERATURE).abs() < f64::EPSILON
-        && (m.temperature - cfg.temperature).abs() > f64::EPSILON
-    {
+    // A legacy inline `llm_config` carries a non-optional `temperature` (serde
+    // default 0.0), so we cannot tell "unset" apart from an explicit 0.0. Treat
+    // any positive manifest temperature as an explicit per-agent preference and
+    // let it override the resolved preset temperature whatever the preset's own
+    // value is (previously this only fired when the preset resolved to exactly
+    // 0.2, silently dropping manifest temperatures for presets like coding=0.1).
+    // A 0.0 manifest temperature is treated as unset — it would be sent as "no
+    // temperature" downstream anyway; use `llm_overrides.temperature` for an
+    // explicit, unconditional override (including 0.0).
+    if m.temperature > 0.0 && (m.temperature - cfg.temperature).abs() > f64::EPSILON {
         cfg.temperature = m.temperature;
     }
 }
@@ -428,10 +432,36 @@ mod tests {
     }
 
     #[test]
-    fn merge_manifest_temperature_zero_when_preset_default() {
-        let mut config = fixed_config();
-        config.llm_presets.get_mut("sonnet").unwrap().temperature = None;
+    fn legacy_manifest_temperature_overrides_nondefault_preset() {
+        // Regression for #858: `sonnet` preset resolves to 0.1 (not 0.2), and a
+        // legacy inline llm_config declaring a positive temperature must still win.
         let mut manifest = test_manifest();
+        manifest.llm_preset = Some("sonnet".to_string());
+        manifest.llm_config = Some(LlmConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            temperature: 0.7,
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: false,
+            context_window_tokens: None,
+            base_url: None,
+            api_key_env: None,
+            routing_preset: None,
+            thinking: None,
+        });
+        let profile =
+            resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
+        assert_eq!(profile.llm_config.temperature, 0.7);
+    }
+
+    #[test]
+    fn legacy_manifest_zero_temperature_treated_as_unset() {
+        // A legacy llm_config omitting temperature deserializes to 0.0; it must
+        // not clobber the resolved preset temperature (use llm_overrides for an
+        // explicit 0.0). Preset `sonnet` resolves to 0.1 here.
+        let mut manifest = test_manifest();
+        manifest.llm_preset = Some("sonnet".to_string());
         manifest.llm_config = Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
@@ -445,10 +475,9 @@ mod tests {
             routing_preset: None,
             thinking: None,
         });
-        manifest.llm_preset = Some("sonnet".to_string());
         let profile =
-            resolve_inference_profile("coder.default", &manifest, &config, None).unwrap();
-        assert_eq!(profile.llm_config.temperature, 0.0);
+            resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
+        assert_eq!(profile.llm_config.temperature, 0.1);
     }
 
     #[test]
