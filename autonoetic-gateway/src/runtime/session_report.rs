@@ -38,6 +38,21 @@ struct SessionReportState {
     generated_at: String,
     agents: BTreeMap<String, AgentReport>,
     timeline: Vec<ReportEvent>,
+    /// Session-level context-governor rollup (#842). `None` until the
+    /// governor first fires, so reports from sessions that never needed
+    /// reduction are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_governor: Option<ContextGovernorSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContextGovernorSummary {
+    /// Number of times the governor pipeline ran and recovered within budget.
+    fired_count: u32,
+    /// Sum of (tokens_before - tokens_after) across all governor runs. This
+    /// is an estimate: it measures immediate prompt-size reduction, not the
+    /// compounding savings on subsequent turns.
+    tokens_saved_estimate: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +71,12 @@ struct AgentReport {
     tool_count: u32,
     error_count: u32,
     approval_count: u32,
+    /// Times the context governor reduced this agent's prompt (#842).
+    #[serde(default)]
+    governor_fired_count: u32,
+    /// Estimated prompt tokens removed by governor reductions (#842).
+    #[serde(default)]
+    governor_tokens_saved_estimate: u64,
     last_event_at: Option<String>,
     last_event_kind: Option<String>,
     last_event_summary: Option<String>,
@@ -165,6 +186,7 @@ impl SessionReportState {
             generated_at: chrono::Utc::now().to_rfc3339(),
             agents: BTreeMap::new(),
             timeline: Vec::new(),
+            context_governor: None,
         }
     }
 }
@@ -188,6 +210,8 @@ impl AgentReport {
             tool_count: 0,
             error_count: 0,
             approval_count: 0,
+            governor_fired_count: 0,
+            governor_tokens_saved_estimate: 0,
             last_event_at: None,
             last_event_kind: None,
             last_event_summary: None,
@@ -385,6 +409,62 @@ impl SessionReportWriter {
                     summary: short,
                     important: true,
                     details,
+                    payload_ref: None,
+                    links: None,
+                },
+            );
+        })
+    }
+
+    /// Records a context-governor reduction (#842): how many estimated
+    /// prompt tokens the pipeline removed and which strategies ran.
+    pub fn record_context_governor(
+        &mut self,
+        tokens_before: usize,
+        tokens_after: usize,
+        strategies: &[String],
+    ) -> anyhow::Result<()> {
+        let session_id = self.session_id.clone();
+        let agent_id = self.agent_id.clone();
+        let depth = self.depth;
+        let strategies_owned: Vec<String> = strategies.to_vec();
+        self.update_state(|state| {
+            let now = chrono::Utc::now().to_rfc3339();
+            let saved = tokens_before.saturating_sub(tokens_after) as u64;
+            let agent = ensure_agent(state, &session_id, &agent_id, depth);
+            agent.governor_fired_count = agent.governor_fired_count.saturating_add(1);
+            agent.governor_tokens_saved_estimate =
+                agent.governor_tokens_saved_estimate.saturating_add(saved);
+            let summary = format!(
+                "context governor: {} → {} tokens (saved ~{})",
+                tokens_before, tokens_after, saved
+            );
+            touch_agent(agent, "GOVERNOR", &summary, &now);
+            let rollup = state
+                .context_governor
+                .get_or_insert_with(|| ContextGovernorSummary {
+                    fired_count: 0,
+                    tokens_saved_estimate: 0,
+                });
+            rollup.fired_count = rollup.fired_count.saturating_add(1);
+            rollup.tokens_saved_estimate = rollup.tokens_saved_estimate.saturating_add(saved);
+            push_event(
+                state,
+                ReportEvent {
+                    event_id: None,
+                    created_at: now,
+                    session_id: session_id.clone(),
+                    agent_id: agent_id.clone(),
+                    turn_id: None,
+                    kind: "GOVERNOR".to_string(),
+                    summary,
+                    important: false,
+                    details: Some(serde_json::json!({
+                        "tokens_before": tokens_before,
+                        "tokens_after": tokens_after,
+                        "tokens_saved_estimate": saved,
+                        "strategies": strategies_owned,
+                    })),
                     payload_ref: None,
                     links: None,
                 },
@@ -1394,6 +1474,14 @@ fn render_live_markdown(state: &SessionReportState) -> String {
         state.started_at.as_deref().unwrap_or("—")
     );
     let _ = writeln!(out, "| Total turns | {} |", total_turns);
+    if let Some(gov) = &state.context_governor {
+        let _ = writeln!(out, "| Governor fires | {} |", gov.fired_count);
+        let _ = writeln!(
+            out,
+            "| Governor tokens saved (est.) | ~{} |",
+            gov.tokens_saved_estimate
+        );
+    }
     let _ = writeln!(
         out,
         "| Duration | {} |",
@@ -1886,6 +1974,16 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
         "<tr><th>Total turns</th><td>{}</td></tr>\n",
         total_turns
     ));
+    if let Some(gov) = &state.context_governor {
+        out.push_str(&format!(
+            "<tr><th>Governor fires</th><td>{}</td></tr>\n",
+            gov.fired_count
+        ));
+        out.push_str(&format!(
+            "<tr><th>Governor tokens saved (est.)</th><td>~{}</td></tr>\n",
+            gov.tokens_saved_estimate
+        ));
+    }
     out.push_str(&format!(
         "<tr><th>Duration</th><td>{}</td></tr>\n",
         format_duration(state.started_at.as_deref(), Some(&state.generated_at))
@@ -2276,6 +2374,14 @@ fn render_final_markdown(state: &SessionReportState) -> String {
     let _ = writeln!(out, "| Agent sessions | {} |", agents.len());
     let _ = writeln!(out, "| Errors | {} |", total_errors);
     let _ = writeln!(out, "| Approvals | {} |", total_approvals);
+    if let Some(gov) = &state.context_governor {
+        let _ = writeln!(out, "| Governor fires | {} |", gov.fired_count);
+        let _ = writeln!(
+            out,
+            "| Governor tokens saved (est.) | ~{} |",
+            gov.tokens_saved_estimate
+        );
+    }
     let _ = writeln!(out);
     let _ = writeln!(out, "## Agent Summary");
     let _ = writeln!(out);
@@ -2573,6 +2679,7 @@ code { background: #21262d; padding: 0.1rem 0.3rem; border-radius: 3px; font-siz
 .kind-POLL { color: var(--text-dim); }
 .kind-DELEGATE { color: var(--purple); }
 .kind-NOTE { color: var(--text-dim); }
+.kind-GOVERNOR { color: var(--green); }
 .kind-SESSION, .kind-FINAL { color: var(--accent); }
 details { margin: 0.5rem 0; }
 summary { cursor: pointer; color: var(--text-dim); font-size: 0.9rem; }
@@ -2615,6 +2722,10 @@ pre { background: var(--surface); border: 1px solid var(--border); border-radius
         if total_errors > 0 { "var(--red)" } else { "var(--text)" }, total_errors));
     out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Approvals</div></div>\n", total_approvals));
     out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\">{}</div><div class=\"stat-label\">Events</div></div>\n", state.timeline.len()));
+    if let Some(gov) = &state.context_governor {
+        out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\" style=\"color:var(--green)\">{}</div><div class=\"stat-label\">Governor fires</div></div>\n", gov.fired_count));
+        out.push_str(&format!("<div class=\"stat-card\"><div class=\"stat-value\" style=\"color:var(--green)\">~{}</div><div class=\"stat-label\">Tokens saved (est.)</div></div>\n", gov.tokens_saved_estimate));
+    }
     out.push_str("</div>\n");
     out.push_str(&format!("<p><strong>Started:</strong> {} &nbsp;|&nbsp; <strong>Ended:</strong> {} &nbsp;|&nbsp; <strong>Duration:</strong> {}</p>\n",
         state.started_at.as_deref().unwrap_or("—"),
@@ -3489,6 +3600,72 @@ mod tests {
         assert!(final_md.contains("## Errors"));
         assert!(final_md.contains("## Approvals"));
         assert!(final_json.contains("\"request_id\": \"apr-1\""));
+    }
+
+    #[test]
+    fn record_context_governor_rolls_up_metrics_into_report() {
+        let tmp = tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let mut writer =
+            SessionReportWriter::open(&gateway_dir, "root/planner.default", "planner.default")
+                .unwrap();
+        writer.start_session("Plan something big").unwrap();
+        writer.start_turn(Some("turn-1")).unwrap();
+        writer
+            .record_context_governor(
+                45_000,
+                28_000,
+                &["trim_history".to_string(), "capsule".to_string()],
+            )
+            .unwrap();
+        writer
+            .record_context_governor(41_000, 30_000, &["trim_history".to_string()])
+            .unwrap();
+        writer
+            .finish_session(SessionCloseOutcome::ExecuteLoopComplete, Some("done"))
+            .unwrap();
+
+        let session_dir = gateway_dir.join("sessions").join("root");
+        let final_json = std::fs::read_to_string(session_dir.join("session_report.json")).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&final_json).unwrap();
+
+        let gov = &state["context_governor"];
+        assert_eq!(gov["fired_count"], 2);
+        assert_eq!(gov["tokens_saved_estimate"], 17_000 + 11_000);
+
+        let agent = &state["agents"]["root/planner.default"];
+        assert_eq!(agent["governor_fired_count"], 2);
+        assert_eq!(agent["governor_tokens_saved_estimate"], 28_000);
+
+        let live = std::fs::read_to_string(session_dir.join("session_overview.md")).unwrap();
+        assert!(live.contains("Governor fires | 2"));
+        let final_md = std::fs::read_to_string(session_dir.join("session_report.md")).unwrap();
+        assert!(final_md.contains("Governor tokens saved (est.)"));
+    }
+
+    #[test]
+    fn report_without_governor_activity_omits_governor_summary() {
+        let tmp = tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let mut writer =
+            SessionReportWriter::open(&gateway_dir, "root/planner.default", "planner.default")
+                .unwrap();
+        writer.start_session("Small task").unwrap();
+        writer.start_turn(Some("turn-1")).unwrap();
+        writer
+            .finish_session(SessionCloseOutcome::ExecuteLoopComplete, Some("done"))
+            .unwrap();
+
+        let session_dir = gateway_dir.join("sessions").join("root");
+        let final_json = std::fs::read_to_string(session_dir.join("session_report.json")).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&final_json).unwrap();
+        assert!(state.get("context_governor").is_none());
+        let agent = &state["agents"]["root/planner.default"];
+        assert_eq!(agent["governor_fired_count"], 0);
     }
 
     #[test]

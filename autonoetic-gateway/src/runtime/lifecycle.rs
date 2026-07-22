@@ -1954,6 +1954,25 @@ impl AgentExecutor {
                                 actions = ?actions_taken,
                                 "ContextGovernor recovered within budget"
                             );
+                            // #842: surface governor activity in the session
+                            // report so operators can quantify savings.
+                            if let Some(report) = &self.live_report {
+                                let strategy_names: Vec<String> = actions_taken
+                                    .iter()
+                                    .map(|a| a.strategy.clone())
+                                    .collect();
+                                if let Err(e) = report.lock().unwrap().record_context_governor(
+                                    total_tokens,
+                                    ctx.breakdown.total_tokens,
+                                    &strategy_names,
+                                ) {
+                                    tracing::warn!(
+                                        target: "session_report",
+                                        error = %e,
+                                        "Failed to record context governor metrics"
+                                    );
+                                }
+                            }
                             if ctx.compression_metadata.as_ref().map(|m| m.compression_count > self.compression_metadata.compression_count).unwrap_or(false) {
                                 if let Some(meta) = ctx.compression_metadata.clone() {
                                     self.compression_metadata = meta;

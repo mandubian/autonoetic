@@ -118,6 +118,22 @@ reduction pipeline but targets the soft budget instead of the hard window
 limit. This caps context growth before it becomes expensive. The hard limit
 remains the safety backstop.
 
+### Governor metrics in session reports (#842)
+
+Every time the governor recovers within budget, the session report records it:
+
+- `context_governor.fired_count` / `context_governor.tokens_saved_estimate` —
+  session-level rollup in `session_report.json` (omitted when the governor
+  never fired)
+- `governor_fired_count` / `governor_tokens_saved_estimate` — per-agent fields
+- "Governor fires" / "Governor tokens saved (est.)" rows in
+  `session_overview.md`, `session_report.md`, and the HTML reports
+
+`tokens_saved_estimate` sums `tokens_before - tokens_after` per governor run.
+It measures the immediate prompt-size reduction, not the compounding savings
+on subsequent turns (each later turn also avoids re-sending the removed
+tokens), so real savings are typically higher.
+
 ## Tool Tiers
 
 | Tier | Tools | When included |
