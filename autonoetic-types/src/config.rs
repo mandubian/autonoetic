@@ -1218,9 +1218,26 @@ pub struct GatewayConfig {
     pub sandbox: SandboxConfig,
 
     /// Maximum number of turns allowed per agent session before forced suspension.
-    /// Acts as a circuit breaker for runaway loops. Default: 12.
+    /// Acts as a circuit breaker for runaway loops. Default: 25.
+    ///
+    /// This is a *soft* limit: reaching it raises a `SessionContinue` approval,
+    /// and each operator clearance grants one additional window of this size.
+    /// The absolute ceiling that continuation approvals cannot lift is
+    /// `max_session_turns_hard` (see below).
     #[serde(default = "default_max_session_turns")]
     pub max_session_turns: u32,
+
+    /// Absolute per-session turn ceiling that continuation approvals **cannot**
+    /// lift. When a session's turn counter exceeds this, the session terminates
+    /// (`YieldReason::MaxTurnsReached`, a declared budget-exhaustion reason under
+    /// Ri-0.12) and can only be intervened on by emergency-stop or operator
+    /// revoke — never by a `SessionContinue` approval.
+    ///
+    /// This value is the *system ceiling*: per-agent `max_session_turns_hard`
+    /// overrides (declared in SKILL metadata) are clamped down to it. When unset
+    /// (`None`), the ceiling defaults to `2 × max_session_turns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_turns_hard: Option<u32>,
 
     /// Loop guard configuration — per-session circuit breaker for stuck agents.
     #[serde(default)]
@@ -3360,6 +3377,7 @@ impl Default for GatewayConfig {
             validation_waivers: ValidationWaiversConfig::default(),
             sandbox: SandboxConfig::default(),
             max_session_turns: default_max_session_turns(),
+            max_session_turns_hard: None,
             loop_guard: LoopGuardConfig::default(),
             prompt_budget: PromptBudgetConfig::default(),
             trajectory: TrajectoryConfig::default(),

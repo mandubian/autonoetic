@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-5 principle(s) (bind the agent), 8 right(s) (bind the gateway), 4 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+5 principle(s) (bind the agent), 9 right(s) (bind the gateway), 4 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -86,6 +86,14 @@ Every action an agent performs is attributed to that agent on the causal chain a
 | rule id | check | code | test | config |
 |---|---|---|---|---|
 | `Ri-0.11` | `non_repudiation` | `causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id` | `constitution_rights_early_bucket.rs::ri_0_11_hash_chain_integrity` | — |
+
+### Ri-0.12 — Closed list of termination reasons
+
+A session terminates only for a reason in the declared, closed list (agent exit, budget exhaustion, operator emergency stop, parent-orphan reap, unrecoverable fatal error naming a rule ID, scheduled timeout). Turn-budget exhaustion — the `max_session_turns_hard` ceiling that continuation approvals cannot lift — terminates as budget exhaustion; any termination outside the list is a rights violation and a gateway bug.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `Ri-0.12` | `session_turn_hard_cap` | `runtime/lifecycle.rs::execute_with_history + emit_session_turn_hard_cap_event + runtime/tool_dispatch.rs::effective_max_session_turns_hard` | `runtime::lifecycle::tests::test_max_session_turns_hard_cap_terminates_without_approval` | `max_session_turns_hard, max_session_turns, loop_guard.max_session_turns_hard` |
 
 ### Ri-0.13 — Reasoning privacy
 

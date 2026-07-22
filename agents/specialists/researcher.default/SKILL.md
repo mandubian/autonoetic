@@ -23,6 +23,12 @@ metadata:
       # so a divergent research loop (e.g. an unextractable JS-heavy page)
       # trips the guard before it burns the workflow budget.
       max_loops_without_progress: 6
+      # Soft limit: at turn 20 a SessionContinue approval is raised. This is
+      # now backed by an absolute hard cap (issue #854) that continuation
+      # approvals cannot lift — it defaults to 2× the soft limit (40 turns),
+      # after which the session terminates (MaxTurnsReached). Set
+      # `max_session_turns_hard` here to override that default (clamped to the
+      # system ceiling).
       max_session_turns: 20
     capabilities:
       - type: "SandboxFunctions"

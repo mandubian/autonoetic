@@ -273,8 +273,8 @@ pub struct AgentExecutor {
 }
 
 use crate::runtime::tool_dispatch::{
-    effective_max_session_turns, loop_guard_from_config_and_manifest,
-    tool_result_counts_as_progress,
+    effective_max_session_turns, effective_max_session_turns_hard,
+    loop_guard_from_config_and_manifest, tool_result_counts_as_progress,
 };
 pub use crate::runtime::tool_dispatch::determine_tool_tier_filter;
 use std::sync::atomic::AtomicU64;
@@ -707,6 +707,182 @@ impl AgentExecutor {
                 Ok(None)
             }
             GateResult::PolicyAllowed => Ok(None),
+        }
+    }
+
+    /// Emit the causal + timeline events for a `max_session_turns_hard` trip
+    /// (issue #854). The session terminates via `YieldReason::MaxTurnsReached`,
+    /// a declared budget-exhaustion termination reason under Ri-0.12; these
+    /// events make *why* the session was terminated attributable in the causal
+    /// chain, in contract-health (via the enforcement register), and on the
+    /// room timeline — mirroring the `loop_guard.tripped` emission.
+    fn emit_session_turn_hard_cap_event(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        soft_limit: u32,
+        hard_cap: u32,
+        blocked_turn: u64,
+    ) {
+        let Some(store) = self.gateway_store.as_ref() else {
+            return;
+        };
+        let root = crate::runtime::content_store::root_session_id(session_id).to_string();
+        let payload = serde_json::json!({
+            "reason": "max_session_turns_hard_reached",
+            "max_session_turns": soft_limit,
+            "max_session_turns_hard": hard_cap,
+            "turn_counter": blocked_turn,
+            "root_session_id": root,
+            "clause": crate::enforcement_register::clause_of_rule("Ri-0.12"),
+        });
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("turnhardcap-{}", uuid::Uuid::new_v4()),
+            agent_id: self.manifest.agent.id.clone(),
+            session_id: session_id.to_string(),
+            turn_id: Some(turn_id.to_string()),
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "session".to_string(),
+            action: "session.turn_hard_cap".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec!["Ri-0.12".to_string()],
+            target: None,
+            payload: Some(payload.to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("max_session_turns_hard_reached".to_string()),
+        };
+        if let Err(err) = store.create_causal_event(&event) {
+            tracing::warn!(
+                target: "lifecycle",
+                error = %err,
+                "failed to emit session.turn_hard_cap causal event"
+            );
+        }
+
+        // Surface on the canonical timeline so the room shows *why* the session
+        // terminated, carrying the rule ID as a first-class ref.
+        let principal =
+            autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
+        let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
+        let tl = crate::runtime::session_timeline::build_timeline_event(
+            root,
+            session_id.to_string(),
+            Some(turn_id.to_string()),
+            &principal,
+            &role,
+            "session.turn_hard_cap",
+            None, // base_altitude ⇒ Error
+            Some(serde_json::json!({
+                "max_session_turns": soft_limit,
+                "max_session_turns_hard": hard_cap,
+                "turn_counter": blocked_turn,
+            })),
+            autonoetic_types::session_timeline::TimelineRefs {
+                enforced_rules: vec!["Ri-0.12".to_string()],
+                ..Default::default()
+            },
+        );
+        if let Err(err) = store.create_live_digest_event(&tl) {
+            tracing::debug!(
+                target: "session_timeline",
+                error = %err,
+                "session.turn_hard_cap timeline emit failed"
+            );
+        }
+    }
+
+    /// Option 3 (issue #854): emit an **observational** causal + timeline event,
+    /// keyed to the **root** session, recording that a delegated child session
+    /// has crossed into another `max_session_turns` continuation window. This
+    /// gives the operator/planner root-level visibility that a descendant has
+    /// been running for N continuation windows — a long-running child that the
+    /// root would otherwise only see as an isolated per-child approval.
+    ///
+    /// The causal event carries the baseline attribution placeholder (not an
+    /// enforcement rule), so it is *observability, not enforcement*: it does not
+    /// inflate any clause's contract-health tally.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_continuation_window_extended_event(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        soft_limit: u32,
+        hard_cap: u32,
+        approved_windows: u64,
+        blocked_turn: u64,
+        approval_request_id: &str,
+    ) {
+        let Some(store) = self.gateway_store.as_ref() else {
+            return;
+        };
+        let root = crate::runtime::content_store::root_session_id(session_id).to_string();
+        // The child has already cleared `approved_windows`, so this request is
+        // for window N+1.
+        let requested_window = approved_windows.saturating_add(1);
+        let payload = serde_json::json!({
+            "child_session_id": session_id,
+            "child_agent_id": self.manifest.agent.id,
+            "approved_windows": approved_windows,
+            "requested_window": requested_window,
+            "max_session_turns": soft_limit,
+            "max_session_turns_hard": hard_cap,
+            "turn_counter": blocked_turn,
+            "approval_request_id": approval_request_id,
+        });
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("contwindow-{}", uuid::Uuid::new_v4()),
+            agent_id: self.manifest.agent.id.clone(),
+            // Keyed to the root session so it surfaces at the root, not buried
+            // in the child's own trace.
+            session_id: root.clone(),
+            turn_id: Some(turn_id.to_string()),
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "session".to_string(),
+            action: "session.continuation_window_extended".to_string(),
+            status: "active".to_string(),
+            enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+            target: None,
+            payload: Some(payload.to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("delegated_continuation_window".to_string()),
+        };
+        if let Err(err) = store.create_causal_event(&event) {
+            tracing::warn!(
+                target: "lifecycle",
+                error = %err,
+                "failed to emit session.continuation_window_extended causal event"
+            );
+        }
+
+        let principal =
+            autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
+        let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
+        let tl = crate::runtime::session_timeline::build_timeline_event(
+            root,
+            session_id.to_string(),
+            Some(turn_id.to_string()),
+            &principal,
+            &role,
+            "session.continuation_window_extended",
+            None,
+            Some(serde_json::json!({
+                "child_session_id": session_id,
+                "approved_windows": approved_windows,
+                "requested_window": requested_window,
+                "max_session_turns_hard": hard_cap,
+            })),
+            autonoetic_types::session_timeline::TimelineRefs::default(),
+        );
+        if let Err(err) = store.create_live_digest_event(&tl) {
+            tracing::debug!(
+                target: "session_timeline",
+                error = %err,
+                "session.continuation_window_extended timeline emit failed"
+            );
         }
     }
 
@@ -1250,19 +1426,75 @@ impl AgentExecutor {
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
 
-        // Hard session-level turn limit with explicit approval gate.
-        // Each approval grants one additional window of `max_session_turns`.
+        // Session-level turn limits (issue #854).
+        //
+        // `max_session_turns` is a *soft* limit: reaching it raises a
+        // `SessionContinue` approval and each operator clearance grants one more
+        // window of that size. `max_session_turns_hard` is the *absolute*
+        // ceiling those continuation approvals **cannot** lift — crossing it
+        // terminates the session via `YieldReason::MaxTurnsReached` (a declared
+        // budget-exhaustion termination reason under Ri-0.12). Only
+        // emergency-stop or operator revoke can intervene past the hard cap;
+        // the soft approval gate cannot. This binds delegated (child) sessions
+        // exactly as it binds the root — the hard cap is not clearable by any
+        // approval, visible to the operator or not.
         if let Some(cfg) = &self.config {
             let effective_turns = effective_max_session_turns(
                 cfg.max_session_turns,
                 self.loop_guard_declaration.as_ref(),
             );
             if effective_turns > 0 {
+                let hard_cap = effective_max_session_turns_hard(
+                    cfg.max_session_turns,
+                    cfg.max_session_turns_hard,
+                    self.loop_guard_declaration.as_ref(),
+                );
+                // turn_counter already includes the in-flight turn (next_turn_id
+                // incremented above), so we trip only when *attempting* turn N+1
+                // for an allowance of N.
+                //
+                // The hard cap is checked BEFORE the soft approval gate so no
+                // number of continuation approvals can push execution past it:
+                // once turn_counter exceeds `hard_cap` the session terminates
+                // unconditionally.
+                if hard_cap > 0 && self.turn_counter > hard_cap as u64 {
+                    let blocked_turn = self.turn_counter;
+                    tracing::warn!(
+                        agent_id = %self.manifest.agent.id,
+                        session_id = %session_id,
+                        turn_counter = blocked_turn,
+                        max_turns = effective_turns,
+                        max_turns_hard = hard_cap,
+                        "Session exceeded max_session_turns_hard; terminating \
+                         (continuation approvals cannot lift the hard cap)"
+                    );
+                    self.emit_session_turn_hard_cap_event(
+                        &session_id,
+                        &turn_id,
+                        effective_turns,
+                        hard_cap,
+                        blocked_turn,
+                    );
+                    let err = anyhow::anyhow!(
+                        "Session {} exceeded max_session_turns_hard={} at turn {} \
+                         (continuation approvals cannot lift the hard cap; only \
+                         emergency-stop or operator revoke can intervene)",
+                        session_id,
+                        hard_cap,
+                        blocked_turn
+                    );
+                    return Err(self.save_and_yield(
+                        history,
+                        &turn_id,
+                        YieldReason::MaxTurnsReached,
+                        None,
+                        err,
+                    ));
+                }
+
                 let approved_windows = self.approved_session_continue_count(&session_id)?;
                 let allowed_turns =
                     (effective_turns as u64).saturating_mul(1 + approved_windows);
-                // turn_counter already includes the in-flight turn (next_turn_id incremented above),
-                // so we trip only when attempting turn N+1 for an allowance of N.
                 if self.turn_counter > allowed_turns {
                     let blocked_turn = self.turn_counter;
                     match self.check_session_continue_gate(
@@ -1279,11 +1511,33 @@ impl AgentExecutor {
                                 agent_id = %self.manifest.agent.id,
                                 session_id = %session_id,
                                 turn_counter = blocked_turn,
-                                max_turns = cfg.max_session_turns,
+                                max_turns = effective_turns,
+                                max_turns_hard = hard_cap,
                                 approved_windows = approved_windows,
                                 approval_request_id = %request_id,
                                 "Session reached max turns limit; approval required to continue"
                             );
+                            // Option 3 (issue #854): when a *delegated* (child)
+                            // session requests a 2nd+ continuation window, surface
+                            // it at the root session so the operator/planner can
+                            // see the child has been running for N continuation
+                            // windows — visibility the per-child approval alone
+                            // does not give the root when the child is deep in
+                            // the tree.
+                            if approved_windows >= 1
+                                && crate::runtime::content_store::root_session_id(&session_id)
+                                    != session_id.as_str()
+                            {
+                                self.emit_continuation_window_extended_event(
+                                    &session_id,
+                                    &turn_id,
+                                    effective_turns,
+                                    hard_cap,
+                                    approved_windows,
+                                    blocked_turn,
+                                    &request_id,
+                                );
+                            }
                             let _ = self.save_yield_checkpoint(
                                 history,
                                 &turn_id,
@@ -1303,7 +1557,7 @@ impl AgentExecutor {
                                 agent_id = %self.manifest.agent.id,
                                 session_id = %session_id,
                                 turn_counter = blocked_turn,
-                                max_turns = cfg.max_session_turns,
+                                max_turns = effective_turns,
                                 approved_windows = approved_windows,
                                 "Session continue gate cleared; continuing without suspension"
                             );
@@ -5292,6 +5546,269 @@ mod tests {
             .await
             .expect("third call should execute after approval grant");
         assert!(matches!(third, TurnOutcome::Completed(_)));
+    }
+
+    /// Issue #854: `max_session_turns_hard` is an absolute ceiling that
+    /// terminates the session **without** raising a clearable approval — so a
+    /// delegated child cannot extend past it even if it never surfaces an
+    /// approval to the operator. With soft == hard == 1, the second turn trips
+    /// the hard cap directly (no `SessionContinue` approval is ever minted).
+    #[tokio::test]
+    async fn test_max_session_turns_hard_cap_terminates_without_approval() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("gateway store should open"),
+        );
+
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.max_session_turns = 1;
+        cfg.max_session_turns_hard = Some(1);
+
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            Some(store.clone()),
+        )
+        .with_config(Arc::new(cfg))
+        // Delegated child session (session_id contains '/').
+        .with_session_id("root-hardcap/researcher.default-abcd1234");
+
+        let mut history = vec![Message::system("System prompt"), Message::user("Turn 1")];
+        let first = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("first turn should execute");
+        assert!(matches!(first, TurnOutcome::Completed(_)));
+
+        history.push(Message::user("Turn 2"));
+        let second = runtime.execute_with_history(&mut history).await;
+        let err = second.expect_err("second turn should hard-terminate, not suspend");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_session_turns_hard=1"),
+            "hard-cap error should name the ceiling, got: {msg}"
+        );
+
+        // The hard cap is checked BEFORE the soft gate, so NO SessionContinue
+        // approval is minted — there is nothing for an operator (or the auto
+        // continuation path) to clear.
+        let pending = store
+            .get_pending_approvals()
+            .expect("pending approval lookup should succeed");
+        assert!(
+            pending.is_empty(),
+            "hard-cap trip must not create a clearable approval, found: {pending:?}"
+        );
+
+        // And the terminal cause is recorded as a causal event for audit.
+        let events = store
+            .search_causal_events(Some("root-hardcap/researcher.default-abcd1234"), None, 50)
+            .expect("causal event search should succeed");
+        assert!(
+            events
+                .iter()
+                .any(|e| e.action == "session.turn_hard_cap"
+                    && e.enforced_rules.iter().any(|r| r == "Ri-0.12")),
+            "expected a session.turn_hard_cap causal event attributed to Ri-0.12"
+        );
+    }
+
+    /// Issue #854: continuation approvals can extend the soft window, but never
+    /// past `max_session_turns_hard`. With soft=1, hard=2: one approval grants a
+    /// second window (turn 2), after which the hard cap terminates the session
+    /// rather than raising a second approval.
+    #[tokio::test]
+    async fn test_max_session_turns_hard_cap_bounds_approved_windows() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("gateway store should open"),
+        );
+
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.max_session_turns = 1;
+        cfg.max_session_turns_hard = Some(2);
+
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            Some(store.clone()),
+        )
+        .with_config(Arc::new(cfg))
+        .with_session_id("root-bound/researcher.default-abcd1234");
+
+        let mut history = vec![Message::system("System prompt"), Message::user("Turn 1")];
+        assert!(matches!(
+            runtime
+                .execute_with_history(&mut history)
+                .await
+                .expect("turn 1"),
+            TurnOutcome::Completed(_)
+        ));
+
+        // Turn 2 hits the soft gate → approval; approve it to grant window 2.
+        history.push(Message::user("Turn 2"));
+        let request_id = match runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect("turn 2 should suspend at soft gate")
+        {
+            TurnOutcome::Suspended {
+                approval_request_id,
+            } => approval_request_id,
+            other => panic!("expected Suspended, got {other:?}"),
+        };
+        store
+            .record_decision(
+                &request_id,
+                "approved",
+                "operator",
+                &chrono::Utc::now().to_rfc3339(),
+                None,
+            )
+            .expect("decision should record");
+
+        // Approved window 2 allows one more turn.
+        history.push(Message::user("Turn 2 retry"));
+        assert!(matches!(
+            runtime
+                .execute_with_history(&mut history)
+                .await
+                .expect("turn after approval"),
+            TurnOutcome::Completed(_)
+        ));
+
+        // Next turn crosses the hard cap: terminate, do NOT raise a 2nd approval.
+        history.push(Message::user("Turn 3"));
+        let err = runtime
+            .execute_with_history(&mut history)
+            .await
+            .expect_err("turn past hard cap should terminate");
+        assert!(err.to_string().contains("max_session_turns_hard=2"));
+
+        // Exactly one continuation approval was ever minted (window 2). The hard
+        // cap did not mint a clearable one.
+        let pending = store.get_pending_approvals().expect("pending lookup");
+        assert!(
+            pending.is_empty(),
+            "hard-cap trip must not leave a pending approval, found: {pending:?}"
+        );
+        let approved = store
+            .get_approved_approvals_for_session("root-bound/researcher.default-abcd1234")
+            .expect("approved lookup");
+        assert_eq!(
+            approved.len(),
+            1,
+            "only the single soft-gate window should have been approved"
+        );
+    }
+
+    /// Issue #854 Option 3: when a delegated child requests a 2nd+ continuation
+    /// window, an observational `session.continuation_window_extended` event is
+    /// emitted **keyed to the root session** so the operator/planner can see the
+    /// child has been running for N windows.
+    #[tokio::test]
+    async fn test_delegated_continuation_window_emits_root_visible_event() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("gateway store should open"),
+        );
+
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.max_session_turns = 1;
+        // Raise the system ceiling so the per-agent hard override below is not
+        // clamped down — we need a generous hard cap to reach a 2nd window.
+        cfg.max_session_turns_hard = Some(20);
+
+        let child_session = "root-vis/researcher.default-abcd1234";
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            Some(store.clone()),
+        )
+        .with_config(Arc::new(cfg))
+        .with_session_id(child_session);
+        // Per-agent hard override lifts this child's ceiling to 20 (the default
+        // would be 2× the soft limit = 2, too tight to reach a 2nd window).
+        runtime.loop_guard_declaration = Some(autonoetic_types::agent::LoopGuardDeclaration {
+            max_session_turns_hard: Some(20),
+            ..Default::default()
+        });
+
+        let mut history = vec![Message::system("System prompt"), Message::user("Turn 1")];
+        runtime.execute_with_history(&mut history).await.expect("turn 1");
+
+        // Drive through the soft gate twice, approving each window. The 2nd
+        // window request (approved_windows == 1) is the one that emits the
+        // root-visible event.
+        for label in ["Turn 2", "Turn 3"] {
+            history.push(Message::user(label));
+            let request_id = match runtime
+                .execute_with_history(&mut history)
+                .await
+                .expect("soft gate suspension")
+            {
+                TurnOutcome::Suspended {
+                    approval_request_id,
+                } => approval_request_id,
+                other => panic!("expected Suspended at {label}, got {other:?}"),
+            };
+            store
+                .record_decision(
+                    &request_id,
+                    "approved",
+                    "operator",
+                    &chrono::Utc::now().to_rfc3339(),
+                    None,
+                )
+                .expect("decision should record");
+            history.push(Message::user("retry after approval"));
+            runtime
+                .execute_with_history(&mut history)
+                .await
+                .expect("turn after approval");
+        }
+
+        // The visibility event is keyed to the ROOT session, not the child.
+        let root_events = store
+            .search_causal_events(Some("root-vis"), None, 100)
+            .expect("root causal event search");
+        let window_event = root_events
+            .iter()
+            .find(|e| e.action == "session.continuation_window_extended")
+            .expect("expected a root-visible continuation_window_extended event");
+        let payload: serde_json::Value = serde_json::from_str(
+            window_event.payload.as_deref().unwrap_or("{}"),
+        )
+        .expect("payload should be JSON");
+        assert_eq!(payload["child_session_id"], child_session);
+        assert!(
+            payload["requested_window"].as_u64().unwrap_or(0) >= 2,
+            "event should record the child requesting a 2nd+ window, got {payload}"
+        );
     }
 
     #[test]

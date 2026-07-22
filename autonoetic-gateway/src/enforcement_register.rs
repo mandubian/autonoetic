@@ -221,6 +221,17 @@ pub fn rights() -> &'static [Right] {
             entrenched: true,
         },
         Right {
+            id: "Ri-0.12",
+            title: "Closed list of termination reasons",
+            statement: "A session terminates only for a reason in the declared, closed list \
+                        (agent exit, budget exhaustion, operator emergency stop, parent-orphan \
+                        reap, unrecoverable fatal error naming a rule ID, scheduled timeout). \
+                        Turn-budget exhaustion — the `max_session_turns_hard` ceiling that \
+                        continuation approvals cannot lift — terminates as budget exhaustion; \
+                        any termination outside the list is a rights violation and a gateway bug.",
+            entrenched: false,
+        },
+        Right {
             id: "Ri-0.13",
             title: "Reasoning privacy",
             statement: "An agent's internal reasoning is private-under-law: not used by the \
@@ -448,6 +459,21 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             code: "causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id",
             test: "constitution_rights_early_bucket.rs::ri_0_11_hash_chain_integrity",
             config: None,
+        },
+        // ── Ri-0.12 (binds gateway — closed list of termination reasons) ──
+        // The `max_session_turns_hard` ceiling (issue #854) terminates a
+        // session via reason (b) budget exhaustion: turn-budget exhausted. It
+        // is the *absolute* cap that continuation approvals cannot lift, so a
+        // delegated child cannot extend its window past it however many times
+        // the soft gate clears.
+        EnforcementEntry {
+            clause_id: "Ri-0.12",
+            rule_id: "Ri-0.12",
+            check_id: "session_turn_hard_cap",
+            code: "runtime/lifecycle.rs::execute_with_history + emit_session_turn_hard_cap_event \
+                   + runtime/tool_dispatch.rs::effective_max_session_turns_hard",
+            test: "runtime::lifecycle::tests::test_max_session_turns_hard_cap_terminates_without_approval",
+            config: Some("max_session_turns_hard, max_session_turns, loop_guard.max_session_turns_hard"),
         },
         // ── Ri-0.13 (binds gateway) ──
         EnforcementEntry {
