@@ -986,14 +986,7 @@ impl JsonRpcRouter {
                 {
                     Ok((result, _trace_session)) => {
                         if let Some(source_agent_id) = params.source_agent_id.as_deref() {
-                            let task_status = if result.suspended_for_approval.is_some()
-                                || result.suspended_for_user_input
-                                || result.suspended_for_child_wait
-                            {
-                                TaskStatus::Claimed
-                            } else {
-                                TaskStatus::Completed
-                            };
+                            let task_status = delegation_task_status_for_spawn(&result);
                             let _ = append_delegation_task_entry(
                                 self.config.as_ref(),
                                 source_agent_id,
@@ -1225,14 +1218,8 @@ impl JsonRpcRouter {
                             match result {
                                 Ok((spawn_result, _)) => {
                                     if let Some(source) = source_agent_id {
-                                        let task_status = if spawn_result.suspended_for_approval.is_some()
-                                            || spawn_result.suspended_for_user_input
-                                            || spawn_result.suspended_for_child_wait
-                                        {
-                                            TaskStatus::Claimed
-                                        } else {
-                                            TaskStatus::Completed
-                                        };
+                                        let task_status =
+                                            delegation_task_status_for_spawn(&spawn_result);
                                         let _ = append_delegation_task_entry(
                                             config.as_ref(),
                                             &source,
@@ -1292,14 +1279,7 @@ impl JsonRpcRouter {
                     {
                         Ok((result, _trace_session)) => {
                             if let Some(source_agent_id) = params.source_agent_id.as_deref() {
-                                let task_status = if result.suspended_for_approval.is_some()
-                                    || result.suspended_for_user_input
-                                    || result.suspended_for_child_wait
-                                {
-                                    TaskStatus::Claimed
-                                } else {
-                                    TaskStatus::Completed
-                                };
+                                let task_status = delegation_task_status_for_spawn(&result);
                                 let _ = append_delegation_task_entry(
                                     self.config.as_ref(),
                                     source_agent_id,
@@ -4639,6 +4619,22 @@ struct EventIngestParams {
     async_mode: bool,
 }
 
+/// Task-board status for a delegation whose spawn just returned. A spawn that
+/// suspended (approval, user input, or waiting for children) is still in flight,
+/// so the delegating parent's task stays `Claimed` — reporting `Completed` would
+/// tell a planner reading its task board to consume outputs that don't exist yet
+/// (#848). Only a fully-completed spawn maps to `Completed`.
+fn delegation_task_status_for_spawn(result: &SpawnResult) -> TaskStatus {
+    if result.suspended_for_approval.is_some()
+        || result.suspended_for_user_input
+        || result.suspended_for_child_wait
+    {
+        TaskStatus::Claimed
+    } else {
+        TaskStatus::Completed
+    }
+}
+
 fn append_delegation_task_entry(
     config: &GatewayConfig,
     source_agent_id: &str,
@@ -5686,5 +5682,108 @@ mod tests {
         r.enforced_rules.clear();
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("enforced_rules").is_none(), "empty ⇒ omitted");
+    }
+
+    /// A `SpawnResult` with the given suspension flags and everything else empty.
+    fn spawn_result(
+        approval: Option<&str>,
+        user_input: bool,
+        child_wait: bool,
+    ) -> crate::execution::SpawnResult {
+        crate::execution::SpawnResult {
+            agent_id: "coder.default".into(),
+            session_id: "s1".into(),
+            assistant_reply: None,
+            workflow_note: None,
+            should_signal_background: false,
+            artifacts: Vec::new(),
+            files: Vec::new(),
+            shared_knowledge: Vec::new(),
+            llm_usage: Vec::new(),
+            suspended_for_approval: approval.map(str::to_string),
+            suspended_for_user_input: user_input,
+            suspended_for_child_wait: child_wait,
+        }
+    }
+
+    fn async_entry() -> AsyncIngestResult {
+        AsyncIngestResult {
+            session_id: "s1".into(),
+            status: AsyncIngestStatus::Processing,
+            assistant_reply: None,
+            workflow_note: None,
+            artifacts: Vec::new(),
+            shared_knowledge: Vec::new(),
+            error: None,
+            enforced_rules: Vec::new(),
+            started_at: "t0".into(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn delegation_status_stays_claimed_while_a_spawn_is_suspended() {
+        // #848 site 4: a suspended spawn is still in flight, so the delegating
+        // parent's task-board entry must not read Completed — else a planner
+        // consumes outputs that don't exist yet.
+        // TaskStatus has no PartialEq, so match on the variant.
+        assert!(
+            matches!(
+                delegation_task_status_for_spawn(&spawn_result(None, false, true)),
+                TaskStatus::Claimed
+            ),
+            "child-wait suspension → Claimed"
+        );
+        assert!(
+            matches!(
+                delegation_task_status_for_spawn(&spawn_result(Some("apr-1"), false, false)),
+                TaskStatus::Claimed
+            ),
+            "approval suspension → Claimed"
+        );
+        assert!(
+            matches!(
+                delegation_task_status_for_spawn(&spawn_result(None, true, false)),
+                TaskStatus::Claimed
+            ),
+            "user-input suspension → Claimed"
+        );
+        assert!(
+            matches!(
+                delegation_task_status_for_spawn(&spawn_result(None, false, false)),
+                TaskStatus::Completed
+            ),
+            "no suspension → Completed"
+        );
+    }
+
+    #[test]
+    fn async_entry_status_reflects_child_wait_suspension() {
+        // #848 site 1: a child-wait-suspended spawn must surface as
+        // SuspendedChildWait with completed_at unset, so an SSE/status client
+        // keeps polling instead of concluding the agent is done.
+        let mut e = async_entry();
+        JsonRpcRouter::apply_spawn_result_to_async_entry(&mut e, &spawn_result(None, false, true));
+        assert_eq!(e.status, AsyncIngestStatus::SuspendedChildWait);
+        assert!(e.completed_at.is_none(), "child-wait is non-terminal → no completed_at");
+
+        // Contrast: a fully-completed spawn is terminal and stamps completed_at.
+        let mut done = async_entry();
+        JsonRpcRouter::apply_spawn_result_to_async_entry(
+            &mut done,
+            &spawn_result(None, false, false),
+        );
+        assert_eq!(done.status, AsyncIngestStatus::Completed);
+        assert!(done.completed_at.is_some(), "completed spawn stamps completed_at");
+
+        // Approval / user-input suspensions map to their own statuses and, like
+        // completion, are terminal for the status entry (completed_at set).
+        let mut appr = async_entry();
+        JsonRpcRouter::apply_spawn_result_to_async_entry(
+            &mut appr,
+            &spawn_result(Some("apr-1"), false, false),
+        );
+        assert_eq!(appr.status, AsyncIngestStatus::SuspendedApproval);
+        assert!(appr.completed_at.is_some());
     }
 }

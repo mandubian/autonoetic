@@ -843,6 +843,45 @@ mod tests {
 
     const TEST_SECRET: &str = "test-secret-token";
 
+    /// A `session.status` SSE stream must stay open while the agent is still
+    /// working — `Processing` and (#848) `SuspendedChildWait` are non-terminal,
+    /// so a client keeps polling. The input-blocked / done statuses are terminal.
+    #[test]
+    fn sse_terminal_keeps_streaming_for_child_wait() {
+        let entry = |status: AsyncIngestStatus| {
+            let r = AsyncIngestResult {
+                session_id: "s1".into(),
+                status,
+                assistant_reply: None,
+                workflow_note: None,
+                artifacts: Vec::new(),
+                shared_knowledge: Vec::new(),
+                error: None,
+                enforced_rules: Vec::new(),
+                started_at: "t0".into(),
+                completed_at: None,
+            };
+            JsonRpcResponse::success("1".into(), serde_json::to_value(&r).unwrap())
+        };
+
+        // Non-terminal: the agent is still doing work.
+        assert!(!sse_session_status_terminal(&entry(AsyncIngestStatus::Processing)));
+        assert!(!sse_session_status_terminal(&entry(AsyncIngestStatus::SuspendedChildWait)));
+
+        // Terminal: nothing more will stream without operator/child action.
+        assert!(sse_session_status_terminal(&entry(AsyncIngestStatus::Completed)));
+        assert!(sse_session_status_terminal(&entry(AsyncIngestStatus::Failed)));
+        assert!(sse_session_status_terminal(&entry(AsyncIngestStatus::SuspendedApproval)));
+        assert!(sse_session_status_terminal(&entry(AsyncIngestStatus::SuspendedUserInput)));
+
+        // A JSON-RPC error is always terminal.
+        assert!(sse_session_status_terminal(&JsonRpcResponse::error(
+            "1".into(),
+            -32000,
+            "boom"
+        )));
+    }
+
     async fn setup_test_server() -> (
         std::net::SocketAddr,
         tokio::task::JoinHandle<()>,
