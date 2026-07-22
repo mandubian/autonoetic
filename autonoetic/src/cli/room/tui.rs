@@ -610,10 +610,14 @@ fn build_header(
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
     let mut right_parts = Vec::new();
     if stats.llm_calls > 0 {
-        right_parts.push(format!("{}→{} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
+        right_parts.push(format!("{} → {} ●{}", format_tokens(stats.total_input), format_tokens(stats.total_output), stats.llm_calls));
     }
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
+    }
+    // In-flight async tool calls: `⋯2 spawn,workflow_wait`.
+    if let Some(chip) = pending_chip(&stats.pending_calls) {
+        right_parts.push(chip);
     }
     let floor_ind = format!("{}{}", render::altitude_glyph(floor), floor.as_str());
     right_parts.push(floor_ind);
@@ -633,6 +637,29 @@ fn build_header(
         let pad = avail - left_w - right_w;
         format!("{}{}{}", left, " ".repeat(pad), right)
     }
+}
+
+/// Header chip for in-flight async tool calls: `⋯N name1,name2` (up to two
+/// distinct names). The count `N` is total pending calls; the trailing `,…`
+/// appears only when there are more *distinct* tool names than shown — repeated
+/// calls of a displayed tool (e.g. 3×workflow_wait → `⋯3 workflow_wait`) don't
+/// add one. Empty names are skipped. Returns `None` when nothing is pending.
+fn pending_chip(pending: &[String]) -> Option<String> {
+    if pending.is_empty() {
+        return None;
+    }
+    const MAX_NAMES: usize = 2;
+    let n = pending.len();
+    let mut distinct: Vec<&str> = Vec::new();
+    for name in pending {
+        let short = name.as_str();
+        if !short.is_empty() && !distinct.contains(&short) {
+            distinct.push(short);
+        }
+    }
+    let shown = distinct.len().min(MAX_NAMES);
+    let more = if distinct.len() > shown { ",…" } else { "" };
+    Some(format!("⋯{n} {}{}", distinct[..shown].join(","), more))
 }
 
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
@@ -2083,6 +2110,11 @@ struct SessionStats {
     context_total_pct: f64,
     context_samples: u64,
     context_window: Option<u32>,
+    /// Tool names for calls that were requested but not yet completed — async
+    /// work in flight (approval-gated tools, workflow_wait, resumed
+    /// continuations). Surfaced as a subtle header chip so a launched-but-not-
+    /// returned tool is never silently lost between request and response.
+    pending_calls: Vec<String>,
 }
 
 fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
@@ -2094,6 +2126,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         context_total_pct: 0.0,
         context_samples: 0,
         context_window: None,
+        pending_calls: pending_tool_calls(entries),
     };
     for e in entries {
         if e.event_type != "llm.round" {
@@ -2143,6 +2176,56 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         }
     }
     stats
+}
+
+/// Tool names for calls seen as `tool.requested` but not yet `tool.completed`,
+/// in request order. Correlation is by `call_id` when present; older rows
+/// without one fall back to matching a completion to the earliest open request
+/// of the same tool name (FIFO). Non-async calls complete in the same batch, so
+/// this list is normally empty — a non-empty result means real in-flight work.
+fn pending_tool_calls(entries: &[SessionTimelineEntry]) -> Vec<String> {
+    // Open calls with a call_id: id -> tool_name (insertion order preserved).
+    let mut open_by_id: Vec<(String, String)> = Vec::new();
+    // Open calls without a call_id, per tool name: a FIFO count.
+    let mut open_anon: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // Anon requests in arrival order, for a stable pending list.
+    let mut anon_order: Vec<String> = Vec::new();
+    for e in entries {
+        let ty = e.event_type.as_str();
+        if ty != "tool.requested" && ty != "tool.completed" {
+            continue;
+        }
+        let tool = payload_field_str(e, "tool_name").unwrap_or_else(|| "tool".into());
+        let call_id = payload_field_str(e, "call_id");
+        match (ty, call_id) {
+            ("tool.requested", Some(id)) => open_by_id.push((id, tool)),
+            ("tool.completed", Some(id)) => open_by_id.retain(|(oid, _)| oid != &id),
+            ("tool.requested", None) => {
+                *open_anon.entry(tool.clone()).or_insert(0) += 1;
+                anon_order.push(tool);
+            }
+            ("tool.completed", None) => {
+                if let Some(c) = open_anon.get_mut(&tool) {
+                    if *c > 0 {
+                        *c -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut pending: Vec<String> = open_by_id.into_iter().map(|(_, tool)| tool).collect();
+    // Append still-open anon calls in arrival order, honouring remaining counts.
+    let mut remaining = open_anon;
+    for tool in anon_order {
+        if let Some(c) = remaining.get_mut(&tool) {
+            if *c > 0 {
+                *c -= 1;
+                pending.push(tool);
+            }
+        }
+    }
+    pending
 }
 
 fn avg_context_pct(stats: &SessionStats) -> Option<f64> {
@@ -4445,6 +4528,7 @@ pub fn run(
         let turn_boundaries = annotate_turns_and_in_flight(
             &mut indexed,
             &visible,
+            &entries,
             &open_turns,
             show_reasoning,
             &extra_inflight_rows,
@@ -4749,7 +4833,7 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
     let short = render::agent_id_short(&lineage.target_agent_id);
     match local_turn {
         Some(n) if n > 1 => format!("{}.{}", lineage.spawned_at_turn, n),
-        _ => format!("{}→{}", lineage.spawned_at_turn, short),
+        _ => format!("{} → {}", lineage.spawned_at_turn, short),
     }
 }
 
@@ -4767,6 +4851,12 @@ fn child_turn_label(lineage: &SessionSpawnLineageEntry, local_turn: Option<u64>)
 fn annotate_turns_and_in_flight(
     rows: &mut [(RenderedRow, RowSource)],
     visible: &[SessionTimelineEntry],
+    // Full, unfiltered timeline — used only to build the async back-reference
+    // map. It must not be floor-filtered: a `tool.requested` is `Detail` and is
+    // often filtered out of `visible`, while its `tool.completed` gets bumped to
+    // `Attention` on failure and stays visible. Pass `visible` here when there
+    // is no separate unfiltered slice (e.g. tests).
+    all_entries: &[SessionTimelineEntry],
     open_turns: &HashSet<String>,
     show_reasoning: bool,
     extra_inflight_rows: &HashSet<usize>,
@@ -4802,7 +4892,21 @@ fn annotate_turns_and_in_flight(
             }
         }
     }
-    for (i, (row, _)) in rows.iter_mut().enumerate() {
+    // Map each tool call's `call_id` to the turn it was *requested* in, so a
+    // `tool.completed` that lands in a later turn (async: approval-gated tools,
+    // workflow_wait, resumed continuations) can point back to its origin.
+    let mut requested_turn: HashMap<String, u64> = HashMap::new();
+    for e in all_entries {
+        if e.event_type == "tool.requested" {
+            if let (Some(cid), Some(t)) = (
+                payload_field_str(e, "call_id"),
+                e.turn_id.as_deref().and_then(turn_number_of),
+            ) {
+                requested_turn.entry(cid).or_insert(t);
+            }
+        }
+    }
+    for (i, (row, src)) in rows.iter_mut().enumerate() {
         match row {
             RenderedRow::Line(spec) => {
                 let local_turn = spec
@@ -4810,6 +4914,22 @@ fn annotate_turns_and_in_flight(
                     .as_deref()
                     .and_then(turn_number_of);
                 spec.turn_index = local_turn.map(|n| n as u32);
+                // Async back-reference: if this row is a completion whose request
+                // happened in an earlier turn, annotate where it came from.
+                if let RowSource::Single(idx) = src {
+                    if let Some(e) = visible.get(*idx) {
+                        if e.event_type == "tool.completed" {
+                            if let Some(cid) = payload_field_str(e, "call_id") {
+                                if let Some(&req_turn) = requested_turn.get(&cid) {
+                                    if Some(req_turn) != local_turn {
+                                        spec.headline
+                                            .push_str(&format!("  ⟵ requested T{req_turn}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(src_id) = spec.source_session_id.as_deref() {
                     if src_id != root_session_id {
                         if let Some(lineage) = spawn_lineage.get(src_id) {
@@ -8624,6 +8744,7 @@ mod tests {
         let boundaries = annotate_turns_and_in_flight(
             &mut rows,
             &[],
+            &[],
             &open,
             true,
             &HashSet::new(),
@@ -8665,7 +8786,7 @@ mod tests {
             spec_with_turn(None, "no turn"),
             spec_with_turn(Some("turn-000005"), "t5"),
         ];
-        annotate_turns_and_in_flight(&mut rows, &[], &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
         let indices: Vec<Option<u32>> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8695,6 +8816,7 @@ mod tests {
         annotate_turns_and_in_flight(
             &mut rows,
             &[],
+            &[],
             &HashSet::new(),
             true,
             &HashSet::new(),
@@ -8708,7 +8830,161 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(labels, vec![Some("3→coder".into()), Some("3.2".into())]);
+        assert_eq!(labels, vec![Some("3 → coder".into()), Some("3.2".into())]);
+    }
+
+    fn tool_entry(et: &str, turn_id: Option<&str>, tool: &str, call_id: Option<&str>) -> SessionTimelineEntry {
+        use autonoetic_types::principal::Principal;
+        use autonoetic_types::session_timeline::{SessionRole, TimelineRefs};
+        let mut payload = serde_json::json!({ "tool_name": tool });
+        if let Some(id) = call_id {
+            payload["call_id"] = serde_json::json!(id);
+        }
+        SessionTimelineEntry {
+            event_id: format!("ev-{et}-{}", call_id.unwrap_or(tool)),
+            root_session_id: "r".into(),
+            source_session_id: "r".into(),
+            turn_id: turn_id.map(str::to_string),
+            principal: Principal::agent("planner.default"),
+            role: SessionRole::Planner,
+            event_type: et.into(),
+            altitude: Altitude::Detail,
+            occurred_at: "2026-06-01T00:00:00Z".into(),
+            payload: Some(payload.to_string()),
+            refs: TimelineRefs::default(),
+        }
+    }
+
+    #[test]
+    fn pending_tool_calls_lists_requested_but_not_completed() {
+        let entries = vec![
+            tool_entry("tool.requested", Some("turn-000001"), "read", Some("c1")),
+            tool_entry("tool.completed", Some("turn-000001"), "read", Some("c1")),
+            // Async: requested but no completion yet.
+            tool_entry("tool.requested", Some("turn-000002"), "workflow_wait", Some("c2")),
+            tool_entry("tool.requested", Some("turn-000002"), "agent_spawn", Some("c3")),
+            tool_entry("tool.completed", Some("turn-000002"), "agent_spawn", Some("c3")),
+        ];
+        // Only workflow_wait (c2) stays open.
+        assert_eq!(pending_tool_calls(&entries), vec!["workflow_wait".to_string()]);
+    }
+
+    #[test]
+    fn pending_tool_calls_falls_back_to_name_fifo_without_call_id() {
+        let entries = vec![
+            tool_entry("tool.requested", Some("turn-000001"), "sandbox_exec", None),
+            tool_entry("tool.requested", Some("turn-000001"), "sandbox_exec", None),
+            tool_entry("tool.completed", Some("turn-000001"), "sandbox_exec", None),
+        ];
+        // Two requested, one completed → one still pending.
+        assert_eq!(pending_tool_calls(&entries), vec!["sandbox_exec".to_string()]);
+    }
+
+    #[test]
+    fn async_completion_gets_back_reference_to_request_turn() {
+        // Request in turn 1, completion in turn 5 (async gap) → back-reference.
+        let visible = vec![
+            tool_entry("tool.requested", Some("turn-000001"), "workflow_wait", Some("c9")),
+            tool_entry("tool.completed", Some("turn-000005"), "workflow_wait", Some("c9")),
+        ];
+        let mut rows: Vec<(RenderedRow, RowSource)> = vec![(
+            RenderedRow::Line(render::render_spec(&visible[1])),
+            RowSource::Single(1),
+        )];
+        annotate_turns_and_in_flight(
+            &mut rows,
+            &visible,
+            &visible,
+            &HashSet::new(),
+            true,
+            &HashSet::new(),
+            "r",
+            &HashMap::new(),
+        );
+        let RenderedRow::Line(spec) = &rows[0].0 else { panic!("expected line row") };
+        assert!(
+            spec.headline.contains("⟵ requested T1"),
+            "headline: {}",
+            spec.headline
+        );
+    }
+
+    #[test]
+    fn pending_chip_ellipsis_reflects_distinct_names_not_raw_count() {
+        assert_eq!(pending_chip(&[]), None);
+        // Three of the same tool → count 3, one name, no ellipsis.
+        assert_eq!(
+            pending_chip(&["workflow_wait".into(), "workflow_wait".into(), "workflow_wait".into()]),
+            Some("⋯3 workflow_wait".to_string())
+        );
+        // Three distinct → two shown, ellipsis for the hidden third.
+        assert_eq!(
+            pending_chip(&["a".into(), "b".into(), "c".into()]),
+            Some("⋯3 a,b,…".to_string())
+        );
+        // Exactly two distinct → both shown, no ellipsis.
+        assert_eq!(
+            pending_chip(&["a".into(), "b".into()]),
+            Some("⋯2 a,b".to_string())
+        );
+    }
+
+    #[test]
+    fn back_reference_uses_unfiltered_entries_when_request_below_floor() {
+        // Real-world failure case: the `tool.requested` (Detail) is filtered out
+        // of `visible`, but its failed `tool.completed` (bumped to Attention) is
+        // shown. The map is built from `all_entries`, so the back-reference still
+        // resolves. `visible` here omits the request; `all_entries` includes it.
+        let all_entries = vec![
+            tool_entry("tool.requested", Some("turn-000002"), "sandbox_exec", Some("cX")),
+            tool_entry("tool.completed", Some("turn-000007"), "sandbox_exec", Some("cX")),
+        ];
+        let visible = vec![all_entries[1].clone()];
+        let mut rows: Vec<(RenderedRow, RowSource)> = vec![(
+            RenderedRow::Line(render::render_spec(&visible[0])),
+            RowSource::Single(0),
+        )];
+        annotate_turns_and_in_flight(
+            &mut rows,
+            &visible,
+            &all_entries,
+            &HashSet::new(),
+            true,
+            &HashSet::new(),
+            "r",
+            &HashMap::new(),
+        );
+        let RenderedRow::Line(spec) = &rows[0].0 else { panic!("expected line row") };
+        assert!(
+            spec.headline.contains("⟵ requested T2"),
+            "headline: {}",
+            spec.headline
+        );
+    }
+
+    #[test]
+    fn sync_completion_has_no_back_reference() {
+        // Same turn → no back-reference (would be noise for synchronous calls).
+        let visible = vec![
+            tool_entry("tool.requested", Some("turn-000003"), "read", Some("c1")),
+            tool_entry("tool.completed", Some("turn-000003"), "read", Some("c1")),
+        ];
+        let mut rows: Vec<(RenderedRow, RowSource)> = vec![(
+            RenderedRow::Line(render::render_spec(&visible[1])),
+            RowSource::Single(1),
+        )];
+        annotate_turns_and_in_flight(
+            &mut rows,
+            &visible,
+            &visible,
+            &HashSet::new(),
+            true,
+            &HashSet::new(),
+            "r",
+            &HashMap::new(),
+        );
+        let RenderedRow::Line(spec) = &rows[0].0 else { panic!("expected line row") };
+        assert!(!spec.headline.contains("⟵ requested"), "headline: {}", spec.headline);
     }
 
     #[test]
@@ -8743,7 +9019,7 @@ mod tests {
         ];
         let open: HashSet<String> = HashSet::new();
         let extra: HashSet<usize> = [1].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &extra, "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &open, true, &extra, "root", &HashMap::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8762,7 +9038,7 @@ mod tests {
             spec_with_turn(Some("B"), "late"),
         ];
         let open: HashSet<String> = HashSet::new();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &open, true, &HashSet::new(), "root", &HashMap::new());
         let inflight: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8782,7 +9058,7 @@ mod tests {
             spec_with_turn(Some("A"), "\u{1F4AD} thinking out loud"),
         ];
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &[], &open, false, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &[], &[], &open, false, &HashSet::new(), "root", &HashMap::new());
         let shown: Vec<bool> = rows
             .iter()
             .map(|(r, _)| match r {
@@ -8824,7 +9100,7 @@ mod tests {
         ];
         let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
         let open: HashSet<String> = ["A".into()].into_iter().collect();
-        annotate_turns_and_in_flight(&mut rows, &visible, &open, true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &visible, &visible, &open, true, &HashSet::new(), "root", &HashMap::new());
 
         assert_eq!(rows.len(), 1);
         assert!(
@@ -8862,7 +9138,7 @@ mod tests {
             entry("turn.end", Some("A")),
         ];
         let mut rows: Vec<(RenderedRow, RowSource)> = render::coalesce_indexed(&visible);
-        annotate_turns_and_in_flight(&mut rows, &visible, &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
+        annotate_turns_and_in_flight(&mut rows, &visible, &visible, &HashSet::new(), true, &HashSet::new(), "root", &HashMap::new());
 
         assert!(
             matches!(

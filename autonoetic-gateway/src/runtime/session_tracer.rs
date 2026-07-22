@@ -816,6 +816,7 @@ impl SessionTracer {
         tool_name: &str,
         arguments: &str,
         intent: Option<&str>,
+        call_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let redacted_args = redact_text_for_logs(arguments);
         if tool_name != "digest_annotate" {
@@ -867,6 +868,9 @@ impl SessionTracer {
                 "tool_name": tool_name,
                 "arguments": redacted_args.clone(),
                 "intent": intent,
+                // Correlation key: the LLM's tool_call_id. Lets the room pair this
+                // request with its (possibly async, far-later) `tool.completed`.
+                "call_id": call_id,
             })),
         );
         let mut requested_payload = serde_json::json!({
@@ -876,6 +880,9 @@ impl SessionTracer {
         });
         if let Some(intent) = intent {
             requested_payload["intent"] = serde_json::json!(intent);
+        }
+        if let Some(call_id) = call_id {
+            requested_payload["call_id"] = serde_json::json!(call_id);
         }
         let requested_evidence = serde_json::json!({
             "tool_name": tool_name,
@@ -900,7 +907,7 @@ impl SessionTracer {
     }
 
     pub fn log_tool_completed(&mut self, tool_name: &str, result: &str) -> anyhow::Result<String> {
-        self.log_tool_completed_with_approval(tool_name, result, None, None)
+        self.log_tool_completed_with_approval(tool_name, result, None, None, None)
     }
 
     pub fn log_tool_completed_with_approval(
@@ -909,6 +916,7 @@ impl SessionTracer {
         result: &str,
         arguments: Option<&str>,
         approval_ref: Option<&str>,
+        call_id: Option<&str>,
     ) -> anyhow::Result<String> {
         let parsed_result = serde_json::from_str::<serde_json::Value>(result).ok();
         let mut completed_payload = serde_json::json!({
@@ -930,6 +938,9 @@ impl SessionTracer {
             });
         if let Some(ref preview) = args_preview {
             completed_payload["args_preview"] = serde_json::json!(preview);
+        }
+        if let Some(call_id) = call_id {
+            completed_payload["call_id"] = serde_json::json!(call_id);
         }
         if let Some(enforced_rules) = parsed_result
             .as_ref()
@@ -1058,6 +1069,9 @@ impl SessionTracer {
         });
         if let Some(preview) = args_preview {
             timeline_payload["args_preview"] = serde_json::json!(preview);
+        }
+        if let Some(call_id) = call_id {
+            timeline_payload["call_id"] = serde_json::json!(call_id);
         }
         // `tool.completed` is Detail by default (success = plumbing). A result
         // with `ok:false` is a failure the operator should see without dialing
@@ -1201,20 +1215,44 @@ fn cap_chars(value: &str, max: usize) -> String {
 /// agent id) and does not need truncation.
 fn extract_tool_args_preview(tool_name: &str, arguments: &str) -> Option<String> {
     let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
-    let preview = match tool_name {
-        "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str()),
-        "content_write" => args.get("name").and_then(|v| v.as_str()),
-        "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str()),
-        "sandbox_exec" => args.get("command").and_then(|v| v.as_str()),
-        "artifact_exec" => args.get("entrypoint").and_then(|v| v.as_str()),
+    let preview: String = match tool_name {
+        "artifact_inspect" => args.get("artifact_ref").and_then(|v| v.as_str())?.to_string(),
+        "content_write" | "content_patch" => args.get("name").and_then(|v| v.as_str())?.to_string(),
+        "agent_spawn" => args.get("agent_id").and_then(|v| v.as_str())?.to_string(),
+        "sandbox_exec" => args.get("command").and_then(|v| v.as_str())?.to_string(),
+        // Surface what is actually executed AND where: `<entrypoint> <args> · <artifact_ref>`.
+        // The entrypoint+args lead so they survive the length cap; the artifact ref
+        // (which tells the operator *which* bundle ran) trails.
+        "artifact_exec" => {
+            let entrypoint = args.get("entrypoint").and_then(|v| v.as_str())?;
+            let call_args = args
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let cmd = if call_args.trim().is_empty() {
+                entrypoint.to_string()
+            } else {
+                format!("{entrypoint} {call_args}")
+            };
+            match args.get("artifact_ref").and_then(|v| v.as_str()) {
+                Some(art) if !art.is_empty() => format!("{cmd} · {art}"),
+                _ => cmd,
+            }
+        }
         _ => return None,
     };
-    preview.map(|s| {
-        if s.len() > 80 {
-            format!("{}…", &s[..79])
-        } else {
-            s.to_string()
-        }
+    // Char-based cap (byte slicing could split a multi-byte boundary and panic).
+    Some(if preview.chars().count() > 80 {
+        let truncated: String = preview.chars().take(79).collect();
+        format!("{truncated}…")
+    } else {
+        preview
     })
 }
 
@@ -1355,8 +1393,8 @@ mod tests {
     fn digest_annotate_is_excluded_from_action_chain() {
         let mut t = SessionTracer::test_tracer();
         // Internal bookkeeping must not leak into the operator-facing chain.
-        t.log_tool_requested("digest_annotate", "{}", None).unwrap();
-        t.log_tool_requested("read_file", "{}", None).unwrap();
+        t.log_tool_requested("digest_annotate", "{}", None, None).unwrap();
+        t.log_tool_requested("read_file", "{}", None, None).unwrap();
         assert_eq!(
             Vec::from_iter(t.recent_actions.iter().cloned()),
             vec!["read_file".to_string()]
@@ -1414,6 +1452,7 @@ mod tests {
                 r#"{"accepted":true,"agent_id":"coder.default"}"#,
                 Some(r#"{"agent_id":"coder.default","message":"implement feature"}"#),
                 None,
+                Some("call_abc123"),
             )
             .unwrap();
 
@@ -1430,6 +1469,12 @@ mod tests {
         assert_eq!(
             payload.get("args_preview").and_then(|v| v.as_str()),
             Some("coder.default")
+        );
+        // The correlation key rides along so the room can pair this completion
+        // with its request (possibly async, far earlier on the timeline).
+        assert_eq!(
+            payload.get("call_id").and_then(|v| v.as_str()),
+            Some("call_abc123")
         );
     }
 
@@ -1518,10 +1563,20 @@ mod tests {
         assert_eq!(
             extract_tool_args_preview(
                 "artifact_exec",
+                r#"{"artifact_ref":"ar.abc123","entrypoint":"main.py","args":["--fast","x"]}"#
+            )
+            .as_deref(),
+            Some("main.py --fast x · ar.abc123"),
+            "artifact_exec should preview entrypoint + args + which artifact ran"
+        );
+        assert_eq!(
+            extract_tool_args_preview(
+                "artifact_exec",
                 r#"{"artifact_ref":"ar.abc123","entrypoint":"main.py"}"#
             )
             .as_deref(),
-            Some("main.py")
+            Some("main.py · ar.abc123"),
+            "artifact_exec without args still names the artifact"
         );
     }
 

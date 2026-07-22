@@ -1293,7 +1293,7 @@ fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Opt
     let args: serde_json::Value = serde_json::from_str(args_str).ok()?;
     let key = match tool_name {
         "artifact_inspect" => args.get("artifact_ref").and_then(|x| x.as_str()),
-        "content_write" => args.get("name").and_then(|x| x.as_str()),
+        "content_write" | "content_patch" => args.get("name").and_then(|x| x.as_str()),
         "agent_spawn" => args.get("agent_id").and_then(|x| x.as_str()),
         "sandbox_exec" => args.get("command").and_then(|x| x.as_str()),
         "artifact_exec" => args.get("entrypoint").and_then(|x| x.as_str()),
@@ -1306,6 +1306,38 @@ fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Opt
             s.to_string()
         }
     })
+}
+
+/// Headline for an `agent_spawn` tool row. Spawns are structural events (a
+/// child agent is launched), so they get a distinctive `⑂ spawn → <id>` line
+/// instead of the generic `tool agent_spawn (<id>)` — the fork glyph and arrow
+/// read as "delegated to a child" at a glance, and the child's task goes on the
+/// `↳` detail line (see `detail_preview`).
+fn spawn_headline(agent_id: Option<&str>) -> String {
+    match agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("⑂ spawn → {id}"),
+        None => "⑂ spawn child agent".to_string(),
+    }
+}
+
+/// Headline for `sandbox_exec` / `artifact_exec` rows. Leads with `▶` and the
+/// command (sandbox) or `<entrypoint> <args> · <artifact_ref>` (artifact) so the
+/// operator sees *what ran* at a glance; the result/output lands on the `↳`
+/// detail line (see the exec arm of `detail_preview`).
+fn exec_headline(preview: Option<&str>) -> String {
+    match preview.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(cmd) => format!("▶ {cmd}"),
+        None => "▶ run".to_string(),
+    }
+}
+
+/// Headline for `content_write` / `content_patch` rows: `✎ wrote <path>` so a
+/// file creation reads as an action with its target, not a buried `(name)` suffix.
+fn write_headline(verb: &str, path: Option<&str>) -> String {
+    match path.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => format!("✎ {verb} {p}"),
+        None => format!("✎ {verb} file"),
+    }
 }
 
 /// Human summary of an event, from its type + payload. Keeps the most useful
@@ -1396,17 +1428,51 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         // available so the row tells you what artifact/file/agent was involved.
         "tool.requested" => {
             let tool_name = field("tool_name").unwrap_or_default();
-            match extract_tool_key_param(&p, &tool_name) {
+            if tool_name == "agent_spawn" {
+                return spawn_headline(
+                    agent_spawn_agent_id(entry)
+                        .or_else(|| extract_tool_key_param(&p, &tool_name))
+                        .as_deref(),
+                );
+            }
+            let kp = extract_tool_key_param(&p, &tool_name);
+            match tool_name.as_str() {
+                "sandbox_exec" | "artifact_exec" => return exec_headline(kp.as_deref()),
+                "content_write" => return write_headline("write", kp.as_deref()),
+                "content_patch" => return write_headline("patch", kp.as_deref()),
+                _ => {}
+            }
+            match kp {
                 Some(kp) => format!("{tool_name} → {kp}"),
                 None => format!("{tool_name} requested"),
             }
         }
         "tool.completed" => {
-            let summary = extract_tool_summary(p.as_ref());
             let tool_name = field("tool_name")
                 .or_else(|| field("tool"))
                 .unwrap_or_else(|| "completed".into());
-            let key_suffix = extract_tool_key_param(&p, &tool_name)
+            // Spawns get a distinctive headline instead of the generic
+            // `tool agent_spawn (<id>)`; the child's task lands on the detail line.
+            if tool_name == "agent_spawn" {
+                return spawn_headline(
+                    agent_spawn_agent_id(entry)
+                        .or_else(|| extract_tool_key_param(&p, &tool_name))
+                        .as_deref(),
+                );
+            }
+            let key_param = extract_tool_key_param(&p, &tool_name);
+            // Action-first headlines: `▶ <command>` for exec, `✎ wrote <path>`
+            // for file mutations. Output/result stays on the detail line.
+            match tool_name.as_str() {
+                "sandbox_exec" | "artifact_exec" => {
+                    return exec_headline(key_param.as_deref())
+                }
+                "content_write" => return write_headline("wrote", key_param.as_deref()),
+                "content_patch" => return write_headline("patched", key_param.as_deref()),
+                _ => {}
+            }
+            let summary = extract_tool_summary(p.as_ref());
+            let key_suffix = key_param
                 .map(|kp| format!(" ({kp})"))
                 .unwrap_or_default();
             match summary {
@@ -1693,9 +1759,31 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
             // or args_preview. For artifact_inspect/agent_spawn, show the key
             // argument from args_preview (extracted by the tracer).
             match tool.as_deref() {
-                Some("content_write") => s("args_preview")
-                    .or_else(|| s("name")).or_else(|| s("path"))
-                    .map(|p| cap_preview(&p, 80)),
+                // The path is already in the headline (`✎ wrote <path>`); use the
+                // detail line for the store ref / sandbox path so the operator can
+                // reference the file, and fall back to a result summary. Suppress a
+                // line that would only repeat the path.
+                Some("content_write") | Some("content_patch") => {
+                    let result_obj = p.as_ref().and_then(|v| v.get("result")).and_then(|r| {
+                        match r {
+                            serde_json::Value::String(raw) => {
+                                serde_json::from_str::<serde_json::Value>(raw).ok()
+                            }
+                            serde_json::Value::Object(_) => Some(r.clone()),
+                            _ => None,
+                        }
+                    });
+                    let from_result = |k: &str| {
+                        result_obj
+                            .as_ref()
+                            .and_then(|r| r.get(k).and_then(|x| x.as_str()).map(str::to_string))
+                    };
+                    from_result("summary")
+                        .or_else(|| from_result("sandbox_path"))
+                        .or_else(|| from_result("ref"))
+                        .filter(|d| !d.trim().is_empty())
+                        .map(|d| cap_preview(&d, 80))
+                }
                 Some("artifact_inspect") => s("args_preview")
                     .or_else(|| s("artifact_ref"))
                     .map(|p| cap_preview(&p, 80)),
@@ -1746,9 +1834,23 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                         }
                     })
                 }
-                Some("agent_spawn") => s("args_preview")
-                    .or_else(|| s("message"))
-                    .map(|m| cap_preview(&m, 80)),
+                // The spawn target is already in the headline (`⑂ spawn → <id>`),
+                // so the detail line surfaces the child's *task* instead. When the
+                // only preview available is the agent id, drop the redundant line.
+                Some("agent_spawn") => {
+                    // Resolve the target the same way the headline does, then
+                    // suppress a detail line that only repeats it.
+                    let agent = agent_spawn_agent_id(entry)
+                        .or_else(|| extract_tool_key_param(&p, "agent_spawn"));
+                    s("message")
+                        .filter(|m| !m.trim().is_empty())
+                        .or_else(|| {
+                            s("args_preview").filter(|ap| {
+                                agent.as_deref().map(str::trim) != Some(ap.trim())
+                            })
+                        })
+                        .map(|m| cap_preview(&m, 80))
+                }
                 // `task_ids` is never a top-level payload field (the real
                 // payload only ever has tool_name/result/args_preview — see
                 // `log_tool_completed_with_approval`), so this always
@@ -2431,22 +2533,77 @@ fn flush_run(
     }
 }
 
-/// Brief breakdown of a collapsed run: the top event types by count. Sorted by
-/// count desc, then name asc for deterministic output.
+/// Brief breakdown of a collapsed run. When the run contains tool calls, name
+/// the tools that ran (e.g. `calls: read×2, grep, sandbox_exec`) so a folded row
+/// still tells the operator *which* tools were invoked — the fact that a tool
+/// was called is never hidden, only compacted. Falls back to an event-type
+/// breakdown for runs with no tool activity (pure llm/turn plumbing).
 fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
-    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    // Count distinct tool invocations by name. A single call emits both
+    // `tool.requested` and `tool.completed`; dedupe them by `call_id` so one call
+    // counts once. Without a call_id (older rows), count `tool.requested` only.
+    let mut tool_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut seen_calls: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    let mut non_tool = 0usize;
     for e in run {
-        *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+        match e.event_type.as_str() {
+            "tool.requested" | "tool.completed" => {
+                let Some(p) = parse_entry_payload(e) else {
+                    non_tool += 1;
+                    continue;
+                };
+                let tool = payload_field_str(&p, "tool_name").unwrap_or_else(|| "tool".into());
+                let call_id = payload_field_str(&p, "call_id");
+                let count_it = match (&call_id, e.event_type.as_str()) {
+                    // With a call_id, count the first of the request/completion pair.
+                    (Some(id), _) => seen_calls.insert((tool.clone(), id.clone())),
+                    // Without one, count the request (the completion would double it).
+                    (None, "tool.requested") => true,
+                    (None, _) => false,
+                };
+                if count_it {
+                    *tool_counts.entry(tool).or_insert(0) += 1;
+                }
+            }
+            _ => non_tool += 1,
+        }
     }
-    let mut ordered: Vec<(&str, usize)> = counts.into_iter().collect();
-    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    let parts: Vec<String> = ordered
+
+    if tool_counts.is_empty() {
+        // No tool activity — fall back to an event-type breakdown.
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for e in run {
+            *counts.entry(e.event_type.as_str()).or_insert(0) += 1;
+        }
+        let mut ordered: Vec<(&str, usize)> = counts.into_iter().collect();
+        ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let parts: Vec<String> = ordered
+            .iter()
+            .take(3)
+            .map(|(k, c)| format!("{k}×{c}"))
+            .collect();
+        let more = if ordered.len() > 3 { ", …" } else { "" };
+        return format!("routine events ({}{})", parts.join(", "), more);
+    }
+
+    let mut ordered: Vec<(String, usize)> = tool_counts.into_iter().collect();
+    ordered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let shown = ordered.len().min(3);
+    let mut parts: Vec<String> = ordered
         .iter()
-        .take(3)
-        .map(|(k, c)| format!("{k}×{c}"))
+        .take(shown)
+        .map(|(k, c)| if *c > 1 { format!("{k}×{c}") } else { k.clone() })
         .collect();
-    let more = if ordered.len() > 3 { ", …" } else { "" };
-    format!("routine events ({}{})", parts.join(", "), more)
+    if ordered.len() > shown {
+        parts.push(format!("+{}", ordered.len() - shown));
+    }
+    let extra = if non_tool > 0 {
+        format!(" · +{non_tool}")
+    } else {
+        String::new()
+    };
+    format!("calls: {}{}", parts.join(", "), extra)
 }
 
 /// Multi-line detail view of a single event for the drill-down pane: metadata,
@@ -2967,6 +3124,52 @@ mod tests {
             payload: Some(payload.to_string()),
             refs: TimelineRefs::default(),
         }
+    }
+
+    #[test]
+    fn collapsed_summary_names_the_tools_that_ran() {
+        // A folded run should still tell the operator which tools were called,
+        // deduping request+completion of the same call by call_id.
+        let mk = |et: &str, tool: &str, call_id: &str| {
+            entry(
+                SessionRole::Specialist { kind: "coder".into() },
+                Principal::agent("coder.default"),
+                et,
+                Altitude::Detail,
+                serde_json::json!({ "tool_name": tool, "call_id": call_id }),
+            )
+        };
+        let run = vec![
+            mk("tool.requested", "read", "c1"),
+            mk("tool.completed", "read", "c1"),
+            mk("tool.requested", "read", "c2"),
+            mk("tool.completed", "read", "c2"),
+            mk("tool.requested", "grep", "c3"),
+            mk("tool.completed", "grep", "c3"),
+        ];
+        let refs: Vec<&SessionTimelineEntry> = run.iter().collect();
+        let summary = collapsed_summary(&refs);
+        assert!(summary.starts_with("calls:"), "got: {summary}");
+        assert!(summary.contains("read×2"), "got: {summary}");
+        assert!(summary.contains("grep"), "got: {summary}");
+        assert!(!summary.contains("grep×"), "grep ran once, no count: {summary}");
+    }
+
+    #[test]
+    fn collapsed_summary_falls_back_to_event_types_without_tools() {
+        let mk = |et: &str| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Detail,
+                serde_json::json!({}),
+            )
+        };
+        let run = vec![mk("llm.round"), mk("llm.round"), mk("turn.start")];
+        let refs: Vec<&SessionTimelineEntry> = run.iter().collect();
+        let summary = collapsed_summary(&refs);
+        assert!(summary.starts_with("routine events"), "got: {summary}");
     }
 
     #[test]
@@ -3557,8 +3760,9 @@ mod tests {
                 "arguments": r#"{"command":"pytest -k foo"}"#,
             }),
         );
+        // Exec rows lead with `▶ <command>` so the operator sees what ran.
         assert!(
-            render_line(&e).contains("sandbox_exec → pytest -k foo"),
+            render_line(&e).contains("▶ pytest -k foo"),
             "got: {}",
             render_line(&e)
         );
@@ -4402,6 +4606,48 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_artifact_exec_shows_command_in_headline_and_output_in_detail() {
+        // The tracer packs `<entrypoint> <args> · <artifact_ref>` into args_preview;
+        // the headline leads with `▶` so the operator sees what ran, and the detail
+        // carries the captured stdout.
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "artifact_exec",
+                "args_preview": "main.py --fast · ar.abc123",
+                "result": r#"{"ok":true,"command_succeeded":true,"stdout":"42 passed"}"#
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.starts_with('▶'), "headline: {}", spec.headline);
+        assert!(spec.headline.contains("main.py --fast"), "headline: {}", spec.headline);
+        assert!(spec.headline.contains("ar.abc123"), "headline: {}", spec.headline);
+        assert_eq!(spec.detail.as_deref(), Some("42 passed"));
+    }
+
+    #[test]
+    fn render_spec_content_write_detail_shows_ref_not_redundant_path() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("coder.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "content_write",
+                "args_preview": "skills/weather/SKILL.md",
+                "result": r#"{"ok":true,"sandbox_path":"/tmp/skills/weather/SKILL.md"}"#
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("skills/weather/SKILL.md"));
+        // Detail surfaces the sandbox path (useful, non-redundant), not the name again.
+        assert_eq!(spec.detail.as_deref(), Some("/tmp/skills/weather/SKILL.md"));
+    }
+
+    #[test]
     fn render_spec_extracts_agent_spawn_message_preview() {
         let e = entry(
             SessionRole::Planner,
@@ -4419,6 +4665,28 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("build the weather skill"));
+    }
+
+    #[test]
+    fn render_spec_agent_spawn_splits_target_and_task() {
+        // With both an agent id and a task message, the headline names the child
+        // (`⑂ spawn → coder.default`) and the detail carries the task.
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": { "ok": true, "agent_id": "coder.default", "task_id": "t-1" },
+                "message": "implement the retry backoff"
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.starts_with('⑂'), "headline: {}", spec.headline);
+        assert!(spec.headline.contains("coder.default"), "headline: {}", spec.headline);
+        assert!(!spec.headline.contains("tool agent_spawn"), "headline: {}", spec.headline);
+        assert_eq!(spec.detail.as_deref(), Some("implement the retry backoff"));
     }
 
     #[test]
@@ -4458,12 +4726,15 @@ mod tests {
             }),
         );
         let spawn_spec = render_spec(&spawn);
+        // Distinctive spawn headline names the target with the fork glyph.
         assert!(
-            spawn_spec.headline.contains("coder.default"),
+            spawn_spec.headline.contains("spawn") && spawn_spec.headline.contains("coder.default"),
             "headline: {}",
             spawn_spec.headline
         );
-        assert_eq!(spawn_spec.detail.as_deref(), Some("coder.default"));
+        // The agent id is already in the headline, so the redundant detail line
+        // (whose only content here is that same id) is suppressed.
+        assert_eq!(spawn_spec.detail.as_deref(), None);
 
         let write = entry(
             SessionRole::Specialist { kind: "coder".into() },
@@ -4477,11 +4748,14 @@ mod tests {
             }),
         );
         let write_spec = render_spec(&write);
-        assert!(write_spec.headline.contains("skills/weather/SKILL.md"));
-        assert_eq!(
-            write_spec.detail.as_deref(),
-            Some("skills/weather/SKILL.md")
+        // File writes read as `✎ wrote <path>`; the path is in the headline, so
+        // the detail line (which would only repeat it) is suppressed.
+        assert!(
+            write_spec.headline.contains("wrote") && write_spec.headline.contains("skills/weather/SKILL.md"),
+            "headline: {}",
+            write_spec.headline
         );
+        assert_eq!(write_spec.detail.as_deref(), None);
     }
 
     #[test]
