@@ -47,6 +47,24 @@ impl PromotionRole {
             PromotionRole::SealedEvaluator => "sealed_evaluator",
         }
     }
+
+    /// Derive the promotion role from a target agent id (e.g.
+    /// `"unit_test_runner.default"` → `UnitTestRunner`). Used to fill in
+    /// `promotion_role` mechanically when the spawning agent omitted it —
+    /// the validation gate otherwise defaults to `"evaluator"` and reports
+    /// a phantom `pass=false` for a verdict the child recorded under its
+    /// own role.
+    pub fn for_agent_id(agent_id: &str) -> Option<PromotionRole> {
+        let base = agent_id.split('.').next().unwrap_or(agent_id);
+        match base {
+            "evaluator" => Some(PromotionRole::Evaluator),
+            "auditor" => Some(PromotionRole::Auditor),
+            "static_evaluator" => Some(PromotionRole::StaticEvaluator),
+            "unit_test_runner" => Some(PromotionRole::UnitTestRunner),
+            "sealed_evaluator" => Some(PromotionRole::SealedEvaluator),
+            _ => None,
+        }
+    }
 }
 
 /// Promotion record linking validation results to an artifact.
@@ -135,6 +153,40 @@ impl PromotionRecord {
             "sealed_evaluator" => Some((self.sealed_evaluator_pass, &self.sealed_evaluator_findings)),
             _ => None,
         }
+    }
+
+    /// Whether any agent has recorded a verdict in the given role slot.
+    /// Distinguishes "no verdict yet" from an explicit `pass=false`.
+    pub fn has_role_verdict(&self, role: &str) -> bool {
+        match role {
+            "evaluator" => self.evaluator_id.is_some(),
+            "auditor" => self.auditor_id.is_some(),
+            "static_evaluator" => self.static_evaluator_id.is_some(),
+            "unit_test_runner" => self.unit_test_runner_id.is_some(),
+            "sealed_evaluator" => self.sealed_evaluator_id.is_some(),
+            _ => false,
+        }
+    }
+
+    /// Role-slot names that currently hold a recorded verdict.
+    pub fn roles_with_verdicts(&self) -> Vec<&'static str> {
+        let mut roles = Vec::new();
+        if self.evaluator_id.is_some() {
+            roles.push("evaluator");
+        }
+        if self.auditor_id.is_some() {
+            roles.push("auditor");
+        }
+        if self.static_evaluator_id.is_some() {
+            roles.push("static_evaluator");
+        }
+        if self.unit_test_runner_id.is_some() {
+            roles.push("unit_test_runner");
+        }
+        if self.sealed_evaluator_id.is_some() {
+            roles.push("sealed_evaluator");
+        }
+        roles
     }
 }
 
@@ -275,7 +327,7 @@ mod promotion_query_args_tests {
 
 #[cfg(test)]
 mod promotion_record_tests {
-    use super::PromotionRecord;
+    use super::{PromotionRecord, PromotionRole};
 
     #[test]
     fn loads_old_json_without_new_fields() {
@@ -312,5 +364,58 @@ mod promotion_record_tests {
         assert_eq!(record.get_role_result("unit_test_runner").map(|(p, f)| (p, f.is_empty())), Some((true, true)));
         assert_eq!(record.get_role_result("sealed_evaluator").map(|(p, f)| (p, f.is_empty())), Some((false, true)));
         assert!(record.get_role_result("unknown_role").is_none());
+    }
+
+    #[test]
+    fn for_agent_id_maps_gate_agents() {
+        assert_eq!(
+            PromotionRole::for_agent_id("unit_test_runner.default").map(|r| r.as_str()),
+            Some("unit_test_runner")
+        );
+        assert_eq!(
+            PromotionRole::for_agent_id("auditor.default").map(|r| r.as_str()),
+            Some("auditor")
+        );
+        assert_eq!(
+            PromotionRole::for_agent_id("static_evaluator.default").map(|r| r.as_str()),
+            Some("static_evaluator")
+        );
+        assert_eq!(
+            PromotionRole::for_agent_id("sealed_evaluator.default").map(|r| r.as_str()),
+            Some("sealed_evaluator")
+        );
+        assert_eq!(
+            PromotionRole::for_agent_id("evaluator.default").map(|r| r.as_str()),
+            Some("evaluator")
+        );
+        assert!(PromotionRole::for_agent_id("coder.default").is_none());
+        assert!(PromotionRole::for_agent_id("planner.default").is_none());
+        // Revision-suffixed ids still resolve on the base name.
+        assert_eq!(
+            PromotionRole::for_agent_id("unit_test_runner").map(|r| r.as_str()),
+            Some("unit_test_runner")
+        );
+    }
+
+    #[test]
+    fn has_role_verdict_and_roles_with_verdicts_track_recorded_slots() {
+        let record: PromotionRecord = serde_json::from_str(r#"{
+            "artifact_id": "art_test",
+            "evaluator_id": "evaluator.default",
+            "evaluator_pass": true,
+            "unit_test_runner_id": "unit_test_runner.default",
+            "unit_test_runner_pass": true,
+            "promotion_gate_version": "2.0"
+        }"#).expect("should load");
+
+        assert!(record.has_role_verdict("evaluator"));
+        assert!(record.has_role_verdict("unit_test_runner"));
+        assert!(!record.has_role_verdict("auditor"));
+        assert!(!record.has_role_verdict("static_evaluator"));
+        assert!(!record.has_role_verdict("unknown"));
+        assert_eq!(
+            record.roles_with_verdicts(),
+            vec!["evaluator", "unit_test_runner"]
+        );
     }
 }
