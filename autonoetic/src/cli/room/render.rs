@@ -1308,6 +1308,18 @@ fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Opt
     })
 }
 
+/// Headline for an `agent_spawn` tool row. Spawns are structural events (a
+/// child agent is launched), so they get a distinctive `⑂ spawn → <id>` line
+/// instead of the generic `tool agent_spawn (<id>)` — the fork glyph and arrow
+/// read as "delegated to a child" at a glance, and the child's task goes on the
+/// `↳` detail line (see `detail_preview`).
+fn spawn_headline(agent_id: Option<&str>) -> String {
+    match agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => format!("⑂ spawn → {id}"),
+        None => "⑂ spawn child agent".to_string(),
+    }
+}
+
 /// Human summary of an event, from its type + payload. Keeps the most useful
 /// field per known event type; falls back to the bare event type.
 pub fn summarize(entry: &SessionTimelineEntry) -> String {
@@ -1396,16 +1408,32 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         // available so the row tells you what artifact/file/agent was involved.
         "tool.requested" => {
             let tool_name = field("tool_name").unwrap_or_default();
+            if tool_name == "agent_spawn" {
+                return spawn_headline(
+                    agent_spawn_agent_id(entry)
+                        .or_else(|| extract_tool_key_param(&p, &tool_name))
+                        .as_deref(),
+                );
+            }
             match extract_tool_key_param(&p, &tool_name) {
                 Some(kp) => format!("{tool_name} → {kp}"),
                 None => format!("{tool_name} requested"),
             }
         }
         "tool.completed" => {
-            let summary = extract_tool_summary(p.as_ref());
             let tool_name = field("tool_name")
                 .or_else(|| field("tool"))
                 .unwrap_or_else(|| "completed".into());
+            // Spawns get a distinctive headline instead of the generic
+            // `tool agent_spawn (<id>)`; the child's task lands on the detail line.
+            if tool_name == "agent_spawn" {
+                return spawn_headline(
+                    agent_spawn_agent_id(entry)
+                        .or_else(|| extract_tool_key_param(&p, &tool_name))
+                        .as_deref(),
+                );
+            }
+            let summary = extract_tool_summary(p.as_ref());
             let key_suffix = extract_tool_key_param(&p, &tool_name)
                 .map(|kp| format!(" ({kp})"))
                 .unwrap_or_default();
@@ -1746,9 +1774,23 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                         }
                     })
                 }
-                Some("agent_spawn") => s("args_preview")
-                    .or_else(|| s("message"))
-                    .map(|m| cap_preview(&m, 80)),
+                // The spawn target is already in the headline (`⑂ spawn → <id>`),
+                // so the detail line surfaces the child's *task* instead. When the
+                // only preview available is the agent id, drop the redundant line.
+                Some("agent_spawn") => {
+                    // Resolve the target the same way the headline does, then
+                    // suppress a detail line that only repeats it.
+                    let agent = agent_spawn_agent_id(entry)
+                        .or_else(|| extract_tool_key_param(&p, "agent_spawn"));
+                    s("message")
+                        .filter(|m| !m.trim().is_empty())
+                        .or_else(|| {
+                            s("args_preview").filter(|ap| {
+                                agent.as_deref().map(str::trim) != Some(ap.trim())
+                            })
+                        })
+                        .map(|m| cap_preview(&m, 80))
+                }
                 // `task_ids` is never a top-level payload field (the real
                 // payload only ever has tool_name/result/args_preview — see
                 // `log_tool_completed_with_approval`), so this always
@@ -4422,6 +4464,28 @@ mod tests {
     }
 
     #[test]
+    fn render_spec_agent_spawn_splits_target_and_task() {
+        // With both an agent id and a task message, the headline names the child
+        // (`⑂ spawn → coder.default`) and the detail carries the task.
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": { "ok": true, "agent_id": "coder.default", "task_id": "t-1" },
+                "message": "implement the retry backoff"
+            }),
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.starts_with('⑂'), "headline: {}", spec.headline);
+        assert!(spec.headline.contains("coder.default"), "headline: {}", spec.headline);
+        assert!(!spec.headline.contains("tool agent_spawn"), "headline: {}", spec.headline);
+        assert_eq!(spec.detail.as_deref(), Some("implement the retry backoff"));
+    }
+
+    #[test]
     fn render_spec_generic_tool_completed_prefers_summary_over_raw_json() {
         // Any tool without an explicit detail_preview arm (the vast majority —
         // ~50+ tools) falls to the generic `Some(_)` branch. `result` is a
@@ -4458,12 +4522,15 @@ mod tests {
             }),
         );
         let spawn_spec = render_spec(&spawn);
+        // Distinctive spawn headline names the target with the fork glyph.
         assert!(
-            spawn_spec.headline.contains("coder.default"),
+            spawn_spec.headline.contains("spawn") && spawn_spec.headline.contains("coder.default"),
             "headline: {}",
             spawn_spec.headline
         );
-        assert_eq!(spawn_spec.detail.as_deref(), Some("coder.default"));
+        // The agent id is already in the headline, so the redundant detail line
+        // (whose only content here is that same id) is suppressed.
+        assert_eq!(spawn_spec.detail.as_deref(), None);
 
         let write = entry(
             SessionRole::Specialist { kind: "coder".into() },
