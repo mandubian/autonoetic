@@ -109,8 +109,8 @@ def main():
 
     # ── Evolution flags ───────────────────────────────────────────────
     lines.append("## Evolution Flags\n")
-    flags = [d for d in decisions if d.get("action") == "flag_for_evolution" or
-             (json.loads(d["payload"]) if d["payload"] else {}).get("action") == "flag_for_evolution"]
+    flags = [d for d in decisions
+             if (json.loads(d["payload"]) if d["payload"] else {}).get("action") == "flag_for_evolution"]
     if flags:
         for f in flags:
             payload = json.loads(f["payload"]) if f["payload"] else {}
@@ -128,11 +128,17 @@ def main():
     promotions = [d for d in decisions if
                   (json.loads(d["payload"]) if d["payload"] else {}).get("action") == "promote_to_skill"]
     if promotions:
+        # Deduplicate identical promote_to_skill entries (same target+agent+instruction)
+        seen: set[str] = set()
         for p in promotions:
             payload = json.loads(p["payload"]) if p["payload"] else {}
             target = p["target"] or payload.get("target", "?")
-            agent = payload.get("target_agent", "?")
-            instruction = payload.get("proposed_instruction", "?")
+            agent = payload.get("target_agent") or "(not specified)"
+            instruction = payload.get("proposed_instruction") or "(not specified)"
+            key = f"{target}|{agent}|{instruction}"
+            if key in seen:
+                continue
+            seen.add(key)
             lines.append(f"- 🏆 **`{target}`** → **`{agent}`**")
             lines.append(f"  **Instruction:** `{instruction}`")
             lines.append("")
