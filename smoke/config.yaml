@@ -6,3 +6,4 @@ background_scheduler_enabled: true
 background_tick_secs: 1
 background_min_interval_secs: 1
 max_background_due_per_tick: 8
+allow_runtime_lock_drift: true

@@ -69,6 +69,7 @@ agents_dir: "$RUN_DIR/agents"
 port: $PORT
 ofp_port: $OFP_PORT
 http_port: 0
+allow_runtime_lock_drift: true
 tls: false
 node_id: "memory-loop"
 node_name: "memory-loop"
