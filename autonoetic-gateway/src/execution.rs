@@ -2849,7 +2849,7 @@ impl GatewayExecutionService {
                 "Resolved session to pinned revision"
             );
             let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-            let loaded =
+            let mut loaded =
                 repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?;
 
             if let Some(ref gs) = self.gateway_store {
@@ -3180,6 +3180,9 @@ impl GatewayExecutionService {
                 session_id,
             )?;
             let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
+            // Propagate the resolved llm_config (with context_window_tokens and any
+            // overrides) back into the manifest so the context governor can use it.
+            loaded.manifest.llm_config = Some(inference.llm_config.clone());
 
             let openrouter_catalog =
                 Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
@@ -3870,7 +3873,7 @@ impl GatewayExecutionService {
         }
 
         let repo = AgentRepository::from_config(&self.config);
-        let loaded = if let Some(ref gs) = self.gateway_store {
+        let mut loaded = if let Some(ref gs) = self.gateway_store {
             let binding = gs.get_session_agent_binding(session_id)?.ok_or_else(|| {
                 anyhow::anyhow!(
                     "No session binding found for checkpoint respawn of session '{}'. \
@@ -3894,6 +3897,9 @@ impl GatewayExecutionService {
             session_id,
         )?;
         let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
+        // Propagate the resolved llm_config (with context_window_tokens and any
+        // overrides) back into the manifest so the context governor can use it.
+        loaded.manifest.llm_config = Some(inference.llm_config.clone());
 
         let openrouter_catalog = Arc::new(OpenRouterCatalog::new(self.http_client.clone()));
         let middleware = loaded.manifest.middleware.clone().unwrap_or_default();
@@ -4019,7 +4025,7 @@ impl GatewayExecutionService {
 
         let gateway_dir = crate::execution::gateway_root_dir(&self.config);
         let repo = AgentRepository::from_config(&self.config);
-        let loaded = repo
+        let mut loaded = repo
             .get_sync_from_store(&agent_id, &gateway_dir, self.gateway_store.as_deref())
             .map_err(|e| anyhow::anyhow!("Failed to load agent '{}': {}", agent_id, e))?;
 
@@ -4029,6 +4035,9 @@ impl GatewayExecutionService {
             &child_session_id,
         )?;
         let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
+        // Propagate the resolved llm_config (with context_window_tokens and any
+        // overrides) back into the manifest so the context governor can use it.
+        loaded.manifest.llm_config = Some(inference.llm_config.clone());
 
         let redacted_question = crate::log_redaction::redact_text_for_logs(question);
         store.add_gate_message(approval_id, "operator", &redacted_question)?;
@@ -4171,7 +4180,7 @@ impl GatewayExecutionService {
 
         let gateway_dir = crate::execution::gateway_root_dir(&self.config);
         let repo = AgentRepository::from_config(&self.config);
-        let loaded = repo
+        let mut loaded = repo
             .get_sync_from_store(&agent_id, &gateway_dir, self.gateway_store.as_deref())
             .map_err(|e| anyhow::anyhow!("Failed to load agent '{}': {}", agent_id, e))?;
 
@@ -4181,6 +4190,9 @@ impl GatewayExecutionService {
             &child_session_id,
         )?;
         let driver = build_driver(inference.llm_config.clone(), self.http_client.clone())?;
+        // Propagate the resolved llm_config (with context_window_tokens and any
+        // overrides) back into the manifest so the context governor can use it.
+        loaded.manifest.llm_config = Some(inference.llm_config.clone());
 
         let redacted_question = crate::log_redaction::redact_text_for_logs(question);
         store.add_gate_message(escalation_id, "operator", &redacted_question)?;
