@@ -314,7 +314,7 @@ pub fn extract_and_persist(
             format!("session:{}:io.returns", session_id),
             content,
         );
-        memory.source_type = MemorySourceType::SessionDigest;
+        memory.source_type = MemorySourceType::AgentWrite;
         memory.tags = vec![
             "source:memory_curator".to_string(),
             "type:curator_output".to_string(),
@@ -437,5 +437,19 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].target, "pattern-keep");
         assert_eq!(entries[1].target, "pattern-ok");
+    }
+
+    #[test]
+    fn curator_output_memory_id_uses_session_id() {
+        let session_id = "curator-final";
+        let expected = format!("curator-output-{}", session_id.replace('/', "-"));
+        assert_eq!(expected, "curator-output-curator-final");
+    }
+
+    #[test]
+    fn curator_output_memory_id_escapes_slashes() {
+        let session_id = "evo-cycle/memory-curator.default-abc123";
+        let expected = format!("curator-output-{}", session_id.replace('/', "-"));
+        assert_eq!(expected, "curator-output-evo-cycle-memory-curator.default-abc123");
     }
 }
