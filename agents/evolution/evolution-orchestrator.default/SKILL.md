@@ -110,11 +110,14 @@ Use the `last_processed_at` value as the starting window.
 
 Call `knowledge_search(scope="evolution/graduations", tags=["type:promote_to_skill"])`.
 
-For each result, if it has `target_agent` and `proposed_instruction` in its
-content, process it via Step 5b (spawn evolution-steward). This handles
-cases where the curator ran but the orchestrator was not triggered (manual
-curator invocation, orchestrator crash mid-pipeline, or bookmark gaps).
-If no pending graduations are found, continue to Step 4.
+For each result, parse its `content` field as JSON. If it contains
+`target_agent` and `proposed_instruction`, process it via Step 5b
+(spawn evolution-steward with those fields). The content JSON also carries
+`knowledge_entry_id`, `confidence`, and `reason_detail`.
+
+This handles cases where the curator ran but the orchestrator was not
+triggered (manual curator invocation, orchestrator crash mid-pipeline,
+or bookmark gaps). If no pending graduations are found, continue to Step 4.
 
 ### Step 4: Find new completed sessions
 

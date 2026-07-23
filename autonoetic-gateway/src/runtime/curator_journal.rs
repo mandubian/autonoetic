@@ -253,10 +253,13 @@ pub fn persist_decision_journal_entries(
         }
         let Some(ref agent) = entry.target_agent else { continue };
         let Some(ref instruction) = entry.proposed_instruction else { continue };
-        let content = format!(
-            "promote_to_skill: agent={}, target={}, instruction={}",
-            agent, entry.target, instruction
-        );
+        let content = serde_json::json!({
+            "target_agent": agent,
+            "proposed_instruction": instruction,
+            "knowledge_entry_id": entry.target,
+            "confidence": entry.confidence,
+            "reason_detail": entry.reason_detail,
+        }).to_string();
         let mut memory = MemoryObject::new(
             format!("grad-{}-{}", agent, entry.target),
             "evolution/graduations".to_string(),
