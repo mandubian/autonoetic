@@ -15,6 +15,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::scheduler::gateway_store::GatewayStore;
+use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
 
 /// One row of the curator's decision journal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -242,6 +243,39 @@ pub fn persist_decision_journal_entries(
         reason: None,
     };
     store.create_causal_event(&summary)?;
+
+    // Also persist promote_to_skill decisions as knowledge entries so the
+    // evolution-orchestrator can find them via knowledge_search (causal events
+    // are invisible to agent tools).
+    for entry in entries {
+        if entry.action != "promote_to_skill" {
+            continue;
+        }
+        let Some(ref agent) = entry.target_agent else { continue };
+        let Some(ref instruction) = entry.proposed_instruction else { continue };
+        let content = format!(
+            "promote_to_skill: agent={}, target={}, instruction={}",
+            agent, entry.target, instruction
+        );
+        let mut memory = MemoryObject::new(
+            format!("grad-{}-{}", agent, entry.target),
+            "evolution/graduations".to_string(),
+            agent_id.to_string(),
+            agent_id.to_string(),
+            format!("session:{}:decision_journal", session_id),
+            content,
+        );
+        memory.source_type = MemorySourceType::ScheduledAction;
+        memory.tags = vec![
+            "source:memory_curator".to_string(),
+            "type:promote_to_skill".to_string(),
+            format!("agent:{}", agent),
+            format!("target:{}", entry.target),
+        ];
+        memory.visibility = MemoryVisibility::Global;
+        memory.confidence = entry.confidence;
+        store.memory_upsert(&memory)?;
+    }
 
     Ok(())
 }
