@@ -38,6 +38,34 @@ impl DecisionJournalEntry {
     }
 }
 
+/// Extract the JSON object slice from text that may be wrapped in markdown
+/// code fences or have leading/trailing prose. Mirrors `post_session_digest.rs`.
+fn extract_json_object_slice(text: &str) -> Option<&str> {
+    let t = text.trim();
+    // Strip markdown code fences if present
+    let scan = if let Some(pos) = t.find("```") {
+        let after = t[pos + 3..].trim_start();
+        let after = if after.starts_with("json") {
+            after[4..].trim_start()
+        } else {
+            after
+        };
+        if let Some(end) = after.find("```") {
+            &after[..end]
+        } else {
+            after
+        }
+    } else {
+        t
+    };
+    let start = scan.find('{')?;
+    let end = scan.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(scan[start..=end].trim())
+}
+
 /// Extract decision-journal entries from a structured assistant reply.
 ///
 /// Returns:
@@ -48,7 +76,8 @@ impl DecisionJournalEntry {
 ///   entries inside the array are dropped with a warn log so the rest of
 ///   the journal is still persisted.
 pub fn extract_decision_journal_entries(reply: &str) -> Option<Vec<DecisionJournalEntry>> {
-    let json: serde_json::Value = serde_json::from_str(reply).ok()?;
+    let json_slice = extract_json_object_slice(reply)?;
+    let json: serde_json::Value = serde_json::from_str(json_slice).ok()?;
     let array = json.get("decision_journal")?.as_array()?;
     let mut out = Vec::with_capacity(array.len());
     for (idx, raw) in array.iter().enumerate() {
@@ -178,4 +207,53 @@ pub fn extract_and_persist(
     let n = entries.len();
     persist_decision_journal_entries(store, category, agent_id, session_id, revision_id, &entries)?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_plain_json() {
+        let reply = r#"{"decision_journal": [{"target": "mem-1", "action": "keep", "reason_code": "high_confidence_pattern"}]}"#;
+        let entries = extract_decision_journal_entries(reply).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].target, "mem-1");
+        assert_eq!(entries[0].action, "keep");
+    }
+
+    #[test]
+    fn parses_fenced_json() {
+        let reply = "I previously wrapped my output in markdown code fences. Let me resubmit.\n\n```json\n{\"decision_journal\": [{\"target\": \"mem-2\", \"action\": \"promote_to_skill\", \"reason_code\": \"high_confidence_pattern\", \"reason_detail\": \"recurring across 3 sessions\"}]}\n```\n";
+        let entries = extract_decision_journal_entries(reply).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].target, "mem-2");
+        assert_eq!(entries[0].action, "promote_to_skill");
+    }
+
+    #[test]
+    fn parses_fenced_json_without_lang_tag() {
+        let reply = "Here's the journal:\n```\n{\"decision_journal\": [{\"target\": \"mem-3\", \"action\": \"drop\", \"reason_code\": \"stale\"}]}\n```";
+        let entries = extract_decision_journal_entries(reply).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].action, "drop");
+    }
+
+    #[test]
+    fn returns_none_for_missing_journal() {
+        let reply = r#"{"agent_scores": {}}"#;
+        assert!(extract_decision_journal_entries(reply).is_none());
+    }
+
+    #[test]
+    fn skips_malformed_entries() {
+        let reply = r#"{"decision_journal": [
+            {"target": "good", "action": "keep", "reason_code": "high_confidence_pattern"},
+            {"action": "keep", "reason_code": "missing_target"},
+            "not_an_object"
+        ]}"#;
+        let entries = extract_decision_journal_entries(reply).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].target, "good");
+    }
 }
