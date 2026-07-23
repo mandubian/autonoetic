@@ -104,25 +104,26 @@ knowledge_store({
 
 Use the `last_processed_at` value as the starting window.
 
-### Step 3: Find new completed sessions
+### Step 3: Check for pending graduations from prior curator runs
+
+**Always do this first, before looking for new sessions.**
+
+Call `knowledge_search(scope="evolution/graduations", tags=["type:promote_to_skill"])`.
+
+For each result, if it has `target_agent` and `proposed_instruction` in its
+content, process it via Step 5b (spawn evolution-steward). This handles
+cases where the curator ran but the orchestrator was not triggered (manual
+curator invocation, orchestrator crash mid-pipeline, or bookmark gaps).
+If no pending graduations are found, continue to Step 4.
+
+### Step 4: Find new completed sessions
 
 Call `session_search(status="completed", since=<last_processed_at>, limit=50)`.
 
 If no sessions found → update bookmark to now, end turn.
+Otherwise continue to Step 5 to spawn the curator.
 
-### Step 3b: Check for pending graduations from prior curator runs
-
-Before spawning the curator, check for any `promote_to_skill` decisions
-already persisted from previous curator runs that were not yet routed.
-Call `knowledge_search(scope="evolution/graduations", tags=["type:promote_to_skill"])`.
-
-For each result, if it has `target_agent` and `proposed_instruction` in its
-content, process it via Step 4b (spawn evolution-steward) before continuing
-to Step 4. This handles cases where the curator ran but the orchestrator
-was not triggered (e.g., manual curator invocation, orchestrator crash
-mid-pipeline, or bookmark gaps).
-
-### Step 4: Spawn memory-curator
+### Step 5: Spawn memory-curator
 
 Spawn `memory-curator.default` with:
 
@@ -184,7 +185,7 @@ Entries with `action == "promote_to_skill"` are lesson-graduation
 proposals owned by the Curator office (B.2) — you route them; the steward
 judges them.
 
-### Step 4b: Route lesson graduations
+### Step 5b: Route lesson graduations
 
 For each `decision_journal` entry where `action == "promote_to_skill"`:
 
@@ -213,7 +214,7 @@ For each `decision_journal` entry where `action == "promote_to_skill"`:
 Wait for the result before spawning the next graduation — lessons are
 slow on purpose, and the steward dedups against prior graduations.
 
-### Step 5: Process systemic gaps
+### Step 6: Process systemic gaps
 
 For each gap in `systemic_gaps`, call:
 
@@ -228,7 +229,7 @@ admin_proposal_create({
 })
 ```
 
-### Step 6: Process flagged agents
+### Step 7: Process flagged agents
 
 For each agent in `agent_scores` where `evolution_recommended == true`:
 
@@ -245,7 +246,7 @@ For each agent in `agent_scores` where `evolution_recommended == true`:
 
 Wait for result. Track outcomes.
 
-### Step 7: Update bookmark
+### Step 8: Update bookmark
 
 Only on full success (all spawns completed without error):
 
@@ -258,7 +259,7 @@ knowledge_store({
 })
 ```
 
-### Step 8: End turn with summary
+### Step 9: End turn with summary
 
 Report:
 - Sessions analysed
