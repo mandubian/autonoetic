@@ -299,6 +299,39 @@ pub fn extract_and_persist(
     }
     let n = entries.len();
     persist_decision_journal_entries(store, category, agent_id, session_id, revision_id, &entries)?;
+
+    // Store the full curator output as a knowledge entry so the
+    // evolution-orchestrator can find it via knowledge_search.
+    // The orchestrator spawns the curator as a workflow child but has
+    // no reliable way to read the spawn return — this bridges the gap.
+    if let Some(json_slice) = extract_json_object_slice(reply) {
+        let content = json_slice.to_string();
+        let mut memory = MemoryObject::new(
+            format!("curator-output-{}", session_id.replace('/', "-")),
+            "evolution/curator_output".to_string(),
+            agent_id.to_string(),
+            agent_id.to_string(),
+            format!("session:{}:io.returns", session_id),
+            content,
+        );
+        memory.source_type = MemorySourceType::SessionDigest;
+        memory.tags = vec![
+            "source:memory_curator".to_string(),
+            "type:curator_output".to_string(),
+            format!("session:{}", session_id),
+        ];
+        memory.visibility = MemoryVisibility::Global;
+        memory.confidence = Some(1.0);
+        if let Err(e) = store.memory_upsert(&memory) {
+            tracing::warn!(
+                target: "curator_journal",
+                session_id = %session_id,
+                error = %e,
+                "failed to persist curator output as knowledge entry"
+            );
+        }
+    }
+
     Ok(n)
 }
 

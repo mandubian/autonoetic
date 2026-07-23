@@ -174,6 +174,11 @@ Wait for the result (`workflow_wait` or synchronous spawn). The curator returns:
 }
 ```
 
+If the spawn return is not directly readable from the parent session,
+fall back to `knowledge_search(scope="evolution/curator_output",
+tags=["type:curator_output"], limit=1)` — the gateway persists the
+full curator output there after every curator session.
+
 The `decision_journal` is part of the curator's required return contract.
 Entries with `action == "promote_to_skill"` are lesson-graduation
 proposals owned by the Curator office (B.2) — you route them; the steward
