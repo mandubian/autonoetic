@@ -87,7 +87,7 @@ impl NativeTool for KnowledgeStoreTool {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Unique identifier for this knowledge" },
+                    "id": { "type": "string", "description": "Unique identifier for this knowledge. Optional — omit to auto-generate a deterministic ID from the content (recommended for dedup: re-storing the same pattern becomes an update, not a duplicate insert)." },
                     "content": { "type": "string", "description": "The fact or information to store. Must be a plain string — not a JSON object. If storing structured data, serialize it to a JSON string first." },
                     "scope": { "type": "string", "description": "Category/namespace for organizing knowledge (e.g., 'api-keys', 'user-preferences')", "default": "general" },
                     "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags for searchability" },
@@ -95,7 +95,7 @@ impl NativeTool for KnowledgeStoreTool {
                     "retention": { "type": "string", "description": "Lifetime: stable (no expiry), ephemeral (~1 hour), 1d, 30d", "default": "stable" },
                     "visibility": { "type": "string", "description": "Who can read: global (default, all agents across sessions), session (same session only), private (writer/owner only)", "default": "global" }
                 },
-                "required": ["id", "content"],
+                "required": ["content"],
                 "additionalProperties": false
             }),
         }
@@ -116,6 +116,7 @@ impl NativeTool for KnowledgeStoreTool {
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
+            #[serde(default)]
             id: String,
             #[serde(deserialize_with = "crate::runtime::tools::deserialize_string_lenient")]
             content: String,
@@ -143,10 +144,35 @@ impl NativeTool for KnowledgeStoreTool {
             "global".to_string()
         }
 
+        /// Compute a deterministic memory ID from scope + normalized content.
+        /// Same content always produces the same ID → `memory_upsert` becomes
+        /// an idempotent update rather than a duplicate insert (#868).
+        fn deterministic_id(scope: &str, content: &str) -> String {
+            use sha2::{Digest, Sha256};
+            // Normalize: lowercase, strip non-alphanumeric, collapse whitespace.
+            let normalized: String = content
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+                .collect::<String>()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut h = Sha256::new();
+            h.update(scope.as_bytes());
+            h.update(b"|");
+            h.update(normalized.as_bytes());
+            format!("dedup-{}", hex::encode(h.finalize())[..24].to_string())
+        }
+
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        anyhow::ensure!(!args.id.trim().is_empty(), "id must not be empty");
+        let id = if args.id.trim().is_empty() {
+            deterministic_id(&args.scope, &args.content)
+        } else {
+            args.id.clone()
+        };
         anyhow::ensure!(!args.content.trim().is_empty(), "content must not be empty");
         anyhow::ensure!(
             args.confidence >= 0.0 && args.confidence <= 1.0,
@@ -174,7 +200,7 @@ impl NativeTool for KnowledgeStoreTool {
         let visibility = parse_knowledge_store_visibility(&args.visibility, session_id)?;
 
         let mut memory = autonoetic_types::memory::MemoryObject::new(
-            args.id.clone(),
+            id,
             args.scope.clone(),
             manifest.agent.id.clone(),
             manifest.agent.id.clone(),
