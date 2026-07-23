@@ -145,6 +145,28 @@ def main():
     else:
         lines.append("No lessons promoted to SKILL.md.\n")
 
+    # ── Skipped graduations (from evolution/graduations with graduation_skipped tags) ──
+    skipped = list(conn.execute(
+        "SELECT content, tags, created_at FROM memories "
+        "WHERE scope='evolution/graduations' AND tags LIKE '%type:graduation_skipped%' "
+        "AND created_at > ? ORDER BY created_at DESC", (since,)))
+    if skipped:
+        lines.append("## Skipped Graduations (exempt or blocked)\n")
+        for s in skipped:
+            try:
+                c = json.loads(s["content"])
+            except json.JSONDecodeError:
+                c = {"raw": s["content"]}
+            agent = c.get("target_agent", "?")
+            reason = c.get("skip_reason", c.get("reason", "unknown"))
+            instruction = c.get("proposed_instruction", "")
+            lines.append(f"- ⏭️ **`{agent}`** — skipped: {reason}")
+            if instruction:
+                lines.append(f"  **Proposed instruction:** `{instruction}`")
+            lines.append("")
+    else:
+        lines.append("No graduations skipped in this window.\n")
+
     # ── Agent revisions (evolution changelog) ─────────────────────────
     lines.append("## Agent Revisions\n")
     try:

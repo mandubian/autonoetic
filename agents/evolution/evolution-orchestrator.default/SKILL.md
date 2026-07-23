@@ -197,7 +197,20 @@ For each `decision_journal` entry where `action == "promote_to_skill"`:
    over nested items, so a malformed entry can reach you). Log a warning
    naming the offending `target` and continue with the next entry; never
    spawn the steward with incomplete graduation input.
-2. Check `target_agent` is NOT in the exemption list.
+2. Check `target_agent` is NOT in the exemption list. **If exempt**,
+   store a `graduation_skipped` knowledge entry so the operator can see
+   why the graduation was not applied:
+
+   ```json
+   knowledge_store({
+     "scope": "evolution/graduations",
+     "tags": ["type:graduation_skipped", "agent:<target_agent>", "reason:exempt"],
+     "content": "<JSON with target_agent, proposed_instruction, knowledge_entry_id, skip_reason: 'target_agent is in the exempt agents list'>",
+     "visibility": "global"
+   })
+   ```
+
+   Then continue to the next entry — do NOT spawn the steward for exempt agents.
 3. Check we have not already queued a graduation for the same `target`
    (knowledge entry id) this run — one graduation per lesson per run.
 4. Spawn `evolution-steward.default` with:
