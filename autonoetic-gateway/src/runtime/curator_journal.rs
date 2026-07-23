@@ -265,7 +265,7 @@ pub fn persist_decision_journal_entries(
             format!("session:{}:decision_journal", session_id),
             content,
         );
-        memory.source_type = MemorySourceType::ScheduledAction;
+        memory.source_type = MemorySourceType::AgentWrite;
         memory.tags = vec![
             "source:memory_curator".to_string(),
             "type:promote_to_skill".to_string(),

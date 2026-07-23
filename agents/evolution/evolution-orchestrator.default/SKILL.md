@@ -110,6 +110,18 @@ Call `session_search(status="completed", since=<last_processed_at>, limit=50)`.
 
 If no sessions found → update bookmark to now, end turn.
 
+### Step 3b: Check for pending graduations from prior curator runs
+
+Before spawning the curator, check for any `promote_to_skill` decisions
+already persisted from previous curator runs that were not yet routed.
+Call `knowledge_search(scope="evolution/graduations", tags=["type:promote_to_skill"])`.
+
+For each result, if it has `target_agent` and `proposed_instruction` in its
+content, process it via Step 4b (spawn evolution-steward) before continuing
+to Step 4. This handles cases where the curator ran but the orchestrator
+was not triggered (e.g., manual curator invocation, orchestrator crash
+mid-pipeline, or bookmark gaps).
+
 ### Step 4: Spawn memory-curator
 
 Spawn `memory-curator.default` with:
