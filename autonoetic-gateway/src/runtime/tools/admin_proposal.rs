@@ -147,10 +147,7 @@ impl NativeTool for AdminProposalCreateTool {
             .to_string());
         }
 
-        let proposal_id = format!(
-            "prop-{}",
-            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
-        );
+        let proposal_id = autonoetic_types::id_format::short_random_id_hex("prop-", 12);
         let now = chrono::Utc::now().to_rfc3339();
         let proposal = AdminProposal {
             proposal_id: proposal_id.clone(),
@@ -171,7 +168,7 @@ impl NativeTool for AdminProposalCreateTool {
         store.insert_admin_proposal(&proposal)?;
 
         let notification = NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             NotificationType::AdminProposal,
             "system".to_string(),
             json!({

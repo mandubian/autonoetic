@@ -1884,7 +1884,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                         config,
                         Some(gateway_store.as_ref()),
                         &autonoetic_types::workflow::WorkflowEventRecord {
-                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                             workflow_id: workflow.workflow_id.clone(),
                             task_id: existing.existing_task_id.clone(),
                             event_type: "workflow.single_flight.coalesced".to_string(),
@@ -2354,7 +2354,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                         config,
                         Some(gateway_store.as_ref()),
                         &autonoetic_types::workflow::WorkflowEventRecord {
-                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                             workflow_id: workflow,
                             task_id: None,
                             event_type: "workflow.revision.created".to_string(),
@@ -2966,7 +2966,7 @@ do not re-issue."
                         config,
                         Some(gateway_store.as_ref()),
                         &autonoetic_types::workflow::WorkflowEventRecord {
-                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                             workflow_id: workflow.workflow_id.clone(),
                             task_id: existing.existing_task_id.clone(),
                             event_type: "workflow.single_flight.coalesced".to_string(),
@@ -4763,7 +4763,7 @@ impl NativeTool for AgentRevisionRollbackTool {
                         config,
                         Some(gateway_store.as_ref()),
                         &autonoetic_types::workflow::WorkflowEventRecord {
-                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                             workflow_id: workflow.workflow_id.clone(),
                             task_id: existing.existing_task_id.clone(),
                             event_type: "workflow.single_flight.coalesced".to_string(),

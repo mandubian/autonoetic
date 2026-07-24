@@ -500,7 +500,7 @@ impl GateService {
             });
         }
 
-        let interaction_id = format!("ui-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let interaction_id = autonoetic_types::id_format::short_random_id("ui-");
 
         let (root_session_id, workflow_id, task_id) = resolve_execution_context(req);
 
@@ -1237,7 +1237,7 @@ impl GateService {
         let request_id = req
             .request_id
             .map(|id| id.to_string())
-            .unwrap_or_else(|| format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+            .unwrap_or_else(|| autonoetic_types::id_format::short_random_id("apr-"));
         let mut approval_req = ApprovalRequest {
             request_id: request_id.clone(),
             agent_id: req.manifest.agent.id.clone(),
@@ -2110,7 +2110,7 @@ mod tests {
         let action = make_credential_request_action("http://localhost:8080/api");
 
         // Create approval manually and approve it.
-        let ref_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let ref_id = autonoetic_types::id_format::short_random_id("apr-");
         let mut approval = ApprovalRequest {
             request_id: ref_id.clone(),
             agent_id: manifest.agent.id.clone(),
@@ -2187,7 +2187,7 @@ mod tests {
         let action = make_credential_request_action("http://localhost:8080/api");
 
         // Create approval for a different agent.
-        let ref_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let ref_id = autonoetic_types::id_format::short_random_id("apr-");
         let mut approval = ApprovalRequest {
             request_id: ref_id.clone(),
             agent_id: "other-agent".to_string(),
@@ -2262,7 +2262,7 @@ mod tests {
             intent: None,
         };
 
-        let ref_id = format!("apr-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let ref_id = autonoetic_types::id_format::short_random_id("apr-");
         let mut approval = ApprovalRequest {
             request_id: ref_id.clone(),
             agent_id: manifest.agent.id.clone(),

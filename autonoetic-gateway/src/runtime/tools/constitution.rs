@@ -400,10 +400,7 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
             .to_error_response());
         };
 
-        let proposal_id = format!(
-            "cprop-{}",
-            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
-        );
+        let proposal_id = autonoetic_types::id_format::short_random_id_hex("cprop-", 12);
         let now = chrono::Utc::now().to_rfc3339();
         let proposal = ConstitutionalProposal {
             proposal_id: proposal_id.clone(),
@@ -461,7 +458,7 @@ impl NativeTool for ConstitutionProposeAmendmentTool {
         }
 
         let notification = NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             NotificationType::ConstitutionalProposal,
             "system".to_string(),
             json!({

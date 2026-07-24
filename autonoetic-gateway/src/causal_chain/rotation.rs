@@ -175,7 +175,7 @@ impl SegmentIndex {
 
 pub fn generate_segment_filename() -> String {
     let now = chrono::Utc::now();
-    let uuid = uuid::Uuid::new_v4().to_string()[..8].to_string();
+    let uuid = autonoetic_types::id_format::short_random_id("");
     format!(
         "{}{}-{:04}.jsonl",
         SEGMENT_PREFIX,

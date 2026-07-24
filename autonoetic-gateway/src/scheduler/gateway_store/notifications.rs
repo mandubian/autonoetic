@@ -31,7 +31,7 @@ impl GatewayStore {
 
     pub fn create_notification(&self, session_id: &str, payload: &serde_json::Value) -> Result<()> {
         let n = NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             NotificationType::ApprovalResolved,
             session_id.to_string(),
             payload.clone(),

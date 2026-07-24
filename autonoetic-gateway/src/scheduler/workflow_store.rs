@@ -215,16 +215,16 @@ fn now_rfc3339() -> String {
 }
 
 fn new_workflow_id() -> String {
-    format!("wf-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    autonoetic_types::id_format::short_random_id("wf-")
 }
 
 /// Allocate a new `task-*` id (separate from session paths).
 pub fn new_task_id() -> String {
-    format!("task-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    autonoetic_types::id_format::short_random_id("task-")
 }
 
 fn new_event_id() -> String {
-    format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    autonoetic_types::id_format::short_random_id("wevt-")
 }
 
 /// Load a workflow run by id, if present.
@@ -784,7 +784,7 @@ pub fn append_scheduled_job_cancelled_workflow_event(
         return Ok(());
     };
     let occurred_at = chrono::Utc::now().to_rfc3339();
-    let suffix = &uuid::Uuid::new_v4().to_string()[..8];
+    let suffix = autonoetic_types::id_format::short_random_id("");
     let event = autonoetic_types::workflow::WorkflowEventRecord {
         event_id: format!("wevt-sjcancel-{job_id}-{suffix}"),
         workflow_id: primary_wf,

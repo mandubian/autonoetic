@@ -202,7 +202,7 @@ impl NativeTool for ArtifactPrepareTool {
         }
 
         if !needs_approval {
-            let ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
+            let ticket_id = autonoetic_types::id_format::short_random_id_hex("dtk-", 12);
             store_deployment_ticket(
                 &store,
                 &ticket_id,
@@ -352,7 +352,7 @@ impl NativeTool for ArtifactPrepareTool {
                         }
                     }
                 }
-                let ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
+                let ticket_id = autonoetic_types::id_format::short_random_id_hex("dtk-", 12);
                 store_deployment_ticket(
                     &store,
                     &ticket_id,
@@ -487,7 +487,7 @@ impl NativeTool for ArtifactPrepareTool {
                     }),
                 );
 
-                let pending_ticket_id = format!("dtk-{}", &uuid::Uuid::new_v4().to_string()[..12]);
+                let pending_ticket_id = autonoetic_types::id_format::short_random_id_hex("dtk-", 12);
                 store_deployment_ticket(
                     &store,
                     &pending_ticket_id,

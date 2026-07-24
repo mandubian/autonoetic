@@ -70,7 +70,6 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// Same content always produces the same ID → `memory_upsert` becomes
 /// an idempotent update rather than a duplicate insert (#868).
 pub(crate) fn deterministic_id(scope: &str, content: &str) -> String {
-    use sha2::{Digest, Sha256};
     let normalized: String = content
         .to_lowercase()
         .chars()
@@ -79,11 +78,12 @@ pub(crate) fn deterministic_id(scope: &str, content: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let mut h = Sha256::new();
-    h.update(scope.as_bytes());
-    h.update(b"|");
-    h.update(normalized.as_bytes());
-    format!("dedup-{}", hex::encode(h.finalize())[..24].to_string())
+    // `dedup-<sha256(scope|normalized)[..24]>` — hashing the concatenation
+    // matches the previous streamed updates exactly.
+    format!(
+        "dedup-{}",
+        autonoetic_types::id_format::hash_and_truncate(&format!("{scope}|{normalized}"), 24)
+    )
 }
 
 pub struct KnowledgeStoreTool;
