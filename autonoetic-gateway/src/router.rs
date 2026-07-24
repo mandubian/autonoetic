@@ -730,6 +730,43 @@ impl JsonRpcRouter {
             )
     }
 
+    /// `evolution.list_pending` — the standing view of in-flight skill work
+    /// (`/skills` in the session room, #818): proposals, the decisions recorded
+    /// against them, and the Candidate revisions the promotion gate is holding.
+    ///
+    /// The assembly lives in `crate::evolution_view` so it can be unit-tested
+    /// against a store without a router, and so this dispatch frame stays small
+    /// (#884).
+    fn handle_evolution_list_pending(
+        &self,
+        req_id: String,
+        params: serde_json::Value,
+    ) -> JsonRpcResponse {
+        let limit = params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20)
+            .min(200) as usize;
+        let store = match self.execution.gateway_store() {
+            Some(s) => s,
+            None => {
+                return JsonRpcResponse::error(
+                    req_id,
+                    -32000,
+                    "Gateway store not available".to_string(),
+                );
+            }
+        };
+        match crate::evolution_view::pending_view(store.as_ref(), limit) {
+            Ok(view) => JsonRpcResponse::success(req_id, view),
+            Err(e) => JsonRpcResponse::error(
+                req_id,
+                -32000,
+                format!("Failed to assemble the pending evolution view: {e}"),
+            ),
+        }
+    }
+
     /// `curation.run_for_session` — operator-triggered memory curation on a
     /// specific session (`/curate`). Extracted for the same stack-frame reason
     /// as the crystallization handler above.
@@ -1514,6 +1551,9 @@ impl JsonRpcRouter {
             }
             "curation.run_for_session" => {
                 self.handle_curation_run_for_session(req.id, req.params)
+            }
+            "evolution.list_pending" => {
+                self.handle_evolution_list_pending(req.id, req.params)
             }
             "event.ingest" => {
                 let params: EventIngestParams = match serde_json::from_value(req.params) {

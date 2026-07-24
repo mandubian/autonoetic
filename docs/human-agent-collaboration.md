@@ -345,6 +345,37 @@ the in-flight task rather than starting a competing run.
 Autonomous crystallization — the curator proposing new skills on its own during
 the evolution cycle — is deliberately not enabled; see issue #880.
 
+### What is in flight (`/skills`)
+
+```
+/skills
+```
+
+The standing view of skill work: crystallization verdicts, lesson graduations,
+the decisions recorded against them, and any Candidate revisions the promotion
+gate is holding.
+
+It is gateway-wide, not session-scoped — a lesson proposed in one session is
+enacted in another, so "what is in flight" spans the gateway. Each row shows the
+kind of work, the target agent, the verdict where there is one, and the stage:
+
+| Stage | Meaning |
+|---|---|
+| `proposed` | Recorded by its proposer; nobody has decided yet |
+| `judged → landed` \| `→ covered` \| `→ rejected` | The steward decided, and what it decided |
+| `skipped` | Dropped before judgment (e.g. the target agent is exempt), with the reason |
+| `declined` | The crystallizer itself returned `none` — a decision, not a stall |
+
+Rows are **reporting, not inference**: every field comes from a recorded entry,
+and a proposal with no recorded decision shows as `proposed` rather than being
+guessed at. A `⏳ awaiting promotion` line means a Candidate revision exists and
+the operator's approval is what it is waiting for.
+
+The view is read-only. Enactment goes through the promotion gate (P-9.15), not
+from this pane. Before this existed the same information could only be read by
+running `scripts/evolution_digest.py` against the gateway's SQLite file, so work
+that stalled mid-pipeline was effectively invisible.
+
 ### Return to agent (`/return`)
 
 ```

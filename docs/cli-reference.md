@@ -369,6 +369,7 @@ autonoetic chat researcher.default --session-id my-session
 | `/persona [text]` | Show or set user persona (persists to `persona.md`, applies to new sessions) |
 | `/curate [focus notes]` | Run memory curation on the current session now; optional focus notes steer the curator |
 | `/crystallize [what worked]` | Make a tactic from this session reusable; the crystallizer picks instruction / wrapper / new skill |
+| `/skills` | Standing view of proposed skill work: verdicts, recorded decisions, and Candidate revisions awaiting promotion |
 | `/cancel` | Leave the current picker/prompt |
 | `/quit` or `/exit` | Exit chat |
 | `/help` | Show all commands |

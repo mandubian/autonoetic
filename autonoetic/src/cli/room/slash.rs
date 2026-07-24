@@ -16,6 +16,7 @@
 //! - `/return [--force] [note...]` — return the active workbench to the orchestrator
 //! - `/curate [notes...]` — run memory curation on this session now (notes steer the curator)
 //! - `/crystallize [notes...]` — make what worked here reusable (notes name the tactic)
+//! - `/skills` — standing view of proposed skill work and what was decided
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — full command reference in the detail pane
 //! - `/model` — show current inference profile
@@ -66,6 +67,10 @@ pub enum SlashCommand {
     /// notes naming the tactic. The crystallizer decides *which* durable home
     /// it gets (instruction, wrapper, or new skill) — see its SKILL.
     Crystallize { notes: Option<String> },
+    /// Standing view of in-flight skill work: crystallization verdicts, lesson
+    /// graduations, the decisions recorded against them, and the Candidate
+    /// revisions waiting on the promotion gate.
+    ListSkills,
     /// Show resolved inference profile for the current session.
     ModelShow,
     /// Override the session inference preset until cleared.
@@ -78,7 +83,7 @@ pub enum SlashCommand {
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /cron · /wiki · /test · /model · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -142,6 +147,7 @@ pub fn help_lines() -> Vec<String> {
         "  /return [--force] [note]   return the active workbench to the orchestrator".to_string(),
         "  /curate [focus notes]      run memory curation on this session now (notes steer the curator)".to_string(),
         "  /crystallize [what worked]  make it reusable — instruction, wrapper, or new skill".to_string(),
+        "  /skills                    proposed skill work: verdicts, decisions, candidates".to_string(),
         "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
@@ -181,6 +187,9 @@ pub fn parse(input: &str) -> SlashCommand {
         "return" => parse_return(tail),
         "curate" => parse_curate(tail),
         "crystallize" => parse_crystallize(tail),
+        // No sub-verbs: the view is read-only, and acting on a row happens
+        // through the promotion gate, not from here.
+        "skills" => SlashCommand::ListSkills,
         "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
@@ -733,6 +742,17 @@ mod tests {
                 notes: Some("the retry-with-backoff around the flaky API".into())
             }
         );
+    }
+
+    #[test]
+    fn parse_skills_takes_no_arguments() {
+        assert_eq!(parse("/skills"), SlashCommand::ListSkills);
+        assert_eq!(parse("/skills   "), SlashCommand::ListSkills);
+        // A tail is ignored rather than misread as a sub-verb — the view is
+        // read-only, so there is nothing for an argument to mean yet.
+        assert_eq!(parse("/skills pending"), SlashCommand::ListSkills);
+        // Singular is a different word: report it rather than guess.
+        assert!(matches!(parse("/skill"), SlashCommand::Unknown(_)));
     }
 
     /// `/curate` and `/crystallize` share a prefix; the dispatcher must not
