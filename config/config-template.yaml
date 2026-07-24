@@ -63,6 +63,15 @@ max_background_due_per_tick: 32
 # Guardrail: sub-10s schedules are allowed only for script-mode target agents.
 # For tight schedules (<5s), reduce background_tick_secs to 1 for better precision.
 
+# ── Knowledge Store ───────────────────────────────────────────────────
+# Semantic dedup for knowledge_store (#874): when a memory ID is auto-computed,
+# an existing entry in the same scope + `type` tag whose Jaccard token overlap
+# with the new content exceeds similarity_threshold is merged into instead of
+# inserting a duplicate. Higher = stricter (fewer merges); lower = more
+# aggressive. Default: 0.25 (conservative — avoids false merges).
+# knowledge_store:
+#   similarity_threshold: 0.25
+
 # ── Fast Scheduler Sidecar ────────────────────────────────────────────
 # Parallel low-latency loop for interval-style jobs (every N seconds).
 # Disabled by default. DB claim-and-advance remains the source of truth

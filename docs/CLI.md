@@ -245,6 +245,34 @@ autonoetic gateway approvals reject <request_id> [--reason TEXT]
 
 ---
 
+### `autonoetic gateway cron`
+
+Inspect and operate the gateway's scheduled cron jobs.
+
+```
+autonoetic gateway cron list [--root <session_id>]
+autonoetic gateway cron trigger <job_id> [--force]
+```
+
+- `list` — list scheduled cron jobs and their root sessions.
+- `trigger <job_id>` — fire a scheduled job **now** on the running gateway, bypassing its schedule (calls the live `scheduled_jobs.trigger` JSON-RPC method). Get the `job_id` from `cron list`. Returns `{status: "triggered"}` or `{status: "trigger_skipped"}` when an in-flight fire of the same job is already running. `--force` skips that in-flight guard and fires regardless.
+
+Requires a running gateway (the scheduler and target agent run in-process).
+
+### `autonoetic gateway system-agents`
+
+Inspect and run the built-in system agents (curator, evolution orchestrator, …).
+
+```
+autonoetic gateway system-agents list
+autonoetic gateway system-agents run <agent_id>
+```
+
+- `list` — list declared system agents and their status.
+- `run <agent_id>` — manually trigger a system agent's run now, bypassing its schedule (same live-fire path as `cron trigger`).
+
+---
+
 ## Agent Commands
 
 ### `autonoetic agent init`

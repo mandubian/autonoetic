@@ -298,6 +298,18 @@ Available when `validation_waivers.enabled: true`.
 
 `mechanical_safety` and `security_review` validations cannot be waived. Waivers are recorded with a reason and surfaced in `promotion.query`.
 
+### Memory curation (`/curate`)
+
+```
+/curate [focus notes...]
+```
+
+Runs memory curation on the current session immediately, instead of waiting for
+the scheduled `memory-curator.default` cron (`auto_learning.curation_schedule`).
+Optional free-text focus notes steer the curator — e.g. `/curate focus on the
+retry loop` narrows what it distills. Useful right after a session where you want
+its lessons captured before moving on.
+
 ### Return to agent (`/return`)
 
 ```
