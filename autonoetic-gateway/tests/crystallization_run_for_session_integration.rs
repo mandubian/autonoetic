@@ -128,6 +128,7 @@ struct Env {
     _ws: TestWorkspace,
     store: Arc<GatewayStore>,
     router: JsonRpcRouter,
+    config: autonoetic_types::config::GatewayConfig,
 }
 
 // JsonRpcRouter::new initializes the global constitution runtime, which cannot
@@ -144,11 +145,12 @@ fn shared() -> &'static Env {
         let config = ws.gateway_config();
         register_crystallizer_revision(&config, &store, &authoring_dir)
             .expect("crystallizer revision");
-        let router = JsonRpcRouter::new(config, Some(store.clone()));
+        let router = JsonRpcRouter::new(config.clone(), Some(store.clone()));
         Env {
             _ws: ws,
             store,
             router,
+            config,
         }
     })
 }
@@ -314,6 +316,93 @@ async fn repeated_crystallize_deduplicates_to_the_running_task() -> anyhow::Resu
     // And no second task was enqueued.
     let queued = env.store.list_queued_tasks_for_workflow(&workflow_id)?;
     assert_eq!(queued.len(), 1, "still exactly one queued task");
+
+    Ok(())
+}
+
+/// A singleton slot taken for a task that never got queued would make every
+/// later `/crystallize` in that workflow dedup to a phantom run, wedging the
+/// command until the workflow is cleaned up. The failure is reachable today:
+/// `enqueue_task` refuses on an emergency-stopped workflow, which is exactly the
+/// state an operator who just hit `/estop` is in.
+#[tokio::test]
+async fn enqueue_failure_releases_the_singleton_slot() -> anyhow::Result<()> {
+    use autonoetic_types::workflow::WorkflowRunStatus;
+
+    let env = shared();
+    let root = "root-crystallize-estop";
+    let config = &env.config;
+
+    // Materialize the workflow, then put it in emergency stop so enqueue refuses.
+    let workflow = autonoetic_gateway::scheduler::ensure_workflow_for_root_session(
+        config,
+        Some(env.store.as_ref()),
+        root,
+        Some(CRYSTALLIZER_ID),
+    )?;
+    let mut run = autonoetic_gateway::scheduler::load_workflow_run(
+        config,
+        Some(env.store.as_ref()),
+        &workflow.workflow_id,
+    )?
+    .expect("workflow run");
+    run.status = WorkflowRunStatus::EmergencyStopped;
+    autonoetic_gateway::scheduler::save_workflow_run(config, Some(env.store.as_ref()), &run)?;
+
+    let blocked = env
+        .router
+        .dispatch(make_jsonrpc(
+            "skill.crystallize_from_session",
+            serde_json::json!({ "root_session_id": root }),
+        ))
+        .await;
+    assert!(
+        blocked.error.is_some(),
+        "enqueue should fail on an emergency-stopped workflow, got {:?}",
+        blocked.result
+    );
+
+    // Lift the stop — the operator's next /crystallize must actually run rather
+    // than dedup to the task that failed to queue.
+    run.status = WorkflowRunStatus::Active;
+    autonoetic_gateway::scheduler::save_workflow_run(config, Some(env.store.as_ref()), &run)?;
+
+    let retry = env
+        .router
+        .dispatch(make_jsonrpc(
+            "skill.crystallize_from_session",
+            serde_json::json!({ "root_session_id": root }),
+        ))
+        .await;
+    assert!(retry.error.is_none(), "unexpected error: {:?}", retry.error);
+    let result = retry.result.expect("result");
+    assert_ne!(
+        result.get("status").and_then(|v| v.as_str()),
+        Some("deduplicated"),
+        "the slot from the failed enqueue must not survive as a phantom run"
+    );
+    // The retry is really queued, under its own id.
+    let retry_task_id = result
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .expect("task_id");
+    let queued = env
+        .store
+        .list_queued_tasks_for_workflow(&workflow.workflow_id)?;
+    assert!(
+        queued.iter().any(|t| t.task_id == retry_task_id),
+        "retry task should be queued, got {:?}",
+        queued.iter().map(|t| &t.task_id).collect::<Vec<_>>()
+    );
+    // NOTE: the refused enqueue also left an orphan row behind — `enqueue_task`
+    // commits the queue row before its emergency-stop check (#883). That is not
+    // asserted as correct here; this test owns the slot-release invariant, and
+    // the count is left unpinned so fixing #883 does not break it.
+    assert!(
+        queued.len() <= 2,
+        "expected at most the retry plus the #883 orphan, got {}",
+        queued.len()
+    );
 
     Ok(())
 }

@@ -1127,6 +1127,7 @@ impl JsonRpcRouter {
                     &config.agents_dir,
                     &crystallizer_ref.agent_id,
                 );
+                let mut acquired_singleton_slot = false;
                 if is_singleton {
                     match store.acquire_singleton_slot(
                         &workflow_id,
@@ -1145,7 +1146,7 @@ impl JsonRpcRouter {
                                 }),
                             );
                         }
-                        Ok(None) => { /* slot acquired — proceed with enqueue */ }
+                        Ok(None) => acquired_singleton_slot = true,
                         Err(e) => {
                             tracing::warn!(
                                 target: "crystallization",
@@ -1191,6 +1192,23 @@ impl JsonRpcRouter {
                 if let Err(e) =
                     crate::scheduler::enqueue_task(&config, Some(store.as_ref()), &queued)
                 {
+                    // Release the slot we took, or the next /crystallize would
+                    // dedup to a task that was never queued — wedging the
+                    // command until the workflow is cleaned up. Reachable
+                    // today: enqueue refuses on an emergency-stopped workflow.
+                    if acquired_singleton_slot {
+                        if let Err(rel) =
+                            store.release_singleton_slot_by_task_id(&workflow_id, &task_id)
+                        {
+                            tracing::warn!(
+                                target: "crystallization",
+                                workflow_id = %workflow_id,
+                                task_id = %task_id,
+                                error = %rel,
+                                "Failed to release singleton slot after enqueue failure"
+                            );
+                        }
+                    }
                     return JsonRpcResponse::error(
                         req.id,
                         -32000,
@@ -1324,6 +1342,7 @@ impl JsonRpcRouter {
                     &config.agents_dir,
                     &curator_ref.agent_id,
                 );
+                let mut acquired_singleton_slot = false;
                 if is_singleton {
                     match store.acquire_singleton_slot(
                         &workflow_id,
@@ -1344,7 +1363,7 @@ impl JsonRpcRouter {
                                 }),
                             );
                         }
-                        Ok(None) => { /* slot acquired — proceed with enqueue */ }
+                        Ok(None) => acquired_singleton_slot = true,
                         Err(e) => {
                             tracing::warn!(
                                 target: "curation",
@@ -1393,6 +1412,22 @@ impl JsonRpcRouter {
                     Some(store.as_ref()),
                     &queued,
                 ) {
+                    // Same wedge as the crystallization handler above: a slot
+                    // held for a task that was never queued would make every
+                    // later /curate dedup to a phantom run.
+                    if acquired_singleton_slot {
+                        if let Err(rel) =
+                            store.release_singleton_slot_by_task_id(&workflow_id, &task_id)
+                        {
+                            tracing::warn!(
+                                target: "curation",
+                                workflow_id = %workflow_id,
+                                task_id = %task_id,
+                                error = %rel,
+                                "Failed to release singleton slot after enqueue failure"
+                            );
+                        }
+                    }
                     return JsonRpcResponse::error(
                         req.id,
                         -32000,
