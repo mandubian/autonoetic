@@ -419,11 +419,7 @@ pub fn format_self_describe_for_chat(v: &Value) -> String {
         .get("evolution")
         .and_then(|e| e.get("paths"))
         .and_then(|p| p.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(str::to_string))
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(format_evolution_path).collect())
         .unwrap_or_default();
 
     let mut out = format!("**{name}** (`{agent_id}`)\n");
@@ -451,11 +447,36 @@ pub fn format_self_describe_for_chat(v: &Value) -> String {
     }
     if !paths.is_empty() {
         out.push_str("\n**Evolution paths:**\n");
-        for path in paths.iter().take(3) {
+        // Not truncated: the list is a bounded const table gateway-side, and an
+        // *unavailable* path is exactly what an operator needs to see (#818).
+        for path in &paths {
             out.push_str(&format!("- {path}\n"));
         }
     }
     out.trim_end().to_string()
+}
+
+/// One evolution path as a chat line.
+///
+/// Handles both shapes: the derived object emitted by `self_describe`
+/// (`{path, available, unavailable_reason, ...}`) and the older plain string,
+/// which remote agents on an earlier gateway may still return.
+fn format_evolution_path(entry: &Value) -> Option<String> {
+    if let Some(s) = entry.as_str() {
+        return Some(s.to_string());
+    }
+    let id = entry.get("path").and_then(|p| p.as_str())?;
+    let available = entry
+        .get("available")
+        .and_then(|a| a.as_bool())
+        .unwrap_or(false);
+    if available {
+        return Some(format!("{id} — available"));
+    }
+    match entry.get("unavailable_reason").and_then(|r| r.as_str()) {
+        Some(reason) => Some(format!("{id} — unavailable ({reason})")),
+        None => Some(format!("{id} — unavailable")),
+    }
 }
 
 pub fn parse_and_format_self_describe_json(raw: &str) -> Option<String> {
@@ -777,6 +798,25 @@ mod tests {
         assert!(text.contains("ReadAccess"));
         assert!(text.contains("Core, Standard"));
         assert!(text.contains("skill promotion"));
+    }
+
+    /// The derived path shape (#818) renders per-path availability, and an
+    /// unavailable path is shown with its reason rather than dropped.
+    #[test]
+    fn format_self_describe_for_chat_renders_derived_evolution_paths() {
+        let raw = r#"{"ok":true,"identity":{"agent_id":"planner.default","name":"Planner"},"evolution":{"paths":[
+            {"path":"agent_revision","available":true,"enacted_by":"self","via":["agent_revision_create_from_intent"]},
+            {"path":"skill_crystallization","available":false,"enacted_by":"nothing","via":[],"unavailable_reason":"not implemented — tracked by #818"}
+        ]}}"#;
+        let v: Value = serde_json::from_str(raw).unwrap();
+        let text = format_self_describe_for_chat(&v);
+        assert!(text.contains("agent_revision — available"), "got:\n{text}");
+        assert!(
+            text.contains(
+                "skill_crystallization — unavailable (not implemented — tracked by #818)"
+            ),
+            "got:\n{text}"
+        );
     }
 
     #[test]

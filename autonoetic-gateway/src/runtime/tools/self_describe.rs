@@ -22,7 +22,13 @@
 //! This first slice composes the manifest + the register's rights with
 //! structured pointers for the history/evolution dimensions; richer inline
 //! history aggregation is a follow-up.
+//!
+//! The evolution dimension is **derived, never asserted** (#818). It used to
+//! be a hardcoded prose list, which let the runtime advertise a path the code
+//! did not have — the confabulation P-6.23 exists to prevent, committed by
+//! the gateway itself. See [`EVOLUTION_PATHS`].
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,9 +39,170 @@ use crate::enforcement_register;
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::tools::{NativeTool, NativeToolRunContext};
+use crate::scheduler::gateway_store::GatewayStore;
 
 pub fn register_tools(registry: &mut crate::runtime::tools::NativeToolRegistry) {
     registry.register(Box::new(SelfDescribeTool));
+}
+
+/// How an evolution path is actually enacted — the field that keeps the
+/// "how do I evolve" answer honest.
+///
+/// Each variant carries what must be true for the path to be real, and the
+/// guard tests in this module assert that each reference resolves: a
+/// `SelfTool` names a registered native tool, a `Pipeline` names installed
+/// agent bundles, an `Unimplemented` names the issue tracking it. A renamed
+/// tool or agent therefore breaks a test rather than silently turning the
+/// answer into a lie.
+#[derive(Debug, Clone, Copy)]
+enum PathEnactor {
+    /// The caller enacts it itself with this native tool — advertised as
+    /// available only when the tool is available to the caller's manifest.
+    SelfTool(&'static str),
+    /// The evolution pipeline enacts it on the caller's behalf — advertised
+    /// as available only when every listed agent is installed here.
+    Pipeline(&'static [&'static str]),
+    /// Advertised historically but implemented by nothing. Reported as
+    /// unavailable, naming the issue that tracks it.
+    Unimplemented(&'static str),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EvolutionPath {
+    id: &'static str,
+    summary: &'static str,
+    enactor: PathEnactor,
+}
+
+/// The revision one-door: the only agent licensed to call the revision tools.
+const REVISION_PIPELINE: &[&str] = &["specialized_builder.default"];
+
+/// The B.2 lesson-graduation pipeline: curator proposes, steward judges,
+/// factory enacts.
+const GRADUATION_PIPELINE: &[&str] = &[
+    "memory-curator.default",
+    "evolution-steward.default",
+    "agent-factory.default",
+];
+
+/// Every evolution path the runtime may tell an agent about.
+///
+/// Adding a row here is a claim, and the guard tests below make it a checkable
+/// one. `skill_crystallization` is deliberately present-and-unavailable rather
+/// than absent: agents were told for months that it existed, and reporting it
+/// as *not* implemented is the honest correction — silence would leave the
+/// same gap undocumented.
+const EVOLUTION_PATHS: &[EvolutionPath] = &[
+    EvolutionPath {
+        id: "agent_revision",
+        summary: "Create a Candidate revision directly — immutable and content-addressed; \
+                  promotion advances the alias.",
+        enactor: PathEnactor::SelfTool("agent_revision_create_from_intent"),
+    },
+    EvolutionPath {
+        id: "revision_via_builder",
+        summary: "Delegate revision creation and promotion to the only agent licensed to call \
+                  the revision tools (the one-door invariant, P-9.15).",
+        enactor: PathEnactor::Pipeline(REVISION_PIPELINE),
+    },
+    EvolutionPath {
+        id: "lesson_graduation",
+        summary: "Lessons that recur across sessions graduate into your SKILL.md instruction \
+                  text through the curator → steward → factory pipeline.",
+        enactor: PathEnactor::Pipeline(GRADUATION_PIPELINE),
+    },
+    EvolutionPath {
+        id: "skill_crystallization",
+        summary: "Crystallise a proven tactic into a new reusable skill. No code path mints a \
+                  skill from a curated pattern today — every path above modifies an agent that \
+                  already exists.",
+        enactor: PathEnactor::Unimplemented("#818"),
+    },
+    EvolutionPath {
+        id: "constitution_amendment",
+        summary: "Propose an amendment to the law that binds you (Ri-0.8).",
+        enactor: PathEnactor::SelfTool("constitution_propose_amendment"),
+    },
+];
+
+/// Is `agent_id` installed — resolvable to a revision — on this gateway?
+///
+/// `None` when there is no gateway store in this call and installation cannot
+/// be checked. Unknown is reported as unavailable, never as available: the
+/// only safe direction for an honesty fix is to under-claim.
+fn agent_is_installed(store: Option<&GatewayStore>, agent_id: &str) -> Option<bool> {
+    let store = store?;
+    Some(crate::runtime::tools::resolve_target_to_agent_ref(agent_id, store).is_ok())
+}
+
+/// Render one path with its availability derived from this caller's tools and
+/// this gateway's installed agents.
+fn describe_path(
+    path: &EvolutionPath,
+    available_tools: &HashSet<String>,
+    store: Option<&GatewayStore>,
+) -> serde_json::Value {
+    let (available, enacted_by, via, unavailable_reason) = match path.enactor {
+        PathEnactor::SelfTool(tool) => {
+            let have_tool = available_tools.contains(tool);
+            (
+                have_tool,
+                "self",
+                vec![tool.to_string()],
+                (!have_tool).then(|| {
+                    format!(
+                        "the '{tool}' tool is not available to you — you do not hold the \
+                         capability it requires"
+                    )
+                }),
+            )
+        }
+        PathEnactor::Pipeline(agents) => {
+            let mut missing: Vec<String> = Vec::new();
+            let mut unverified = false;
+            for agent in agents {
+                match agent_is_installed(store, agent) {
+                    Some(true) => {}
+                    Some(false) => missing.push((*agent).to_string()),
+                    None => unverified = true,
+                }
+            }
+            let reason = if unverified {
+                Some(
+                    "installation could not be verified in this context — no gateway store"
+                        .to_string(),
+                )
+            } else if !missing.is_empty() {
+                Some(format!(
+                    "not installed on this gateway: {}",
+                    missing.join(", ")
+                ))
+            } else {
+                None
+            };
+            (
+                reason.is_none(),
+                "evolution_pipeline",
+                agents.iter().map(|a| (*a).to_string()).collect(),
+                reason,
+            )
+        }
+        PathEnactor::Unimplemented(issue) => (
+            false,
+            "nothing",
+            Vec::new(),
+            Some(format!("not implemented — tracked by {issue}")),
+        ),
+    };
+
+    serde_json::json!({
+        "path": path.id,
+        "available": available,
+        "enacted_by": enacted_by,
+        "via": via,
+        "summary": path.summary,
+        "unavailable_reason": unavailable_reason,
+    })
 }
 
 pub struct SelfDescribeTool;
@@ -76,7 +243,7 @@ impl NativeTool for SelfDescribeTool {
         session_id: Option<&str>,
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<Arc<GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let can_propose_amendments = manifest
@@ -95,6 +262,18 @@ impl NativeTool for SelfDescribeTool {
                     "binds": "gateway",
                 })
             })
+            .collect();
+
+        // how do I evolve — derived from the tools this caller actually has
+        // and the agents actually installed here (#818). Capability-level
+        // availability: a tool advertised here can still be filtered out of a
+        // given turn by the tool-tier filter (see `allowed_tool_tiers` above).
+        let available_tools =
+            crate::runtime::tools::default_registry().available_tool_names(manifest);
+        let store_ref = gateway_store.as_deref();
+        let evolution_paths: Vec<serde_json::Value> = EVOLUTION_PATHS
+            .iter()
+            .map(|path| describe_path(path, &available_tools, store_ref))
             .collect();
 
         let out = serde_json::json!({
@@ -131,15 +310,10 @@ impl NativeTool for SelfDescribeTool {
             // how do I evolve
             "evolution": {
                 "may_propose_amendments": can_propose_amendments,
-                "paths": [
-                    "agent revisions — immutable, content-addressed; promotion advances the alias",
-                    "skill promotion — crystallise successful tactics into reusable skills",
-                    if can_propose_amendments {
-                        "constitution_propose_amendment — you hold the ConstitutionalProposal capability (Ri-0.8)"
-                    } else {
-                        "constitutional amendment — requires the ConstitutionalProposal capability, which you do not currently hold"
-                    },
-                ],
+                "note": "Each path's availability is derived from the tools you hold and the \
+                         agents installed here — an unavailable path is reported as such with \
+                         its reason, never implied to work.",
+                "paths": evolution_paths,
             },
         });
         Ok(out.to_string())
@@ -240,5 +414,157 @@ mod tests {
             patterns: vec!["*".to_string()],
         }]));
         assert_eq!(with["evolution"]["may_propose_amendments"], true);
+    }
+
+    fn path_of(v: &serde_json::Value, id: &str) -> serde_json::Value {
+        v["evolution"]["paths"]
+            .as_array()
+            .expect("paths should be an array")
+            .iter()
+            .find(|p| p["path"] == id)
+            .unwrap_or_else(|| panic!("path '{id}' should be advertised"))
+            .clone()
+    }
+
+    /// Directory names of every reference agent bundle (`agents/*/<id>/SKILL.md`).
+    fn reference_bundle_ids() -> std::collections::HashSet<String> {
+        let agents_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("agents");
+        let mut ids = std::collections::HashSet::new();
+        let groups = std::fs::read_dir(&agents_root)
+            .unwrap_or_else(|e| panic!("agents dir {} should read: {e}", agents_root.display()));
+        for group in groups.flatten() {
+            if !group.path().is_dir() {
+                continue;
+            }
+            let Ok(bundles) = std::fs::read_dir(group.path()) else {
+                continue;
+            };
+            for bundle in bundles.flatten() {
+                if bundle.path().join("SKILL.md").is_file() {
+                    ids.insert(bundle.file_name().to_string_lossy().to_string());
+                }
+            }
+        }
+        ids
+    }
+
+    /// The guard that makes an advertised path a checkable claim (#818): a
+    /// `SelfTool` path must name a tool the registry actually registers, so a
+    /// tool rename breaks this test instead of turning the answer into a lie.
+    #[test]
+    fn advertised_self_tools_are_registered() {
+        let registered = crate::runtime::tools::default_registry().registered_tool_names();
+        for path in EVOLUTION_PATHS {
+            if let PathEnactor::SelfTool(tool) = path.enactor {
+                assert!(
+                    registered.contains(tool),
+                    "evolution path '{}' advertises tool '{}', which is not registered",
+                    path.id,
+                    tool
+                );
+            }
+        }
+    }
+
+    /// Same guard for the pipeline paths: every agent named must exist as a
+    /// reference bundle, so renaming an evolution agent cannot leave
+    /// `self_describe` promising a pipeline nothing can run.
+    #[test]
+    fn advertised_pipeline_agents_have_reference_bundles() {
+        let bundles = reference_bundle_ids();
+        for path in EVOLUTION_PATHS {
+            if let PathEnactor::Pipeline(agents) = path.enactor {
+                for agent in agents {
+                    assert!(
+                        bundles.contains(*agent),
+                        "evolution path '{}' advertises agent '{}', which has no reference bundle",
+                        path.id,
+                        agent
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unimplemented_paths_name_a_tracking_issue() {
+        for path in EVOLUTION_PATHS {
+            if let PathEnactor::Unimplemented(issue) = path.enactor {
+                let number = issue.strip_prefix('#').unwrap_or_else(|| {
+                    panic!("path '{}' issue ref should start with '#'", path.id)
+                });
+                assert!(
+                    number.parse::<u32>().is_ok(),
+                    "path '{}' issue ref '{}' should be '#<number>'",
+                    path.id,
+                    issue
+                );
+            }
+        }
+    }
+
+    /// The regression guard for the claim that started #818: skill
+    /// crystallisation is reported as *not* implemented until code mints a
+    /// skill from a curated pattern. Flipping this row is a deliberate act
+    /// that must update this test.
+    #[test]
+    fn crystallization_reported_unavailable_until_implemented() {
+        let v = run(&manifest_with(vec![]));
+        let path = path_of(&v, "skill_crystallization");
+        assert_eq!(path["available"], false);
+        assert_eq!(path["enacted_by"], "nothing");
+        assert!(
+            path["unavailable_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("#818"),
+            "unavailable_reason should name the tracking issue, got {:?}",
+            path["unavailable_reason"]
+        );
+    }
+
+    #[test]
+    fn amendment_path_availability_tracks_the_tool() {
+        let without = path_of(&run(&manifest_with(vec![])), "constitution_amendment");
+        assert_eq!(without["available"], false);
+        assert!(without["unavailable_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("constitution_propose_amendment"));
+
+        let with = path_of(
+            &run(&manifest_with(vec![Capability::ConstitutionalProposal {
+                patterns: vec!["*".to_string()],
+            }])),
+            "constitution_amendment",
+        );
+        assert_eq!(with["available"], true);
+        assert_eq!(with["enacted_by"], "self");
+        assert_eq!(with["unavailable_reason"], serde_json::Value::Null);
+    }
+
+    /// Without a gateway store the tool cannot verify that the pipeline agents
+    /// are installed, so it under-claims rather than assuming they are.
+    #[test]
+    fn pipeline_paths_underclaim_without_a_store() {
+        let path = path_of(&run(&manifest_with(vec![])), "lesson_graduation");
+        assert_eq!(path["available"], false);
+        assert_eq!(path["enacted_by"], "evolution_pipeline");
+        assert!(path["unavailable_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be verified"));
+        // The mechanism is still named even when unverified — the agent learns
+        // which pipeline would carry the lesson.
+        assert_eq!(
+            path["via"],
+            serde_json::json!([
+                "memory-curator.default",
+                "evolution-steward.default",
+                "agent-factory.default"
+            ])
+        );
     }
 }

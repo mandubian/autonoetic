@@ -75,7 +75,7 @@ When a message arrives at the gateway:
 | **Factory** | `agent-factory.default` | Owns full agent creation pipeline end-to-end |
 | **Adapter** | `agent-adapter.default` | Generates wrapper agents for I/O gaps |
 | **Curator** | `memory-curator.default` | Distills durable learnings |
-| **Steward** | `evolution-steward.default` | Decides skill promotion |
+| **Steward** | `evolution-steward.default` | Judges whether a flagged agent is evolved and whether a recurring lesson graduates into its instructions; delegates all enactment to `agent-factory.default` |
 
 ### Delegation Ladder (for Planner)
 

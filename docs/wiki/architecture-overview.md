@@ -68,4 +68,4 @@ Gateway (High Privilege)
 | **agent-factory** | Builds new agents end-to-end |
 | **agent-adapter** | Generates wrapper agents for I/O gaps |
 | **memory-curator** | Distills durable learnings |
-| **evolution-steward** | Decides skill promotion |
+| **evolution-steward** | Judges agent evolutions and lesson graduations; delegates enactment to agent-factory |
