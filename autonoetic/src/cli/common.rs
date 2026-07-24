@@ -992,7 +992,7 @@ pub enum AgentCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Revision-based lifecycle operations (create/promote)
+    /// Revision-based lifecycle operations (list/inspect/create/promote)
     Revision {
         #[command(subcommand)]
         command: AgentRevisionCommands,
@@ -1113,6 +1113,31 @@ pub enum AgentRevisionCommands {
         /// Optional short summary
         #[arg(long)]
         summary: Option<String>,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// List revisions and their statuses. `--status candidate` is the one an
+    /// operator usually wants: what the promotion gate is holding.
+    List {
+        /// Filter by logical agent ID (omit to list every agent's revisions)
+        #[arg(long)]
+        agent_id: Option<String>,
+        /// Filter by status: candidate, ready, archived, rejected
+        #[arg(long)]
+        status: Option<String>,
+        /// Maximum rows to print (newest first)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Emit machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect one revision: metadata, execution closure, and the SKILL body it
+    /// would install
+    Inspect {
+        /// Revision ID (`rev_sha256:…`) or agent ref (`agent@rev_<short>`)
+        target: String,
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,

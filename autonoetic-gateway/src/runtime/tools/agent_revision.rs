@@ -3263,10 +3263,19 @@ do not re-issue."
                     .as_ref()
                     .map(|d| serde_json::to_value(&d.broadened).unwrap_or_default())
                     .unwrap_or_default();
+                // What the operator is actually admitting. Until now the card
+                // carried only the capability delta, which says what the agent
+                // *may* do and nothing about what it *will* do — and for a
+                // crystallized skill or a graduated lesson the instruction text
+                // is the whole change (#818). The SKILL body shapes runtime
+                // behaviour with those capabilities, so it belongs in front of
+                // the person granting them.
+                let skill_preview = skill_body_preview(&skill_text);
                 let payload = serde_json::json!({
                     "added": added_capabilities,
                     "broadened": broadened_structured,
                     "reassignment": reassignment_payload,
+                    "skill_preview": skill_preview,
                 });
 
                 let reass_suffix = reassignment_signal
@@ -3340,8 +3349,39 @@ do not re-issue."
                         "Approve only if you acknowledge every added/broadened capability by name and accept the reassignment (if any)",
                     )
                     .with_analysis(format!(
-                        "Reassignment details: {}",
-                        reassignment_payload.to_string()
+                        "Reassignment details: {}\n\nWhat this revision instructs \
+                         the agent to do{}:\n{}",
+                        reassignment_payload,
+                        if skill_preview
+                            .get("truncated")
+                            .and_then(|t| t.as_bool())
+                            .unwrap_or(false)
+                        {
+                            format!(
+                                " (first {} of {} lines — open the revision for the rest)",
+                                skill_preview
+                                    .get("lines")
+                                    .and_then(|l| l.as_array())
+                                    .map(|l| l.len())
+                                    .unwrap_or(0),
+                                skill_preview
+                                    .get("total_lines")
+                                    .and_then(|t| t.as_u64())
+                                    .unwrap_or(0),
+                            )
+                        } else {
+                            String::new()
+                        },
+                        skill_preview
+                            .get("lines")
+                            .and_then(|l| l.as_array())
+                            .map(|lines| lines
+                                .iter()
+                                .filter_map(|l| l.as_str())
+                                .map(|l| format!("  {l}"))
+                                .collect::<Vec<_>>()
+                                .join("\n"))
+                            .unwrap_or_default(),
                     )),
                     summary: approval_message.clone(),
                     approval_ref: args.approval_ref.as_deref(),
@@ -5274,6 +5314,64 @@ fn find_merged_federation_promote_approval(
     Ok(None)
 }
 
+/// Lines of instruction body to show on the approval card. Enough to judge what
+/// an agent is being told to do; short enough that the card stays readable and
+/// the stored approval record stays small.
+const SKILL_PREVIEW_MAX_LINES: usize = 40;
+/// Hard byte ceiling, so one pathological line cannot bloat the record.
+const SKILL_PREVIEW_MAX_BYTES: usize = 4_000;
+
+/// The instruction body of a revision's SKILL.md, bounded for display.
+///
+/// The YAML frontmatter is dropped: its capability declarations are already
+/// rendered as the delta, and repeating them buries the prose an operator needs
+/// to read. Returns `{ lines, truncated, total_lines }` — `truncated` says
+/// plainly that there is more, so a reviewer knows to open the revision rather
+/// than assuming they saw all of it.
+pub(crate) fn skill_body_preview(skill_text: &str) -> serde_json::Value {
+    let body = strip_frontmatter(skill_text);
+    let total_lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    let mut hit_byte_cap = false;
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+        if lines.len() >= SKILL_PREVIEW_MAX_LINES {
+            break;
+        }
+        if bytes + line.len() > SKILL_PREVIEW_MAX_BYTES {
+            hit_byte_cap = true;
+            break;
+        }
+        bytes += line.len();
+        lines.push(line.trim_end().to_string());
+    }
+
+    serde_json::json!({
+        "lines": lines,
+        "total_lines": total_lines,
+        "truncated": hit_byte_cap || total_lines > lines.len(),
+    })
+}
+
+/// Text after the leading `---` frontmatter block, or the whole input when there
+/// is no frontmatter (a body-only SKILL is still worth previewing).
+fn strip_frontmatter(skill_text: &str) -> &str {
+    let trimmed = skill_text.trim_start();
+    if !trimmed.starts_with("---") {
+        return skill_text;
+    }
+    let after_open = &trimmed[3..];
+    // The closing fence is a `---` on its own line.
+    for (idx, _) in after_open.match_indices("\n---") {
+        let rest = &after_open[idx + 4..];
+        if rest.starts_with('\n') || rest.starts_with("\r\n") || rest.is_empty() {
+            return rest.trim_start_matches(['\r', '\n']);
+        }
+    }
+    skill_text
+}
+
 pub(crate) fn check_capability_delta(
     gateway_store: &crate::scheduler::gateway_store::GatewayStore,
     gateway_dir: &Path,
@@ -6506,6 +6604,83 @@ mod capability_schema_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod skill_preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_drops_frontmatter_and_keeps_the_body() {
+        let skill = "---\nname: \"x.default\"\nmetadata:\n  autonoetic:\n    capabilities: []\n---\n# X\n\nAlways seal the workbench first.\n";
+        let v = skill_body_preview(skill);
+        let lines: Vec<&str> = v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
+        assert_eq!(lines, vec!["# X", "Always seal the workbench first."]);
+        // The capability declarations are already rendered as the delta; showing
+        // them again would bury the prose the operator needs to read.
+        assert!(!lines.iter().any(|l| l.contains("capabilities")));
+        assert_eq!(v["truncated"], false);
+    }
+
+    #[test]
+    fn preview_without_frontmatter_still_shows_the_body() {
+        let v = skill_body_preview("# Body only\n\ndo the thing\n");
+        assert_eq!(v["lines"][0], "# Body only");
+        assert_eq!(v["total_lines"], 2);
+    }
+
+    /// A long body is clipped, and `truncated` says so — a reviewer who sees a
+    /// preview without that flag is entitled to assume they saw everything.
+    #[test]
+    fn preview_clips_long_bodies_and_admits_it() {
+        let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let v = skill_body_preview(&format!("---\nname: y\n---\n{body}"));
+        assert_eq!(
+            v["lines"].as_array().unwrap().len(),
+            SKILL_PREVIEW_MAX_LINES
+        );
+        assert_eq!(v["total_lines"], 200);
+        assert_eq!(v["truncated"], true);
+    }
+
+    /// One pathological line must not bloat the stored approval record.
+    #[test]
+    fn preview_respects_the_byte_ceiling() {
+        let huge = "x".repeat(SKILL_PREVIEW_MAX_BYTES * 2);
+        let v = skill_body_preview(&format!("---\nname: y\n---\nfirst\n{huge}\n"));
+        let rendered: usize = v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|l| l.as_str())
+            .map(|l| l.len())
+            .sum();
+        assert!(
+            rendered <= SKILL_PREVIEW_MAX_BYTES,
+            "preview should stay under the byte ceiling, got {rendered}"
+        );
+        assert_eq!(v["truncated"], true);
+    }
+
+    /// `---` inside the body (a markdown rule) must not be mistaken for the
+    /// closing fence of a second frontmatter block.
+    #[test]
+    fn preview_handles_horizontal_rules_in_the_body() {
+        let skill = "---\nname: y\n---\n# Title\n\n---\n\nafter the rule\n";
+        let v = skill_body_preview(skill);
+        let lines: Vec<&str> = v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
+        assert_eq!(lines, vec!["# Title", "---", "after the rule"]);
     }
 }
 

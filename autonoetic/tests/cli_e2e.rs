@@ -1215,3 +1215,145 @@ fn gateway_pending_lists_unified_queue() {
         "expected empty message, got:\n{stdout2}"
     );
 }
+
+/// `agent revision list` — candidates were invisible outside the TUI until now:
+/// the CLI had only `create` and `promote`, so an operator could not see what the
+/// promotion gate was holding without opening the session room (#818).
+#[test]
+fn agent_revision_list_filters_by_status_and_reports_truncation() {
+    use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus};
+    use autonoetic_types::principal::PrincipalKind;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = temp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("agents dir");
+    let config_path = temp.path().join("config.yaml");
+    write_config(&config_path, &agents_dir, 4017, 4217, 4);
+
+    let gateway_dir = agents_dir.join(".gateway");
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+        .expect("store opens");
+
+    let seed = |revision_id: &str, agent_id: &str, status: AgentRevisionStatus, created: &str| {
+        let rec = AgentRevisionRecord {
+            revision_id: revision_id.to_string(),
+            agent_id: agent_id.to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: format!("sha256:{revision_id}"),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: created.to_string(),
+            created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
+            created_by_id: "specialized_builder.default".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status,
+            metadata_json: serde_json::json!({}),
+            short_id: revision_id.chars().rev().take(8).collect(),
+            detected_network_hosts: None,
+            signature: None,
+            signer_id: None,
+        };
+        store.insert_agent_revision(&rec).expect("seed revision");
+    };
+
+    seed(
+        "rev_sha256:aaaa000000000000000000000000000000000000000000000000000000000001",
+        "batch-fetcher.default",
+        AgentRevisionStatus::Candidate,
+        "2026-07-25T10:00:00Z",
+    );
+    seed(
+        "rev_sha256:bbbb000000000000000000000000000000000000000000000000000000000002",
+        "coder.default",
+        AgentRevisionStatus::Ready,
+        "2026-07-25T09:00:00Z",
+    );
+
+    let cfg = config_path.to_str().expect("utf8 path");
+
+    // Unfiltered: both revisions, and the human view points at the useful filter.
+    let out = run_autonoetic(&["--config", cfg, "agent", "revision", "list"], None);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "list failed:\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Candidate"), "got:\n{stdout}");
+    assert!(stdout.contains("Ready"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("--status candidate"),
+        "human output should point at the candidate filter, got:\n{stdout}"
+    );
+
+    // Filtered to candidates: the Ready revision must not appear.
+    let out = run_autonoetic(
+        &[
+            "--config",
+            cfg,
+            "agent",
+            "revision",
+            "list",
+            "--status",
+            "candidate",
+            "--json",
+        ],
+        None,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "filtered list failed: {stdout}");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json output");
+    let rows = parsed["revisions"].as_array().expect("revisions array");
+    assert_eq!(rows.len(), 1, "only the candidate should match: {stdout}");
+    assert_eq!(rows[0]["agent_id"], "batch-fetcher.default");
+    assert_eq!(rows[0]["status"], "Candidate");
+
+    // Case-insensitive: an operator types lowercase, the record says `Candidate`.
+    let out = run_autonoetic(
+        &[
+            "--config",
+            cfg,
+            "agent",
+            "revision",
+            "list",
+            "--status",
+            "CANDIDATE",
+            "--json",
+        ],
+        None,
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("json");
+    assert_eq!(parsed["revisions"].as_array().map(|r| r.len()), Some(1));
+
+    // Truncation is stated, not silent — a clipped list that reads as complete
+    // is how an operator misses the thing waiting on them.
+    let out = run_autonoetic(
+        &["--config", cfg, "agent", "revision", "list", "--limit", "1"],
+        None,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1 of 2 shown"),
+        "truncation should be reported, got:\n{stdout}"
+    );
+
+    // An empty result says so rather than printing a bare header.
+    let out = run_autonoetic(
+        &[
+            "--config", cfg, "agent", "revision", "list", "--status", "rejected",
+        ],
+        None,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("No revisions with status 'rejected'"),
+        "got:\n{stdout}"
+    );
+}

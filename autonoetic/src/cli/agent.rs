@@ -683,6 +683,140 @@ pub fn handle_agent_revision(
                 );
             }
         }
+        AgentRevisionCommands::List {
+            agent_id,
+            status,
+            limit,
+            json,
+        } => {
+            let args = serde_json::json!({ "agent_id": agent_id });
+            let tool = autonoetic_gateway::runtime::tools::AgentRevisionListTool;
+            let output = tool.execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(&gateway_dir),
+                &args.to_string(),
+                None,
+                None,
+                Some(&config),
+                Some(store.clone()),
+                None,
+            )?;
+            let parsed: serde_json::Value = serde_json::from_str(&output)?;
+            let mut rows: Vec<serde_json::Value> =
+                parsed["revisions"].as_array().cloned().unwrap_or_default();
+
+            // The tool has no status filter, so filter here — case-insensitively,
+            // because the operator types `candidate` and the record says `Candidate`.
+            if let Some(wanted) = status.as_deref().map(str::to_ascii_lowercase) {
+                rows.retain(|r| {
+                    r["status"]
+                        .as_str()
+                        .map(|s| s.to_ascii_lowercase() == wanted)
+                        .unwrap_or(false)
+                });
+            }
+            rows.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
+            let total_matching = rows.len();
+            rows.truncate(*limit);
+
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "revisions": rows,
+                        "count": rows.len(),
+                        "total_matching": total_matching,
+                    })
+                );
+            } else if rows.is_empty() {
+                match status.as_deref() {
+                    Some(s) => println!("No revisions with status '{s}'."),
+                    None => println!("No revisions found."),
+                }
+            } else {
+                println!(
+                    "{:<12} {:<28} {:<24} CREATED",
+                    "STATUS", "AGENT", "SHORT REF"
+                );
+                for r in &rows {
+                    println!(
+                        "{:<12} {:<28} {:<24} {}",
+                        r["status"].as_str().unwrap_or("?"),
+                        r["agent_id"].as_str().unwrap_or("?"),
+                        r["short_ref"].as_str().unwrap_or("?"),
+                        r["created_at"].as_str().unwrap_or("?"),
+                    );
+                }
+                // Say what was dropped rather than letting the list read as complete.
+                if total_matching > rows.len() {
+                    println!(
+                        "\n{} of {} shown — raise --limit for the rest",
+                        rows.len(),
+                        total_matching
+                    );
+                }
+                if status.is_none() {
+                    println!("\nTip: --status candidate shows what the promotion gate is holding.");
+                }
+            }
+        }
+        AgentRevisionCommands::Inspect { target, json } => {
+            // A full revision id is passed as `revision_id`; anything else is an
+            // agent ref (`agent@rev_<short>` or a bare alias), which the tool
+            // resolves itself.
+            let args = if target.starts_with("rev_") || target.contains("sha256:") {
+                serde_json::json!({ "revision_id": target })
+            } else {
+                serde_json::json!({ "agent_ref": target })
+            };
+            let tool = autonoetic_gateway::runtime::tools::AgentRevisionInspectTool;
+            let output = tool.execute(
+                &manifest,
+                &policy,
+                Path::new("/tmp"),
+                Some(&gateway_dir),
+                &args.to_string(),
+                None,
+                None,
+                Some(&config),
+                Some(store.clone()),
+                None,
+            )?;
+            if *json {
+                println!("{}", output);
+            } else {
+                let parsed: serde_json::Value = serde_json::from_str(&output)?;
+                let rev = parsed
+                    .get("revision")
+                    .cloned()
+                    .unwrap_or_else(|| parsed.clone());
+                let field = |k: &str| {
+                    rev.get(k)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("-")
+                        .to_string()
+                };
+                println!("agent:      {}", field("agent_id"));
+                println!("revision:   {}", field("revision_id"));
+                println!("status:     {}", field("status"));
+                println!("created:    {}", field("created_at"));
+                println!("created by: {}", field("created_by_id"));
+                println!("digest:     {}", field("content_digest"));
+                if let Some(caps) = rev.get("capabilities").and_then(|c| c.as_array()) {
+                    println!("capabilities:");
+                    for c in caps {
+                        println!("  - {c}");
+                    }
+                }
+                // Print the raw payload too: this command is what an operator
+                // reaches for when deciding on a Candidate, and a summary that
+                // silently omitted a field would be worse than verbose.
+                println!("\nfull record:\n{}", serde_json::to_string_pretty(&parsed)?);
+            }
+        }
     }
     Ok(())
 }
