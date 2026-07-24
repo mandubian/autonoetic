@@ -139,23 +139,30 @@ fn agent_is_installed(store: Option<&GatewayStore>, agent_id: &str) -> Option<bo
 /// this gateway's installed agents.
 fn describe_path(
     path: &EvolutionPath,
+    manifest: &AgentManifest,
     available_tools: &HashSet<String>,
     store: Option<&GatewayStore>,
 ) -> serde_json::Value {
     let (available, enacted_by, via, unavailable_reason) = match path.enactor {
         PathEnactor::SelfTool(tool) => {
             let have_tool = available_tools.contains(tool);
-            (
-                have_tool,
-                "self",
-                vec![tool.to_string()],
-                (!have_tool).then(|| {
-                    format!(
-                        "the '{tool}' tool is not available to you — you do not hold the \
-                         capability it requires"
-                    )
-                }),
-            )
+            // Two distinct ways a tool can be absent from the available set, and
+            // the agent needs to know which: an excluded tool stays closed no
+            // matter what capabilities it is granted.
+            let reason = if have_tool {
+                None
+            } else if crate::runtime::tools::is_tool_excluded_public(tool, manifest) {
+                Some(format!(
+                    "the '{tool}' tool is excluded by your manifest (excluded_tools) — this path \
+                     stays closed even if you hold the capability it requires"
+                ))
+            } else {
+                Some(format!(
+                    "the '{tool}' tool is not available to you — you do not hold the capability \
+                     it requires"
+                ))
+            };
+            (have_tool, "self", vec![tool.to_string()], reason)
         }
         PathEnactor::Pipeline(agents) => {
             let mut missing: Vec<String> = Vec::new();
@@ -273,7 +280,7 @@ impl NativeTool for SelfDescribeTool {
         let store_ref = gateway_store.as_deref();
         let evolution_paths: Vec<serde_json::Value> = EVOLUTION_PATHS
             .iter()
-            .map(|path| describe_path(path, &available_tools, store_ref))
+            .map(|path| describe_path(path, manifest, &available_tools, store_ref))
             .collect();
 
         let out = serde_json::json!({
@@ -543,6 +550,48 @@ mod tests {
         assert_eq!(with["available"], true);
         assert_eq!(with["enacted_by"], "self");
         assert_eq!(with["unavailable_reason"], serde_json::Value::Null);
+    }
+
+    /// A tool can also be missing from the available set because the manifest
+    /// excludes it — a different fact than lacking the capability, and one the
+    /// agent must not be told wrong: an excluded tool stays closed however many
+    /// capabilities it is granted.
+    #[test]
+    fn excluded_tool_reports_exclusion_not_a_missing_capability() {
+        let mut manifest = manifest_with(vec![Capability::ConstitutionalProposal {
+            patterns: vec!["*".to_string()],
+        }]);
+        manifest.excluded_tools = vec!["constitution_propose_amendment".to_string()];
+
+        let path = path_of(&run(&manifest), "constitution_amendment");
+        assert_eq!(path["available"], false);
+        let reason = path["unavailable_reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("excluded_tools"),
+            "should name the exclusion, got: {reason}"
+        );
+        assert!(
+            !reason.contains("do not hold the capability"),
+            "must not blame a capability the agent actually holds, got: {reason}"
+        );
+    }
+
+    /// The capability-cause wording is only honest while every `SelfTool` row
+    /// names a capability-gated tool: granting that capability must flip the
+    /// path to available.
+    #[test]
+    fn self_tool_paths_are_capability_gated() {
+        let revision_without = path_of(&run(&manifest_with(vec![])), "agent_revision");
+        assert_eq!(revision_without["available"], false);
+
+        let revision_with = path_of(
+            &run(&manifest_with(vec![Capability::AgentRevision {
+                patterns: vec!["*".to_string()],
+            }])),
+            "agent_revision",
+        );
+        assert_eq!(revision_with["available"], true);
+        assert_eq!(revision_with["unavailable_reason"], serde_json::Value::Null);
     }
 
     /// Without a gateway store the tool cannot verify that the pipeline agents
