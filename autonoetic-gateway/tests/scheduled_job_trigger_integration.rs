@@ -73,6 +73,7 @@ fn manual_fire_enqueues_task_and_advances_schedule() -> anyhow::Result<()> {
     // workflow id is the stable sched-{job_id}
     assert_eq!(event.workflow_id, "sched-sj-trig-001");
     assert_eq!(event.job_id, "sj-trig-001");
+    assert_eq!(event.root_session_id, "root-evolution");
     assert!(event.task_id.starts_with("task-sj-trig-001-"));
 
     // A queued task was created with the manual flag set.
@@ -88,6 +89,22 @@ fn manual_fire_enqueues_task_and_advances_schedule() -> anyhow::Result<()> {
         Some(true)
     );
     assert_eq!(queued[0].child_session_id, "sched-child-sj-trig-001");
+
+    // The WorkflowRun's queued_task_ids must contain the task — the fire must
+    // not clobber the run with a stale pre-enqueue snapshot (enqueue_task
+    // itself persists the run; a redundant save would drop queued_task_ids).
+    let wf = autonoetic_gateway::scheduler::load_workflow_run(
+        &config,
+        Some(store.as_ref()),
+        "sched-sj-trig-001",
+    )?
+    .expect("workflow run exists");
+    assert!(
+        wf.queued_task_ids.iter().any(|t| t == &event.task_id),
+        "queued_task_ids {:?} must contain the fired task {}",
+        wf.queued_task_ids,
+        event.task_id
+    );
 
     // A scheduled_job.triggered event was recorded.
     let events = store.list_workflow_events("sched-sj-trig-001")?;
@@ -115,16 +132,17 @@ fn manual_fire_enqueues_task_and_advances_schedule() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// In-flight guard: a second fire for a job that already has a Running task is
-/// flagged as a collision by `inflight_task_for_workflow`, before any new task
-/// is enqueued.
+/// In-flight guard: after a fire, a follow-up trigger must be flagged as a
+/// collision by `inflight_task_for_workflow`. The guard must catch the task
+/// both (a) while it still sits in `queued_task_runs` (before the drain
+/// promotes it into `task_runs`) and (b) after promotion to a Running TaskRun.
 #[test]
-fn inflight_guard_detects_running_task() -> anyhow::Result<()> {
+fn inflight_guard_detects_queued_and_running_task() -> anyhow::Result<()> {
     let (_temp, store, config) = temp_gateway_store();
     let job = make_job("sj-trig-002", "*/5 * * * *");
     store.create_scheduled_job(&job)?;
 
-    // First fire — no in-flight task beforehand.
+    // No in-flight task before any fire.
     assert!(store
         .inflight_task_for_workflow("sched-sj-trig-002")?
         .is_none());
@@ -138,11 +156,17 @@ fn inflight_guard_detects_running_task() -> anyhow::Result<()> {
         None,
     )?;
 
-    // The queued task is not yet "running" (the drain promotes it), but the
-    // guard also treats pending/runnable tasks as in-flight. Simulate the
-    // drain having promoted the task to Running by directly upserting a
-    // TaskRun.
+    // (a) Immediately after the fire the task is only in queued_task_runs (the
+    // drain has not run). The guard must already see it here, otherwise a
+    // second trigger within the same tick window would enqueue a duplicate.
     let queued = store.list_queued_tasks_for_workflow("sched-sj-trig-002")?;
+    assert_eq!(queued.len(), 1);
+    let inflight_queued = store.inflight_task_for_workflow("sched-sj-trig-002")?;
+    assert_eq!(inflight_queued.as_deref(), Some(queued[0].task_id.as_str()));
+
+    // (b) Simulate the drain having promoted the queued task to a Running
+    // TaskRun by upserting it, then dequeue the queued copy (the drain does
+    // this on promotion).
     let running = autonoetic_types::workflow::TaskRun {
         task_id: queued[0].task_id.clone(),
         workflow_id: "sched-sj-trig-002".to_string(),
@@ -164,10 +188,34 @@ fn inflight_guard_detects_running_task() -> anyhow::Result<()> {
         dedupe_key: None,
     };
     store.upsert_task_run(&running)?;
+    store.dequeue_queued_task("sched-sj-trig-002", &running.task_id)?;
 
-    // Now the guard sees the running task.
-    let inflight = store.inflight_task_for_workflow("sched-sj-trig-002")?;
-    assert_eq!(inflight.as_deref(), Some(running.task_id.as_str()));
+    // The guard still sees the promoted running task.
+    let inflight_running = store.inflight_task_for_workflow("sched-sj-trig-002")?;
+    assert_eq!(inflight_running.as_deref(), Some(running.task_id.as_str()));
+
+    Ok(())
+}
+
+/// In-flight guard end-to-end via the trigger helper: a second fire without
+/// `force` is not possible at this layer (the helper always enqueues); the
+/// guard is consulted by the router before calling it. This test documents that
+/// two consecutive direct helper calls both enqueue (the guard is the router's
+/// responsibility), and that `force` semantics live above the helper.
+#[test]
+fn helper_always_enqueues_even_when_inflight() -> anyhow::Result<()> {
+    let (_temp, store, config) = temp_gateway_store();
+    let job = make_job("sj-trig-002b", "*/5 * * * *");
+    store.create_scheduled_job(&job)?;
+
+    let _e1 = enqueue_scheduled_job_fire(&config, store.as_ref(), &job, Utc::now(), true, None)?;
+    let _e2 = enqueue_scheduled_job_fire(&config, store.as_ref(), &job, Utc::now(), true, None)?;
+
+    // Two distinct tasks enqueued — confirming the helper itself is what the
+    // guard protects against, not the helper protecting itself.
+    let queued = store.list_queued_tasks_for_workflow("sched-sj-trig-002b")?;
+    assert_eq!(queued.len(), 2);
+    assert_ne!(queued[0].task_id, queued[1].task_id);
 
     Ok(())
 }

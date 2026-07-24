@@ -3192,35 +3192,39 @@ pub fn enqueue_scheduled_job_fire(
         &uuid::Uuid::new_v4().to_string()[..8]
     );
 
-    let mut run =
-        match workflow_store::load_workflow_run(config, Some(store), &workflow_id) {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                let new_run = autonoetic_types::workflow::WorkflowRun {
-                    workflow_id: workflow_id.clone(),
-                    root_session_id: job.root_session_id.clone(),
-                    lead_agent_id: job.owner_agent_id.clone(),
-                    status: autonoetic_types::workflow::WorkflowRunStatus::Active,
-                    created_at: now_rfc.clone(),
-                    updated_at: now_rfc.clone(),
-                    active_task_ids: Vec::new(),
-                    queued_task_ids: Vec::new(),
-                    join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
-                    join_task_ids: Vec::new(),
-                    active_plan_ref: None,
-                    reactivated_for_root_spawn: false,
-                };
-                workflow_store::save_workflow_run(config, Some(store), &new_run)?;
-                new_run
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to load workflow run for {}: {}",
-                    workflow_id,
-                    e
-                ));
-            }
-        };
+    // Ensure the WorkflowRun exists — `enqueue_task` errors if it does not, and
+    // it performs all run-state mutation (loading, appending to
+    // queued_task_ids, and saving) itself. We therefore do NOT save `run` back
+    // after enqueue: that would overwrite the run that `enqueue_task` just
+    // persisted with this stale pre-enqueue snapshot, dropping the newly queued
+    // task from `queued_task_ids`.
+    match workflow_store::load_workflow_run(config, Some(store), &workflow_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let new_run = autonoetic_types::workflow::WorkflowRun {
+                workflow_id: workflow_id.clone(),
+                root_session_id: job.root_session_id.clone(),
+                lead_agent_id: job.owner_agent_id.clone(),
+                status: autonoetic_types::workflow::WorkflowRunStatus::Active,
+                created_at: now_rfc.clone(),
+                updated_at: now_rfc.clone(),
+                active_task_ids: Vec::new(),
+                queued_task_ids: Vec::new(),
+                join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
+                join_task_ids: Vec::new(),
+                active_plan_ref: None,
+                reactivated_for_root_spawn: false,
+            };
+            workflow_store::save_workflow_run(config, Some(store), &new_run)?;
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "Failed to load workflow run for {}: {}",
+                workflow_id,
+                e
+            ));
+        }
+    }
 
     let mut metadata = serde_json::json!({
         "scheduled_job_id": job.job_id,
@@ -3248,8 +3252,6 @@ pub fn enqueue_scheduled_job_fire(
     if let Err(e) = workflow_store::enqueue_task(config, Some(store), &queued) {
         return Err(anyhow::anyhow!("Failed to enqueue task: {}", e));
     }
-
-    workflow_store::save_workflow_run(config, Some(store), &run)?;
 
     let trigger_event = autonoetic_types::workflow::WorkflowEventRecord {
         event_id: format!("wevt-sched-{}", &task_id),
@@ -3281,6 +3283,7 @@ pub fn enqueue_scheduled_job_fire(
         job_id: job.job_id.clone(),
         workflow_id,
         task_id,
+        root_session_id: job.root_session_id.clone(),
         triggered_at: now_rfc,
         scheduled_for: next_run_at,
     })

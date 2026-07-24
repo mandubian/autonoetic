@@ -94,16 +94,40 @@ impl GatewayStore {
         Ok(out)
     }
 
-    /// Returns the `task_id` of any in-flight (pending/runnable/running/awaiting
-    /// approval) task for the given workflow, or `None` if there is no active
-    /// task. Used by the manual `scheduled_jobs.trigger` path to detect overlap
-    /// with a prior fire (manual or cron) and avoid double-processing.
+    /// Returns the `task_id` of any in-flight task for the given workflow, or
+    /// `None` if there is no active task. Used by the manual
+    /// `scheduled_jobs.trigger` path to detect overlap with a prior fire
+    /// (manual or cron) and avoid double-processing.
+    ///
+    /// Checks both lifecycle tables:
+    /// - `queued_task_runs`: a freshly fired task sits here until the drain
+    ///   promotes it into `task_runs` (up to one scheduler tick later).
+    /// - `task_runs`: once promoted, an active (pending/runnable/running/
+    ///   awaiting_approval) task.
+    ///
+    /// Without the queued check, repeated triggers within the same tick window
+    /// would bypass the guard and enqueue duplicates.
     ///
     /// Note: a residual TOCTOU window exists between this check and the
     /// subsequent enqueue; for operator-initiated single triggers this is
     /// acceptable, and singleton agents get a second dedup layer during drain.
     pub fn inflight_task_for_workflow(&self, workflow_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
+        // Queued tasks (pre-drain) — newest signal of an in-flight fire.
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM queued_task_runs
+             WHERE workflow_id = ?1
+             ORDER BY enqueued_at ASC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![workflow_id])?;
+        if let Some(row) = rows.next()? {
+            return Ok(Some(row.get::<_, String>(0)?));
+        }
+        // `rows` borrows `stmt`; drop in reverse declaration order.
+        drop(rows);
+        drop(stmt);
+        // Promoted tasks still active.
         let mut stmt = conn.prepare(
             "SELECT task_id FROM task_runs
              WHERE workflow_id = ?1

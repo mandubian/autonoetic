@@ -83,6 +83,7 @@ pub struct ScheduledJobTriggerEvent {
     pub job_id: String,
     pub workflow_id: String,
     pub task_id: String,
+    pub root_session_id: String,
     pub triggered_at: String,
     pub scheduled_for: String,
 }
