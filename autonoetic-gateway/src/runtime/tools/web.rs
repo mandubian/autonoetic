@@ -182,6 +182,99 @@ fn session_grants_allow_host(
     store.session_grants_cover_targets(root_sid, &[host.to_string()])
 }
 
+// ---------------------------------------------------------------------------
+// Per-host probe budget for the read-style web tools (#857)
+//
+// The per-host `sandbox_exec` probe budget (#853) detects an agent re-probing
+// one dead host by strike-counting duplicate-content probes and refusing the
+// next one. But it only sees `sandbox_exec`: its host detection runs static
+// analysis over the *script*. `web_fetch` and idempotent `web_call` GETs are
+// the same divergence shape (loop one host with a stream of different URLs,
+// each a fresh `(tool, args)` fingerprint the rotating-poll guard misses, all
+// returning the same page) yet never reach that path.
+//
+// These helpers feed the *same* [`crate::runtime::host_probe_budget`] registry,
+// so strikes accumulate per-host **across** tools — a `web_fetch` + `sandbox_exec`
+// mix against one host shares a single budget — and a novel response still
+// resets the count. Scope is deliberately limited to reads: `web_fetch` always,
+// `web_call` only for GET. A repeated non-GET `web_call` is a mutation, not a
+// probe, and its uniform-ack responses (e.g. `{"status":"ok"}` across a batch
+// of distinct writes) would false-positive under "duplicate content = strike".
+// ---------------------------------------------------------------------------
+
+/// Pre-execution check: returns the `host_budget_exhausted` refusal response
+/// when `host` has already exhausted its per-session probe budget, else `None`
+/// (proceed). No-ops when the budget is disabled or there is no store/session.
+fn web_probe_budget_refusal(
+    gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    session_id: Option<&str>,
+    host: &str,
+) -> Option<String> {
+    let store = gateway_store?;
+    let sid = session_id?;
+    if store.host_probe_budget.cap() == 0 {
+        return None;
+    }
+    let strikes = store.host_probe_budget.exhausted(sid, host)?;
+    Some(
+        crate::runtime::host_probe_budget::host_budget_exhausted_response(
+            host,
+            strikes,
+            store.host_probe_budget.cap(),
+        ),
+    )
+}
+
+/// Post-execution accounting for a *successful* read-style web probe: a response
+/// whose content hash was already seen from `host` this session is a strike; a
+/// novel response resets the count. Emits the operator triage event the first
+/// time a host reaches the strike cap (mirroring `sandbox_exec`). Web failures
+/// bubble up as `Err` before reaching here, so — like #853's success path —
+/// only successes are recorded; failed retries remain the LoopGuard per-tool
+/// failure budget's job.
+fn web_probe_budget_record_success(
+    gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    session_id: Option<&str>,
+    agent_id: &str,
+    host: &str,
+    body: &str,
+) {
+    let (Some(store), Some(sid)) = (gateway_store, session_id) else {
+        return;
+    };
+    if store.host_probe_budget.cap() == 0 {
+        return;
+    }
+    let output_hash = crate::runtime::host_probe_budget::content_hash(body);
+    if let crate::runtime::host_probe_budget::ProbeOutcome::Strike {
+        strikes,
+        reached_cap,
+        ..
+    } = store
+        .host_probe_budget
+        .record(sid, host, true, &output_hash)
+    {
+        if reached_cap {
+            let root = crate::runtime::content_store::root_session_id(sid);
+            if let Err(e) = store.emit_host_probe_budget_exhausted_event(
+                sid,
+                root,
+                agent_id,
+                host,
+                strikes,
+                store.host_probe_budget.cap(),
+            ) {
+                tracing::warn!(
+                    target: "web",
+                    error = %e,
+                    host = %host,
+                    "Failed to emit host_budget_exhausted event (#857)"
+                );
+            }
+        }
+    }
+}
+
 fn resolve_duckduckgo_engine_url(args: &WebSearchArgs) -> String {
     args.duckduckgo_engine_url
         .as_ref()
@@ -1612,6 +1705,15 @@ impl NativeTool for WebFetchTool {
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
         enforce_remote_target_for_web(manifest, agent_dir, &host, &args.url)?;
+
+        // Per-host probe budget (#857): refuse a probe against a host this
+        // session has already exhausted, before doing any network work.
+        if let Some(refusal) =
+            web_probe_budget_refusal(_gateway_store.as_ref(), _session_id, &host)
+        {
+            return Ok(refusal);
+        }
+
         let approval_validated = if let (Some(approval_ref), Some(store)) =
             (args.approval_ref.as_deref(), _gateway_store.as_ref())
         {
@@ -1682,7 +1784,7 @@ impl NativeTool for WebFetchTool {
             agent_dir,
             _session_id,
             _config,
-            _gateway_store,
+            _gateway_store.clone(),
             _run_context,
             &args,
             approval_validated,
@@ -1696,6 +1798,18 @@ impl NativeTool for WebFetchTool {
                 final_url,
                 redirect_hops,
             } => {
+                // Per-host probe budget (#857): a novel response resets this
+                // host's strike count; a repeat of content already seen from it
+                // this session is a strike. Hash the full body (pre-truncation)
+                // so a varying `max_chars` cannot disguise identical pages.
+                web_probe_budget_record_success(
+                    _gateway_store.as_ref(),
+                    _session_id,
+                    &manifest.agent.id,
+                    &host,
+                    &body,
+                );
+
                 let total_chars = body.chars().count();
                 let truncated = total_chars > max_chars;
                 let content = if truncated {
@@ -1827,6 +1941,28 @@ impl NativeTool for WebCallTool {
         anyhow::ensure!(!args.url.trim().is_empty(), "url must not be empty");
         let host = extract_host(&args.url)?;
         enforce_remote_target_for_web(manifest, agent_dir, &host, &args.url)?;
+
+        // Per-host probe budget (#857) applies to `web_call` only for GET — a
+        // read probe of the same family as `web_fetch`. Non-GET methods are
+        // mutations, not probes, so they are exempt. Clone the store handle
+        // up-front: the approval-gate branch below partially moves
+        // `_gateway_store`, which would otherwise leave it unavailable for the
+        // post-success accounting.
+        let budget_store = _gateway_store.clone();
+        let is_get_probe = args
+            .method
+            .as_deref()
+            .unwrap_or("GET")
+            .trim()
+            .eq_ignore_ascii_case("GET");
+        if is_get_probe {
+            if let Some(refusal) =
+                web_probe_budget_refusal(budget_store.as_ref(), _session_id, &host)
+            {
+                return Ok(refusal);
+            }
+        }
+
         let approval_validated = if let (Some(approval_ref), Some(store)) =
             (args.approval_ref.as_deref(), _gateway_store.as_ref())
         {
@@ -2079,6 +2215,20 @@ impl NativeTool for WebCallTool {
             })?;
             Ok((status, content_type, text))
         })?;
+
+        // Per-host probe budget (#857): GET is a read probe — record it against
+        // this host (novel response resets its strikes; a repeat is a strike).
+        // Hash the full response (pre-truncation) so a varying `max_chars`
+        // cannot disguise identical pages.
+        if is_get_probe {
+            web_probe_budget_record_success(
+                budget_store.as_ref(),
+                _session_id,
+                &manifest.agent.id,
+                &host,
+                &response_text,
+            );
+        }
 
         let total_chars = response_text.chars().count();
         let truncated = total_chars > max_chars;
