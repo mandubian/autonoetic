@@ -66,6 +66,26 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(DigestQueryTool));
 }
 
+/// Compute a deterministic memory ID from scope + normalized content.
+/// Same content always produces the same ID → `memory_upsert` becomes
+/// an idempotent update rather than a duplicate insert (#868).
+pub(crate) fn deterministic_id(scope: &str, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized: String = content
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut h = Sha256::new();
+    h.update(scope.as_bytes());
+    h.update(b"|");
+    h.update(normalized.as_bytes());
+    format!("dedup-{}", hex::encode(h.finalize())[..24].to_string())
+}
+
 pub struct KnowledgeStoreTool;
 
 impl NativeTool for KnowledgeStoreTool {
@@ -144,35 +164,16 @@ impl NativeTool for KnowledgeStoreTool {
             "global".to_string()
         }
 
-        /// Compute a deterministic memory ID from scope + normalized content.
-        /// Same content always produces the same ID → `memory_upsert` becomes
-        /// an idempotent update rather than a duplicate insert (#868).
-        fn deterministic_id(scope: &str, content: &str) -> String {
-            use sha2::{Digest, Sha256};
-            // Normalize: lowercase, strip non-alphanumeric, collapse whitespace.
-            let normalized: String = content
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-                .collect::<String>()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut h = Sha256::new();
-            h.update(scope.as_bytes());
-            h.update(b"|");
-            h.update(normalized.as_bytes());
-            format!("dedup-{}", hex::encode(h.finalize())[..24].to_string())
-        }
-
         let args: Args = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
-        let id = if args.id.trim().is_empty() {
-            deterministic_id(&args.scope, &args.content)
-        } else {
+        let user_provided_id = !args.id.trim().is_empty();
+        let id = if user_provided_id {
             args.id.clone()
+        } else {
+            deterministic_id(&args.scope, &args.content)
         };
+
         anyhow::ensure!(!args.content.trim().is_empty(), "content must not be empty");
         anyhow::ensure!(
             args.confidence >= 0.0 && args.confidence <= 1.0,
@@ -195,6 +196,68 @@ impl NativeTool for KnowledgeStoreTool {
             &manifest.agent.id,
             session_id,
         )?;
+
+        // ── Semantic dedup (Jaccard pre-check) ────────────────────────
+        // When the ID is auto-computed, check for an existing pattern in
+        // the same scope with the same `type:` tag whose Jaccard token
+        // overlap exceeds the configured threshold. If found, reuse that
+        // entry's ID so the upsert merges instead of inserting a duplicate.
+        let id = if user_provided_id {
+            id
+        } else {
+            match block_on_memory(mem.recall(&id)).ok() {
+                Some(_) => id, // exact match already exists
+                None => {
+                    let type_tag = args.tags.iter().find(|t| t.starts_with("type:"));
+                    match type_tag {
+                        Some(tag) => {
+                            let threshold = _config
+                                .map(|c| c.knowledge_store.similarity_threshold)
+                                .unwrap_or(0.25);
+                            let candidates = block_on_memory(
+                                mem.search_by_tags(&args.scope, &[tag.clone()], None, 20),
+                            )
+                            .unwrap_or_default();
+                            let mut best_score = 0.0_f64;
+                            let mut best_id = None;
+                            for candidate in &candidates {
+                                if candidate.memory_id == id {
+                                    continue;
+                                }
+                                let score =
+                                    crate::runtime::context::score_task_relevance(
+                                        &candidate.content,
+                                        &args.content,
+                                    );
+                                if score > best_score {
+                                    best_score = score;
+                                    best_id = Some(candidate.memory_id.clone());
+                                }
+                            }
+                            if best_score >= threshold {
+                                if let Some(ref merged) = best_id {
+                                    tracing::info!(
+                                        target: "knowledge_store",
+                                        new_id = %id,
+                                        merged_into = %merged,
+                                        score = %best_score,
+                                        threshold = %threshold,
+                                        "semantic dedup: merging with existing pattern (Jaccard {:.2})",
+                                        best_score
+                                    );
+                                    merged.clone()
+                                } else {
+                                    id
+                                }
+                            } else {
+                                id
+                            }
+                        }
+                        None => id, // no type tag → exact match only
+                    }
+                }
+            }
+        };
 
         let expires_at = knowledge_retention_expires_at(&args.retention)?;
         let visibility = parse_knowledge_store_visibility(&args.visibility, session_id)?;
@@ -628,5 +691,57 @@ impl NativeTool for DigestQueryTool {
             "narrative": narrative,
         }))
         .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_id_is_stable() {
+        let a = deterministic_id("evolution/patterns", "When make is blocked by sandbox policy P-1.9");
+        let b = deterministic_id("evolution/patterns", "When make is blocked by sandbox policy P-1.9");
+        assert_eq!(a, b);
+        assert!(a.starts_with("dedup-"));
+    }
+
+    #[test]
+    fn deterministic_id_differs_on_content() {
+        let a = deterministic_id("evolution/patterns", "When make is blocked by sandbox policy");
+        let b = deterministic_id("evolution/patterns", "Python repr prevents truncation in file reads");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn deterministic_id_differs_on_scope() {
+        let a = deterministic_id("evolution/patterns", "sandbox exec permission error");
+        let b = deterministic_id("digest.lesson", "sandbox exec permission error");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn jaccard_high_for_same_concept_different_phrasing() {
+        let a = "When `make` is blocked by sandbox policy P-1.9, wrap in bash -c or call python3 directly.";
+        let b = "sandbox_exec permission blocks bare make commands. Workaround: use bash -c wrapper or python3 scripts directly.";
+        let score = crate::runtime::context::score_task_relevance(a, b);
+        assert!(score >= 0.25, "expected >= 0.25 for same-concept phrases, got {score:.3}");
+    }
+
+    #[test]
+    fn jaccard_low_for_different_patterns() {
+        let a = "When `make` is blocked by sandbox policy P-1.9, wrap in bash -c.";
+        let b = "The session transcript handle is not visible to cross-agent callers.";
+        let score = crate::runtime::context::score_task_relevance(a, b);
+        assert!(score < 0.25, "expected < 0.25 for unrelated patterns, got {score:.3}");
+    }
+
+    #[test]
+    fn jaccard_distinguishes_sandbox_subtopics() {
+        let a = "make blocked by sandbox policy P-1.9 — use python3 directly.";
+        let b = "sandbox filesystem isolation causes resolve content_not_found for host paths.";
+        let score = crate::runtime::context::score_task_relevance(a, b);
+        // shared: "sandbox" + "by" — not enough to exceed 0.25
+        assert!(score < 0.25, "expected < 0.25 for different sandbox subtopics, got {score:.3}");
     }
 }
