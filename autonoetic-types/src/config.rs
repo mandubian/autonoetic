@@ -457,6 +457,12 @@ pub struct AutoLearningConfig {
     #[serde(default = "default_curation_schedule")]
     pub curation_schedule: String,
 
+    /// Cron schedule for the periodic evolution-orchestrator run, which
+    /// sequences curator output, graduations, and steward review.
+    /// Default: daily at 03:00 UTC ("0 3 * * *").
+    #[serde(default = "default_evolution_schedule")]
+    pub evolution_schedule: String,
+
     /// Score wake-time memory priming (context.rs) against the incoming task
     /// text (Jaccard token overlap) instead of pure recency. Default: true.
     #[serde(default = "default_true")]
@@ -471,12 +477,17 @@ fn default_curation_schedule() -> String {
     "0 */4 * * *".to_string()
 }
 
+fn default_evolution_schedule() -> String {
+    "0 3 * * *".to_string()
+}
+
 impl Default for AutoLearningConfig {
     fn default() -> Self {
         Self {
             enabled: default_auto_learning_enabled(),
             quality_signals: default_auto_learning_enabled(),
             curation_schedule: default_curation_schedule(),
+            evolution_schedule: default_evolution_schedule(),
             task_matched_recall: default_true(),
         }
     }

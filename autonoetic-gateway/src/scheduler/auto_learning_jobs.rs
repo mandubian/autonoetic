@@ -15,9 +15,6 @@ pub const AUTO_LEARNING_OWNER_ID: &str = "gateway.auto-learning";
 const MEMORY_CURATOR_ID: &str = "memory-curator.default";
 const EVOLUTION_ORCHESTRATOR_ID: &str = "evolution-orchestrator.default";
 
-/// Daily at 03:00 UTC — evolution runs less frequently than memory curation.
-const DEFAULT_EVOLUTION_CRON: &str = "0 3 * * *";
-
 fn system_agent_schedules_target(config: &GatewayConfig, target_agent_id: &str) -> bool {
     config.system_agents.iter().any(|e| {
         e.enabled
@@ -217,7 +214,7 @@ pub fn inject_auto_learning_jobs(
                     match create_auto_learning_job(
                         store,
                         EVOLUTION_ORCHESTRATOR_ID,
-                        DEFAULT_EVOLUTION_CRON,
+                        &config.auto_learning.evolution_schedule,
                         msg,
                         "evolution_orchestrator",
                     ) {
@@ -226,7 +223,8 @@ pub fn inject_auto_learning_jobs(
                                 agent_id: EVOLUTION_ORCHESTRATOR_ID.to_string(),
                                 action: ReconcileAction::Created,
                                 message: format!(
-                                    "Evolution orchestrator cron created ({DEFAULT_EVOLUTION_CRON})"
+                                    "Evolution orchestrator cron created ({})",
+                                    config.auto_learning.evolution_schedule
                                 ),
                             });
                         }

@@ -83,6 +83,36 @@ pub struct ScheduledJobTriggerEvent {
     pub job_id: String,
     pub workflow_id: String,
     pub task_id: String,
+    pub root_session_id: String,
     pub triggered_at: String,
     pub scheduled_for: String,
+}
+
+/// Parameters for `scheduled_jobs.trigger` — manually fire a scheduled job's
+/// agent now on the running gateway, bypassing the cron schedule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJobTriggerParams {
+    /// The `job_id` of the scheduled job to fire.
+    pub job_id: String,
+    /// If true, skip the in-flight guard that prevents overlap with an
+    /// already-running fire for the same job. Default false.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Outcome of `scheduled_jobs.trigger`. Either the job was fired (a new task
+/// enqueued) or skipped because a prior fire is still in flight.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ScheduledJobTriggerResult {
+    /// A new task was enqueued for immediate execution.
+    Triggered {
+        #[serde(flatten)]
+        event: ScheduledJobTriggerEvent,
+    },
+    /// An existing in-flight task was found for this job; no new task enqueued.
+    TriggerSkipped {
+        job_id: String,
+        existing_task_id: String,
+    },
 }

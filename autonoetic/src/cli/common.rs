@@ -889,6 +889,14 @@ pub enum GatewayCronCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Fire a scheduled job now on the running gateway, bypassing its schedule.
+    Trigger {
+        /// The job id to fire (see `gateway cron list`).
+        job_id: String,
+        /// Skip the in-flight guard that prevents overlap with a running fire.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

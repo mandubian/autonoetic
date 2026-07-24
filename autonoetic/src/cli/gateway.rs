@@ -2382,27 +2382,54 @@ pub async fn handle_gateway_system_agents(
         }
 
         super::common::SystemAgentCommands::Run { ref agent_id } => {
+            // Validate the agent is declared (config or installed bundle).
             let entry = config.system_agents.iter().find(|e| e.agent_id == *agent_id);
+            let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
+            let _loaded = repo.get_sync(agent_id)
+                .map_err(|e| anyhow::anyhow!("Could not load agent '{}': {}", agent_id, e))?;
             if entry.is_none() {
-                anyhow::bail!("Agent '{}' is not declared as a system agent in config.", agent_id);
+                tracing::debug!(
+                    "Agent '{}' is not declared under `system_agents` in config; attempting to \
+                     trigger its cron job regardless.",
+                    agent_id
+                );
             }
 
-            let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
-            let _loaded = repo.get_sync(&agent_id)
-                .map_err(|e| anyhow::anyhow!("Could not load agent '{}': {}", agent_id, e))?;
+            // Auto-learning jobs use a random `sj-auto-{uuid}` id, so resolve
+            // agent_id -> job_id by scanning active jobs for a matching target.
+            // If more than one active job targets this agent (different root
+            // sessions / owners / custom cron rows), refuse to guess: require
+            // the operator to specify the job_id via `gateway cron trigger`.
+            let jobs = store.list_scheduled_jobs(None, None, None, 500)?;
+            let matching: Vec<_> = jobs
+                .iter()
+                .filter(|j| {
+                    j.target_agent_id == *agent_id
+                        && j.status
+                            == autonoetic_types::scheduled_job::ScheduledJobStatus::Active
+                })
+                .collect();
+            let job = match matching.as_slice() {
+                [] => anyhow::bail!(
+                    "No active scheduled job targets agent '{agent_id}'. Use \
+                     `autonoetic gateway cron list` to see jobs, or `gateway cron trigger \
+                     <job_id>` for an arbitrary job id."
+                ),
+                [one] => one,
+                many => {
+                    let ids: Vec<&str> =
+                        many.iter().map(|j| j.job_id.as_str()).collect();
+                    anyhow::bail!(
+                        "Multiple active scheduled jobs target agent '{agent_id}' \
+                         ({}); refusing to guess which to fire. Specify the job_id \
+                         explicitly: `autonoetic gateway cron trigger <job_id>`.",
+                        ids.join(", ")
+                    );
+                }
+            };
 
-            let message = entry.and_then(|e| e.message.clone())
-                .unwrap_or_else(|| format!("Manual trigger for {}", agent_id));
-
-            println!("Spawning system agent '{}'...", agent_id);
-
-            let agent_ref = autonoetic_gateway::resolve_target_to_agent_ref(
-                &agent_id, store.as_ref(),
-            ).map_err(|e| anyhow::anyhow!("Could not resolve agent '{}': {}", agent_id, e))?;
-
-            println!("Target: {} @ {}", agent_ref.agent_id, agent_ref.revision_id);
-            println!("Message: {}", message);
-            println!("Note: Actual agent execution requires a running gateway. Use 'autonoetic gateway start' to run the agent.");
+            println!("Resolved agent '{agent_id}' to job '{}'.", job.job_id);
+            trigger_scheduled_job(&config, &job.job_id, false).await?;
         }
     }
 
@@ -2491,8 +2518,79 @@ pub async fn handle_gateway_cron(
                 "Reconnect to a session timeline: autonoetic room <root_session_id> --tui"
             );
         }
+        super::common::GatewayCronCommands::Trigger { job_id, force } => {
+            // Trigger must run on the live gateway (the scheduler + agent
+            // runtimes live there), so this goes over JSON-RPC rather than
+            // reading the store directly like `list` does.
+            trigger_scheduled_job(&config, &job_id, *force).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Fire a scheduled job now via the running gateway's `scheduled_jobs.trigger`
+/// JSON-RPC method. Shared by `gateway cron trigger <job_id>` and
+/// `gateway system-agents run <agent_id>`.
+async fn trigger_scheduled_job(
+    config: &autonoetic_types::config::GatewayConfig,
+    job_id: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let client = super::room::client::RoomClient::from_config(config)?;
+    let result = client
+        .call(
+            "scheduled_jobs.trigger",
+            serde_json::json!({ "job_id": job_id, "force": force }),
+        )
+        .await?;
+
+    // The RPC returns `{status: "triggered", ...}` or `{status: "trigger_skipped", ...}`.
+    let status = result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    match status {
+        "triggered" => {
+            let task_id = result
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let workflow_id = result
+                .get("workflow_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let scheduled_for = result
+                .get("scheduled_for")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let root_session_id = result
+                .get("root_session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("Fired job '{job_id}'.");
+            println!("  workflow:      {workflow_id}");
+            println!("  task:          {task_id}");
+            println!("  root_session:  {root_session_id}");
+            println!("  next_run_at:   {scheduled_for}  (schedule advanced; the cron tick will not re-fire)");
+            println!();
+            println!("The agent will start within one scheduler tick. Follow progress with:");
+            println!("  autonoetic room {root_session_id} --tui");
+        }
+        "trigger_skipped" => {
+            let existing = result
+                .get("existing_task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!(
+                "Skipped: job '{job_id}' already has an in-flight task ({existing}). Re-run with \
+                 --force to override."
+            );
+        }
+        other => {
+            println!("Unexpected trigger response (status={other}): {result}");
+        }
+    }
     Ok(())
 }
 
