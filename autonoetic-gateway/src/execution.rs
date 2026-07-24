@@ -2745,8 +2745,16 @@ impl GatewayExecutionService {
             .execute_with_reliability_controls(&lock_agent_id, || async move {
                 let repo = AgentRepository::from_config(&self.config);
 
+            // The source-agent capability check gates *agent*-initiated spawns
+            // and messages. Operator/gateway-initiated spawns (e.g. `/curate`,
+            // which enqueues with source `operator`) have no seeded source agent
+            // to load — they are already authoritative. Skip the load for such
+            // reserved principals; otherwise `get_sync_from_store` bails with
+            // "No alias found for agent 'operator'" and the task dies on start.
             if let Some(source_id) = source_agent_id {
-                if source_id != agent_id {
+                if source_id != agent_id
+                    && !autonoetic_types::principal::is_reserved_non_agent_id(source_id)
+                {
                     let gateway_dir = crate::execution::gateway_root_dir(&self.config);
                     let source_loaded = repo.get_sync_from_store(source_id, &gateway_dir, self.gateway_store.as_deref())?;
                     let source_policy = crate::policy::PolicyEngine::new(source_loaded.manifest);
