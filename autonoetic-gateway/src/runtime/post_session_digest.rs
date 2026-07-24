@@ -201,6 +201,12 @@ pub(crate) fn extract_json_object_slice(text: &str) -> anyhow::Result<&str> {
     let end = scan
         .rfind('}')
         .ok_or_else(|| anyhow::anyhow!("digest LLM output has no closing brace"))?;
+    anyhow::ensure!(
+        end > start,
+        "digest LLM output has a closing brace before the JSON object (start={}, end={})",
+        start,
+        end
+    );
     Ok(scan[start..=end].trim())
 }
 
