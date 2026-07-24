@@ -42,9 +42,9 @@ pub fn mint_hashed_prefixed_id(prefix: &str, entropy: &str) -> String {
     format!("{}{}", prefix, hash_and_truncate(entropy, STABLE_ID_HEX_LEN))
 }
 
-/// Mint an ephemeral random identifier: `prefix` followed by `hex_len` hex
-/// characters from a fresh v4 UUID (dash-free `simple` form). `hex_len` is
-/// clamped to the 32-char UUID hex width.
+/// Mint an ephemeral random identifier: `prefix` prepended verbatim (no
+/// separator is inserted) to `hex_len` hex characters from a fresh v4 UUID
+/// (dash-free `simple` form). `hex_len` is clamped to the 32-char UUID hex width.
 ///
 /// Prefer [`short_random_id`] (8 hex) for the common event/message/notification
 /// case; use this directly only when a wider random suffix is needed.
@@ -54,12 +54,15 @@ pub fn short_random_id_hex(prefix: &str, hex_len: usize) -> String {
     format!("{}{}", prefix, &hex[..len])
 }
 
-/// Mint an ephemeral random identifier: `prefix` followed by 8 hex characters
-/// from a fresh v4 UUID (e.g. `short_random_id("msg-")` -> `msg-1a2b3c4d`).
+/// Mint an ephemeral random identifier: `prefix` prepended **verbatim** (no
+/// separator is inserted) to 8 hex characters from a fresh v4 UUID. Include any
+/// trailing delimiter in `prefix` yourself — `short_random_id("msg-")` ->
+/// `msg-1a2b3c4d`, whereas `short_random_id("msg")` -> `msg1a2b3c4d`. Pass `""`
+/// for a bare 8-hex-char id.
 ///
-/// Pass `""` for a bare 8-hex-char id. This replaces the previously-duplicated
-/// `format!("{prefix}-{}", &Uuid::new_v4().to_string()[..8])` idiom, and
-/// encapsulates the fact that the slice is only valid because UUID hex is ASCII.
+/// Replaces the previously-duplicated
+/// `format!("{prefix}-{}", &Uuid::new_v4().to_string()[..8])` idiom and
+/// encapsulates the fact that the slice is valid only because UUID hex is ASCII.
 pub fn short_random_id(prefix: &str) -> String {
     short_random_id_hex(prefix, 8)
 }
@@ -92,16 +95,18 @@ mod tests {
     }
 
     #[test]
-    fn test_short_random_id_shape_and_uniqueness() {
-        let a = short_random_id("msg-");
-        assert!(a.starts_with("msg-"));
-        assert_eq!(a.len(), "msg-".len() + 8);
-        assert!(a["msg-".len()..]
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        // Fresh randomness each call.
-        assert_ne!(short_random_id("msg-"), short_random_id("msg-"));
-        // Empty prefix → bare 8-hex id.
+    fn test_short_random_id_shape() {
+        // Validate shape + charset over several calls. Values are random, so we
+        // deliberately do NOT assert inequality — that would be a rare CI flake.
+        for _ in 0..16 {
+            let a = short_random_id("msg-");
+            assert!(a.starts_with("msg-"));
+            assert_eq!(a.len(), "msg-".len() + 8);
+            assert!(a["msg-".len()..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        }
+        // Empty prefix → bare 8-hex id (no separator inserted).
         assert_eq!(short_random_id("").len(), 8);
     }
 
