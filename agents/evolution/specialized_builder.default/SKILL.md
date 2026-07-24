@@ -324,10 +324,16 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
   "script_entry": "main.py",          // REQUIRED - path to entry script
   "artifact_ref": "ar.example",      // REQUIRED - reviewed artifact containing main.py
   "capabilities": [...],
+  "io": {
+    "accepts": {"type": "object", "required": ["task"], "properties": {"task": {"type": "string"}}},  // REQUIRED - JSON schema of the stdin payload
+    "returns": {"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}  // output contract — enforced on every run, including the smoke test
+  },
   "credential_services": ["my-service"]  // OPTIONAL - service names for credential env injection at spawn time (derived from the service name in the planner's hand-off)
 }
 ```
-**Missing `script_entry` will cause install to fail! Also: do NOT include `llm_preset` for script agents.**
+**Missing `script_entry` OR missing `io.accepts` will cause install to fail! Also: do NOT include `llm_preset` for script agents.**
+
+The script's stdout must match `io.returns` exactly (all `required` fields present) — the gateway enforces the schema on every execution, including the pre-promotion smoke test. A script that omits a required field fails its smoke test and cannot be promoted.
 
 ### Promotion evidence (gateway-enforced)
 

@@ -1418,9 +1418,12 @@ fn test_revision_create_from_intent_materializes_canonical_skill_and_lock() {
 }
 
 #[test]
-fn test_revision_create_from_intent_script_mode_without_io_leaves_io_none() {
-    // The gateway must not silently inject a default io schema when the author
-    // omits `io` for a script agent. The shape of the input is the author's call.
+fn test_revision_create_from_intent_script_mode_without_io_accepts_rejected() {
+    // Script agents are schema-native: `io.accepts` is a hard birth requirement.
+    // A script that parses stdin deterministically (json.loads) with no declared
+    // input contract is advertised to callers as `message_format: "free_text"`,
+    // so it receives raw prose and crashes at runtime — a failure the promotion
+    // gates cannot see. Reject at creation instead.
     use autonoetic_gateway::artifact_store::ArtifactStore;
     use autonoetic_gateway::runtime::content_store::ContentStore;
     use autonoetic_types::artifact::ArtifactKind;
@@ -1482,6 +1485,83 @@ fn test_revision_create_from_intent_script_mode_without_io_leaves_io_none() {
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(
+        parsed["ok"], false,
+        "script agent without io.accepts must be rejected: {parsed:?}"
+    );
+    let message = parsed["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("io.accepts"),
+        "rejection must name the missing contract: {message}"
+    );
+}
+
+#[test]
+fn test_revision_create_from_intent_script_mode_with_io_materializes_contract() {
+    // Positive counterpart: a script agent declaring io.accepts / io.returns is
+    // created and the canonical SKILL.md carries the declared contract.
+    use autonoetic_gateway::artifact_store::ArtifactStore;
+    use autonoetic_gateway::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
+
+    let tmp = TempDir::new().unwrap();
+    let gateway_dir = tmp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let session_id = "intent-script-io-session";
+
+    let content_store = ContentStore::new(&gateway_dir).unwrap();
+    let artifact_store = ArtifactStore::new(&gateway_dir).unwrap();
+    let script =
+        b"#!/usr/bin/env python3\nimport os\nprint(os.environ.get('AUTONOETIC_INPUT',''))\n";
+    let handle = content_store.write(script).unwrap();
+    content_store
+        .register_name(session_id, "scripts/echo.py", &handle)
+        .unwrap();
+    let bundle = artifact_store
+        .build_with_kind(
+            &["scripts/echo.py".to_string()],
+            Some(&["scripts/echo.py".to_string()]),
+            None,
+            ArtifactKind::AgentBundle,
+            session_id,
+        )
+        .unwrap();
+
+    let manifest = manifest_with_capabilities(vec![Capability::AgentRevision {
+        patterns: vec!["script.io*".into()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let tool = autonoetic_gateway::runtime::tools::AgentRevisionCreateFromIntentTool;
+    let args = json!({
+        "agent_id": "script.io",
+        "artifact_id": bundle.artifact_id,
+        "instructions": "# IO script agent\n\nEchoes AUTONOETIC_INPUT.",
+        "description": "Script agent with declared io contract",
+        "capabilities": [],
+        "execution_mode": "script",
+        "script_entry": "scripts/echo.py",
+        "io": {
+            "accepts": {"type": "object", "required": ["task"], "properties": {"task": {"type": "string"}}},
+            "returns": {"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}
+        }
+    });
+
+    let out = tool
+        .execute(
+            &manifest,
+            &policy,
+            Path::new("/tmp"),
+            Some(gateway_dir.as_path()),
+            &args.to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
         parsed["ok"], true,
         "create_from_intent should succeed: {parsed:?}"
     );
@@ -1490,16 +1570,25 @@ fn test_revision_create_from_intent_script_mode_without_io_leaves_io_none() {
     let revision_dir = gateway_dir
         .join("revisions")
         .join("agents")
-        .join("script.plain")
+        .join("script.io")
         .join(revision_id);
     let skill_text = std::fs::read_to_string(revision_dir.join("SKILL.md")).unwrap();
     let (parsed_manifest, _body) =
         autonoetic_gateway::runtime::parser::SkillParser::parse(&skill_text).unwrap();
 
+    let io = parsed_manifest
+        .io
+        .as_ref()
+        .expect("script agent with declared io must install with the contract");
     assert!(
-        parsed_manifest.io.is_none(),
-        "script agent created without io must install with io=None; got {:?}",
-        parsed_manifest.io
+        io.accepts.as_ref().and_then(|a| a.get("required")).is_some(),
+        "io.accepts must round-trip into the canonical SKILL.md: {:?}",
+        io.accepts
+    );
+    assert!(
+        io.returns.as_ref().and_then(|r| r.get("required")).is_some(),
+        "io.returns must round-trip into the canonical SKILL.md: {:?}",
+        io.returns
     );
     assert!(matches!(
         parsed_manifest.execution_mode,

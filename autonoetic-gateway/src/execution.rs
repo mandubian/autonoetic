@@ -609,6 +609,22 @@ pub struct SpawnResult {
     pub suspended_for_child_wait: bool,
 }
 
+/// I/O contract captured from the manifest that actually executed a spawn.
+///
+/// Response validation must key off this struct — never a post-hoc alias
+/// re-load — so candidate-revision smoke tests (spawn with `revision_id`
+/// before any alias exists) are validated against the exact manifest that
+/// ran. An alias lookup resolves to `None` for uninstalled candidates, which
+/// used to silently skip `io.returns` enforcement until first production use.
+#[derive(Debug, Clone)]
+struct ExecutedIoContract {
+    returns_schema: Option<serde_json::Value>,
+    output_policy: Option<autonoetic_types::agent::OutputPolicy>,
+    execution_mode: autonoetic_types::agent::ExecutionMode,
+    returns_enforcement: autonoetic_types::agent::IoReturnsEnforcement,
+    agent_is_spawn_capable: bool,
+}
+
 /// Per-root-session wake hint injected by the operator's TUI after plan approval.
 /// While active, `agent_list` returns a blocking error that directs the planner
 /// to the single agent identified by the wake message, preventing the
@@ -2741,7 +2757,7 @@ impl GatewayExecutionService {
             );
         }
 
-        let mut result = self
+        let raw_result = self
             .execute_with_reliability_controls(&lock_agent_id, || async move {
                 let repo = AgentRepository::from_config(&self.config);
 
@@ -2859,6 +2875,34 @@ impl GatewayExecutionService {
             let gateway_dir = crate::execution::gateway_root_dir(&self.config);
             let mut loaded =
                 repo.load_from_revision_dir(&gateway_dir, &agent_ref.agent_id, &agent_ref.revision_id)?;
+
+            // I/O contract of the manifest that will actually execute this turn.
+            // Response validation (after this closure) MUST key off the executed
+            // manifest — never a post-hoc alias re-load — so candidate-revision
+            // smoke tests (spawn with `revision_id`, no alias installed yet) are
+            // validated against the exact manifest that ran.
+            let executed_io_contract = ExecutedIoContract {
+                returns_schema: loaded
+                    .manifest
+                    .io
+                    .as_ref()
+                    .and_then(|io| io.returns.clone()),
+                output_policy: loaded
+                    .manifest
+                    .io
+                    .as_ref()
+                    .and_then(|io| io.output_policy.clone()),
+                execution_mode: loaded.manifest.execution_mode,
+                returns_enforcement: loaded
+                    .manifest
+                    .io
+                    .as_ref()
+                    .map(|io| io.effective_returns_enforcement(loaded.manifest.execution_mode))
+                    .unwrap_or_default(),
+                agent_is_spawn_capable: loaded.manifest.capabilities.iter().any(|c| {
+                    matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. })
+                }),
+            };
 
             if let Some(ref gs) = self.gateway_store {
                 // Only seed placeholder for truly new sessions — don't overwrite
@@ -3166,20 +3210,23 @@ impl GatewayExecutionService {
                     Some(session_id),
                 );
 
-                return Ok(SpawnResult {
-                    agent_id: agent_id.to_string(),
-                    session_id: session_id.to_string(),
-                    assistant_reply: Some(script_result),
-                    workflow_note: None,
-                    should_signal_background,
-                    artifacts,
-                    files,
-                    shared_knowledge,
-                    llm_usage: Vec::new(),
-                    suspended_for_approval: None,
-                    suspended_for_user_input: false,
-                    suspended_for_child_wait: false,
-                });
+                return Ok((
+                    SpawnResult {
+                        agent_id: agent_id.to_string(),
+                        session_id: session_id.to_string(),
+                        assistant_reply: Some(script_result),
+                        workflow_note: None,
+                        should_signal_background,
+                        artifacts,
+                        files,
+                        shared_knowledge,
+                        llm_usage: Vec::new(),
+                        suspended_for_approval: None,
+                        suspended_for_user_input: false,
+                        suspended_for_child_wait: false,
+                    },
+                    executed_io_contract,
+                ));
             }
 
             let inference = self.resolve_spawn_inference_profile(
@@ -3409,7 +3456,7 @@ impl GatewayExecutionService {
                 close_flags.assistant_reply.as_deref(),
                 is_signal,
             );
-            self.finalize_session(
+            let finalized = self.finalize_session(
                 &mut runtime,
                 resolved_session_id.clone(),
                 agent_id,
@@ -3417,9 +3464,11 @@ impl GatewayExecutionService {
                 close_flags,
                 true,
                 consumed_checkpoint_turn_id,
-            ).await
+            ).await?;
+            Ok((finalized, executed_io_contract))
         })
         .await?;
+        let (mut result, executed_io) = (raw_result.0, raw_result.1);
         if source_agent_id.is_some() {
             log_nested_spawn_to_gateway(
                 self.config.as_ref(),
@@ -3435,32 +3484,15 @@ impl GatewayExecutionService {
         // - output shape is enforced from manifest `io.returns`.
         // - non-schema runtime constraints are enforced from manifest `io.output_policy`.
         // Validation is skipped for suspended sessions (they haven't finished producing output).
-        let gateway_dir = crate::execution::gateway_root_dir(&self.config);
-        let manifest_loaded = {
-            let repo = AgentRepository::from_config(&self.config);
-            repo.get_sync_from_store(agent_id, &gateway_dir, self.gateway_store.as_deref())
-                .ok()
-                .map(|loaded| loaded.manifest)
-        };
-        let manifest_returns_schema = manifest_loaded
-            .as_ref()
-            .and_then(|manifest| manifest.io.as_ref())
-            .and_then(|io| io.returns.clone());
-        let manifest_output_policy = manifest_loaded
-            .as_ref()
-            .and_then(|manifest| manifest.io.as_ref())
-            .and_then(|io| io.output_policy.clone());
-        let manifest_execution_mode = manifest_loaded
-            .as_ref()
-            .map(|m| m.execution_mode)
-            .unwrap_or_default();
-        let manifest_returns_enforcement = manifest_loaded
-            .as_ref()
-            .and_then(|manifest| manifest.io.as_ref())
-            .map(|io| {
-                io.effective_returns_enforcement(manifest_execution_mode)
-            })
-            .unwrap_or_default();
+        //
+        // The contract comes from the manifest that actually executed the turn
+        // (`executed_io`), not from an alias re-load: candidate-revision smoke
+        // tests spawn with `revision_id` before any alias exists, so an alias
+        // lookup would resolve to None and silently skip validation — the exact
+        // gap that let schema-violating agents promote (session-b5c8f091).
+        let manifest_returns_schema = executed_io.returns_schema.clone();
+        let manifest_output_policy = executed_io.output_policy.clone();
+        let manifest_returns_enforcement = executed_io.returns_enforcement;
 
         if let Some(meta) = metadata {
             if meta.get("response_contract").is_some() {
@@ -3488,11 +3520,6 @@ impl GatewayExecutionService {
             let mut output_policy = manifest_output_policy.unwrap_or_default();
             output_policy.normalize();
             let validation_session_id = result.session_id.clone();
-            let agent_is_spawn_capable = manifest_loaded.as_ref().map_or(false, |m| {
-                m.capabilities
-                    .iter()
-                    .any(|c| matches!(c, autonoetic_types::capability::Capability::AgentSpawn { .. }))
-            });
             match self
                 .validate_and_maybe_repair(
                     agent_id,
@@ -3503,8 +3530,9 @@ impl GatewayExecutionService {
                     source_agent_id,
                     workflow_id,
                     task_id,
-                    agent_is_spawn_capable,
+                    executed_io.agent_is_spawn_capable,
                     None,
+                    executed_io.execution_mode,
                 )
                 .await
             {

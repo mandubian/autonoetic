@@ -270,7 +270,22 @@ the single join already does that."
             let agents_dir = config.map(|c| &c.agents_dir).ok_or_else(|| {
                 anyhow::anyhow!("config is required for agent.spawn schema enforcement")
             })?;
-            let target_agent_path = agents_dir.join(&args.agent_id).join("SKILL.md");
+            // Candidate-revision spawns (smoke tests) run a revision that is not
+            // installed yet — the live `agents/<id>/SKILL.md` either doesn't exist
+            // or describes a different (older) revision. Resolve the manifest from
+            // the pinned revision dir so input validation keys off the exact
+            // contract the child will execute against.
+            let target_agent_path = spawn_target_skill_path(
+                agents_dir,
+                &args.agent_id,
+                args.revision_id.as_deref(),
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid revision_id '{}': must be a single path component (no separators or traversal)",
+                    args.revision_id.as_deref().unwrap_or("")
+                )
+            })?;
 
             if target_agent_path.exists() {
                 if let Ok(manifest_content) = std::fs::read_to_string(&target_agent_path) {
@@ -1611,6 +1626,46 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(AgentMessageTool));
 }
 
+/// Resolve the SKILL.md whose `io.accepts` contract governs a spawn.
+///
+/// Alias spawns (installed agents) read the live agent dir; candidate-revision
+/// spawns (smoke tests, `revision_id = Some`) read the pinned revision dir —
+/// the candidate is not installed yet, so the live dir is absent or stale.
+///
+/// Returns `None` when `revision_id` is not a safe single path component:
+/// `PathBuf::join` honors absolute paths and `..` segments, so an unvalidated
+/// caller-supplied revision id could escape the revisions directory and make
+/// the gateway read an arbitrary SKILL.md from elsewhere on disk. Unlike the
+/// execution path (which resolves revision records via the store first), this
+/// helper touches the filesystem directly and must fail closed.
+pub(crate) fn spawn_target_skill_path(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    revision_id: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    match revision_id {
+        Some(rev_id)
+            if !rev_id.is_empty()
+                && rev_id != "."
+                && rev_id != ".."
+                && !rev_id.contains('/')
+                && !rev_id.contains('\\') =>
+        {
+            Some(
+                agents_dir
+                    .join(".gateway")
+                    .join("revisions")
+                    .join("agents")
+                    .join(agent_id)
+                    .join(rev_id)
+                    .join("SKILL.md"),
+            )
+        }
+        Some(_) => None,
+        None => Some(agents_dir.join(agent_id).join("SKILL.md")),
+    }
+}
+
 /// Outcome of enforcing the target agent's `io.accepts` schema on a spawn message.
 pub(crate) enum SpawnSchemaOutcome {
     /// Message matches the schema — proceed unchanged.
@@ -1892,5 +1947,51 @@ mod spawn_schema_tests {
         let schema = serde_json::json!({ "type": "string" });
         let outcome = enforce_spawn_message_schema("x", "just some text", &schema);
         assert!(matches!(outcome, SpawnSchemaOutcome::Pass));
+    }
+
+    #[test]
+    fn skill_path_for_alias_spawn_reads_live_agent_dir() {
+        let path = spawn_target_skill_path(
+            std::path::Path::new("/data/agents"),
+            "weather-forecast",
+            None,
+        )
+        .expect("alias spawn path");
+        assert_eq!(
+            path,
+            std::path::Path::new("/data/agents/weather-forecast/SKILL.md")
+        );
+    }
+
+    #[test]
+    fn skill_path_for_revision_spawn_reads_pinned_revision_dir() {
+        let path = spawn_target_skill_path(
+            std::path::Path::new("/data/agents"),
+            "weather-forecast",
+            Some("rev_sha256:abc123"),
+        )
+        .expect("revision spawn path");
+        assert_eq!(
+            path,
+            std::path::Path::new(
+                "/data/agents/.gateway/revisions/agents/weather-forecast/rev_sha256:abc123/SKILL.md"
+            )
+        );
+    }
+
+    #[test]
+    fn skill_path_rejects_revision_id_path_traversal() {
+        for evil in ["..", ".", "../escape", "rev/../../escape", "/abs/path", "rev\\..\\win"] {
+            assert!(
+                spawn_target_skill_path(std::path::Path::new("/data/agents"), "a", Some(evil))
+                    .is_none(),
+                "revision_id {evil:?} must be rejected"
+            );
+        }
+        // `..` as a substring of an ordinary single component is not traversal.
+        assert!(
+            spawn_target_skill_path(std::path::Path::new("/data/agents"), "a", Some("rev_.._x"))
+                .is_some()
+        );
     }
 }
