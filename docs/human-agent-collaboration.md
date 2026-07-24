@@ -310,6 +310,41 @@ Optional free-text focus notes steer the curator — e.g. `/curate focus on the
 retry loop` narrows what it distills. Useful right after a session where you want
 its lessons captured before moving on.
 
+### Skill crystallization (`/crystallize`)
+
+```
+/crystallize [what worked...]
+```
+
+You just watched something work and want it to be reusable. This fires
+`skill-crystallizer.default` on the current session; the optional free text names
+the tactic you have in mind — e.g. `/crystallize the retry-with-backoff around
+the flaky API`.
+
+The crystallizer does **not** mint an agent by reflex. It reads the session's
+traces, digests and published report, checks the installed roster, and returns
+one of four verdicts — routing each to the agent that owns it:
+
+| Verdict | Meaning | Enacted by |
+|---|---|---|
+| `graduate` | An existing agent already does this; it just needs to be told to | `evolution-steward.default` |
+| `adapt` | An existing agent fits, but callers kept remapping its I/O | `agent-adapter.default` |
+| `crystallize` | Nothing covers the procedure — mint a new reusable skill | `agent-factory.default` |
+| `none` | The evidence doesn't justify a durable change (with a reason) | nobody |
+
+It always records the verdict in the `evolution/crystallizations` knowledge
+scope, including `none`, so repeating `/crystallize` on the same session does not
+re-litigate a decision — and a verdict you *reject* is not proposed again.
+
+Nothing becomes active behind your back. Every route ends at a Candidate
+revision behind the standard promotion gates, and a brand-new agent additionally
+requires your own approval of its capability set before it can run. Because the
+crystallizer is a singleton, a second `/crystallize` while one is running reports
+the in-flight task rather than starting a competing run.
+
+Autonomous crystallization — the curator proposing new skills on its own during
+the evolution cycle — is deliberately not enabled; see issue #880.
+
 ### Return to agent (`/return`)
 
 ```

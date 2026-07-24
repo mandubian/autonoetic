@@ -15,6 +15,7 @@
 //! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
 //! - `/return [--force] [note...]` — return the active workbench to the orchestrator
 //! - `/curate [notes...]` — run memory curation on this session now (notes steer the curator)
+//! - `/crystallize [notes...]` — make what worked here reusable (notes name the tactic)
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — full command reference in the detail pane
 //! - `/model` — show current inference profile
@@ -61,6 +62,10 @@ pub enum SlashCommand {
     /// Run memory curation on the current session now, with optional operator
     /// focus notes that steer the curator's analysis.
     Curate { notes: Option<String> },
+    /// Make what worked in the current session reusable, with optional operator
+    /// notes naming the tactic. The crystallizer decides *which* durable home
+    /// it gets (instruction, wrapper, or new skill) — see its SKILL.
+    Crystallize { notes: Option<String> },
     /// Show resolved inference profile for the current session.
     ModelShow,
     /// Override the session inference preset until cleared.
@@ -73,7 +78,7 @@ pub enum SlashCommand {
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /cron · /wiki · /test · /model · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /cron · /wiki · /test · /model · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -136,6 +141,7 @@ pub fn help_lines() -> Vec<String> {
         "  /plan approve|a|ok [id]    approve a plan frame".to_string(),
         "  /return [--force] [note]   return the active workbench to the orchestrator".to_string(),
         "  /curate [focus notes]      run memory curation on this session now (notes steer the curator)".to_string(),
+        "  /crystallize [what worked]  make it reusable — instruction, wrapper, or new skill".to_string(),
         "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
@@ -174,6 +180,7 @@ pub fn parse(input: &str) -> SlashCommand {
         "plan" => parse_plan(tail),
         "return" => parse_return(tail),
         "curate" => parse_curate(tail),
+        "crystallize" => parse_crystallize(tail),
         "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
@@ -288,6 +295,17 @@ fn parse_curate(tail: &str) -> SlashCommand {
     let trimmed = tail.trim();
     let notes = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
     SlashCommand::Curate { notes }
+}
+
+fn parse_crystallize(tail: &str) -> SlashCommand {
+    // `/crystallize`                          — mine this session for a reusable tactic
+    // `/crystallize the retry-with-backoff`   — name the tactic for the crystallizer
+    // The tail is free text naming what the operator saw work; it is a strong
+    // hint about *which* tactic to look at, not permission to skip the evidence
+    // checks (see skill-crystallizer.default's SKILL).
+    let trimmed = tail.trim();
+    let notes = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    SlashCommand::Crystallize { notes }
 }
 
 fn parse_session(tail: &str) -> SlashCommand {
@@ -695,5 +713,39 @@ mod tests {
                 notes: Some("looks like a missing approval, weight that".into())
             }
         );
+    }
+
+    #[test]
+    fn parse_crystallize_variants() {
+        // Bare `/crystallize` (and whitespace-only tail) → no notes.
+        assert_eq!(
+            parse("/crystallize"),
+            SlashCommand::Crystallize { notes: None }
+        );
+        assert_eq!(
+            parse("/crystallize   "),
+            SlashCommand::Crystallize { notes: None }
+        );
+        // Free text names the tactic the operator saw work, verbatim (trimmed).
+        assert_eq!(
+            parse("/crystallize the retry-with-backoff around the flaky API"),
+            SlashCommand::Crystallize {
+                notes: Some("the retry-with-backoff around the flaky API".into())
+            }
+        );
+    }
+
+    /// `/curate` and `/crystallize` share a prefix; the dispatcher must not
+    /// route one to the other (a mis-route would fire the wrong agent on the
+    /// operator's session).
+    #[test]
+    fn curate_and_crystallize_do_not_collide() {
+        assert_eq!(parse("/curate"), SlashCommand::Curate { notes: None });
+        assert_eq!(
+            parse("/crystallize"),
+            SlashCommand::Crystallize { notes: None }
+        );
+        // A partial word is neither — reported, never guessed.
+        assert!(matches!(parse("/cryst"), SlashCommand::Unknown(_)));
     }
 }

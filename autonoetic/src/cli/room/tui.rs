@@ -3099,6 +3099,60 @@ pub fn run(
                                             }
                                         }
                                     }
+                                    SlashCommand::Crystallize { notes } => {
+                                        // Make what worked in this session
+                                        // reusable. The crystallizer picks the
+                                        // route (instruction / wrapper / new
+                                        // skill); notes name the tactic.
+                                        let mut params = serde_json::json!({
+                                            "root_session_id": &*root_session_id,
+                                        });
+                                        if let Some(n) = notes
+                                            .as_deref()
+                                            .filter(|n| !n.is_empty())
+                                        {
+                                            params["focus_notes"] = serde_json::json!(n);
+                                        }
+                                        match rpc(
+                                            client,
+                                            "skill.crystallize_from_session",
+                                            params,
+                                        ) {
+                                            Ok(v) => {
+                                                let task = v
+                                                    .get("task_id")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or("?");
+                                                let queued_for = v
+                                                    .get("session_id")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or(root_session_id);
+                                                // A singleton already running is
+                                                // reported as such rather than as
+                                                // a second queued run.
+                                                let deduped = v
+                                                    .get("status")
+                                                    .and_then(|x| x.as_str())
+                                                    == Some("deduplicated");
+                                                status = Some(if deduped {
+                                                    format!(
+                                                        "✓ crystallizer already running for session {queued_for} (task {task}) — watch the timeline"
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "✓ crystallization queued for session {queued_for} (task {task}) — watch the timeline"
+                                                    )
+                                                });
+                                                force_timeline_refresh = true;
+                                                follow = true;
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!(
+                                                    "✗ crystallize failed: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
                                     SlashCommand::ModelShow => {
                                         match rpc(client, "session.inference.get", serde_json::json!({
                                             "session_id": &*root_session_id,

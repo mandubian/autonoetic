@@ -68,4 +68,5 @@ Gateway (High Privilege)
 | **agent-factory** | Builds new agents end-to-end |
 | **agent-adapter** | Generates wrapper agents for I/O gaps |
 | **memory-curator** | Distills durable learnings |
+| **skill-crystallizer** | Routes a proven tactic to an instruction, a wrapper, or a new skill (operator-triggered) |
 | **evolution-steward** | Judges agent evolutions and lesson graduations; delegates enactment to agent-factory |

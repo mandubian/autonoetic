@@ -86,6 +86,7 @@ llm_preset_mapping:
   evolution-steward: agentic
   evolution-orchestrator: agentic
   agent-adapter: agentic
+  skill-crystallizer: agentic
   context_compression: haiku
   default: fallback
 "#,

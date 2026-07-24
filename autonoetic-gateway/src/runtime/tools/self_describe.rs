@@ -50,10 +50,10 @@ pub fn register_tools(registry: &mut crate::runtime::tools::NativeToolRegistry) 
 ///
 /// Each variant carries what must be true for the path to be real, and the
 /// guard tests in this module assert that each reference resolves: a
-/// `SelfTool` names a registered native tool, a `Pipeline` names installed
-/// agent bundles, an `Unimplemented` names the issue tracking it. A renamed
-/// tool or agent therefore breaks a test rather than silently turning the
-/// answer into a lie.
+/// `SelfTool` names a registered native tool, a `Pipeline` or
+/// `OperatorPipeline` names installed agent bundles, an `Unimplemented` names
+/// the issue tracking it. A renamed tool or agent therefore breaks a test
+/// rather than silently turning the answer into a lie.
 #[derive(Debug, Clone, Copy)]
 enum PathEnactor {
     /// The caller enacts it itself with this native tool — advertised as
@@ -62,6 +62,15 @@ enum PathEnactor {
     /// The evolution pipeline enacts it on the caller's behalf — advertised
     /// as available only when every listed agent is installed here.
     Pipeline(&'static [&'static str]),
+    /// Same installation requirement as `Pipeline`, but **only an operator can
+    /// start it**. Kept distinct so an agent does not read "available" as "I can
+    /// trigger this" — that would be a fresh confabulation in place of the one
+    /// #818 removed.
+    OperatorPipeline {
+        agents: &'static [&'static str],
+        /// How the operator starts it, named so the agent can *ask* for it.
+        trigger: &'static str,
+    },
     /// Advertised historically but implemented by nothing. Reported as
     /// unavailable, naming the issue that tracks it.
     Unimplemented(&'static str),
@@ -85,13 +94,21 @@ const GRADUATION_PIPELINE: &[&str] = &[
     "agent-factory.default",
 ];
 
+/// The crystallization route (#818): the crystallizer decides which durable home
+/// a proven tactic gets, and each of the three verdicts has its own enactor —
+/// all four must be installed for the whole route to be open, and the reason
+/// string names whichever is missing.
+const CRYSTALLIZATION_PIPELINE: &[&str] = &[
+    "skill-crystallizer.default",
+    "evolution-steward.default",
+    "agent-adapter.default",
+    "agent-factory.default",
+];
+
 /// Every evolution path the runtime may tell an agent about.
 ///
 /// Adding a row here is a claim, and the guard tests below make it a checkable
-/// one. `skill_crystallization` is deliberately present-and-unavailable rather
-/// than absent: agents were told for months that it existed, and reporting it
-/// as *not* implemented is the honest correction — silence would leave the
-/// same gap undocumented.
+/// one.
 const EVOLUTION_PATHS: &[EvolutionPath] = &[
     EvolutionPath {
         id: "agent_revision",
@@ -113,10 +130,14 @@ const EVOLUTION_PATHS: &[EvolutionPath] = &[
     },
     EvolutionPath {
         id: "skill_crystallization",
-        summary: "Crystallise a proven tactic into a new reusable skill. No code path mints a \
-                  skill from a curated pattern today — every path above modifies an agent that \
-                  already exists.",
-        enactor: PathEnactor::Unimplemented("#818"),
+        summary: "Make a tactic that worked reusable: the crystallizer routes it to an \
+                  instruction on an existing agent, a wrapper around one, or a new skill — \
+                  whichever fits. An operator starts this; you cannot trigger it yourself, but \
+                  you can ask for it.",
+        enactor: PathEnactor::OperatorPipeline {
+            agents: CRYSTALLIZATION_PIPELINE,
+            trigger: "/crystallize in the session room (skill.crystallize_from_session)",
+        },
     },
     EvolutionPath {
         id: "constitution_amendment",
@@ -165,31 +186,19 @@ fn describe_path(
             (have_tool, "self", vec![tool.to_string()], reason)
         }
         PathEnactor::Pipeline(agents) => {
-            let mut missing: Vec<String> = Vec::new();
-            let mut unverified = false;
-            for agent in agents {
-                match agent_is_installed(store, agent) {
-                    Some(true) => {}
-                    Some(false) => missing.push((*agent).to_string()),
-                    None => unverified = true,
-                }
-            }
-            let reason = if unverified {
-                Some(
-                    "installation could not be verified in this context — no gateway store"
-                        .to_string(),
-                )
-            } else if !missing.is_empty() {
-                Some(format!(
-                    "not installed on this gateway: {}",
-                    missing.join(", ")
-                ))
-            } else {
-                None
-            };
+            let reason = pipeline_unavailable_reason(agents, store);
             (
                 reason.is_none(),
                 "evolution_pipeline",
+                agents.iter().map(|a| (*a).to_string()).collect(),
+                reason,
+            )
+        }
+        PathEnactor::OperatorPipeline { agents, .. } => {
+            let reason = pipeline_unavailable_reason(agents, store);
+            (
+                reason.is_none(),
+                "operator_pipeline",
                 agents.iter().map(|a| (*a).to_string()).collect(),
                 reason,
             )
@@ -202,14 +211,49 @@ fn describe_path(
         ),
     };
 
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "path": path.id,
         "available": available,
         "enacted_by": enacted_by,
         "via": via,
         "summary": path.summary,
         "unavailable_reason": unavailable_reason,
-    })
+    });
+    // An operator-started path names its trigger, so an agent that wants it can
+    // ask for it by name instead of guessing at a tool it does not have.
+    if let PathEnactor::OperatorPipeline { trigger, .. } = path.enactor {
+        out["operator_trigger"] = serde_json::json!(trigger);
+    }
+    out
+}
+
+/// Why a pipeline of agents is not usable, or `None` when all are installed.
+///
+/// Unverifiable (no gateway store in this call) is reported as unavailable, not
+/// assumed available — the same under-claiming rule the whole surface follows.
+fn pipeline_unavailable_reason(
+    agents: &'static [&'static str],
+    store: Option<&GatewayStore>,
+) -> Option<String> {
+    let mut missing: Vec<String> = Vec::new();
+    let mut unverified = false;
+    for agent in agents {
+        match agent_is_installed(store, agent) {
+            Some(true) => {}
+            Some(false) => missing.push((*agent).to_string()),
+            None => unverified = true,
+        }
+    }
+    if unverified {
+        Some("installation could not be verified in this context — no gateway store".to_string())
+    } else if !missing.is_empty() {
+        Some(format!(
+            "not installed on this gateway: {}",
+            missing.join(", ")
+        ))
+    } else {
+        None
+    }
 }
 
 pub struct SelfDescribeTool;
@@ -482,15 +526,18 @@ mod tests {
     fn advertised_pipeline_agents_have_reference_bundles() {
         let bundles = reference_bundle_ids();
         for path in EVOLUTION_PATHS {
-            if let PathEnactor::Pipeline(agents) = path.enactor {
-                for agent in agents {
-                    assert!(
-                        bundles.contains(*agent),
-                        "evolution path '{}' advertises agent '{}', which has no reference bundle",
-                        path.id,
-                        agent
-                    );
-                }
+            let agents = match path.enactor {
+                PathEnactor::Pipeline(agents) => agents,
+                PathEnactor::OperatorPipeline { agents, .. } => agents,
+                _ => continue,
+            };
+            for agent in agents {
+                assert!(
+                    bundles.contains(*agent),
+                    "evolution path '{}' advertises agent '{}', which has no reference bundle",
+                    path.id,
+                    agent
+                );
             }
         }
     }
@@ -512,24 +559,53 @@ mod tests {
         }
     }
 
-    /// The regression guard for the claim that started #818: skill
-    /// crystallisation is reported as *not* implemented until code mints a
-    /// skill from a curated pattern. Flipping this row is a deliberate act
-    /// that must update this test.
+    /// Crystallization is real now (#818), but only an operator starts it. The
+    /// row must say so: an agent reading "available" as "I can trigger this"
+    /// would be a fresh confabulation in place of the one this work removed.
+    /// The trigger is named so the agent can ask for it instead of hunting for
+    /// a tool that does not exist.
     #[test]
-    fn crystallization_reported_unavailable_until_implemented() {
-        let v = run(&manifest_with(vec![]));
-        let path = path_of(&v, "skill_crystallization");
-        assert_eq!(path["available"], false);
-        assert_eq!(path["enacted_by"], "nothing");
-        assert!(
-            path["unavailable_reason"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("#818"),
-            "unavailable_reason should name the tracking issue, got {:?}",
-            path["unavailable_reason"]
+    fn crystallization_is_an_operator_started_route() {
+        let path = path_of(&run(&manifest_with(vec![])), "skill_crystallization");
+        assert_eq!(path["enacted_by"], "operator_pipeline");
+        assert_eq!(
+            path["operator_trigger"],
+            "/crystallize in the session room (skill.crystallize_from_session)"
         );
+        assert!(
+            path["via"]
+                .as_array()
+                .expect("via should list the pipeline")
+                .iter()
+                .any(|a| a == "skill-crystallizer.default"),
+            "the crystallizer should be named as the route's entry point, got {:?}",
+            path["via"]
+        );
+        // No store in this context, so availability under-claims rather than
+        // assuming the four agents are installed.
+        assert_eq!(path["available"], false);
+        assert!(path["unavailable_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("could not be verified"));
+    }
+
+    /// Only paths nothing implements may carry an `Unimplemented` enactor. This
+    /// keeps the table from drifting back into advertising vapour: adding such a
+    /// row is allowed (honest), but it must name a tracking issue, and the
+    /// `unimplemented_paths_name_a_tracking_issue` guard above enforces that.
+    #[test]
+    fn no_path_claims_self_service_crystallization() {
+        for path in EVOLUTION_PATHS {
+            if path.id != "skill_crystallization" {
+                continue;
+            }
+            assert!(
+                matches!(path.enactor, PathEnactor::OperatorPipeline { .. }),
+                "crystallization must stay operator-started until an autonomous route ships \
+                 (#880) — a SelfTool enactor here would tell agents they can mint skills alone"
+            );
+        }
     }
 
     #[test]
