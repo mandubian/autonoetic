@@ -7210,7 +7210,7 @@ fn list_skills_detail(client: &RoomClient) -> Vec<String> {
                 lines.push(format!("{kind}  {target}{verdict_part}  — {state}"));
                 lines.push(format!("    {}", str_of("summary")));
                 let candidates = row
-                    .get("candidate_revisions")
+                    .get("target_agent_candidates")
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
@@ -7221,7 +7221,9 @@ fn list_skills_detail(client: &RoomClient) -> Vec<String> {
                         .map(|c| c.chars().take(20).collect())
                         .collect();
                     lines.push(format!(
-                        "    ⏳ awaiting promotion: {} — approve via the gate, not from here",
+                        "    ⏳ {} candidate(s) for this agent awaiting promotion: {} \
+                         — approve via the gate, not from here",
+                        ids.len(),
                         ids.join(", ")
                     ));
                 }

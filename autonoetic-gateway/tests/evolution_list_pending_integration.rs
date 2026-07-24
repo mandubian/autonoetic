@@ -167,9 +167,10 @@ async fn list_pending_surfaces_proposals_decisions_and_candidates() -> anyhow::R
         .find(|r| r["id"] == "crys-awaiting")
         .expect("awaiting crystallization listed");
     assert_eq!(awaiting["stage"], "proposed");
-    // The point of the view: the Candidate the gate is holding is attached to the
-    // proposal that produced it, so an operator can see what is waiting on them.
-    let candidates = awaiting["candidate_revisions"]
+    // The point of the view: a Candidate the gate is holding shows up against the
+    // agent it targets, so an operator can see what is waiting on them. (All of the
+    // agent's Candidates — revisions carry no proposal id yet.)
+    let candidates = awaiting["target_agent_candidates"]
         .as_array()
         .cloned()
         .unwrap_or_default();

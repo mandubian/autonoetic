@@ -16,8 +16,9 @@
 //! the router's already-oversized dispatch frame does not grow (#884).
 
 use anyhow::Result;
+use std::collections::HashMap;
+
 use autonoetic_types::agent_revision::AgentRevisionStatus;
-use autonoetic_types::memory::MemoryObject;
 use serde::{Deserialize, Serialize};
 
 use crate::scheduler::gateway_store::GatewayStore;
@@ -27,6 +28,10 @@ use crate::scheduler::gateway_store::GatewayStore;
 const TAG_CRYSTALLIZATION: &str = "type:crystallization_verdict";
 const TAG_GRADUATION: &str = "type:promote_to_skill";
 const TAG_GRADUATION_SKIPPED: &str = "type:graduation_skipped";
+/// Tag the steward writes on its decisions. The view resolves decisions by id
+/// rather than by tag, so this is referenced only by tests that seed realistic
+/// records.
+#[cfg(test)]
 const TAG_STEWARD_DECISION: &str = "lesson_graduation";
 
 /// How far a proposal has got, derived only from what is on record.
@@ -62,8 +67,10 @@ pub struct PendingEntry {
     /// `factory_gate_failed`.
     pub outcome: Option<String>,
     pub recorded_at: String,
-    /// Candidate revisions of `target_agent` — what the promotion gate is holding.
-    pub candidate_revisions: Vec<String>,
+    /// Candidate revisions of `target_agent` that the promotion gate is holding.
+    /// All of that agent's Candidates, not only ones this proposal produced —
+    /// revisions carry no proposal id yet (#891).
+    pub target_agent_candidates: Vec<String>,
 }
 
 /// Steward decision parsed out of a `steward.graduation.<id>` entry.
@@ -98,22 +105,43 @@ fn one_line(text: &str, max: usize) -> String {
 /// steward has recorded one. Keyed by the entry id the steward writes under
 /// (`steward.graduation.<knowledge_entry_id>`), which is also the id the
 /// crystallizer passes through as its `proposal_id`.
-fn steward_outcome(decisions: &[MemoryObject], knowledge_entry_id: &str) -> Option<String> {
-    let wanted = format!("steward.graduation.{knowledge_entry_id}");
-    let entry = decisions.iter().find(|m| m.memory_id == wanted)?;
+///
+/// A **point lookup**, not a search over a recent-decisions window: with a window,
+/// a decision older than the window's tail would be missed and the row reported as
+/// `proposed` — the view claiming nobody had decided when someone had. Bounded by
+/// the number of rows (≤ 200), so the cost is the same order as listing them.
+fn steward_outcome(store: &GatewayStore, knowledge_entry_id: &str) -> Option<String> {
+    let entry = store
+        .memory_get_unrestricted(&format!("steward.graduation.{knowledge_entry_id}"))
+        .ok()
+        .flatten()?;
     let parsed: StewardDecision = serde_json::from_str(&entry.content).ok()?;
     parsed.status.filter(|s| !s.trim().is_empty())
 }
 
-/// Candidate revisions of `agent_id` — the ones the promotion gate is holding.
-fn candidate_revisions(store: &GatewayStore, agent_id: &str) -> Vec<String> {
-    store
-        .list_agent_revisions(agent_id)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| r.status == AgentRevisionStatus::Candidate)
-        .map(|r| r.revision_id)
-        .collect()
+/// Candidate revisions of `agent_id`, memoized so each agent is queried once
+/// however many rows target it.
+///
+/// These are **all** Candidates of that agent, not the ones a specific proposal
+/// produced: a revision carries no proposal id today, so nothing links the two.
+/// Two proposals against the same agent therefore show the same list. The field is
+/// named `target_agent_candidates` to say so — attributing a Candidate to a
+/// proposal would be a guess, and #891 tracks recording the provenance that would
+/// make it a fact.
+fn target_agent_candidates<'a>(
+    store: &GatewayStore,
+    cache: &'a mut HashMap<String, Vec<String>>,
+    agent_id: &str,
+) -> &'a Vec<String> {
+    cache.entry(agent_id.to_string()).or_insert_with(|| {
+        store
+            .list_agent_revisions(agent_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.status == AgentRevisionStatus::Candidate)
+            .map(|r| r.revision_id)
+            .collect()
+    })
 }
 
 /// Assemble the view. `limit` bounds each record kind independently, so a flood
@@ -124,11 +152,10 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
     let crystallizations = store.search_memories_by_tags(&[TAG_CRYSTALLIZATION], limit)?;
     let graduations = store.search_memories_by_tags(&[TAG_GRADUATION], limit)?;
     let skipped = store.search_memories_by_tags(&[TAG_GRADUATION_SKIPPED], limit)?;
-    // Decisions are looked up by id rather than listed, so fetch a wider window:
-    // an older judgment still resolves a proposal that is still in the list.
-    let decisions = store.search_memories_by_tags(&[TAG_STEWARD_DECISION], limit * 2)?;
 
     let mut entries: Vec<PendingEntry> = Vec::new();
+    // One revision query per distinct target agent, not per row.
+    let mut candidate_cache: HashMap<String, Vec<String>> = HashMap::new();
 
     for m in &crystallizations {
         let content: serde_json::Value =
@@ -143,7 +170,7 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
             .map(|s| s.to_string())
             .or_else(|| json_str(&content, "rationale"))
             .unwrap_or_else(|| one_line(&m.content, 120));
-        let outcome = steward_outcome(&decisions, &m.memory_id);
+        let outcome = steward_outcome(store, &m.memory_id);
         let stage = match (verdict.as_deref(), outcome.is_some()) {
             (Some("none"), _) => Stage::Declined,
             (_, true) => Stage::Judged,
@@ -152,9 +179,9 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
         entries.push(PendingEntry {
             kind: "crystallization",
             id: m.memory_id.clone(),
-            candidate_revisions: target_agent
+            target_agent_candidates: target_agent
                 .as_deref()
-                .map(|a| candidate_revisions(store, a))
+                .map(|a| target_agent_candidates(store, &mut candidate_cache, a).clone())
                 .unwrap_or_default(),
             target_agent,
             summary: one_line(&summary, 120),
@@ -173,15 +200,15 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
         // decision on that, not on this entry's id.
         let lesson_id =
             json_str(&content, "knowledge_entry_id").unwrap_or_else(|| m.memory_id.clone());
-        let outcome = steward_outcome(&decisions, &lesson_id);
+        let outcome = steward_outcome(store, &lesson_id);
         let summary =
             json_str(&content, "proposed_instruction").unwrap_or_else(|| one_line(&m.content, 120));
         entries.push(PendingEntry {
             kind: "graduation",
             id: m.memory_id.clone(),
-            candidate_revisions: target_agent
+            target_agent_candidates: target_agent
                 .as_deref()
-                .map(|a| candidate_revisions(store, a))
+                .map(|a| target_agent_candidates(store, &mut candidate_cache, a).clone())
                 .unwrap_or_default(),
             target_agent,
             summary: one_line(&summary, 120),
@@ -211,7 +238,7 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
             stage: Stage::Skipped,
             outcome: None,
             recorded_at: m.created_at.clone(),
-            candidate_revisions: Vec::new(),
+            target_agent_candidates: Vec::new(),
         });
     }
 
@@ -225,7 +252,7 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
         "skipped": skipped.len(),
         "awaiting_promotion": entries
             .iter()
-            .filter(|e| !e.candidate_revisions.is_empty())
+            .filter(|e| !e.target_agent_candidates.is_empty())
             .count(),
     });
 
@@ -238,7 +265,7 @@ pub fn pending_view(store: &GatewayStore, limit: usize) -> Result<serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use autonoetic_types::memory::{MemorySourceType, MemoryVisibility};
+    use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
 
     fn store() -> (tempfile::TempDir, GatewayStore) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -459,6 +486,121 @@ mod tests {
         let listed = rows(&v);
         assert_eq!(listed.first().map(|r| r["id"].clone()).unwrap(), "crys-new");
         assert_eq!(listed.last().map(|r| r["id"].clone()).unwrap(), "crys-old");
+    }
+
+    /// The decision lookup must not depend on how many other decisions exist.
+    /// It used to search a bounded window of recent `lesson_graduation` records,
+    /// so a decision older than that window was missed and the row reported as
+    /// `proposed` — the view claiming nobody had decided when someone had
+    /// (#889 review).
+    #[test]
+    fn decision_is_found_behind_many_newer_decisions() {
+        let (_d, store) = store();
+
+        put(
+            &store,
+            "crys-old-decision",
+            "evolution/crystallizations",
+            &[TAG_CRYSTALLIZATION],
+            serde_json::json!({
+                "verdict": "graduate",
+                "tactic": { "title": "decided long ago" },
+                "target_agent": "coder.default"
+            }),
+        );
+        // Its decision is the oldest record of its kind…
+        put(
+            &store,
+            "steward.graduation.crys-old-decision",
+            "evolution",
+            &[TAG_STEWARD_DECISION],
+            serde_json::json!({ "status": "landed" }),
+        );
+        let mut old = store
+            .memory_get_unrestricted("steward.graduation.crys-old-decision")
+            .unwrap()
+            .expect("stored");
+        old.created_at = "2020-01-01T00:00:00Z".to_string();
+        store.memory_upsert(&old).unwrap();
+
+        // …and 60 newer decisions bury it, well beyond any recent-window bound.
+        for i in 0..60 {
+            put(
+                &store,
+                &format!("steward.graduation.other-{i}"),
+                "evolution",
+                &[TAG_STEWARD_DECISION],
+                serde_json::json!({ "status": "covered" }),
+            );
+        }
+
+        let v = pending_view(&store, 20).expect("view");
+        let listed = rows(&v);
+        let r = row_of(&listed, "crys-old-decision");
+        assert_eq!(r["stage"], "judged", "the decision must still be found");
+        assert_eq!(r["outcome"], "landed");
+    }
+
+    /// Candidates are reported per target agent, not per proposal: nothing links a
+    /// revision to the proposal that caused it yet (#891). Two proposals against
+    /// one agent therefore show the same list — pinned here so the field is not
+    /// later misread as attribution.
+    #[test]
+    fn candidates_are_reported_per_agent_not_per_proposal() {
+        use autonoetic_types::agent_revision::AgentRevisionRecord;
+        use autonoetic_types::principal::PrincipalKind;
+
+        let (_d, store) = store();
+        for id in ["crys-a", "crys-b"] {
+            put(
+                &store,
+                id,
+                "evolution/crystallizations",
+                &[TAG_CRYSTALLIZATION],
+                serde_json::json!({
+                    "verdict": "graduate",
+                    "tactic": { "title": id },
+                    "target_agent": "coder.default"
+                }),
+            );
+        }
+        let rec = AgentRevisionRecord {
+            revision_id: "rev_sha256:cand".to_string(),
+            agent_id: "coder.default".to_string(),
+            base_revision_id: None,
+            artifact_id: None,
+            content_digest: "sha256:cand".to_string(),
+            runtime_lock_hash: "sha256:lock".to_string(),
+            manifest_hash: "sha256:manifest".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            created_by_type: PrincipalKind::AutonoeticAgent.tag().to_string(),
+            created_by_id: "specialized_builder.default".to_string(),
+            requested_by_type: None,
+            requested_by_id: None,
+            source_kind: "test".to_string(),
+            source_ref: None,
+            origin_node_id: "gateway".to_string(),
+            trust_domain: "local".to_string(),
+            status: AgentRevisionStatus::Candidate,
+            metadata_json: serde_json::json!({}),
+            short_id: "cand".to_string(),
+            detected_network_hosts: None,
+            signature: None,
+            signer_id: None,
+        };
+        store.insert_agent_revision(&rec).expect("candidate");
+
+        let v = pending_view(&store, 20).expect("view");
+        let listed = rows(&v);
+        let expected = serde_json::json!(["rev_sha256:cand"]);
+        assert_eq!(
+            row_of(&listed, "crys-a")["target_agent_candidates"],
+            expected
+        );
+        assert_eq!(
+            row_of(&listed, "crys-b")["target_agent_candidates"],
+            expected
+        );
     }
 
     #[test]
