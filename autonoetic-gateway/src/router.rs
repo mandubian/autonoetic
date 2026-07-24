@@ -1122,13 +1122,55 @@ impl JsonRpcRouter {
                     format!("curate-child-{}", &params.root_session_id);
                 let now_rfc = chrono::Utc::now().to_rfc3339();
 
+                // Memory-curator is singleton=true. The normal agent.spawn path
+                // acquires a singleton slot before enqueueing to dedup; this
+                // operator RPC must do the same, otherwise repeated /curate
+                // within a tick window can enqueue duplicate curator tasks.
+                let is_singleton = crate::runtime::tools::agent::target_agent_is_singleton(
+                    &config.agents_dir,
+                    &curator_ref.agent_id,
+                );
+                if is_singleton {
+                    match store.acquire_singleton_slot(
+                        &workflow_id,
+                        &curator_ref.agent_id,
+                        Some(&curator_ref.revision_id),
+                        &task_id,
+                    ) {
+                        Ok(Some(existing_task_id)) => {
+                            // A curator is already active in this workflow —
+                            // return the existing task rather than duplicating.
+                            return JsonRpcResponse::success(
+                                req.id,
+                                serde_json::json!({
+                                    "task_id": existing_task_id,
+                                    "workflow_id": workflow_id,
+                                    "session_id": params.root_session_id,
+                                    "status": "deduplicated",
+                                }),
+                            );
+                        }
+                        Ok(None) => { /* slot acquired — proceed with enqueue */ }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "curation",
+                                workflow_id = %workflow_id,
+                                agent_id = %curator_ref.agent_id,
+                                error = %e,
+                                "Failed to acquire singleton slot for curator; enqueueing anyway"
+                            );
+                        }
+                    }
+                }
+
                 // The curator parses its spawn message as JSON (see its SKILL
                 // "Input (from spawn message)" section). focus_notes is null
                 // when absent so the agent can treat it uniformly.
+                let focus_notes = params.focus_notes.clone();
                 let message = serde_json::json!({
                     "session_ids": [&params.root_session_id],
                     "max_sessions": 50,
-                    "focus_notes": params.focus_notes,
+                    "focus_notes": focus_notes,
                 })
                 .to_string();
 
@@ -1164,7 +1206,7 @@ impl JsonRpcRouter {
                     );
                 }
 
-                let _ = crate::scheduler::append_workflow_event(
+                if let Err(e) = crate::scheduler::append_workflow_event(
                     &config,
                     Some(store.as_ref()),
                     &autonoetic_types::workflow::WorkflowEventRecord {
@@ -1175,19 +1217,27 @@ impl JsonRpcRouter {
                         agent_id: Some(curator_ref.agent_id.clone()),
                         payload: serde_json::json!({
                             "session_id": &params.root_session_id,
-                            "focus_notes": params.focus_notes,
+                            "focus_notes": focus_notes,
                             "manual": true,
                         }),
                         occurred_at: now_rfc,
                     },
-                );
+                ) {
+                    tracing::warn!(
+                        target: "curation",
+                        workflow_id = %workflow_id,
+                        task_id = %task_id,
+                        error = %e,
+                        "Failed to append curation.triggered event"
+                    );
+                }
 
                 tracing::info!(
                     target: "curation",
                     root_session_id = %params.root_session_id,
                     workflow_id = %workflow_id,
                     task_id = %task_id,
-                    has_focus_notes = params.focus_notes.is_some(),
+                    has_focus_notes = focus_notes.is_some(),
                     "Manual curation triggered"
                 );
 

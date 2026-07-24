@@ -18,7 +18,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
-fn target_agent_is_singleton(agents_dir: &Path, agent_id: &str) -> bool {
+pub(crate) fn target_agent_is_singleton(agents_dir: &Path, agent_id: &str) -> bool {
     let path = agents_dir.join(agent_id).join("SKILL.md");
     if !path.exists() {
         return false;
