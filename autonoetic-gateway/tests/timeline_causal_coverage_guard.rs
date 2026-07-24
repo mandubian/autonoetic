@@ -22,6 +22,8 @@ const TIMELINE_COVERAGE: &[(&str, Altitude)] = &[
     ("divergence.intervention", Altitude::Attention),
     ("runtime.lock_drift", Altitude::Attention),
     ("guard.tripped", Altitude::Error),
+    // #853: per-host sandbox_exec probe budget trip — operator triage signal.
+    ("sandbox.host_budget_exhausted", Altitude::Attention),
     // #854: max_session_turns_hard termination (Error) and the advisory
     // continuation-window signal for a long-running delegated child (Attention).
     ("session.turn_hard_cap", Altitude::Error),

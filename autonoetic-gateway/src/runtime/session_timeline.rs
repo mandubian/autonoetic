@@ -660,6 +660,10 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // advisory "the operator/planner should look" signal (#854), not a
         // failure — it wants an eye, not an alarm.
         | "session.continuation_window_extended"
+        // A per-host sandbox_exec probe budget trip (#853): the operator should
+        // see a researcher stuck re-probing one host, not have it buried in
+        // per-call tool errors.
+        | "sandbox.host_budget_exhausted"
         | "security.escape_threshold" => Altitude::Attention,
 
         // ─── Normal: visible progress (the default floor). ───
