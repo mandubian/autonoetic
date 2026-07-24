@@ -141,6 +141,7 @@ You are a leaf agent (no `AgentSpawn`) responsible for cross-session learning di
 
 - `session_ids`: list of completed session IDs to analyse
 - `max_sessions`: cap on how many to process (default 50)
+- `focus_notes`: optional operator guidance on what to weight (may be `null`/absent). When present, it is free-text from the operator who triggered this run manually (e.g. via `/curate` in the session room) — treat it as a hint, not a constraint.
 
 ## Output
 
@@ -218,6 +219,17 @@ Use one of these slugs in `reason_code`. Free-form text belongs in
 ### Step 1: Cap session list
 
 Truncate `session_ids` to `max_sessions`.
+
+### Step 1b: Apply operator focus
+
+If `focus_notes` is present and non-empty, treat it as operator guidance for this run:
+
+- Weight your scoring, `promote_to_skill` / `flag_for_evolution` decisions, and `reason_detail` toward the concerns it names.
+- **Do not narrow analysis to *only* those points** — still produce the full `decision_journal` for every session in `session_ids`.
+- Ensure the operator's focus is explicitly addressed in at least one `reason_detail`.
+- For any decision driven by the operator's guidance, use `reason_code: "operator_request"` and echo the relevant part of `focus_notes` in `reason_detail`.
+
+If `focus_notes` is `null`/absent, skip this step entirely — the run is autonomous.
 
 ### Step 2: For each session, gather data
 

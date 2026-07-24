@@ -14,6 +14,7 @@
 //! - `/cron` / `/cron list` — list scheduled jobs for the current session
 //! - `/plan` / `/plan approve [id]` — list or approve pending PlanFrames
 //! - `/return [--force] [note...]` — return the active workbench to the orchestrator
+//! - `/curate [notes...]` — run memory curation on this session now (notes steer the curator)
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — full command reference in the detail pane
 //! - `/model` — show current inference profile
@@ -57,6 +58,9 @@ pub enum SlashCommand {
     ListWikiProposals,
     /// Emergency-stop the current session and optionally redirect with a message.
     EmergencyStopAndRedirect { message: Option<String> },
+    /// Run memory curation on the current session now, with optional operator
+    /// focus notes that steer the curator's analysis.
+    Curate { notes: Option<String> },
     /// Show resolved inference profile for the current session.
     ModelShow,
     /// Override the session inference preset until cleared.
@@ -69,7 +73,7 @@ pub enum SlashCommand {
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /cron · /wiki · /test · /model · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /cron · /wiki · /test · /model · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -131,6 +135,7 @@ pub fn help_lines() -> Vec<String> {
         "  /plan  /plan list          list pending PlanFrames".to_string(),
         "  /plan approve|a|ok [id]    approve a plan frame".to_string(),
         "  /return [--force] [note]   return the active workbench to the orchestrator".to_string(),
+        "  /curate [focus notes]      run memory curation on this session now (notes steer the curator)".to_string(),
         "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
@@ -168,6 +173,7 @@ pub fn parse(input: &str) -> SlashCommand {
         "cron" => parse_cron(tail),
         "plan" => parse_plan(tail),
         "return" => parse_return(tail),
+        "curate" => parse_curate(tail),
         "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
@@ -274,6 +280,16 @@ fn parse_return(tail: &str) -> SlashCommand {
     SlashCommand::ReturnToAgent { force, message }
 }
 
+fn parse_curate(tail: &str) -> SlashCommand {
+    // `/curate`                         — curate the current session, no notes
+    // `/curate focus on the retry loop` — curate with operator focus notes
+    // The whole tail is free-text guidance passed to the memory-curator; it
+    // steers the curator's scoring and graduation decisions (see its SKILL).
+    let trimmed = tail.trim();
+    let notes = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    SlashCommand::Curate { notes }
+}
+
 fn parse_session(tail: &str) -> SlashCommand {
     // `/session <id>` and `/session list [agent]` and `/session resume [agent]`
     // — split on whitespace to peel off the sub-verb, then take the rest as a
@@ -363,6 +379,7 @@ mod tests {
             "/cron",
             "/wiki",
             "/plan approve",
+            "/curate [focus notes]",
             "user.ask",
             "i            compose",
             "j / ↓",
@@ -656,6 +673,26 @@ mod tests {
             SlashCommand::ReturnToAgent {
                 force: true,
                 message: Some("ship it".into())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_curate_variants() {
+        // Bare `/curate` (and whitespace-only tail) → no notes.
+        assert_eq!(parse("/curate"), SlashCommand::Curate { notes: None });
+        assert_eq!(parse("/curate   "), SlashCommand::Curate { notes: None });
+        // Free-text tail becomes the focus notes, verbatim (trimmed).
+        assert_eq!(
+            parse("/curate focus on the retry loop"),
+            SlashCommand::Curate {
+                notes: Some("focus on the retry loop".into())
+            }
+        );
+        assert_eq!(
+            parse("/curate looks like a missing approval, weight that"),
+            SlashCommand::Curate {
+                notes: Some("looks like a missing approval, weight that".into())
             }
         );
     }

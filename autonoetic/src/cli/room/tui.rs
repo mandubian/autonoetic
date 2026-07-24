@@ -3064,6 +3064,41 @@ pub fn run(
                                             }
                                         }
                                     }
+                                    SlashCommand::Curate { notes } => {
+                                        // Fire memory curation on the session
+                                        // the operator is viewing, with optional
+                                        // focus notes that steer the curator.
+                                        let mut params = serde_json::json!({
+                                            "root_session_id": &*root_session_id,
+                                        });
+                                        if let Some(n) = notes
+                                            .as_deref()
+                                            .filter(|n| !n.is_empty())
+                                        {
+                                            params["focus_notes"] = serde_json::json!(n);
+                                        }
+                                        match rpc(client, "curation.run_for_session", params) {
+                                            Ok(v) => {
+                                                let task = v
+                                                    .get("task_id")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or("?");
+                                                let queued_for = v
+                                                    .get("session_id")
+                                                    .and_then(|x| x.as_str())
+                                                    .unwrap_or(root_session_id);
+                                                status = Some(format!(
+                                                    "✓ curation queued for session {queued_for} (task {task}) — watch the timeline"
+                                                ));
+                                                force_timeline_refresh = true;
+                                                follow = true;
+                                            }
+                                            Err(e) => {
+                                                status =
+                                                    Some(format!("✗ curate failed: {e}"));
+                                            }
+                                        }
+                                    }
                                     SlashCommand::ModelShow => {
                                         match rpc(client, "session.inference.get", serde_json::json!({
                                             "session_id": &*root_session_id,
