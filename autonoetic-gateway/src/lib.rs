@@ -14,6 +14,7 @@ pub mod constitution_digest;
 pub mod constitution_glossary;
 pub mod denial_affordances;
 pub mod enforcement_register;
+pub mod evolution_view;
 pub mod exec_request;
 pub mod execution;
 pub mod fail_mode;

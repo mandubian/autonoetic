@@ -3153,6 +3153,20 @@ pub fn run(
                                             }
                                         }
                                     }
+                                    SlashCommand::ListSkills => {
+                                        // Read-only standing view; nothing here
+                                        // acts, so no confirmation and no refresh
+                                        // of the timeline.
+                                        detail = Some(DetailPane::event(
+                                            list_skills_detail(client),
+                                            None,
+                                        ));
+                                        session_pick_list = None;
+                                        status = Some(
+                                            "skill work: proposals + decisions · Esc close"
+                                                .to_string(),
+                                        );
+                                    }
                                     SlashCommand::ModelShow => {
                                         match rpc(client, "session.inference.get", serde_json::json!({
                                             "session_id": &*root_session_id,
@@ -7123,6 +7137,109 @@ fn list_cron_detail(client: &RoomClient, root_session_id: &str) -> Vec<String> {
             Err(e) => vec![format!("✗ malformed scheduled_jobs.list response: {e}")],
         },
         Err(e) => vec![format!("✗ scheduled_jobs.list failed: {e}")],
+    }
+}
+
+/// `/skills` — the standing view of in-flight skill work (#818).
+///
+/// Gateway-wide rather than session-scoped: a graduation proposed in one session
+/// is enacted in another, and an operator asking "what is in flight" means across
+/// the gateway. Rows carry only what is on record — a proposal with no decision
+/// shows as `proposed`, never as a guess.
+fn list_skills_detail(client: &RoomClient) -> Vec<String> {
+    match rpc(
+        client,
+        "evolution.list_pending",
+        serde_json::json!({ "limit": 30 }),
+    ) {
+        Ok(value) => {
+            let pending = value
+                .get("pending")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if pending.is_empty() {
+                return vec![
+                    "(no skill work on record)".to_string(),
+                    String::new(),
+                    "/crystallize [what worked]  propose one from the current session".to_string(),
+                ];
+            }
+            let counts = value.get("counts").cloned().unwrap_or_default();
+            let mut lines = vec![format!(
+                "skill work — {} crystallization(s), {} graduation(s), {} awaiting promotion",
+                counts
+                    .get("crystallizations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                counts
+                    .get("graduations")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                counts
+                    .get("awaiting_promotion")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            )];
+            lines.push(String::new());
+            for row in &pending {
+                let str_of = |k: &str| row.get(k).and_then(|v| v.as_str()).unwrap_or("");
+                let stage = str_of("stage");
+                let verdict = str_of("verdict");
+                let outcome = str_of("outcome");
+                // stage → outcome reads as a sentence: "judged → landed".
+                let state = match (stage, outcome) {
+                    (s, "") => s.to_string(),
+                    (s, o) => format!("{s} → {o}"),
+                };
+                let kind = match str_of("kind") {
+                    "crystallization" => "crystallize",
+                    "graduation" => "graduate  ",
+                    "graduation_skipped" => "skipped   ",
+                    other => other,
+                };
+                let target = match row.get("target_agent").and_then(|v| v.as_str()) {
+                    Some(a) => a.to_string(),
+                    None => "(no target)".to_string(),
+                };
+                let verdict_part = if verdict.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{verdict}]")
+                };
+                lines.push(format!("{kind}  {target}{verdict_part}  — {state}"));
+                lines.push(format!("    {}", str_of("summary")));
+                let candidates = row
+                    .get("target_agent_candidates")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if !candidates.is_empty() {
+                    let ids: Vec<String> = candidates
+                        .iter()
+                        .filter_map(|c| c.as_str())
+                        .map(|c| c.chars().take(20).collect())
+                        .collect();
+                    lines.push(format!(
+                        "    ⏳ {} candidate(s) for this agent awaiting promotion: {} \
+                         — approve via the gate, not from here",
+                        ids.len(),
+                        ids.join(", ")
+                    ));
+                }
+                lines.push(format!(
+                    "    id {}  {}",
+                    str_of("id"),
+                    str_of("recorded_at")
+                ));
+                lines.push(String::new());
+            }
+            lines.push(
+                "read-only — enactment goes through the promotion gate (P-9.15)".to_string(),
+            );
+            lines
+        }
+        Err(e) => vec![format!("✗ evolution.list_pending failed: {e}")],
     }
 }
 
