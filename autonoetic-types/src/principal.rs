@@ -94,6 +94,20 @@ pub fn decider_principal_kind(decided_by: &str) -> Option<PrincipalKind> {
     None
 }
 
+/// True when `id` is a reserved, non-agent principal id — the operator, the
+/// gateway/system itself, an emergency-stop actor, or empty. These are never
+/// seeded agents, so callers must not resolve them through the agent repository
+/// (e.g. an operator- or gateway-initiated spawn has no "source agent" whose
+/// capabilities gate the spawn; trying to load one bails with "No alias found").
+pub fn is_reserved_non_agent_id(id: &str) -> bool {
+    let s = id.trim();
+    s.is_empty()
+        || s == "operator"
+        || s == "gateway"
+        || s == "system"
+        || s.starts_with("emergency_stop:")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     #[serde(flatten)]
@@ -150,6 +164,18 @@ impl Principal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_non_agent_ids_are_recognized() {
+        for id in ["operator", "gateway", "system", "", "  ", "emergency_stop:root-x"] {
+            assert!(is_reserved_non_agent_id(id), "{id:?} should be reserved");
+        }
+        // Real agent ids (dotted / agent: form) are NOT reserved — the source
+        // capability check must still run for genuine agent-initiated spawns.
+        for id in ["memory-curator.default", "planner.default", "agent:coder"] {
+            assert!(!is_reserved_non_agent_id(id), "{id:?} must not be reserved");
+        }
+    }
 
     #[test]
     fn foreign_kind_round_trips_through_storage() {
