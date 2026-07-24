@@ -66,6 +66,26 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(DigestQueryTool));
 }
 
+/// Compute a deterministic memory ID from scope + normalized content.
+/// Same content always produces the same ID → `memory_upsert` becomes
+/// an idempotent update rather than a duplicate insert (#868).
+pub(crate) fn deterministic_id(scope: &str, content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized: String = content
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut h = Sha256::new();
+    h.update(scope.as_bytes());
+    h.update(b"|");
+    h.update(normalized.as_bytes());
+    format!("dedup-{}", hex::encode(h.finalize())[..24].to_string())
+}
+
 pub struct KnowledgeStoreTool;
 
 impl NativeTool for KnowledgeStoreTool {
@@ -142,27 +162,6 @@ impl NativeTool for KnowledgeStoreTool {
         }
         fn default_visibility() -> String {
             "global".to_string()
-        }
-
-        /// Compute a deterministic memory ID from scope + normalized content.
-        /// Same content always produces the same ID → `memory_upsert` becomes
-        /// an idempotent update rather than a duplicate insert (#868).
-        fn deterministic_id(scope: &str, content: &str) -> String {
-            use sha2::{Digest, Sha256};
-            // Normalize: lowercase, strip non-alphanumeric, collapse whitespace.
-            let normalized: String = content
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-                .collect::<String>()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let mut h = Sha256::new();
-            h.update(scope.as_bytes());
-            h.update(b"|");
-            h.update(normalized.as_bytes());
-            format!("dedup-{}", hex::encode(h.finalize())[..24].to_string())
         }
 
         let args: Args = serde_json::from_str(arguments_json)
@@ -628,5 +627,57 @@ impl NativeTool for DigestQueryTool {
             "narrative": narrative,
         }))
         .map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_id_is_stable() {
+        let a = deterministic_id("evolution/patterns", "When make is blocked by sandbox policy P-1.9");
+        let b = deterministic_id("evolution/patterns", "When make is blocked by sandbox policy P-1.9");
+        assert_eq!(a, b);
+        assert!(a.starts_with("dedup-"));
+    }
+
+    #[test]
+    fn deterministic_id_differs_on_content() {
+        let a = deterministic_id("evolution/patterns", "When make is blocked by sandbox policy");
+        let b = deterministic_id("evolution/patterns", "Python repr prevents truncation in file reads");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn deterministic_id_differs_on_scope() {
+        let a = deterministic_id("evolution/patterns", "sandbox exec permission error");
+        let b = deterministic_id("digest.lesson", "sandbox exec permission error");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn jaccard_high_for_same_concept_different_phrasing() {
+        let a = "When `make` is blocked by sandbox policy P-1.9, wrap in bash -c or call python3 directly.";
+        let b = "sandbox_exec permission blocks bare make commands. Workaround: use bash -c wrapper or python3 scripts directly.";
+        let score = crate::runtime::context::score_task_relevance(a, b);
+        assert!(score >= 0.25, "expected >= 0.25 for same-concept phrases, got {score:.3}");
+    }
+
+    #[test]
+    fn jaccard_low_for_different_patterns() {
+        let a = "When `make` is blocked by sandbox policy P-1.9, wrap in bash -c.";
+        let b = "The session transcript handle is not visible to cross-agent callers.";
+        let score = crate::runtime::context::score_task_relevance(a, b);
+        assert!(score < 0.35, "expected < 0.35 for unrelated patterns, got {score:.3}");
+    }
+
+    #[test]
+    fn jaccard_distinguishes_sandbox_subtopics() {
+        let a = "make blocked by sandbox policy P-1.9 — use python3 directly.";
+        let b = "sandbox filesystem isolation causes resolve content_not_found for host paths.";
+        let score = crate::runtime::context::score_task_relevance(a, b);
+        // shared: "sandbox" + "by" — not enough to exceed 0.35
+        assert!(score < 0.35, "expected < 0.35 for different sandbox subtopics, got {score:.3}");
     }
 }

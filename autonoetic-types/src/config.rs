@@ -467,6 +467,12 @@ pub struct AutoLearningConfig {
     /// text (Jaccard token overlap) instead of pure recency. Default: true.
     #[serde(default = "default_true")]
     pub task_matched_recall: bool,
+
+    /// Minimum Jaccard token-overlap score for `knowledge_store` to merge a
+    /// new entry with an existing one in the same scope and `type` tag.
+    /// Default: 0.25 (conservative — avoids false merges).
+    #[serde(default = "default_similarity_threshold")]
+    pub knowledge_store_similarity_threshold: f64,
 }
 
 fn default_auto_learning_enabled() -> bool {
@@ -481,6 +487,10 @@ fn default_evolution_schedule() -> String {
     "0 3 * * *".to_string()
 }
 
+fn default_similarity_threshold() -> f64 {
+    0.25
+}
+
 impl Default for AutoLearningConfig {
     fn default() -> Self {
         Self {
@@ -489,6 +499,7 @@ impl Default for AutoLearningConfig {
             curation_schedule: default_curation_schedule(),
             evolution_schedule: default_evolution_schedule(),
             task_matched_recall: default_true(),
+            knowledge_store_similarity_threshold: default_similarity_threshold(),
         }
     }
 }
