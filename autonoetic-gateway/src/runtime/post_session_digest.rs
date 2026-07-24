@@ -178,7 +178,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
     }
 }
 
-fn extract_json_object_slice(text: &str) -> anyhow::Result<&str> {
+pub(crate) fn extract_json_object_slice(text: &str) -> anyhow::Result<&str> {
     let t = text.trim();
     let scan = if let Some(pos) = t.find("```") {
         let after = t[pos + 3..].trim_start();
@@ -531,7 +531,7 @@ pub async fn run_post_session_digest_with_driver(
     .await
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     let mut iter = s.chars();
     let chunk: String = iter.by_ref().take(max).collect();
     if iter.next().is_some() {

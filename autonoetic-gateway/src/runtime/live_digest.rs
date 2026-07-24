@@ -740,13 +740,7 @@ fn cell(s: &str) -> String {
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
-    let mut iter = s.chars();
-    let chunk: String = iter.by_ref().take(max).collect();
-    if iter.next().is_some() {
-        format!("{}…", chunk)
-    } else {
-        chunk
-    }
+    crate::runtime::post_session_digest::truncate_chars(s, max)
 }
 
 fn truncate_json_string_fields(v: &mut Value, max_len: usize) {

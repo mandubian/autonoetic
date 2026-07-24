@@ -83,34 +83,6 @@ impl DecisionJournalEntry {
     }
 }
 
-/// Extract the JSON object slice from text that may be wrapped in markdown
-/// code fences or have leading/trailing prose. Mirrors `post_session_digest.rs`.
-fn extract_json_object_slice(text: &str) -> Option<&str> {
-    let t = text.trim();
-    // Strip markdown code fences if present
-    let scan = if let Some(pos) = t.find("```") {
-        let after = t[pos + 3..].trim_start();
-        let after = if after.starts_with("json") {
-            after[4..].trim_start()
-        } else {
-            after
-        };
-        if let Some(end) = after.find("```") {
-            &after[..end]
-        } else {
-            after
-        }
-    } else {
-        t
-    };
-    let start = scan.find('{')?;
-    let end = scan.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    Some(scan[start..=end].trim())
-}
-
 /// Extract decision-journal entries from a structured assistant reply.
 ///
 /// Returns:
@@ -121,7 +93,10 @@ fn extract_json_object_slice(text: &str) -> Option<&str> {
 ///   entries inside the array are dropped with a warn log so the rest of
 ///   the journal is still persisted.
 pub fn extract_decision_journal_entries(reply: &str) -> Option<Vec<DecisionJournalEntry>> {
-    let json_slice = extract_json_object_slice(reply)?;
+    let json_slice = match crate::runtime::post_session_digest::extract_json_object_slice(reply) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
     let json: serde_json::Value = serde_json::from_str(json_slice).ok()?;
     let array = json.get("decision_journal")?.as_array()?;
     let mut out = Vec::with_capacity(array.len());
@@ -307,7 +282,7 @@ pub fn extract_and_persist(
     // evolution-orchestrator can find it via knowledge_search.
     // The orchestrator spawns the curator as a workflow child but has
     // no reliable way to read the spawn return — this bridges the gap.
-    if let Some(json_slice) = extract_json_object_slice(reply) {
+    if let Ok(json_slice) = crate::runtime::post_session_digest::extract_json_object_slice(reply) {
         let content = json_slice.to_string();
         let mut memory = MemoryObject::new(
             format!("curator-output-{}", session_id.replace('/', "-")),

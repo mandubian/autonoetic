@@ -980,16 +980,7 @@ fn is_roster_read_tool(tool_name: &str) -> bool {
 /// JSON would otherwise treat repeated semantically-identical calls as new
 /// progress and disable `max_loops_without_progress` protection.
 fn normalize_arguments_for_progress_fingerprint(arguments: &str) -> std::borrow::Cow<'_, str> {
-    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return std::borrow::Cow::Borrowed(arguments);
-    };
-    if let Some(obj) = v.as_object_mut() {
-        obj.remove("intent");
-    }
-    match serde_json::to_string(&v) {
-        Ok(s) => std::borrow::Cow::Owned(s),
-        Err(_) => std::borrow::Cow::Borrowed(arguments),
-    }
+    crate::runtime::trajectory_monitor::normalize_arguments(arguments)
 }
 
 fn compute_fingerprint(tool_name: &str, arguments: &str) -> (String, u64) {
