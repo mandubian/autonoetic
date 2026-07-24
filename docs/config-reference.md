@@ -1141,6 +1141,25 @@ Controls cron-style scheduled job admission and dispatch.
 
 ---
 
+## Knowledge Store
+
+Controls how `knowledge_store` merges near-duplicate entries (semantic dedup, #874).
+When a memory ID is auto-computed, the store checks for an existing entry in the
+same scope and `type` tag whose Jaccard token overlap with the new content
+exceeds the threshold; if found, the write merges into that entry instead of
+inserting a duplicate.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `knowledge_store.similarity_threshold` | f64 | `0.25` | Minimum Jaccard token-overlap score (0.0–1.0) for `knowledge_store` to merge a new entry into an existing one in the same scope and `type` tag. Higher = stricter (fewer merges); lower = more aggressive merging. The `0.25` default is conservative to avoid false merges. |
+
+```yaml
+knowledge_store:
+  similarity_threshold: 0.25
+```
+
+---
+
 ## Auto-Learning Pipeline
 
 Controls the default self-improvement loop. When enabled, the gateway automatically distills memories after sessions, emits quality signals, and schedules periodic memory curation.

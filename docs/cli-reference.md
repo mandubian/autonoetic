@@ -367,6 +367,7 @@ autonoetic chat researcher.default --session-id my-session
 | `/why [request_id]` | Explain why an approval was triggered (constitutional rules) |
 | `/policy <text>` | Send governance intent to `governance-author.default` for constitutional proposals |
 | `/persona [text]` | Show or set user persona (persists to `persona.md`, applies to new sessions) |
+| `/curate [focus notes]` | Run memory curation on the current session now; optional focus notes steer the curator |
 | `/cancel` | Leave the current picker/prompt |
 | `/quit` or `/exit` | Exit chat |
 | `/help` | Show all commands |
