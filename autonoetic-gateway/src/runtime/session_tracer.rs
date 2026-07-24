@@ -382,7 +382,12 @@ impl SessionTracer {
     }
 
     fn append_live_digest_event(&self, event_type: &str, payload: Option<serde_json::Value>) {
-        self.append_live_digest_event_at(event_type, payload, None)
+        self.append_live_digest_event_at(
+            event_type,
+            payload,
+            None,
+            autonoetic_types::session_timeline::TimelineRefs::default(),
+        )
     }
 
     /// Like [`append_live_digest_event`] but lets the caller *raise* the
@@ -396,6 +401,7 @@ impl SessionTracer {
         event_type: &str,
         payload: Option<serde_json::Value>,
         altitude_override: Option<autonoetic_types::session_timeline::Altitude>,
+        refs: autonoetic_types::session_timeline::TimelineRefs,
     ) {
         let Some(store) = &self.gateway_store else {
             return;
@@ -422,7 +428,14 @@ impl SessionTracer {
             principal_id: Some(principal.id.clone()),
             role: Some(role.to_storage()),
             altitude: Some(altitude.as_str().to_string()),
-            refs_json: None,
+            // First-class cross-references (#391) so the Room TUI can drill from a
+            // timeline line into depth. Empty refs stay `None` (unchanged from the
+            // previous hardcoded behavior for events that carry none).
+            refs_json: if refs.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&refs).ok()
+            },
         };
         if let Err(e) = store.create_live_digest_event(&row) {
             tracing::debug!(
@@ -1087,7 +1100,35 @@ impl SessionTracer {
         } else {
             None
         };
-        self.append_live_digest_event_at("tool.completed", Some(timeline_payload), alt_override);
+        // Lift drill-down handles out of the result into first-class refs so the
+        // Room TUI's live content pane can find the artifact a tool built. Without
+        // this the "artifact was built" row rendered (from the payload) but the
+        // content popup, which keys off `refs.artifact_id`, never saw it — the
+        // artifact build result exposes the session-visible `artifact_ref` (some
+        // tools use an `artifact_id` key), and the pane passes that ref straight
+        // to `artifact.list_files`.
+        let refs = {
+            let mut r = autonoetic_types::session_timeline::TimelineRefs::default();
+            if let Some(res) = parsed_result.as_ref() {
+                if let Some(aid) = res
+                    .get("artifact_ref")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| res.get("artifact_id").and_then(|v| v.as_str()))
+                {
+                    r.artifact_id = Some(aid.to_string());
+                }
+                if let Some(tid) = res.get("execution_trace_id").and_then(|v| v.as_str()) {
+                    r.execution_trace_id = Some(tid.to_string());
+                }
+            }
+            r
+        };
+        self.append_live_digest_event_at(
+            "tool.completed",
+            Some(timeline_payload),
+            alt_override,
+            refs,
+        );
         Ok(event_id)
     }
 
@@ -1530,6 +1571,85 @@ mod tests {
         }
         assert!(seen_success, "expected a successful tool.completed");
         assert!(seen_failure, "expected a failed tool.completed");
+    }
+
+    /// Test harness: a store-backed tracer with a turn id set.
+    fn store_tracer() -> (tempfile::TempDir, std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>, SessionTracer) {
+        let temp = tempdir().unwrap();
+        let agent_dir = temp.path().join("agents").join("planner.default");
+        let gateway_dir = temp.path().join("agents").join(".gateway");
+        fs::create_dir_all(agent_dir.join("history")).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+        let mut tracer = SessionTracer::test_tracer_with_store(&agent_dir, store.clone());
+        tracer.set_turn_id("turn-000001");
+        (temp, store, tracer)
+    }
+
+    fn completed_entry(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+    ) -> autonoetic_types::session_timeline::SessionTimelineEntry {
+        store
+            .list_session_timeline("test-session", None, 10, None, None)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.event_type == "tool.completed")
+            .expect("tool.completed on timeline")
+    }
+
+    /// Regression (Room TUI live content popup): a built artifact rendered as
+    /// "artifact was built" in the timeline but never appeared in the popup,
+    /// because tool.completed was emitted with no refs — and the popup keys its
+    /// Artifacts section off `refs.artifact_id`. The artifact_build result
+    /// exposes the session-visible `artifact_ref`; it must land in refs.
+    #[test]
+    fn tool_completed_lifts_artifact_ref_into_refs() {
+        let (_temp, store, mut tracer) = store_tracer();
+        tracer
+            .log_tool_completed(
+                "artifact_build",
+                r#"{"ok":true,"artifact_ref":"ar.session.abc123","artifact_canonical_digest":"sha256:deadbeef"}"#,
+            )
+            .unwrap();
+        let completed = completed_entry(&store);
+        assert_eq!(
+            completed.refs.artifact_id.as_deref(),
+            Some("ar.session.abc123"),
+            "artifact_build's artifact_ref must be lifted into refs.artifact_id"
+        );
+    }
+
+    /// Fallback: a result using an `artifact_id` key (rather than `artifact_ref`)
+    /// still populates refs.artifact_id, and `execution_trace_id` is lifted too.
+    #[test]
+    fn tool_completed_lifts_artifact_id_key_and_trace_id() {
+        let (_temp, store, mut tracer) = store_tracer();
+        tracer
+            .log_tool_completed(
+                "artifact_exec",
+                r#"{"ok":true,"artifact_id":"art_abcd1234","execution_trace_id":"etr-1"}"#,
+            )
+            .unwrap();
+        let completed = completed_entry(&store);
+        assert_eq!(completed.refs.artifact_id.as_deref(), Some("art_abcd1234"));
+        assert_eq!(completed.refs.execution_trace_id.as_deref(), Some("etr-1"));
+    }
+
+    /// A tool whose result carries no drill-down handle keeps empty refs — no
+    /// spurious refs_json, matching the prior behavior for such events.
+    #[test]
+    fn tool_completed_without_handles_has_empty_refs() {
+        let (_temp, store, mut tracer) = store_tracer();
+        tracer
+            .log_tool_completed("resolve", r#"{"ok":true,"value":"answer"}"#)
+            .unwrap();
+        assert!(
+            completed_entry(&store).refs.is_empty(),
+            "no drill-down handle => empty refs"
+        );
     }
 
     #[test]
