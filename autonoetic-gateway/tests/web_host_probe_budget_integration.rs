@@ -222,6 +222,45 @@ fn web_call_get_refused_but_post_exempt() {
     );
 }
 
+#[test]
+fn web_fetch_repeated_failures_exhaust_budget() {
+    // A fresh budget (not pre-seeded): failures must accumulate strikes on their
+    // own, matching #853's "a wasted probe is a failure OR a duplicate success".
+    let temp = tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("SKILL.md"), remote_access_skill()).expect("skill");
+    let store = Arc::new(GatewayStore::open(&temp.path().join(".gateway")).expect("store"));
+    store.host_probe_budget.set_cap(2);
+    let manifest = web_manifest("web.probe.fail");
+
+    let fetch = || {
+        run_web(
+            "web_fetch",
+            &manifest,
+            temp.path(),
+            store.clone(),
+            json!({ "url": URL, "timeout_secs": 2, "max_chars": 512 }),
+        )
+    };
+
+    // Two failing fetches (dead port → connection refused) are wasted probes:
+    // each strikes the host, but surfaces as a network error, not a refusal.
+    for i in 1..=2 {
+        let res = fetch();
+        assert!(
+            matches!(res, Err(_)),
+            "failing fetch {i} should surface as a network error, got: {res:?}"
+        );
+        assert!(!is_budget_refusal(&res));
+    }
+    // The host has now struck up to the cap → the next probe is refused before
+    // any network work, proving failed web probes feed the shared per-host budget.
+    let refused = fetch();
+    assert!(
+        is_budget_refusal(&refused),
+        "after cap failed probes the next fetch must be refused, got: {refused:?}"
+    );
+}
+
 /// End-to-end through a real local HTTP server: proves the *record* path is
 /// wired (a successful `web_fetch` feeds the budget with a hash of its body) and
 /// that the budget is genuinely **content-aware**, not a blunt `(tool, host)`

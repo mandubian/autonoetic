@@ -195,11 +195,13 @@ fn session_grants_allow_host(
 //
 // These helpers feed the *same* [`crate::runtime::host_probe_budget`] registry,
 // so strikes accumulate per-host **across** tools — a `web_fetch` + `sandbox_exec`
-// mix against one host shares a single budget — and a novel response still
-// resets the count. Scope is deliberately limited to reads: `web_fetch` always,
-// `web_call` only for GET. A repeated non-GET `web_call` is a mutation, not a
-// probe, and its uniform-ack responses (e.g. `{"status":"ok"}` across a batch
-// of distinct writes) would false-positive under "duplicate content = strike".
+// mix against one host shares a single budget — with the same "wasted probe"
+// definition as #853: a failure, or a success whose content was already seen
+// from the host, is a strike; a novel success resets the count. Scope is
+// deliberately limited to reads: `web_fetch` always, `web_call` only for GET. A
+// repeated non-GET `web_call` is a mutation, not a probe, and its uniform-ack
+// responses (e.g. `{"status":"ok"}` across a batch of distinct writes) would
+// false-positive under "duplicate content = strike".
 // ---------------------------------------------------------------------------
 
 /// Pre-execution check: returns the `host_budget_exhausted` refusal response
@@ -225,18 +227,19 @@ fn web_probe_budget_refusal(
     )
 }
 
-/// Post-execution accounting for a *successful* read-style web probe: a response
-/// whose content hash was already seen from `host` this session is a strike; a
-/// novel response resets the count. Emits the operator triage event the first
-/// time a host reaches the strike cap (mirroring `sandbox_exec`). Web failures
-/// bubble up as `Err` before reaching here, so — like #853's success path —
-/// only successes are recorded; failed retries remain the LoopGuard per-tool
-/// failure budget's job.
-fn web_probe_budget_record_success(
+/// Post-execution accounting for one read-style web probe against `host`,
+/// matching the `sandbox_exec` budget (#853): a failure, or a success whose
+/// content hash was already seen from this host this session, is a strike; a
+/// novel success resets the count. Emits the operator triage event the first
+/// time a host reaches the strike cap. `ok` marks whether the probe returned
+/// content; `body` is the full response and is only consulted on success (pass
+/// `""` for a failure — a failure strikes regardless of output).
+fn web_probe_budget_record(
     gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     session_id: Option<&str>,
     agent_id: &str,
     host: &str,
+    ok: bool,
     body: &str,
 ) {
     let (Some(store), Some(sid)) = (gateway_store, session_id) else {
@@ -252,7 +255,7 @@ fn web_probe_budget_record_success(
         ..
     } = store
         .host_probe_budget
-        .record(sid, host, true, &output_hash)
+        .record(sid, host, ok, &output_hash)
     {
         if reached_cap {
             let root = crate::runtime::content_store::root_session_id(sid);
@@ -1778,7 +1781,7 @@ impl NativeTool for WebFetchTool {
         let timeout_secs = args.timeout_secs.unwrap_or(20).clamp(5, 120);
         let max_chars = args.max_chars.unwrap_or(20_000).clamp(512, 200_000);
 
-        match execute_web_fetch_http(
+        let outcome = match execute_web_fetch_http(
             manifest,
             policy,
             agent_dir,
@@ -1789,7 +1792,24 @@ impl NativeTool for WebFetchTool {
             &args,
             approval_validated,
             timeout_secs,
-        )? {
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                // Per-host probe budget (#857): a failed fetch is a wasted probe
+                // against this host — strike it (matching #853) before the error
+                // propagates to the LoopGuard's per-tool failure budget.
+                web_probe_budget_record(
+                    _gateway_store.as_ref(),
+                    _session_id,
+                    &manifest.agent.id,
+                    &host,
+                    false,
+                    "",
+                );
+                return Err(e);
+            }
+        };
+        match outcome {
             WebFetchHttpOutcome::NeedsApproval(payload) => Ok(payload),
             WebFetchHttpOutcome::Success {
                 status_code,
@@ -1802,11 +1822,12 @@ impl NativeTool for WebFetchTool {
                 // host's strike count; a repeat of content already seen from it
                 // this session is a strike. Hash the full body (pre-truncation)
                 // so a varying `max_chars` cannot disguise identical pages.
-                web_probe_budget_record_success(
+                web_probe_budget_record(
                     _gateway_store.as_ref(),
                     _session_id,
                     &manifest.agent.id,
                     &host,
+                    true,
                     &body,
                 );
 
@@ -2167,7 +2188,7 @@ impl NativeTool for WebCallTool {
         let headers = args.headers.clone().unwrap_or_default();
         let body = args.body.clone();
 
-        let (status_code, content_type, response_text) = block_on_http(async move {
+        let call_result = block_on_http(async move {
             let client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -2214,21 +2235,42 @@ impl NativeTool for WebCallTool {
                 )))
             })?;
             Ok((status, content_type, text))
-        })?;
+        });
 
         // Per-host probe budget (#857): GET is a read probe — record it against
-        // this host (novel response resets its strikes; a repeat is a strike).
+        // this host. A failed GET is a wasted probe (strike); a success feeds
+        // the content hash so a novel response resets while a repeat strikes.
         // Hash the full response (pre-truncation) so a varying `max_chars`
-        // cannot disguise identical pages.
-        if is_get_probe {
-            web_probe_budget_record_success(
-                budget_store.as_ref(),
-                _session_id,
-                &manifest.agent.id,
-                &host,
-                &response_text,
-            );
-        }
+        // cannot disguise identical pages. Non-GET methods are exempt (mutations,
+        // not probes), so they never touch the budget.
+        let (status_code, content_type, response_text) = match call_result {
+            Ok(v) => {
+                if is_get_probe {
+                    web_probe_budget_record(
+                        budget_store.as_ref(),
+                        _session_id,
+                        &manifest.agent.id,
+                        &host,
+                        true,
+                        &v.2,
+                    );
+                }
+                v
+            }
+            Err(e) => {
+                if is_get_probe {
+                    web_probe_budget_record(
+                        budget_store.as_ref(),
+                        _session_id,
+                        &manifest.agent.id,
+                        &host,
+                        false,
+                        "",
+                    );
+                }
+                return Err(e);
+            }
+        };
 
         let total_chars = response_text.chars().count();
         let truncated = total_chars > max_chars;
