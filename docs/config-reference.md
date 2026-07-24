@@ -1147,7 +1147,7 @@ Controls the default self-improvement loop. When enabled, the gateway automatica
 When `auto_learning.enabled` is `true`, startup injects synthetic cron rows for:
 
 - `memory-curator.default`, driven by `auto_learning.curation_schedule`
-- `evolution-orchestrator.default`, on a fixed daily cadence (`0 3 * * *`)
+- `evolution-orchestrator.default`, driven by `auto_learning.evolution_schedule`
 
 Injection is skipped when an enabled `system_agents` entry already declares a schedule for those targets, or when the agent bundle is missing from `agents_dir`.
 
@@ -1156,12 +1156,14 @@ Injection is skipped when an enabled `system_agents` entry already declares a sc
 | `auto_learning.enabled` | bool | `true` | Master switch for the auto-learning pipeline. |
 | `auto_learning.quality_signals` | bool | `true` | Emit per-session quality signals (turn count, error count, completion) as Tier-2 memories tagged `source:quality_signal`. |
 | `auto_learning.curation_schedule` | string | `"0 */4 * * *"` | Cron expression forwarded to the injected `memory-curator.default` job (UTC). Ignored when auto-learning is disabled or the curator already has an active system cron. |
+| `auto_learning.evolution_schedule` | string | `"0 3 * * *"` | Cron expression forwarded to the injected `evolution-orchestrator.default` job (UTC), which sequences curator output, graduations, and steward review. Ignored when auto-learning is disabled or the orchestrator already has an active system cron. |
 
 ```yaml
 auto_learning:
   enabled: true
   quality_signals: true
   curation_schedule: "0 */4 * * *"
+  evolution_schedule: "0 3 * * *"
 ```
 
 To opt out entirely:

@@ -1575,6 +1575,114 @@ impl JsonRpcRouter {
                 }
             }
 
+            "scheduled_jobs.trigger" => {
+                // Manually fire a scheduled job now on the running gateway,
+                // bypassing the cron schedule. Operator-only (shared-secret
+                // auth on this channel); fires the agent the normal way
+                // (enqueue -> drain -> spawn_agent_once), so all
+                // constitution/approval gates remain in effect.
+                let params: autonoetic_types::scheduled_job::ScheduledJobTriggerParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for scheduled_jobs.trigger: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let job = match store.get_scheduled_job(&params.job_id) {
+                    Ok(Some(j)) => j,
+                    Ok(None) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Scheduled job '{}' not found", params.job_id),
+                        );
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to load scheduled job: {}", e),
+                        );
+                    }
+                };
+                if job.status != autonoetic_types::scheduled_job::ScheduledJobStatus::Active {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!(
+                            "Scheduled job '{}' is {}; resume it before triggering",
+                            params.job_id, job.status
+                        ),
+                    );
+                }
+
+                // In-flight guard: refuse to overlap a prior fire (manual or
+                // cron) for the same job unless `force` is set. The workflow
+                // id is the stable `sched-{job_id}` used by every fire.
+                if !params.force {
+                    let workflow_id = format!("sched-{}", &params.job_id);
+                    match store.inflight_task_for_workflow(&workflow_id) {
+                        Ok(Some(existing_task_id)) => {
+                            return JsonRpcResponse::success(
+                                req.id,
+                                serde_json::to_value(
+                                    autonoetic_types::scheduled_job::ScheduledJobTriggerResult::TriggerSkipped {
+                                        job_id: params.job_id.clone(),
+                                        existing_task_id,
+                                    },
+                                )
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("In-flight check failed: {}", e),
+                            );
+                        }
+                    }
+                }
+
+                let now = chrono::Utc::now();
+                match crate::scheduler::enqueue_scheduled_job_fire(
+                    &self.execution.config(),
+                    store.as_ref(),
+                    &job,
+                    now,
+                    /* manual */ true,
+                    /* next_run_at_override */ None,
+                ) {
+                    Ok(event) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(
+                            autonoetic_types::scheduled_job::ScheduledJobTriggerResult::Triggered { event },
+                        )
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    ),
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("scheduled_jobs.trigger failed: {}", e),
+                    ),
+                }
+            }
+
             "session.list" => {
                 // Discover existing root sessions so the operator can reload or
                 // attach to one. Backed by `causal_events` (every gateway

@@ -94,6 +94,30 @@ impl GatewayStore {
         Ok(out)
     }
 
+    /// Returns the `task_id` of any in-flight (pending/runnable/running/awaiting
+    /// approval) task for the given workflow, or `None` if there is no active
+    /// task. Used by the manual `scheduled_jobs.trigger` path to detect overlap
+    /// with a prior fire (manual or cron) and avoid double-processing.
+    ///
+    /// Note: a residual TOCTOU window exists between this check and the
+    /// subsequent enqueue; for operator-initiated single triggers this is
+    /// acceptable, and singleton agents get a second dedup layer during drain.
+    pub fn inflight_task_for_workflow(&self, workflow_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM task_runs
+             WHERE workflow_id = ?1
+               AND status IN ('pending','runnable','running','awaiting_approval')
+             ORDER BY created_at ASC
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![workflow_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get::<_, String>(0)?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn delete_task_run(&self, workflow_id: &str, task_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

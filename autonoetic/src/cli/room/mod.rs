@@ -7,7 +7,7 @@
 //! `GatewayStore` access.
 
 mod channel;
-mod client;
+pub(crate) mod client;
 mod markdown;
 mod render;
 mod slash;

@@ -3084,6 +3084,10 @@ async fn process_due_scheduled_jobs(
             }
         };
 
+        // The cron path claims the job (advancing next_run_at to the next
+        // occurrence) so a later tick can't re-fire it. The claim is the
+        // cron-vs-cron double-fire guard; the manual trigger path relies on
+        // the in-flight task guard instead.
         let claimed = match store.claim_and_advance_due_job(&job.job_id, &now_rfc, &next_run_at) {
             Ok(Some(j)) => j,
             Ok(None) => {
@@ -3113,80 +3117,21 @@ async fn process_due_scheduled_jobs(
             "Triggering scheduled job"
         );
 
-        let workflow_id = format!("sched-{}", &claimed.job_id);
-        let task_id = format!(
-            "task-{}-{}",
-            &claimed.job_id,
-            &uuid::Uuid::new_v4().to_string()[..8]
-        );
-
-        let mut run =
-            match workflow_store::load_workflow_run(&config, Some(store.as_ref()), &workflow_id) {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    let new_run = autonoetic_types::workflow::WorkflowRun {
-                        workflow_id: workflow_id.clone(),
-                        root_session_id: claimed.root_session_id.clone(),
-                        lead_agent_id: claimed.owner_agent_id.clone(),
-                        status: autonoetic_types::workflow::WorkflowRunStatus::Active,
-                        created_at: now_rfc.clone(),
-                        updated_at: now_rfc.clone(),
-                        active_task_ids: Vec::new(),
-                        queued_task_ids: Vec::new(),
-                        join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
-                        join_task_ids: Vec::new(),
-                        active_plan_ref: None,
-                        reactivated_for_root_spawn: false,
-                    };
-                    if let Err(e) =
-                        workflow_store::save_workflow_run(&config, Some(store.as_ref()), &new_run)
-                    {
-                        tracing::warn!(
-                            target: "scheduler",
-                            workflow_id = %workflow_id,
-                            error = %e,
-                            "Failed to persist new workflow run for scheduled job"
-                        );
-                        continue;
-                    }
-                    new_run
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "scheduler",
-                        workflow_id = %workflow_id,
-                        error = %e,
-                        "Failed to load workflow run for scheduled job"
-                    );
-                    continue;
-                }
-            };
-
-        let queued = autonoetic_types::workflow::QueuedTaskRun {
-            task_id: task_id.clone(),
-            workflow_id: workflow_id.clone(),
-            agent_id: format!("{}@{}", claimed.target_agent_id, claimed.target_revision_id),
-            message: claimed.message.clone(),
-            child_session_id: format!("sched-child-{}", &claimed.job_id),
-            parent_session_id: claimed.root_session_id.clone(),
-            source_agent_id: claimed.owner_agent_id.clone(),
-            metadata: Some(serde_json::json!({
-                "scheduled_job_id": claimed.job_id,
-                "scheduled_next_run_at": next_run_at.clone(),
-            })),
-            join_group: None,
-            blocks_planner: false,
-            enqueued_at: now_rfc.clone(),
-            credential_bindings: vec![],
-        };
-
-        if let Err(e) = workflow_store::enqueue_task(&config, Some(store.as_ref()), &queued) {
+        // The claim already advanced next_run_at, so pass the computed
+        // occurrence through to avoid a redundant store write.
+        if let Err(e) = enqueue_scheduled_job_fire(
+            &config,
+            store.as_ref(),
+            &claimed,
+            now,
+            /* manual */ false,
+            /* next_run_at_override */ Some(&next_run_at),
+        ) {
             tracing::warn!(
                 target: "scheduler",
                 job_id = %claimed.job_id,
-                task_id = %task_id,
                 error = %e,
-                "Failed to enqueue scheduled job task; recording error for backoff"
+                "Failed to fire scheduled job; recording error for backoff"
             );
             let backoff_secs = 60;
             let retry_at =
@@ -3195,31 +3140,150 @@ async fn process_due_scheduled_jobs(
                 &claimed.job_id,
                 &retry_at,
                 None,
-                Some(&format!("Enqueue failed: {}", e)),
+                Some(&format!("Fire failed: {}", e)),
             );
-            continue;
         }
-
-        workflow_store::save_workflow_run(&config, Some(store.as_ref()), &run)?;
-
-        let trigger_event = autonoetic_types::workflow::WorkflowEventRecord {
-            event_id: format!("wevt-sched-{}", &task_id),
-            workflow_id: workflow_id.clone(),
-            event_type: "scheduled_job.triggered".to_string(),
-            task_id: Some(task_id.clone()),
-            agent_id: Some(claimed.target_agent_id.clone()),
-            payload: serde_json::json!({
-                "job_id": claimed.job_id,
-                "owner_agent_id": claimed.owner_agent_id,
-                "scheduled_for": next_run_at,
-            }),
-            occurred_at: now_rfc.clone(),
-        };
-        let _ =
-            workflow_store::append_workflow_event(&config, Some(store.as_ref()), &trigger_event);
     }
 
     Ok(())
+}
+
+/// Materialize a fire of a scheduled job: advance the schedule, create-or-reuse
+/// the `sched-{job_id}` WorkflowRun, enqueue a fresh task, and append a
+/// `scheduled_job.triggered` workflow event.
+///
+/// This is the single fire code path, used by both the cron tick
+/// (`process_due_scheduled_jobs`) and the operator `scheduled_jobs.trigger`
+/// JSON-RPC method. The agent session itself is spawned later by
+/// `process_queued_workflow_tasks` draining the queue.
+///
+/// `next_run_at_override` lets the cron caller pass the next occurrence it
+/// already computed during claim, avoiding a redundant advance. When `None`
+/// (the manual trigger path), the schedule is advanced to the next cron
+/// occurrence from `now` so a later cron tick won't double-fire.
+pub fn enqueue_scheduled_job_fire(
+    config: &autonoetic_types::config::GatewayConfig,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    job: &autonoetic_types::scheduled_job::ScheduledJob,
+    now: chrono::DateTime<chrono::Utc>,
+    manual: bool,
+    next_run_at_override: Option<&str>,
+) -> anyhow::Result<autonoetic_types::scheduled_job::ScheduledJobTriggerEvent> {
+    let now_rfc = now.to_rfc3339();
+
+    // Compute (or accept) the next cron occurrence and advance the schedule so
+    // the regular tick does not re-fire the same job.
+    let next_run_at: String = match next_run_at_override {
+        Some(s) => s.to_string(),
+        None => {
+            let cron = crate::scheduler::cron_parser::parse_schedule(&job.cron_expr)?;
+            let next = crate::scheduler::cron_parser::next_occurrence(&cron, now)
+                .ok_or_else(|| anyhow::anyhow!("No future occurrence for cron '{}'", job.cron_expr))?;
+            let s = next.to_rfc3339();
+            store.advance_next_run(&job.job_id, &s, Some(&now_rfc), None)?;
+            s
+        }
+    };
+
+    let workflow_id = format!("sched-{}", &job.job_id);
+    let task_id = format!(
+        "task-{}-{}",
+        &job.job_id,
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let mut run =
+        match workflow_store::load_workflow_run(config, Some(store), &workflow_id) {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                let new_run = autonoetic_types::workflow::WorkflowRun {
+                    workflow_id: workflow_id.clone(),
+                    root_session_id: job.root_session_id.clone(),
+                    lead_agent_id: job.owner_agent_id.clone(),
+                    status: autonoetic_types::workflow::WorkflowRunStatus::Active,
+                    created_at: now_rfc.clone(),
+                    updated_at: now_rfc.clone(),
+                    active_task_ids: Vec::new(),
+                    queued_task_ids: Vec::new(),
+                    join_policy: autonoetic_types::workflow::JoinPolicy::AllOf,
+                    join_task_ids: Vec::new(),
+                    active_plan_ref: None,
+                    reactivated_for_root_spawn: false,
+                };
+                workflow_store::save_workflow_run(config, Some(store), &new_run)?;
+                new_run
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to load workflow run for {}: {}",
+                    workflow_id,
+                    e
+                ));
+            }
+        };
+
+    let mut metadata = serde_json::json!({
+        "scheduled_job_id": job.job_id,
+        "scheduled_next_run_at": next_run_at.clone(),
+    });
+    if manual {
+        metadata["manual"] = serde_json::json!(true);
+    }
+
+    let queued = autonoetic_types::workflow::QueuedTaskRun {
+        task_id: task_id.clone(),
+        workflow_id: workflow_id.clone(),
+        agent_id: format!("{}@{}", job.target_agent_id, job.target_revision_id),
+        message: job.message.clone(),
+        child_session_id: format!("sched-child-{}", &job.job_id),
+        parent_session_id: job.root_session_id.clone(),
+        source_agent_id: job.owner_agent_id.clone(),
+        metadata: Some(metadata),
+        join_group: None,
+        blocks_planner: false,
+        enqueued_at: now_rfc.clone(),
+        credential_bindings: vec![],
+    };
+
+    if let Err(e) = workflow_store::enqueue_task(config, Some(store), &queued) {
+        return Err(anyhow::anyhow!("Failed to enqueue task: {}", e));
+    }
+
+    workflow_store::save_workflow_run(config, Some(store), &run)?;
+
+    let trigger_event = autonoetic_types::workflow::WorkflowEventRecord {
+        event_id: format!("wevt-sched-{}", &task_id),
+        workflow_id: workflow_id.clone(),
+        event_type: "scheduled_job.triggered".to_string(),
+        task_id: Some(task_id.clone()),
+        agent_id: Some(job.target_agent_id.clone()),
+        payload: serde_json::json!({
+            "job_id": job.job_id,
+            "owner_agent_id": job.owner_agent_id,
+            "scheduled_for": next_run_at,
+            "manual": manual,
+        }),
+        occurred_at: now_rfc.clone(),
+    };
+    let _ = workflow_store::append_workflow_event(config, Some(store), &trigger_event);
+
+    tracing::info!(
+        target: "scheduler",
+        job_id = %job.job_id,
+        workflow_id = %workflow_id,
+        task_id = %task_id,
+        manual,
+        "Scheduled job fired"
+    );
+
+    Ok(autonoetic_types::scheduled_job::ScheduledJobTriggerEvent {
+        event_id: format!("wevt-sched-{}", &task_id),
+        job_id: job.job_id.clone(),
+        workflow_id,
+        task_id,
+        triggered_at: now_rfc,
+        scheduled_for: next_run_at,
+    })
 }
 
 #[cfg(test)]
