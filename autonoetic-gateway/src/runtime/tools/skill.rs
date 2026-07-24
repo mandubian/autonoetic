@@ -658,6 +658,97 @@ fn extract_api_steps_from_markdown(body: &str) -> (Vec<serde_yaml::Value>, Vec<S
     (steps, fragments)
 }
 
+/// Split an absolute http(s) URL into `(origin, host, path)` where `origin` is
+/// `scheme://host[:port]` and `path` defaults to `/`. Used by the single-endpoint
+/// fallback (#856) to derive a `base_url` + operation path from a bare URL.
+fn split_endpoint_url(raw: &str) -> Option<(String, String, String)> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    // Only http(s): a synthesized skill must not emit a base_url with an
+    // unsupported scheme (ftp:, file:, …).
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?.to_string();
+    if host.is_empty() {
+        return None;
+    }
+    let origin = match parsed.port() {
+        Some(p) => format!("{}://{}:{}", parsed.scheme(), host, p),
+        None => format!("{}://{}", parsed.scheme(), host),
+    };
+    // Preserve the query string so required parameters survive in the
+    // synthesized GET step's path (a base URL may carry defaults like `?units=`).
+    let mut path = if parsed.path().is_empty() {
+        "/".to_string()
+    } else {
+        parsed.path().to_string()
+    };
+    if let Some(query) = parsed.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Some((origin, host, path))
+}
+
+/// Trim trailing markdown/prose punctuation a URL regex may over-capture.
+fn trim_url_tail(u: &str) -> &str {
+    u.trim_end_matches(|c| {
+        matches!(c, '.' | ',' | ';' | ':' | ')' | ']' | '>' | '"' | '\'' | '`')
+    })
+}
+
+/// When [`extract_api_steps_from_markdown`] finds no `METHOD path` operations, a
+/// document may still declare a single API by its base/endpoint URL. Find that
+/// URL so the caller can synthesize a one-operation (GET) skill instead of
+/// rejecting the whole document (#856). Priority:
+///   1. an http(s) URL under / next to a `Base URL` or `## Endpoint(s)` marker,
+///   2. else the first standalone http(s) URL in the body,
+///   3. else the caller-supplied `source_url`.
+fn fallback_single_endpoint(body: &str, source_url: Option<&str>) -> Option<String> {
+    let url_re = Regex::new(r#"https?://[^\s`<>()\[\]"']+"#).ok()?;
+    let lines: Vec<&str> = body.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let lower = line.to_ascii_lowercase();
+        let is_marker = lower.contains("base url")
+            || lower.contains("base-url")
+            || (lower.trim_start().starts_with('#') && lower.contains("endpoint"));
+        if !is_marker {
+            continue;
+        }
+        // URL on the marker line itself, else on the next non-empty line.
+        if let Some(m) = url_re.find(line) {
+            return Some(trim_url_tail(m.as_str()).to_string());
+        }
+        if let Some(next) = lines.iter().skip(i + 1).find(|l| !l.trim().is_empty()) {
+            if let Some(m) = url_re.find(next) {
+                return Some(trim_url_tail(m.as_str()).to_string());
+            }
+        }
+    }
+    if let Some(m) = url_re.find(body) {
+        return Some(trim_url_tail(m.as_str()).to_string());
+    }
+    source_url.map(|s| s.trim().to_string())
+}
+
+/// Build a single `GET` `api_call` step for a synthesized one-operation skill (#856).
+fn synthesize_get_step(path: &str) -> serde_yaml::Value {
+    let mut step: HashMap<String, serde_yaml::Value> = HashMap::new();
+    step.insert(
+        "type".to_string(),
+        serde_yaml::Value::String("api_call".to_string()),
+    );
+    step.insert(
+        "method".to_string(),
+        serde_yaml::Value::String("GET".to_string()),
+    );
+    step.insert(
+        "url".to_string(),
+        serde_yaml::Value::String(path.to_string()),
+    );
+    serde_yaml::to_value(&step).unwrap_or(serde_yaml::Value::Null)
+}
+
 fn autonoetic_onboarding_present(content: &str) -> bool {
     if !content.trim_start().starts_with("---") {
         return false;
@@ -954,14 +1045,57 @@ impl NativeTool for SkillNormalizeTool {
             .to_string());
         }
 
-        let (base_url, mut allowed_hosts) = extract_base_and_hosts(source_url.as_deref());
+        let (mut base_url, mut allowed_hosts) = extract_base_and_hosts(source_url.as_deref());
+
+        let (mut step_values, fragments) = extract_api_steps_from_markdown(&markdown);
+
+        // Tolerance (#856): a doc that only declares a base/endpoint URL (no
+        // `METHOD path` lines) is still a valid one-operation GET API. Synthesize
+        // a single step from that URL rather than rejecting the whole document —
+        // the rejection here sent the planner into an 11-minute divergent
+        // re-spawn in session-0718349d. The synthesized op's host is
+        // authoritative, so it overrides base_url/allowed_hosts (the API host,
+        // e.g. api.open-meteo.com, is usually different from the docs host in
+        // source_url).
+        let mut synthesized_single_endpoint = false;
+        if step_values.is_empty() {
+            if let Some((origin, host, path)) =
+                fallback_single_endpoint(&markdown, source_url.as_deref())
+                    .as_deref()
+                    .and_then(split_endpoint_url)
+            {
+                base_url = Some(origin);
+                allowed_hosts = vec![host];
+                step_values.push(synthesize_get_step(&path));
+                synthesized_single_endpoint = true;
+            }
+        }
+
         if allowed_hosts.is_empty() {
             allowed_hosts.push("localhost".to_string());
         }
 
-        let (step_values, fragments) = extract_api_steps_from_markdown(&markdown);
         if step_values.is_empty() {
-            return Ok(ToolError::validation("No HTTP API endpoints could be extracted from the markdown", Some("Ensure the markdown contains valid HTTP API endpoint documentation.")).with_code("no_api_endpoints_found").to_error_response());
+            let found = if fragments.is_empty() {
+                "no HTTP method + path lines and no base/endpoint URL".to_string()
+            } else {
+                fragments.join("; ")
+            };
+            return Ok(ToolError::validation(
+                format!(
+                    "No HTTP API endpoints could be extracted from the markdown. Expected a \
+                     `## Endpoints` section with one URL template per operation (e.g. \
+                     `GET https://host/path{{?param1,param2}}`) or `METHOD /path` lines, or at \
+                     least a `## Base URL` line naming the API's base URL. Found: {found}."
+                ),
+                Some(
+                    "Recovery: re-request the research with an explicit `## Endpoints` section \
+                     (one `GET https://host/path` per operation), or patch the markdown to add a \
+                     `## Base URL` line naming the API host, then retry skill_normalize.",
+                ),
+            )
+            .with_code("no_api_endpoints_found")
+            .to_error_response());
         }
 
         let steps_count = step_values.len();
@@ -1033,10 +1167,13 @@ impl NativeTool for SkillNormalizeTool {
             "steps_count": steps_count,
             "base_url": base_url,
             "fragments": fragments,
+            "synthesized_single_endpoint": synthesized_single_endpoint,
             "session_content": session_content,
             "discovery_record_registered": discovery_record_registered,
             "agent_creation_candidate": agent_candidate,
-            "message": if agent_candidate {
+            "message": if synthesized_single_endpoint {
+                "Wrote Autonoetic SKILL.md with a single GET operation synthesized from the document's base/endpoint URL (no explicit METHOD path operations were declared). Use resolve with session_content.normalized_name, or credential_setup with skill_url for onboarding. If the API has more operations or query parameters, re-run skill_normalize on markdown with an explicit `## Endpoints` section."
+            } else if agent_candidate {
                 "Wrote Autonoetic SKILL.md with multiple API operations. Use resolve with session_content.normalized_name, or credential_setup with skill_url for onboarding. Consider spawning coder.default to build a reusable script agent for this service."
             } else {
                 "Wrote Autonoetic SKILL.md; use resolve with session_content.normalized_name, or credential_setup with skill_url pointing at this path or a file:// URL as supported by your deployment."
@@ -1222,5 +1359,143 @@ fn apply_trust_mode(
                 other
             )).into());
         }
+    }
+}
+
+#[cfg(test)]
+mod skill_normalize_extractor_tests {
+    use super::*;
+
+    #[test]
+    fn extractor_still_parses_method_path_endpoints() {
+        let md = "## Endpoints\n\nGET `/v1/forecast`\nPOST `/v1/register`\n";
+        let (steps, _frags) = extract_api_steps_from_markdown(md);
+        assert_eq!(steps.len(), 2, "explicit METHOD path endpoints still extract");
+    }
+
+    #[test]
+    fn extractor_empty_for_prose_only_base_url() {
+        // The session-0718349d shape: a base URL in prose, no `METHOD path` lines.
+        let md = "## Base URL\nhttps://api.open-meteo.com/v1/forecast\n\nDescribes latitude, longitude params.";
+        let (steps, _frags) = extract_api_steps_from_markdown(md);
+        assert!(steps.is_empty(), "prose base URL yields no method+path steps");
+    }
+
+    #[test]
+    fn fallback_finds_url_under_base_url_heading() {
+        let md = "# Open-Meteo\n\n## Base URL\nhttps://api.open-meteo.com/v1/forecast\n\n## Parameters\nlatitude, longitude";
+        assert_eq!(
+            fallback_single_endpoint(md, Some("https://open-meteo.com/en/docs")).as_deref(),
+            Some("https://api.open-meteo.com/v1/forecast")
+        );
+    }
+
+    #[test]
+    fn fallback_finds_url_on_inline_base_url_line() {
+        let md = "Base URL: https://api.example.com/v2\nsome prose";
+        assert_eq!(
+            fallback_single_endpoint(md, None).as_deref(),
+            Some("https://api.example.com/v2")
+        );
+    }
+
+    #[test]
+    fn fallback_prefers_body_url_over_source_url() {
+        // The API host from the body must win over the docs host in source_url.
+        let md = "## Base URL\nhttps://api.open-meteo.com/v1/forecast";
+        let got = fallback_single_endpoint(md, Some("https://open-meteo.com/en/docs")).unwrap();
+        assert!(got.contains("api.open-meteo.com"), "got: {got}");
+    }
+
+    #[test]
+    fn fallback_uses_source_url_when_body_has_no_url() {
+        let md = "This API returns weather data. No URLs here.";
+        assert_eq!(
+            fallback_single_endpoint(md, Some("https://api.example.com/v1")).as_deref(),
+            Some("https://api.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn fallback_none_when_no_url_anywhere() {
+        assert!(fallback_single_endpoint("just prose, no links", None).is_none());
+    }
+
+    #[test]
+    fn fallback_trims_trailing_punctuation() {
+        // The regex includes a trailing '.', which trim_url_tail must strip.
+        let md = "Base URL: https://api.example.com/v1.";
+        assert_eq!(
+            fallback_single_endpoint(md, None).as_deref(),
+            Some("https://api.example.com/v1")
+        );
+    }
+
+    #[test]
+    fn split_endpoint_url_parts() {
+        let (origin, host, path) =
+            split_endpoint_url("https://api.open-meteo.com/v1/forecast").unwrap();
+        assert_eq!(origin, "https://api.open-meteo.com");
+        assert_eq!(host, "api.open-meteo.com");
+        assert_eq!(path, "/v1/forecast");
+    }
+
+    #[test]
+    fn split_endpoint_url_origin_only_path_is_root() {
+        let (origin, host, path) = split_endpoint_url("https://api.example.com").unwrap();
+        assert_eq!(origin, "https://api.example.com");
+        assert_eq!(host, "api.example.com");
+        assert_eq!(path, "/");
+    }
+
+    #[test]
+    fn split_endpoint_url_with_port() {
+        let (origin, _host, path) = split_endpoint_url("http://localhost:8080/api").unwrap();
+        assert_eq!(origin, "http://localhost:8080");
+        assert_eq!(path, "/api");
+    }
+
+    #[test]
+    fn split_endpoint_url_rejects_non_http_schemes() {
+        assert!(split_endpoint_url("ftp://files.example.com/x").is_none());
+        assert!(split_endpoint_url("file:///etc/passwd").is_none());
+        assert!(split_endpoint_url("mailto:a@b.com").is_none());
+    }
+
+    #[test]
+    fn split_endpoint_url_preserves_query_string() {
+        let (origin, _host, path) =
+            split_endpoint_url("https://api.example.com/v1/forecast?units=metric&hourly=temp")
+                .unwrap();
+        assert_eq!(origin, "https://api.example.com");
+        assert_eq!(path, "/v1/forecast?units=metric&hourly=temp");
+    }
+
+    #[test]
+    fn synthesize_get_step_shape() {
+        let step = synthesize_get_step("/v1/forecast");
+        assert_eq!(step.get("type").and_then(|v| v.as_str()), Some("api_call"));
+        assert_eq!(step.get("method").and_then(|v| v.as_str()), Some("GET"));
+        assert_eq!(step.get("url").and_then(|v| v.as_str()), Some("/v1/forecast"));
+    }
+
+    /// End-to-end of the fix logic on the exact failing shape: prose base URL →
+    /// no extracted steps → fallback finds the API URL → split → single GET op.
+    #[test]
+    fn openmeteo_shape_synthesizes_single_get_operation() {
+        let md = "# Open-Meteo Weather Forecast API\n\n## Base URL\nhttps://api.open-meteo.com/v1/forecast\n\n## Parameters\n- latitude (required)\n- longitude (required)\n";
+        let (steps, _frags) = extract_api_steps_from_markdown(md);
+        assert!(steps.is_empty());
+        let (origin, host, path) =
+            fallback_single_endpoint(md, Some("https://open-meteo.com/en/docs"))
+                .as_deref()
+                .and_then(split_endpoint_url)
+                .expect("fallback should find the API base URL");
+        assert_eq!(origin, "https://api.open-meteo.com");
+        assert_eq!(host, "api.open-meteo.com");
+        assert_eq!(path, "/v1/forecast");
+        let step = synthesize_get_step(&path);
+        assert_eq!(step.get("method").and_then(|v| v.as_str()), Some("GET"));
+        assert_eq!(step.get("url").and_then(|v| v.as_str()), Some("/v1/forecast"));
     }
 }
