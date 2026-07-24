@@ -92,6 +92,34 @@ print(json.dumps(response))
 """
 
 
+def render_inference_block(base_manifest: Dict[str, Any]) -> str:
+    """Inference settings for the wrapper, inherited from the base agent.
+
+    A wrapper is a transformation layer around a base specialist, so it must
+    reason with the *base's* model — never a model hardcoded here. An explicit
+    `llm_config` on the base is copied (with temperature pinned to 0.0, since
+    the wrapper only maps I/O); otherwise the base's `llm_preset` is reused so
+    the gateway resolves provider/model from its own config. With neither, fall
+    back to the `agentic` preset rather than naming a provider.
+    """
+    overrides = '    llm_overrides:\n      temperature: 0.0\n'
+
+    base_config = base_manifest.get("llm_config")
+    if isinstance(base_config, dict) and (
+        base_config.get("provider") or base_config.get("model")
+    ):
+        inherited = {k: v for k, v in base_config.items() if k != "temperature"}
+        inherited["temperature"] = 0.0
+        config_json = json.dumps(inherited, indent=2)
+        config_json = "\n".join("      " + line for line in config_json.splitlines())
+        return f"    llm_config:\n{config_json}\n"
+
+    preset = base_manifest.get("llm_preset")
+    if not isinstance(preset, str) or not preset.strip():
+        preset = "agentic"
+    return f'    llm_preset: "{preset}"\n{overrides}'
+
+
 def render_skill(
     wrapper_id: str,
     base_agent_id: str,
@@ -101,6 +129,7 @@ def render_skill(
     base_skill: str,
     base_capabilities: Any | None,
     schema_notes: List[str],
+    inference_block: str,
 ) -> str:
     middleware_lines = ""
     if with_pre or with_post:
@@ -142,11 +171,7 @@ metadata:
       base_agent_id: "{base_agent_id}"
       generated_at: "{generated_at}"
       schema_notes: {notes_block}
-    llm_config:
-      provider: "openai"
-      model: "gpt-4o"
-      temperature: 0.0
-    io:
+{inference_block}    io:
 {io_block}
 {middleware_lines}---
 # {wrapper_id}
@@ -204,6 +229,7 @@ def main() -> int:
         base_skill=base_skill,
         base_capabilities=base_capabilities,
         schema_notes=notes,
+        inference_block=render_inference_block(base_manifest),
     )
     files["runtime.lock"] = (
         "# Generated runtime.lock - sha256 is computed on first gateway load.\n"

@@ -117,7 +117,7 @@ Reference bundles are under `agents/`:
 - **Artifact Store**: Content-addressed (SHA-256) storage; agents pass handles, not inline blobs
 - **RuntimeLock**: Pinned execution closure for reproducible agent runs (`runtime.lock`)
 - **Cognitive Capsule**: Portable export of an agent bundle plus its runtime closure
-- **Skill Promotion**: Successful tactics can be crystallized into reusable Skills
+- **Lesson Graduation**: A lesson that recurs across sessions is graduated into an agent's SKILL.md instruction text through the curator → steward → `agent-factory` pipeline, landing as an audited revision behind the normal promotion gates. Minting a *new reusable skill* from a proven tactic is **not implemented** — `self_describe` reports that path as unavailable and #818 tracks it
 - **Turn Continuation**: Approval-gated workflow turns are suspended to disk (`.gateway/continuations/<task_id>.json`) and resumed with real tool results, avoiding synthetic retry prompts
 - **Session Approval Grants**: Once the operator approves network access to specific hosts, subsequent `sandbox.exec` calls within the same root session targeting those hosts are auto-approved (stored in `session_approval_grants` SQLite table, cleaned up on session end)
 - **Promotion Severity Gating**: `promotion.record` mechanically rejects `pass=true` when findings contain `error`/`critical` severity, or `warning` findings without concrete `evidence` — preventing evaluators from passing unvalidated code

@@ -22,8 +22,16 @@ input/output remapping middleware where needed.
    - optional `rationale`
 2. Read base `SKILL.md` and extract base manifest/schema metadata.
 3. Run `schema_diff.py` to detect compatibility and mapping needs.
-4. Run `generate_wrapper.py` to produce wrapper artifacts.
-5. Register wrapper via `artifact_build` → `agent_revision_create` → `agent_revision_promote`.
+4. Run `generate_wrapper.py` to produce wrapper artifacts. The wrapper inherits
+   the base agent's inference settings (its `llm_config`, else its
+   `llm_preset`, else the `agentic` preset) with `temperature: 0.0` — a wrapper
+   is a transformation layer, so it must reason with the base's model and never
+   pin one of its own.
+5. Build the wrapper bundle with `artifact_build`, then **delegate installation
+   to `specialized_builder.default`** — the adapter holds no `AgentRevision`
+   capability, so `agent_revision_create` / `agent_revision_promote` calls from
+   it are rejected by the policy engine. `specialized_builder.default` is the
+   only agent licensed to call those tools (the one-door invariant, P-9.15).
 6. Return wrapper id and mapping summary.
 
 ## Files in Adapter Bundle
