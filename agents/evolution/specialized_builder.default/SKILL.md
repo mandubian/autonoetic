@@ -325,7 +325,7 @@ For `execution_mode: "script"` on `agent_revision_create_from_intent`, you MUST 
   "artifact_ref": "ar.example",      // REQUIRED - reviewed artifact containing main.py
   "capabilities": [...],
   "io": {
-    "accepts": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}},  // REQUIRED - JSON schema of the stdin payload
+    "accepts": {"type": "object", "required": ["task"], "properties": {"task": {"type": "string"}}},  // REQUIRED - JSON schema of the stdin payload
     "returns": {"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}  // output contract — enforced on every run, including the smoke test
   },
   "credential_services": ["my-service"]  // OPTIONAL - service names for credential env injection at spawn time (derived from the service name in the planner's hand-off)
