@@ -399,7 +399,7 @@ When the agent persists state across independent invocations (cron, scheduler):
 2. **Include `tests/test_*.py` in the same artifact** before federation — mock `autonoetic_sdk.init()` with `unittest.mock`. The `unit_test_runner` only runs existing tests; it will not write them for you.
 3. Do not rely on file-based `state.json` unless stdlib-only is an explicit requirement — prefer SDK state/memory so smoke tests and cron share the same persistence path.
 
-When writing a script agent that accepts structured inputs, include an `io.accepts` schema note in `agent_instructions.md` so agent-factory can declare it in the install intent — callers will then format their message as JSON:
+When writing a script agent that accepts structured inputs, include an `io.accepts` schema note in `agent_instructions.md` so agent-factory can declare it in the install intent — callers will then format their message as JSON. **The gateway now rejects script-agent installs without `io.accepts`** — it is a hard requirement, and the smoke test enforces `io.returns` on the script's actual stdout, so every field marked `required` in `io.returns` must be emitted by the script on every exit path (success AND error):
 
 ```yaml
 io:
@@ -409,6 +409,12 @@ io:
     properties:
       record_id: {type: string}
       format: {type: string, enum: ["summary", "full"]}
+  returns:
+    type: object
+    required: [status]
+    properties:
+      status: {type: string, enum: ["success", "error"]}
+      error: {type: string}
 ```
 
 ### Workflow for Writing and Running Scripts

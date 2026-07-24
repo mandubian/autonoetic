@@ -3,7 +3,7 @@
 //! When enabled, gateway checks SpawnResult against the agent's output policy.
 //! Returns violations for each failed check.
 
-use autonoetic_types::agent::{IoReturnsEnforcement, OutputPolicy};
+use autonoetic_types::agent::{ExecutionMode, IoReturnsEnforcement, OutputPolicy};
 use autonoetic_types::causal_chain::{CausalEventRecord, EntryStatus};
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::trajectory::FeedbackEvent;
@@ -1267,6 +1267,7 @@ impl GatewayExecutionService {
         task_id: Option<&str>,
         agent_is_spawn_capable: bool,
         feedback_out: Option<&mut Vec<FeedbackEvent>>,
+        execution_mode: ExecutionMode,
     ) -> anyhow::Result<SpawnResult> {
         // #771 D.3: response validation is a leak region — the gateway may
         // normalize the agent's reply (markdown-fence stripping) and may
@@ -1295,6 +1296,7 @@ impl GatewayExecutionService {
                         task_id,
                         agent_is_spawn_capable,
                         feedback_out,
+                        execution_mode,
                     )
                     .await
                 })
@@ -1312,6 +1314,7 @@ impl GatewayExecutionService {
                     task_id,
                     agent_is_spawn_capable,
                     feedback_out,
+                    execution_mode,
                 )
                 .await
             }
@@ -1330,12 +1333,21 @@ impl GatewayExecutionService {
         task_id: Option<&str>,
         agent_is_spawn_capable: bool,
         mut feedback_out: Option<&mut Vec<FeedbackEvent>>,
+        execution_mode: ExecutionMode,
     ) -> anyhow::Result<SpawnResult> {
         let max_duration_ms = output_policy.validation_max_duration_ms;
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(max_duration_ms as u64);
-        let repair_enabled =
-            self.config().response_validation.repair_enabled && output_policy.repair.auto;
+        // Script agents never enter the LLM repair loop: a repair prompt is
+        // natural language, but a script re-executes deterministically and
+        // ignores it, so respawning can only reproduce the identical output
+        // (or fail on the missing checkpoint). Schema violations in script
+        // output are code bugs — fail fast so the caller (or the promotion
+        // smoke-test gate) sees the violation immediately instead of burning
+        // repair rounds.
+        let repair_enabled = self.config().response_validation.repair_enabled
+            && output_policy.repair.auto
+            && execution_mode != ExecutionMode::Script;
         let max_repair_rounds = output_policy.declared_repair_attempts().min(
             self.config()
                 .response_validation
@@ -1479,6 +1491,15 @@ impl GatewayExecutionService {
         }
 
         if !repair_enabled || max_repair_rounds == 0 {
+            if execution_mode == ExecutionMode::Script {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    session_id = %result.session_id,
+                    violation_count = violations.len(),
+                    "response.validation.script_fail_fast: script agent output violates io.returns; repair loop not applicable to deterministic scripts"
+                );
+            }
             // Persist validation feedback to the latest checkpoint so a later
             // retry/resume can detect ignored feedback even when repair is
             // disabled or exhausted.

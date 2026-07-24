@@ -1766,7 +1766,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                     },
                     "io": {
                         "type": "object",
-                        "description": "I/O contract. Declare accepts (input JSON schema), returns (output JSON schema), and optional output_policy (runtime output constraints). Example: {\"accepts\":{\"type\":\"object\",\"required\":[\"task\"],\"properties\":{\"task\":{\"type\":\"string\"}}},\"returns\":{\"type\":\"object\"},\"output_policy\":{\"max_reply_length_chars\":2000}}"
+                        "description": "I/O contract. Declare accepts (input JSON schema), returns (output JSON schema), and optional output_policy (runtime output constraints). REQUIRED for execution_mode: \"script\": io.accepts must describe the stdin payload (use {\"type\":\"string\"} only if the script genuinely consumes raw free text) — creation is rejected without it, because undeclared input contracts surface as runtime JSON-parse crashes that promotion gates cannot catch. Example: {\"accepts\":{\"type\":\"object\",\"required\":[\"task\"],\"properties\":{\"task\":{\"type\":\"string\"}}},\"returns\":{\"type\":\"object\"},\"output_policy\":{\"max_reply_length_chars\":2000}}"
                     },
                     "middleware": { "type": "object" },
                     "base_revision_id": { "type": "string" },
@@ -2178,6 +2178,37 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 None,
             )
         };
+
+        // Schema-native script agents: a script's stdin is parsed
+        // deterministically (typically `json.loads`), so the manifest MUST
+        // declare the input contract. Without `io.accepts` the roster advertises
+        // `message_format: "free_text"` and callers legitimately send raw prose
+        // that crashes the script at runtime — a failure promotion gates cannot
+        // see and response validation cannot repair. Requiring the schema at
+        // birth makes the contract explicit and machine-checkable: the gateway
+        // validates spawn input against it (fail-fast with a repair hint) and
+        // advertises `message_format: "json_schema"` to callers.
+        if resolved_mode == ExecutionMode::Script {
+            let declares_io_accepts = args
+                .io
+                .as_ref()
+                .and_then(|io| io.accepts.as_ref())
+                .is_some();
+            if !declares_io_accepts {
+                return Ok(ToolError::validation(
+                    format!(
+                        "Script agents must declare io.accepts — the JSON schema of the stdin payload. \
+                         Agent '{}' has execution_mode: \"script\" but no io.accepts schema. \
+                         Add e.g. \"io\": {{\"accepts\": {{\"type\": \"object\", \"required\": [\"task\"], \
+                         \"properties\": {{\"task\": {{\"type\": \"string\"}}}}}}, \"returns\": {{\"type\": \"object\"}}}} \
+                         for JSON-stdin scripts, or \"io\": {{\"accepts\": {{\"type\": \"string\"}}}} if the \
+                         script genuinely consumes raw free text.",
+                        args.agent_id
+                    ),
+                    None::<String>,
+                ).to_error_response());
+            }
+        }
 
         let artifact_layers: Vec<autonoetic_types::layer::ArtifactLayer> = bundle_opt
             .as_ref()
@@ -5916,7 +5947,10 @@ mod capability_lenient_deser_tests {
                     "instructions": "# Weather Agent",
                     "capabilities": [
                         {"type": "ReadAccess", "scopes": ["*"]}
-                    ]
+                    ],
+                    "io": {
+                        "accepts": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}}
+                    }
                 })
                 .to_string(),
                 Some(session_id),
@@ -6102,7 +6136,10 @@ mod capability_lenient_deser_tests {
                     "script_entry": "main.py",
                     "capabilities": [
                         {"type": "NetworkAccess", "hosts": ["api.open-meteo.com"]}
-                    ]
+                    ],
+                    "io": {
+                        "accepts": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}}
+                    }
                 })
                 .to_string(),
                 Some(session_id),
@@ -6117,6 +6154,129 @@ mod capability_lenient_deser_tests {
         assert_eq!(
             response_json.get("ok").and_then(|value| value.as_bool()),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn create_from_intent_rejects_script_agent_without_io_accepts() {
+        use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let gateway_dir = dir.path().join(".gateway");
+        let session_id = "sess-no-io-accepts";
+
+        let code = b"#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps({\"status\": \"ok\", \"echo\": json.loads(sys.stdin.read())}))\n";
+        let content_store = crate::runtime::content_store::ContentStore::new(&gateway_dir).unwrap();
+        let handle = content_store.write(code).unwrap();
+        content_store
+            .register_name(session_id, "main.py", &handle)
+            .unwrap();
+
+        let artifact_store = crate::artifact_store::ArtifactStore::new(&gateway_dir).unwrap();
+        let inputs = vec!["main.py".to_string()];
+        let entrypoints = vec!["main.py".to_string()];
+        let bundle = artifact_store
+            .build(&inputs, Some(&entrypoints), None, session_id)
+            .unwrap();
+
+        let gateway_store =
+            Arc::new(crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap());
+        let artifact_ref = "ar.noaccepts01".to_string();
+        gateway_store
+            .create_artifact_ref(&ArtifactRefRecord {
+                ref_id: artifact_ref.clone(),
+                scope_type: ArtifactRefScopeType::Session,
+                scope_id: session_id.to_string(),
+                artifact_id: bundle.artifact_id.clone(),
+                artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+                artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+                created_by_agent_id: "specialized-builder.test".to_string(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: None,
+                revoked_at: None,
+            })
+            .unwrap();
+
+        let manifest = test_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = AgentRevisionCreateFromIntentTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "echo-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Echo structured input",
+                    "instructions": "# Echo Agent",
+                    "execution_mode": "script",
+                    "script_entry": "main.py",
+                    "capabilities": [
+                        {"type": "ReadAccess", "scopes": ["*"]}
+                    ]
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+
+        let response_json: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response_json.get("ok").and_then(|value| value.as_bool()),
+            Some(false),
+            "script agent without io.accepts must be rejected: {response_json}"
+        );
+        let message = response_json
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        assert!(
+            message.contains("io.accepts"),
+            "message should name the missing contract: {message}"
+        );
+
+        // With io.accepts declared, the same intent succeeds.
+        let response_ok = tool
+            .execute(
+                &manifest,
+                &policy,
+                dir.path(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "agent_id": "echo-fetcher",
+                    "artifact_ref": artifact_ref,
+                    "description": "Echo structured input",
+                    "instructions": "# Echo Agent",
+                    "execution_mode": "script",
+                    "script_entry": "main.py",
+                    "capabilities": [
+                        {"type": "ReadAccess", "scopes": ["*"]}
+                    ],
+                    "io": {
+                        "accepts": {"type": "object", "required": ["task"], "properties": {"task": {"type": "string"}}},
+                        "returns": {"type": "object", "required": ["status"], "properties": {"status": {"type": "string"}}}
+                    }
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gateway_store.clone()),
+                None,
+            )
+            .unwrap();
+        let ok_json: serde_json::Value = serde_json::from_str(&response_ok).unwrap();
+        assert_eq!(
+            ok_json.get("ok").and_then(|value| value.as_bool()),
+            Some(true),
+            "script agent with io.accepts must be accepted: {ok_json}"
         );
     }
 

@@ -183,7 +183,10 @@ fn host_contract_persists_detected_hosts_on_success() {
                 "script_entry": "weather.py",
                 "capabilities": [
                     {"type": "NetworkAccess", "hosts": ["api.open-meteo.com", "geocoding-api.open-meteo.com"]}
-                ]
+                ],
+                "io": {
+                    "accepts": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}}
+                }
             })
             .to_string(),
             Some(session_id),
