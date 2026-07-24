@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 const MAX_MESSAGE_CHARS: usize = 280;
@@ -191,10 +190,9 @@ fn filename_token(session_id: &str) -> String {
     } else {
         truncate_chars(&sanitized, 48)
     };
-    let mut hasher = Sha256::new();
-    hasher.update(session_id.as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    format!("{}-{}", prefix, &digest[..12])
+    // `<prefix>-<sha256(session_id)[..12]>` — same format as before, now via the
+    // shared minter (autonoetic_types::id_format).
+    autonoetic_types::id_format::mint_hashed_prefixed_id(&format!("{prefix}-"), session_id)
 }
 
 fn normalize_optional(value: &str, max_chars: usize) -> Option<String> {

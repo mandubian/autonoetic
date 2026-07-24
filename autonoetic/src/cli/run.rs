@@ -624,7 +624,7 @@ pub async fn handle_run(
     };
 
     let session_id = args.session_id.clone().unwrap_or_else(|| {
-        format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8])
+        autonoetic_types::id_format::short_random_id("session-")
     });
 
     let chat_args = super::common::ChatArgs {

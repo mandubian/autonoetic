@@ -138,10 +138,7 @@ impl NativeTool for AnomalyFlagTool {
             .to_error_response());
         };
 
-        let flag_id = format!(
-            "aflag-{}",
-            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
-        );
+        let flag_id = autonoetic_types::id_format::short_random_id_hex("aflag-", 12);
         let now = chrono::Utc::now().to_rfc3339();
         let flag = AnomalyFlag {
             flag_id: flag_id.clone(),
@@ -200,7 +197,7 @@ impl NativeTool for AnomalyFlagTool {
         }
 
         let notification = NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             NotificationType::AnomalyFlag,
             "system".to_string(),
             json!({

@@ -2342,7 +2342,7 @@ impl AgentExecutor {
                                     config,
                                     Some(store),
                                     &autonoetic_types::workflow::WorkflowEventRecord {
-                                        event_id: format!("ctxp-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                                        event_id: autonoetic_types::id_format::short_random_id("ctxp-"),
                                         workflow_id: wf_id.to_string(),
                                         task_id: self.task_id.clone(),
                                         event_type: "context.pressure_high".to_string(),
@@ -4377,7 +4377,7 @@ impl AgentExecutor {
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let msg_id = autonoetic_types::id_format::short_random_id("msg-");
         let message = format!(
             "[Sentinel Notice]\n\
              Level: {}\n\

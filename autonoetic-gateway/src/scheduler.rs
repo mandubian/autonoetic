@@ -492,7 +492,7 @@ async fn check_adjudication_sla_breaches(
         }
 
         let notification = autonoetic_types::notification::NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             autonoetic_types::notification::NotificationType::ConstitutionalProposal,
             // Gateway-detected breach, not tied to a session — mirror the
             // filing-notification pattern ("system"); the owed party lives in
@@ -563,7 +563,7 @@ async fn check_adjudication_sla_breaches(
         }
 
         let notification = autonoetic_types::notification::NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             autonoetic_types::notification::NotificationType::AnomalyFlag,
             // Gateway-detected breach, not tied to a session — see the
             // proposal branch above; owed party is carried in `owed_to`.
@@ -703,7 +703,7 @@ async fn check_amendment_invitation_thresholds(
         }
 
         let notification = autonoetic_types::notification::NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             autonoetic_types::notification::NotificationType::ConstitutionalProposal,
             // Gateway-issued, not tied to a session — mirror the SLA-breach
             // pattern ("system"); the invited party lives in the payload.
@@ -1718,7 +1718,7 @@ pub async fn process_queued_workflow_tasks(
                     &config,
                     store,
                     &autonoetic_types::workflow::WorkflowEventRecord {
-                        event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                        event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                         workflow_id: queued_task.workflow_id.clone(),
                         task_id: Some(queued_task.task_id.clone()),
                         event_type: "task.started".to_string(),
@@ -1775,7 +1775,7 @@ pub async fn process_queued_workflow_tasks(
                 &config,
                 store,
                 &autonoetic_types::workflow::WorkflowEventRecord {
-                    event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                     workflow_id: queued_task.workflow_id.clone(),
                     task_id: Some(queued_task.task_id.clone()),
                     event_type: "task.started".to_string(),
@@ -1942,7 +1942,7 @@ async fn spawn_task_execution(
     let execution_id = format!(
         "exec-wf-{}-{}",
         t_id,
-        &uuid::Uuid::new_v4().to_string()[..8]
+        autonoetic_types::id_format::short_random_id("")
     );
     let workflow_run = match workflow_store::load_workflow_run(&cfg, store, &wf_id) {
         Ok(Some(r)) => r,
@@ -3189,7 +3189,7 @@ pub fn enqueue_scheduled_job_fire(
     let task_id = format!(
         "task-{}-{}",
         &job.job_id,
-        &uuid::Uuid::new_v4().to_string()[..8]
+        autonoetic_types::id_format::short_random_id("")
     );
 
     // Ensure the WorkflowRun exists — `enqueue_task` errors if it does not, and

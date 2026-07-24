@@ -427,13 +427,15 @@ fn stage_memory_snapshot(
 /// provenance chains (see `docs/cognitive-capsule.md`).
 /// Timestamp salting is intentionally avoided.
 fn compute_capsule_id(revision_id: &str, mode: CapsuleMode) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(revision_id.as_bytes());
-    hasher.update(b"\x00");
-    hasher.update(mode_str(mode).as_bytes());
-    let hex = format!("{:x}", hasher.finalize());
-    format!("cap_sha256:{}", &hex[..16])
+    // `cap_sha256:<sha256(revision_id \0 mode)[..16]>` — deterministic, no salt.
+    // Hashing the NUL-joined concatenation matches the previous streamed updates.
+    format!(
+        "cap_sha256:{}",
+        autonoetic_types::id_format::hash_and_truncate(
+            &format!("{revision_id}\0{}", mode_str(mode)),
+            16
+        )
+    )
 }
 
 fn mode_str(mode: CapsuleMode) -> &'static str {

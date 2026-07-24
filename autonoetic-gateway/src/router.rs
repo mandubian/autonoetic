@@ -3952,10 +3952,7 @@ impl JsonRpcRouter {
                     params.handle.clone().unwrap_or_else(|| current_handle.clone());
                 let drifted = anchor_handle != current_handle;
 
-                let comment_id = format!(
-                    "cmt_{}",
-                    &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
-                );
+                let comment_id = autonoetic_types::id_format::short_random_id_hex("cmt_", 12);
                 let redacted_body =
                     crate::log_redaction::redact_text_for_logs(&params.body);
 

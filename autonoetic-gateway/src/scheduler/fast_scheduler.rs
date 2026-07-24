@@ -269,7 +269,7 @@ pub async fn run_fast_scheduler_tick_at(
         let task_id = format!(
             "task-{}-{}",
             &claimed.job_id,
-            &uuid::Uuid::new_v4().to_string()[..8]
+            autonoetic_types::id_format::short_random_id("")
         );
 
         let _run =

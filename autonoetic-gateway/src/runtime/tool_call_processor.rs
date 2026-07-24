@@ -1084,7 +1084,7 @@ mod tests {
         let tool_calls = vec![ToolCall {
             id: "tc1".to_string(),
             name: "knowledge_store".to_string(),
-            arguments: r#"{"id":"","content":"hello"}"#.to_string(),
+            arguments: r#"{"id":"k1","content":""}"#.to_string(),
         }];
 
         let (_, result) = processor
@@ -1192,7 +1192,7 @@ mod tests {
             ToolCall {
                 id: "tc1".to_string(),
                 name: "knowledge_store".to_string(),
-                arguments: r#"{"id":"","content":"hello"}"#.to_string(),
+                arguments: r#"{"id":"k1","content":""}"#.to_string(),
             },
             ToolCall {
                 id: "tc2".to_string(),
@@ -1508,11 +1508,11 @@ mod tests {
             Some("turn-000001".to_string()),
         );
 
-        // First turn: malformed tool call - empty id triggers validation error
+        // First turn: malformed tool call - empty content triggers validation error
         let tool_calls_turn1 = vec![ToolCall {
             id: "tc1".to_string(),
             name: "knowledge_store".to_string(),
-            arguments: r#"{"id":"","content":"hello"}"#.to_string(),
+            arguments: r#"{"id":"k1","content":""}"#.to_string(),
         }];
 
         let (had_success_turn1, result_turn1) = processor
@@ -1531,7 +1531,7 @@ mod tests {
             !had_success_turn1,
             "failed tool call must not count as success"
         );
-        // Parse the error response - could be resource (unknown tool) or validation (empty id)
+        // Parse the error response - could be resource (unknown tool) or validation (empty content)
         let parsed_error: serde_json::Value = serde_json::from_str(&result_turn1[0].2).unwrap();
         assert_eq!(parsed_error.get("ok").unwrap(), false);
         let error_type = parsed_error.get("error_type").unwrap().as_str().unwrap();

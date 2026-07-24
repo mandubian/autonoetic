@@ -103,7 +103,7 @@ impl GatewayStore {
             }
         }
         let notification = autonoetic_types::notification::NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             autonoetic_types::notification::NotificationType::AnomalyFlag,
             "system".to_string(),
             serde_json::json!({

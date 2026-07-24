@@ -282,7 +282,7 @@ pub fn send_workflow_join_satisfied(
     if workflow_id.starts_with("sched-") {
         return Ok(());
     }
-    let signal_id = format!("wf-join-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let signal_id = autonoetic_types::id_format::short_random_id("wf-join-");
     let summary_count = child_summaries.len();
     let signal = Signal::WorkflowJoinSatisfied {
         workflow_id: workflow_id.to_string(),
@@ -312,7 +312,7 @@ pub fn send_child_state_notification(
     target_session_id: &str,
     notification: ChildStateNotification,
 ) -> anyhow::Result<()> {
-    let signal_id = format!("wf-child-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let signal_id = autonoetic_types::id_format::short_random_id("wf-child-");
     let signal = Signal::ChildStateNotification {
         message: format!(
             "Workflow child '{}' changed state to '{}'.",

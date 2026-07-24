@@ -569,7 +569,7 @@ the single join already does that."
                         gw_config,
                         gateway_store.as_deref(),
                         &WorkflowEventRecord {
-                            event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                            event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                             workflow_id: workflow_id.clone(),
                             task_id: existing.existing_task_id.clone(),
                             event_type: "workflow.single_flight.coalesced".to_string(),
@@ -637,7 +637,7 @@ the single join already does that."
                 gw_config,
                 gateway_store.as_deref(),
                 &WorkflowEventRecord {
-                    event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                     workflow_id: workflow_id.clone(),
                     task_id: Some(existing_task_id.clone()),
                     event_type: "workflow.singleton.deduplicated".to_string(),
@@ -697,7 +697,7 @@ the single join already does that."
             "{}/{}-{}",
             resolved_session_id,
             args.agent_id,
-            &uuid::Uuid::new_v4().to_string()[..8]
+            autonoetic_types::id_format::short_random_id("")
         );
 
         let spawned_at_turn = turn_id.and_then(crate::runtime::checkpoint::turn_number_from_id);
@@ -763,7 +763,7 @@ the single join already does that."
                 gw_config,
                 gateway_store.as_deref(),
                 &WorkflowEventRecord {
-                    event_id: format!("wevt-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+                    event_id: autonoetic_types::id_format::short_random_id("wevt-"),
                     workflow_id: workflow_id.clone(),
                     task_id: Some(task_id.clone()),
                     event_type: "task.spawned".to_string(),
@@ -1562,7 +1562,7 @@ important signals (progress reports, divergence findings, status updates from sp
             format!("agent:{}", args.target_agent_id.as_ref().unwrap())
         };
 
-        let msg_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let msg_id = autonoetic_types::id_format::short_random_id("msg-");
 
         let record = crate::scheduler::gateway_store::AgentMessageRecord {
             message_id: msg_id.clone(),

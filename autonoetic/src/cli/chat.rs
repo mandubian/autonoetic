@@ -1259,7 +1259,7 @@ fn format_session_status(app: &App) -> String {
 }
 
 fn generate_session_id() -> String {
-    format!("session-{}", &uuid::Uuid::new_v4().to_string()[..8])
+    autonoetic_types::id_format::short_random_id("session-")
 }
 
 fn open_gateway_store(

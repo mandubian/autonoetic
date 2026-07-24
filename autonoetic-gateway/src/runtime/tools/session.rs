@@ -156,7 +156,7 @@ impl NativeTool for SessionEscalateTool {
                 let root_session_id =
                     crate::runtime::content_store::root_session_id(sid).to_string();
                 let request_id =
-                    format!("esc-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+                    autonoetic_types::id_format::short_random_id("esc-");
                 let action = autonoetic_types::background::ScheduledAction::SessionEscalate {
                     session_id: sid.to_string(),
                     root_session_id: root_session_id.clone(),

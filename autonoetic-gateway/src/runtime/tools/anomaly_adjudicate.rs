@@ -307,7 +307,7 @@ impl NativeTool for AnomalyAdjudicateTool {
         // Notify the reporter that their flag reached a decision (Ri-0.5
         // spirit — voice that is used must not vanish silently).
         let notification = NotificationRecord::new(
-            format!("ntf-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            autonoetic_types::id_format::short_random_id("ntf-"),
             NotificationType::AnomalyFlag,
             "system".to_string(),
             json!({

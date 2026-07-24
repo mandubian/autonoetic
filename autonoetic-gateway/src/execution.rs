@@ -849,7 +849,7 @@ impl GatewayExecutionService {
         trigger: &str,
         reason: &str,
     ) -> anyhow::Result<String> {
-        let message_id = format!("msg-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let message_id = autonoetic_types::id_format::short_random_id("msg-");
         let now = chrono::Utc::now().to_rfc3339();
         let message = format!(
             "[Gateway Notice Ri-0.9]\n\
@@ -1360,7 +1360,7 @@ impl GatewayExecutionService {
             }
         }
 
-        let stop_id = format!("estop-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let stop_id = autonoetic_types::id_format::short_random_id("estop-");
         let requested_at = chrono::Utc::now().to_rfc3339();
 
         let workflow_id = crate::scheduler::workflow_store::resolve_workflow_id_for_root_session(

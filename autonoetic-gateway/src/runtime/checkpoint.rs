@@ -964,7 +964,7 @@ impl SessionFork {
 
         let new_session_id = new_session_id
             .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("fork-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+            .unwrap_or_else(|| autonoetic_types::id_format::short_random_id("fork-"));
 
         // Build history from checkpoint
         let mut history = checkpoint.history.clone();

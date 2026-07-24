@@ -654,10 +654,7 @@ impl HookExecutor {
         let message = render_template(template, &ctx);
 
         // Build a unique, traceable session ID.
-        let session_id = format!(
-            "hook-spawn-{}",
-            &uuid::Uuid::new_v4().to_string().replace('-', "")[..12]
-        );
+        let session_id = autonoetic_types::id_format::short_random_id_hex("hook-spawn-", 12);
 
         let Some(ref tx) = self.spawn_tx else {
             tracing::warn!(
