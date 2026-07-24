@@ -1048,6 +1048,218 @@ impl JsonRpcRouter {
                     }
                 }
             }
+            "skill.crystallize_from_session" => {
+                // Operator-triggered skill crystallization on a specific session
+                // (`/crystallize` in the session room, #818). Same shape as
+                // curation.run_for_session below: resolve the agent, take its
+                // singleton slot, enqueue into the session's own workflow so the
+                // verdict lands in the timeline the operator is watching. All
+                // constitution/approval gates stay in effect — the crystallizer
+                // only proposes and delegates, and every route it takes ends at
+                // a Candidate revision behind the standard promotion gates.
+                let params: CrystallizeRunParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for skill.crystallize_from_session: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let config = self.execution.config();
+
+                let crystallizer_ref = match crate::runtime::tools::resolve_target_to_agent_ref(
+                    "skill-crystallizer.default",
+                    store.as_ref(),
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!(
+                                "Could not resolve skill-crystallizer.default (is the agent \
+                                 bundle installed?): {e}"
+                            ),
+                        );
+                    }
+                };
+
+                let workflow = match crate::scheduler::ensure_workflow_for_root_session(
+                    &config,
+                    Some(store.as_ref()),
+                    &params.root_session_id,
+                    Some("skill-crystallizer.default"),
+                ) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("Failed to resolve workflow for session: {e}"),
+                        );
+                    }
+                };
+                let workflow_id = workflow.workflow_id.clone();
+                let task_id = format!(
+                    "crystallize-{}-{}",
+                    &params.root_session_id,
+                    &uuid::Uuid::new_v4().to_string()[..8]
+                );
+                let child_session_id = format!("crystallize-child-{}", &params.root_session_id);
+                let now_rfc = chrono::Utc::now().to_rfc3339();
+
+                // The crystallizer is singleton=true. Take the slot before
+                // enqueueing, exactly as agent.spawn does, so a repeated
+                // /crystallize inside one tick window does not double-run it.
+                let is_singleton = crate::runtime::tools::agent::target_agent_is_singleton(
+                    &config.agents_dir,
+                    &crystallizer_ref.agent_id,
+                );
+                let mut acquired_singleton_slot = false;
+                if is_singleton {
+                    match store.acquire_singleton_slot(
+                        &workflow_id,
+                        &crystallizer_ref.agent_id,
+                        Some(&crystallizer_ref.revision_id),
+                        &task_id,
+                    ) {
+                        Ok(Some(existing_task_id)) => {
+                            return JsonRpcResponse::success(
+                                req.id,
+                                serde_json::json!({
+                                    "task_id": existing_task_id,
+                                    "workflow_id": workflow_id,
+                                    "session_id": params.root_session_id,
+                                    "status": "deduplicated",
+                                }),
+                            );
+                        }
+                        Ok(None) => acquired_singleton_slot = true,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "crystallization",
+                                workflow_id = %workflow_id,
+                                agent_id = %crystallizer_ref.agent_id,
+                                error = %e,
+                                "Failed to acquire singleton slot for crystallizer; enqueueing anyway"
+                            );
+                        }
+                    }
+                }
+
+                // Matches the crystallizer's "Input (from spawn message)"
+                // section. focus_notes is null rather than absent when the
+                // operator gave none, so the agent reads the field uniformly.
+                let focus_notes = params.focus_notes.clone();
+                let message = serde_json::json!({
+                    "session_ids": [&params.root_session_id],
+                    "focus_notes": focus_notes,
+                })
+                .to_string();
+
+                let queued = autonoetic_types::workflow::QueuedTaskRun {
+                    task_id: task_id.clone(),
+                    workflow_id: workflow_id.clone(),
+                    agent_id: format!(
+                        "{}@{}",
+                        crystallizer_ref.agent_id, crystallizer_ref.revision_id
+                    ),
+                    message,
+                    child_session_id,
+                    parent_session_id: params.root_session_id.clone(),
+                    source_agent_id: "operator".to_string(),
+                    metadata: Some(serde_json::json!({
+                        "manual_crystallization": true,
+                        "root_session_id": &params.root_session_id,
+                    })),
+                    join_group: None,
+                    blocks_planner: false,
+                    enqueued_at: now_rfc.clone(),
+                    credential_bindings: vec![],
+                };
+                if let Err(e) =
+                    crate::scheduler::enqueue_task(&config, Some(store.as_ref()), &queued)
+                {
+                    // Release the slot we took, or the next /crystallize would
+                    // dedup to a task that was never queued — wedging the
+                    // command until the workflow is cleaned up. Reachable
+                    // today: enqueue refuses on an emergency-stopped workflow.
+                    if acquired_singleton_slot {
+                        if let Err(rel) =
+                            store.release_singleton_slot_by_task_id(&workflow_id, &task_id)
+                        {
+                            tracing::warn!(
+                                target: "crystallization",
+                                workflow_id = %workflow_id,
+                                task_id = %task_id,
+                                error = %rel,
+                                "Failed to release singleton slot after enqueue failure"
+                            );
+                        }
+                    }
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("Failed to enqueue crystallization task: {e}"),
+                    );
+                }
+
+                if let Err(e) = crate::scheduler::append_workflow_event(
+                    &config,
+                    Some(store.as_ref()),
+                    &autonoetic_types::workflow::WorkflowEventRecord {
+                        event_id: format!("wevt-{}", &task_id),
+                        workflow_id: workflow_id.clone(),
+                        event_type: "crystallization.triggered".to_string(),
+                        task_id: Some(task_id.clone()),
+                        agent_id: Some(crystallizer_ref.agent_id.clone()),
+                        payload: serde_json::json!({
+                            "session_id": &params.root_session_id,
+                            "focus_notes": focus_notes,
+                            "manual": true,
+                        }),
+                        occurred_at: now_rfc,
+                    },
+                ) {
+                    tracing::warn!(
+                        target: "crystallization",
+                        workflow_id = %workflow_id,
+                        task_id = %task_id,
+                        error = %e,
+                        "Failed to append crystallization.triggered event"
+                    );
+                }
+
+                tracing::info!(
+                    target: "crystallization",
+                    root_session_id = %params.root_session_id,
+                    workflow_id = %workflow_id,
+                    task_id = %task_id,
+                    has_focus_notes = focus_notes.is_some(),
+                    "Manual crystallization triggered"
+                );
+
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "task_id": task_id,
+                        "workflow_id": workflow_id,
+                        "session_id": params.root_session_id,
+                    }),
+                )
+            }
             "curation.run_for_session" => {
                 // Operator-triggered memory curation on a specific session,
                 // with optional focus notes that steer the curator. Fires the
@@ -1130,6 +1342,7 @@ impl JsonRpcRouter {
                     &config.agents_dir,
                     &curator_ref.agent_id,
                 );
+                let mut acquired_singleton_slot = false;
                 if is_singleton {
                     match store.acquire_singleton_slot(
                         &workflow_id,
@@ -1150,7 +1363,7 @@ impl JsonRpcRouter {
                                 }),
                             );
                         }
-                        Ok(None) => { /* slot acquired — proceed with enqueue */ }
+                        Ok(None) => acquired_singleton_slot = true,
                         Err(e) => {
                             tracing::warn!(
                                 target: "curation",
@@ -1199,6 +1412,22 @@ impl JsonRpcRouter {
                     Some(store.as_ref()),
                     &queued,
                 ) {
+                    // Same wedge as the crystallization handler above: a slot
+                    // held for a task that was never queued would make every
+                    // later /curate dedup to a phantom run.
+                    if acquired_singleton_slot {
+                        if let Err(rel) =
+                            store.release_singleton_slot_by_task_id(&workflow_id, &task_id)
+                        {
+                            tracing::warn!(
+                                target: "curation",
+                                workflow_id = %workflow_id,
+                                task_id = %task_id,
+                                error = %rel,
+                                "Failed to release singleton slot after enqueue failure"
+                            );
+                        }
+                    }
                     return JsonRpcResponse::error(
                         req.id,
                         -32000,
@@ -5006,6 +5235,13 @@ struct AgentSpawnParams {
 
 #[derive(Debug, Deserialize)]
 struct CurationRunParams {
+    root_session_id: String,
+    #[serde(default)]
+    focus_notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrystallizeRunParams {
     root_session_id: String,
     #[serde(default)]
     focus_notes: Option<String>,
