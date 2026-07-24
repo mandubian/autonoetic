@@ -663,6 +663,11 @@ fn extract_api_steps_from_markdown(body: &str) -> (Vec<serde_yaml::Value>, Vec<S
 /// fallback (#856) to derive a `base_url` + operation path from a bare URL.
 fn split_endpoint_url(raw: &str) -> Option<(String, String, String)> {
     let parsed = url::Url::parse(raw.trim()).ok()?;
+    // Only http(s): a synthesized skill must not emit a base_url with an
+    // unsupported scheme (ftp:, file:, …).
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
     let host = parsed.host_str()?.to_string();
     if host.is_empty() {
         return None;
@@ -671,11 +676,17 @@ fn split_endpoint_url(raw: &str) -> Option<(String, String, String)> {
         Some(p) => format!("{}://{}:{}", parsed.scheme(), host, p),
         None => format!("{}://{}", parsed.scheme(), host),
     };
-    let path = if parsed.path().is_empty() {
+    // Preserve the query string so required parameters survive in the
+    // synthesized GET step's path (a base URL may carry defaults like `?units=`).
+    let mut path = if parsed.path().is_empty() {
         "/".to_string()
     } else {
         parsed.path().to_string()
     };
+    if let Some(query) = parsed.query() {
+        path.push('?');
+        path.push_str(query);
+    }
     Some((origin, host, path))
 }
 
@@ -1442,6 +1453,22 @@ mod skill_normalize_extractor_tests {
         let (origin, _host, path) = split_endpoint_url("http://localhost:8080/api").unwrap();
         assert_eq!(origin, "http://localhost:8080");
         assert_eq!(path, "/api");
+    }
+
+    #[test]
+    fn split_endpoint_url_rejects_non_http_schemes() {
+        assert!(split_endpoint_url("ftp://files.example.com/x").is_none());
+        assert!(split_endpoint_url("file:///etc/passwd").is_none());
+        assert!(split_endpoint_url("mailto:a@b.com").is_none());
+    }
+
+    #[test]
+    fn split_endpoint_url_preserves_query_string() {
+        let (origin, _host, path) =
+            split_endpoint_url("https://api.example.com/v1/forecast?units=metric&hourly=temp")
+                .unwrap();
+        assert_eq!(origin, "https://api.example.com");
+        assert_eq!(path, "/v1/forecast?units=metric&hourly=temp");
     }
 
     #[test]
