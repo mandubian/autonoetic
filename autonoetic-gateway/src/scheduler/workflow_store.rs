@@ -2911,13 +2911,13 @@ pub fn enqueue_task(
 ) -> anyhow::Result<()> {
     let mut owned_store = None;
     let store = open_store_for(config, store, &mut owned_store)?;
-    store.enqueue_queued_task(queued)?;
-    // Remove legacy file if present.
-    let path = queued_task_path(config, &queued.workflow_id, &queued.task_id);
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-    }
 
+    // Decide whether the workflow accepts work BEFORE committing the queue row
+    // (#883). The drain path reads the queued-tasks table, not the run record's
+    // `queued_task_ids`, so a row written ahead of a refusal is executable: work
+    // the gateway explicitly refused during an emergency stop would run as soon
+    // as the stop lifted, and the caller — told the enqueue failed — would have
+    // no reason to look for it.
     let mut run = load_workflow_run(config, Some(store), &queued.workflow_id)?
         .ok_or_else(|| anyhow::anyhow!("workflow '{}' not found", queued.workflow_id))?;
     anyhow::ensure!(
@@ -2926,6 +2926,14 @@ pub fn enqueue_task(
         "workflow '{}' is in emergency stop; refusing new queued work",
         queued.workflow_id
     );
+
+    store.enqueue_queued_task(queued)?;
+    // Remove legacy file if present.
+    let path = queued_task_path(config, &queued.workflow_id, &queued.task_id);
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+
     if !run.queued_task_ids.contains(&queued.task_id) {
         run.queued_task_ids.push(queued.task_id.clone());
     }
@@ -2937,9 +2945,28 @@ pub fn enqueue_task(
         run.status = WorkflowRunStatus::WaitingChildren;
     }
     run.updated_at = now_rfc3339();
-    save_workflow_run(config, Some(store), &run)?;
+    if let Err(e) = save_workflow_run(config, Some(store), &run) {
+        // The row is committed but the run record does not list the task. Roll
+        // the row back so the two views cannot disagree — a queued-but-
+        // unregistered task is drainable while invisible in the run (#883).
+        if let Err(rb) = store.dequeue_queued_task(&queued.workflow_id, &queued.task_id) {
+            tracing::error!(
+                target: "workflow",
+                workflow_id = %queued.workflow_id,
+                task_id = %queued.task_id,
+                error = %rb,
+                "Failed to roll back queued task after workflow-run save failure; \
+                 the queue row may be drainable without being registered on the run"
+            );
+        }
+        return Err(e);
+    }
 
-    append_workflow_event(
+    // The task is committed and registered by this point, so a timeline-write
+    // failure must not be reported as an enqueue failure: the caller would
+    // believe nothing was queued while the task actually runs. Degrade to an
+    // observability gap instead.
+    if let Err(e) = append_workflow_event(
         config,
         Some(store),
         &WorkflowEventRecord {
@@ -2956,7 +2983,15 @@ pub fn enqueue_task(
             }),
             occurred_at: now_rfc3339(),
         },
-    )?;
+    ) {
+        tracing::warn!(
+            target: "workflow",
+            workflow_id = %queued.workflow_id,
+            task_id = %queued.task_id,
+            error = %e,
+            "Task enqueued but the task.queued timeline event could not be written"
+        );
+    }
 
     tracing::info!(
         target: "workflow",
@@ -4531,6 +4566,101 @@ mod tests {
         dequeue_task(&cfg, None, &wf.workflow_id, "task-q1").unwrap();
         let loaded = load_queued_tasks(&cfg, None, &wf.workflow_id).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    /// Emergency stop is the circuit breaker: work it refuses must not be left
+    /// behind in an executable state (#883). The drain path reads the
+    /// queued-tasks table, so a row committed before the refusal would run as
+    /// soon as the stop lifted — while the caller, told the enqueue failed, had
+    /// no reason to look for it.
+    #[test]
+    fn enqueue_refused_under_emergency_stop_leaves_no_queue_row() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "estop-root", None).unwrap();
+
+        let mut run = load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        run.status = WorkflowRunStatus::EmergencyStopped;
+        save_workflow_run(&cfg, None, &run).unwrap();
+
+        let queued = QueuedTaskRun {
+            task_id: "task-estop".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            message: "work refused during the stop".to_string(),
+            child_session_id: "estop-root/coder-estop".to_string(),
+            parent_session_id: "estop-root".to_string(),
+            source_agent_id: "planner.default".to_string(),
+            metadata: None,
+            join_group: None,
+            blocks_planner: false,
+            enqueued_at: now_rfc3339(),
+            credential_bindings: vec![],
+        };
+        let err = enqueue_task(&cfg, None, &queued).expect_err("enqueue must be refused");
+        assert!(
+            err.to_string().contains("emergency stop"),
+            "unexpected error: {err}"
+        );
+
+        // Nothing queued, and nothing registered on the run.
+        assert!(
+            load_queued_tasks(&cfg, None, &wf.workflow_id)
+                .unwrap()
+                .is_empty(),
+            "refused work must leave no drainable row"
+        );
+        let run = load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        assert!(!run.queued_task_ids.contains(&"task-estop".to_string()));
+
+        // Lifting the stop must not resurrect it either — the task is simply gone.
+        let mut run = run;
+        run.status = WorkflowRunStatus::Active;
+        save_workflow_run(&cfg, None, &run).unwrap();
+        assert!(load_queued_tasks(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The two views of a queued task — the queue table the drain reads and the
+    /// run record's `queued_task_ids` — must agree after a successful enqueue.
+    #[test]
+    fn successful_enqueue_registers_the_task_in_both_views() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let wf = ensure_workflow_for_root_session(&cfg, None, "both-views-root", None).unwrap();
+
+        let queued = QueuedTaskRun {
+            task_id: "task-both".to_string(),
+            workflow_id: wf.workflow_id.clone(),
+            agent_id: "coder.default".to_string(),
+            message: "ok".to_string(),
+            child_session_id: "both-views-root/coder".to_string(),
+            parent_session_id: "both-views-root".to_string(),
+            source_agent_id: "planner.default".to_string(),
+            metadata: None,
+            join_group: None,
+            blocks_planner: false,
+            enqueued_at: now_rfc3339(),
+            credential_bindings: vec![],
+        };
+        enqueue_task(&cfg, None, &queued).unwrap();
+
+        let rows = load_queued_tasks(&cfg, None, &wf.workflow_id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, "task-both");
+        let run = load_workflow_run(&cfg, None, &wf.workflow_id)
+            .unwrap()
+            .unwrap();
+        assert!(run.queued_task_ids.contains(&"task-both".to_string()));
     }
 
     #[test]

@@ -394,14 +394,14 @@ async fn enqueue_failure_releases_the_singleton_slot() -> anyhow::Result<()> {
         "retry task should be queued, got {:?}",
         queued.iter().map(|t| &t.task_id).collect::<Vec<_>>()
     );
-    // NOTE: the refused enqueue also left an orphan row behind — `enqueue_task`
-    // commits the queue row before its emergency-stop check (#883). That is not
-    // asserted as correct here; this test owns the slot-release invariant, and
-    // the count is left unpinned so fixing #883 does not break it.
-    assert!(
-        queued.len() <= 2,
-        "expected at most the retry plus the #883 orphan, got {}",
-        queued.len()
+    // Exactly one row: the refused enqueue used to leave an orphan behind
+    // because `enqueue_task` committed the queue row before its emergency-stop
+    // check. Fixed in #883, so the refusal now leaves nothing to drain.
+    assert_eq!(
+        queued.len(),
+        1,
+        "the retry should be the only queued task, got {:?}",
+        queued.iter().map(|t| &t.task_id).collect::<Vec<_>>()
     );
 
     Ok(())
