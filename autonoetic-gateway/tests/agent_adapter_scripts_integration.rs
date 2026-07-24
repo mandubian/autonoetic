@@ -167,6 +167,79 @@ Base instructions.
     );
 }
 
+/// A wrapper must reason with the *base agent's* model. The generator used to
+/// hardcode `provider: openai` / `model: gpt-4o` into every wrapper, which
+/// would pin a stale model regardless of gateway config or base agent (#818
+/// adapter prerequisite).
+#[test]
+fn test_generated_wrapper_inherits_base_inference_without_hardcoding_a_model() {
+    let generate_wrapper_script = script_path("generate_wrapper.py");
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let base_skill_path = temp.path().join("base.SKILL.md");
+    std::fs::write(&base_skill_path, "---\nname: \"base.agent\"\n---\n# Base\n")
+        .expect("base skill should write");
+
+    let render = |base_manifest: &serde_json::Value, out: &str| -> String {
+        let output_dir = temp.path().join(out);
+        let result = Command::new("python3")
+            .arg(&generate_wrapper_script)
+            .arg("--base-skill")
+            .arg(base_skill_path.to_string_lossy().to_string())
+            .arg("--base-agent-id")
+            .arg("base.agent")
+            .arg("--wrapper-id")
+            .arg("base.agent.adapter")
+            .arg("--target-spec-json")
+            .arg("{}")
+            .arg("--schema-diff-json")
+            .arg("{}")
+            .arg("--base-manifest-json")
+            .arg(serde_json::to_string(base_manifest).expect("manifest serializes"))
+            .arg("--output-dir")
+            .arg(output_dir.to_string_lossy().to_string())
+            .output()
+            .expect("generator should execute");
+        assert!(
+            result.status.success(),
+            "generate_wrapper.py failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::read_to_string(output_dir.join("SKILL.md")).expect("SKILL.md readable")
+    };
+
+    // Base declares a preset → wrapper reuses it, so the gateway resolves
+    // provider/model from its own config.
+    let from_preset = render(&serde_json::json!({ "llm_preset": "coding" }), "preset");
+    assert!(
+        from_preset.contains("llm_preset: \"coding\""),
+        "wrapper should inherit the base preset, got:\n{from_preset}"
+    );
+    assert!(
+        !from_preset.contains("gpt-4o") && !from_preset.contains("provider:"),
+        "wrapper must not name a hardcoded provider/model, got:\n{from_preset}"
+    );
+
+    // Base pins an explicit config → wrapper copies it, but pins temperature to
+    // 0.0 because it is a deterministic transformation layer.
+    let from_config = render(
+        &serde_json::json!({
+            "llm_config": { "provider": "anthropic", "model": "claude-sonnet-5", "temperature": 0.7 }
+        }),
+        "config",
+    );
+    assert!(from_config.contains("\"provider\": \"anthropic\""));
+    assert!(from_config.contains("\"model\": \"claude-sonnet-5\""));
+    assert!(
+        from_config.contains("\"temperature\": 0.0"),
+        "wrapper should pin temperature 0.0, got:\n{from_config}"
+    );
+
+    // No inference info at all → a preset name, never a provider guess.
+    let fallback = render(&serde_json::json!({}), "fallback");
+    assert!(fallback.contains("llm_preset: \"agentic\""));
+    assert!(!fallback.contains("gpt-4o"));
+}
+
 #[test]
 fn test_schema_diff_emits_multiple_mappings() {
     let schema_diff_script = script_path("schema_diff.py");

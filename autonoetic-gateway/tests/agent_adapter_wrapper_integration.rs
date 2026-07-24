@@ -277,6 +277,39 @@ fn test_generated_wrapper_inherits_base_capabilities() {
     ));
 }
 
+/// The inherited inference block must still parse as a manifest — a wrapper
+/// that carries the base's preset is only useful if the gateway can load it.
+#[test]
+fn test_generated_wrapper_manifest_carries_inherited_preset() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let target_spec = serde_json::json!({
+        "accepts": { "type": "object", "required": ["query"] },
+        "returns": { "type": "object", "required": ["summary"] }
+    });
+    let base_manifest = serde_json::json!({
+        "capabilities": [],
+        "llm_preset": "coding"
+    });
+    let wrapper_dir = generate_wrapper(
+        &temp,
+        "base.agent.adapter.preset",
+        &target_spec,
+        &base_manifest,
+        &serde_json::json!({ "type": "object", "required": ["query"] }),
+        &serde_json::json!({ "type": "object", "required": ["summary"] }),
+    );
+    let skill_content =
+        std::fs::read_to_string(wrapper_dir.join("SKILL.md")).expect("wrapper skill should read");
+    let (manifest, _instructions) =
+        SkillParser::parse(&skill_content).expect("wrapper with inherited preset should parse");
+
+    assert_eq!(manifest.llm_preset.as_deref(), Some("coding"));
+    assert!(
+        manifest.llm_config.is_none(),
+        "preset-based wrappers must leave provider/model to gateway config"
+    );
+}
+
 struct EchoSummaryConfidenceDriver;
 
 #[async_trait::async_trait]
