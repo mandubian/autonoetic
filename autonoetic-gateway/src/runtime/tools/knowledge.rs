@@ -212,7 +212,7 @@ impl NativeTool for KnowledgeStoreTool {
                     match type_tag {
                         Some(tag) => {
                             let threshold = _config
-                                .map(|c| c.auto_learning.knowledge_store_similarity_threshold)
+                                .map(|c| c.knowledge_store.similarity_threshold)
                                 .unwrap_or(0.25);
                             let candidates = block_on_memory(
                                 mem.search_by_tags(&args.scope, &[tag.clone()], None, 20),

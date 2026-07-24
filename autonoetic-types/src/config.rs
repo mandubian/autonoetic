@@ -467,12 +467,6 @@ pub struct AutoLearningConfig {
     /// text (Jaccard token overlap) instead of pure recency. Default: true.
     #[serde(default = "default_true")]
     pub task_matched_recall: bool,
-
-    /// Minimum Jaccard token-overlap score for `knowledge_store` to merge a
-    /// new entry with an existing one in the same scope and `type` tag.
-    /// Default: 0.25 (conservative — avoids false merges).
-    #[serde(default = "default_similarity_threshold")]
-    pub knowledge_store_similarity_threshold: f64,
 }
 
 fn default_auto_learning_enabled() -> bool {
@@ -491,6 +485,24 @@ fn default_similarity_threshold() -> f64 {
     0.25
 }
 
+/// Knowledge store configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeStoreConfig {
+    /// Minimum Jaccard token-overlap score for `knowledge_store` to merge a
+    /// new entry with an existing one in the same scope and `type` tag.
+    /// Default: 0.25 (conservative — avoids false merges).
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f64,
+}
+
+impl Default for KnowledgeStoreConfig {
+    fn default() -> Self {
+        Self {
+            similarity_threshold: default_similarity_threshold(),
+        }
+    }
+}
+
 impl Default for AutoLearningConfig {
     fn default() -> Self {
         Self {
@@ -499,7 +511,6 @@ impl Default for AutoLearningConfig {
             curation_schedule: default_curation_schedule(),
             evolution_schedule: default_evolution_schedule(),
             task_matched_recall: default_true(),
-            knowledge_store_similarity_threshold: default_similarity_threshold(),
         }
     }
 }
@@ -1440,6 +1451,10 @@ pub struct GatewayConfig {
     /// Controls post-session digest, quality signals, and periodic memory curation.
     #[serde(default)]
     pub auto_learning: AutoLearningConfig,
+
+    /// Knowledge store configuration: similarity threshold for semantic dedup.
+    #[serde(default)]
+    pub knowledge_store: KnowledgeStoreConfig,
 
     /// Path to a persona file (Markdown) injected into every agent's system
     /// prompt. Defines cross-agent user context, communication preferences,
@@ -3448,6 +3463,7 @@ impl Default for GatewayConfig {
             protected_agents: ProtectedAgentsConfig::default(),
             profile: Profile::default(),
             auto_learning: AutoLearningConfig::default(),
+            knowledge_store: KnowledgeStoreConfig::default(),
             persona_path: None,
             wiki_proposal: WikiProposalConfig::default(),
             session_room: SessionRoomConfig::default(),
