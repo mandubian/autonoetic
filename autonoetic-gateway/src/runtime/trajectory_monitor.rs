@@ -571,7 +571,7 @@ pub fn fingerprint_tool_call(tool_name: &str, arguments_json: &str) -> u64 {
 
 /// Strip echoed `intent` fields so repeated semantically-identical calls
 /// produce the same fingerprint. Matches LoopGuard's approach.
-fn normalize_arguments(arguments_json: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn normalize_arguments(arguments_json: &str) -> std::borrow::Cow<'_, str> {
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(arguments_json) else {
         return std::borrow::Cow::Borrowed(arguments_json);
     };
