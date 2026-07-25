@@ -2693,7 +2693,7 @@ impl AgentExecutor {
                     }
                     Err(e) => {
                         self.guard.register_llm_failure();
-                        let _ = tracer.log_llm_request_failed(&e);
+                        let _ = tracer.log_llm_request_failed(&actual_model, &e);
 
                         // RFC #779 Part E.2: only fail over on transient errors.
                         // A 400/401/403 is deterministic — the same request to a
@@ -2824,7 +2824,7 @@ impl AgentExecutor {
                                         error = %e,
                                         "Fallback model failed"
                                     );
-                                    let _ = tracer.log_llm_request_failed(&e);
+                                    let _ = tracer.log_llm_request_failed(fb_model, &e);
                                     last_err = Some(e);
                                 }
                             }

@@ -561,12 +561,34 @@ fn build_info_panel(
     lines.push(format!("  Channel    {channel_kind}"));
     lines.push(String::new());
     if stats.llm_calls > 0 {
-        let model_tag = if stats.models.len() == 1 {
-            stats.models[0].clone()
+        if stats.per_model.len() <= 1 {
+            let model_tag = if stats.models.len() == 1 {
+                stats.models[0].clone()
+            } else {
+                format!("{} models", stats.models.len())
+            };
+            lines.push(format!("  Model      {model_tag}  ({} calls)", stats.llm_calls));
         } else {
-            format!("{} models", stats.models.len())
-        };
-        lines.push(format!("  Model      {model_tag}  ({} calls)", stats.llm_calls));
+            lines.push(format!("  Models     {} total  ({} calls)", stats.models.len(), stats.llm_calls));
+            // Per-model breakdown: sort by calls descending
+            let mut sorted: Vec<_> = stats.per_model.iter().collect();
+            sorted.sort_by(|a, b| b.1.calls.cmp(&a.1.calls));
+            for (model, m) in &sorted {
+                let err_tag = if m.errors > 0 {
+                    format!("  {} err", m.errors)
+                } else {
+                    String::new()
+                };
+                lines.push(format!(
+                    "    {:<24} {:>4} calls  in {}  out {}{}",
+                    model,
+                    m.calls,
+                    format_tokens(m.input_tokens),
+                    format_tokens(m.output_tokens),
+                    err_tag,
+                ));
+            }
+        }
         lines.push(format!("  Tokens     in {}   out {}", format_tokens(stats.total_input), format_tokens(stats.total_output)));
         let avg_in = stats.total_input / stats.llm_calls as u64;
         let avg_out = stats.total_output / stats.llm_calls as u64;
@@ -2366,11 +2388,21 @@ fn notification_approval_id(entry: &SessionTimelineEntry) -> Option<String> {
 }
 
 /// Read the pre-digested choices + freeform policy for an interaction from its
+#[derive(Default)]
+struct ModelStats {
+    calls: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    errors: u64,
+}
+
 struct SessionStats {
     total_input: u64,
     total_output: u64,
     llm_calls: u64,
     models: Vec<String>,
+    /// Per-model breakdown of calls, tokens, and errors.
+    per_model: HashMap<String, ModelStats>,
     context_total_pct: f64,
     context_samples: u64,
     context_window: Option<u32>,
@@ -2383,6 +2415,10 @@ struct SessionStats {
     pending_age_turns: Option<u64>,
 }
 
+fn short_model(model: &str) -> String {
+    model.split('/').last().unwrap_or(model).to_string()
+}
+
 fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
     let pending = pending_tool_summary(entries);
     let mut stats = SessionStats {
@@ -2390,6 +2426,7 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         total_output: 0,
         llm_calls: 0,
         models: Vec::new(),
+        per_model: HashMap::new(),
         context_total_pct: 0.0,
         context_samples: 0,
         context_window: None,
@@ -2397,48 +2434,75 @@ fn compute_session_stats(entries: &[SessionTimelineEntry]) -> SessionStats {
         pending_age_turns: pending.age_turns,
     };
     for e in entries {
-        if e.event_type != "llm.round" {
-            continue;
-        }
         if let Some(p) = e.payload.as_deref() {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(p) {
-                let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                if inp > 0 || out > 0 {
-                    stats.total_input += inp;
-                    stats.total_output += out;
-                    stats.llm_calls += 1;
-                }
+                match e.event_type.as_str() {
+                    "llm.round" => {
+                        let inp = v.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        let out = v.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                        if inp > 0 || out > 0 {
+                            stats.total_input += inp;
+                            stats.total_output += out;
+                            stats.llm_calls += 1;
+                        }
 
-                let usage = v.get("usage");
-                let (ctx_window, ctx_pct) = match usage.and_then(|u| u.get("context_window_tokens")) {
-                    Some(w) => (
-                        w.as_u64().map(|x| x as u32),
-                        usage
-                            .and_then(|u| u.get("input_context_pct"))
-                            .and_then(|p| p.as_f64()),
-                    ),
-                    None => (
-                        v.get("context_window_tokens")
-                            .and_then(|t| t.as_u64())
-                            .map(|x| x as u32),
-                        v.get("input_context_pct").and_then(|p| p.as_f64()),
-                    ),
-                };
+                        let usage = v.get("usage");
+                        let (ctx_window, ctx_pct) = match usage.and_then(|u| u.get("context_window_tokens")) {
+                            Some(w) => (
+                                w.as_u64().map(|x| x as u32),
+                                usage
+                                    .and_then(|u| u.get("input_context_pct"))
+                                    .and_then(|p| p.as_f64()),
+                            ),
+                            None => (
+                                v.get("context_window_tokens")
+                                    .and_then(|t| t.as_u64())
+                                    .map(|x| x as u32),
+                                v.get("input_context_pct").and_then(|p| p.as_f64()),
+                            ),
+                        };
 
-                if let Some(w) = ctx_window {
-                    stats.context_window = Some(w);
-                }
-                if let Some(pct) = ctx_pct {
-                    stats.context_total_pct += pct;
-                    stats.context_samples += 1;
-                }
+                        if let Some(w) = ctx_window {
+                            stats.context_window = Some(w);
+                        }
+                        if let Some(pct) = ctx_pct {
+                            stats.context_total_pct += pct;
+                            stats.context_samples += 1;
+                        }
 
-                if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
-                    let short = model.split('/').last().unwrap_or(model);
-                    if !stats.models.contains(&short.to_string()) {
-                        stats.models.push(short.to_string());
+                        if let Some(model) = v.get("model").and_then(|m| m.as_str()) {
+                            let short = short_model(model);
+                            if !stats.models.contains(&short) {
+                                stats.models.push(short.clone());
+                            }
+                            let m = stats.per_model.entry(short).or_default();
+                            m.calls += 1;
+                            m.input_tokens += inp;
+                            m.output_tokens += out;
+                        }
                     }
+                    "llm.request_failed" => {
+                        let model = v
+                            .get("model")
+                            .and_then(|m| m.as_str())
+                            .map(short_model)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let m = stats.per_model.entry(model).or_default();
+                        m.errors += 1;
+                    }
+                    "llm.empty_response" => {
+                        let model = v
+                            .get("model")
+                            .and_then(|m| m.as_str())
+                            .map(short_model)
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let m = stats.per_model.entry(model.clone()).or_default();
+                        m.errors += 1;
+                        if !stats.models.contains(&model) {
+                            stats.models.push(model);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

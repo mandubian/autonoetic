@@ -737,9 +737,12 @@ impl SessionTracer {
     }
 
     /// Logged when the LLM driver returns an error before any completion is produced (causal chain + session report).
-    pub fn log_llm_request_failed(&mut self, err: &anyhow::Error) -> anyhow::Result<()> {
+    pub fn log_llm_request_failed(&mut self, model: &str, err: &anyhow::Error) -> anyhow::Result<()> {
         let msg = redact_text_for_logs(&err.to_string());
-        let payload = serde_json::json!({ "error": msg });
+        let payload = serde_json::json!({
+            "error": msg,
+            "model": model,
+        });
         let event_id = self.log_event(
             "llm",
             "request_failed",
@@ -767,6 +770,7 @@ impl SessionTracer {
             "llm.request_failed",
             Some(serde_json::json!({
                 "error": msg,
+                "model": model,
                 "preceding": Vec::from_iter(self.recent_actions.iter().cloned()),
             })),
         );
