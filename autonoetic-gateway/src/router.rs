@@ -839,15 +839,14 @@ impl JsonRpcRouter {
                 }
             };
             let workflow_id = workflow.workflow_id.clone();
-            // One uuid slice shared by task_id and child_session_id so the two
-            // stay correlated (matches the agent_spawn convention at agent.rs:711).
-            // Bind the full uuid string to an owned local before slicing —
-            // borrowing directly from the `to_string()` temporary works today
-            // via temporary lifetime extension, but it's subtle and fragile
-            // under refactor. (Copilot PR #893.)
-            let uuid_str = uuid::Uuid::new_v4().to_string();
-            let short_uuid = &uuid_str[..8];
-            let task_id = format!("curate-{}-{}", &params.root_session_id, short_uuid);
+            // Use the shared `short_random_id` helper (the codebase's
+            // canonical replacement for the `&Uuid::new_v4().to_string()[..8]`
+            // idiom — see autonoetic_types::id_format). The `curate-` prefix
+            // on task_id is load-bearing: `maybe_emit_workflow_timeline` in
+            // workflow_store.rs uses `task_id.starts_with("curate-")` to
+            // discriminate manual `/curate` tasks from cron tasks when
+            // mirroring terminal events onto the root timeline.
+            let task_id = autonoetic_types::id_format::short_random_id("curate-");
             // Slash-form child session id (NOT "curate-child-{root}"). The slash
             // is load-bearing: content_store::root_session_id() is pure
             // `session_id.split('/').next()`, so timeline queries that filter by
@@ -855,9 +854,15 @@ impl JsonRpcRouter {
             // the child id starts with "{root}/". Without the slash the curator
             // is its own root and the operator sees nothing on the timeline
             // after /curate — the session-3739f831 visibility gap. This matches
-            // agent_spawn's "{root}/{agent}-{rand}" convention exactly.
-            let child_session_id =
-                format!("{}/curate-{}", &params.root_session_id, short_uuid);
+            // agent_spawn's "{root}/{agent}-{rand}" convention at agent.rs:711
+            // exactly (same helper, same shape) so resolve()/workflow_wait
+            // behave consistently across both spawn paths.
+            let child_session_id = format!(
+                "{}/{}-{}",
+                &params.root_session_id,
+                curator_ref.agent_id,
+                autonoetic_types::id_format::short_random_id("")
+            );
             let now_rfc = chrono::Utc::now().to_rfc3339();
 
             // Memory-curator is singleton=true. The normal agent.spawn path

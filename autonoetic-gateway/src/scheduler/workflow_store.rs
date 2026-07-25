@@ -683,9 +683,11 @@ fn maybe_emit_workflow_timeline(
     event: &WorkflowEventRecord,
 ) {
     let is_sched = event.workflow_id.starts_with("sched-");
-    // `/curate` task ids are constructed at router.rs as
-    // `curate-{root_session_id}-{8-hex-uuid}`. This prefix is stable and
-    // unique to the operator curation RPC — nothing else mints `curate-` ids.
+    // `/curate` task ids are minted at router.rs via
+    // `id_format::short_random_id("curate-")` → `curate-{8-hex}`. This prefix
+    // is stable and unique to the operator curation RPC — nothing else mints
+    // `curate-` task ids (the cron path uses `sched-{job_id}` workflows with
+    // `task-{...}` ids via `new_task_id()`).
     let is_curation = event
         .task_id
         .as_deref()
@@ -4129,8 +4131,8 @@ mod tests {
                 workflow_id: wf.workflow_id.clone(),
                 event_type: "task.completed".to_string(),
                 // The discriminator: `curate-` prefix identifies operator-RPC
-                // curation tasks (router.rs builds `curate-{root}-{uuid}`).
-                task_id: Some("curate-root-curate-abcd1234".to_string()),
+                // curation tasks (router.rs mints via short_random_id("curate-")).
+                task_id: Some("curate-abcd1234".to_string()),
                 agent_id: Some("memory-curator.default@rev_sha256:abc".to_string()),
                 payload: serde_json::json!({
                     "status": "Succeeded",
@@ -4180,7 +4182,7 @@ mod tests {
                 event_id: "wevt-curate-fail".to_string(),
                 workflow_id: wf.workflow_id.clone(),
                 event_type: "task.failed".to_string(),
-                task_id: Some("curate-root-curate-fail-deadbeef".to_string()),
+                task_id: Some("curate-deadbeef".to_string()),
                 agent_id: Some("memory-curator.default@rev_sha256:abc".to_string()),
                 payload: serde_json::json!({
                     "reason": "curator exceeded turn budget",
