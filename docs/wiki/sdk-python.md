@@ -68,6 +68,7 @@ if __name__ == "__main__":
 - The SDK bridge only supports the methods listed in the tables above. Do not invent or guess method names — every available method is documented here. Unsupported calls raise `AutonoeticSdkError`.
 - The SDK is injected via `PYTHONPATH` and communicates with the gateway over a Unix socket. No network access is required.
 - Script agents can read normalized runtime input via `autonoetic_sdk.load_input()` / `load_invocation()`. Delegation metadata, when present, is exposed separately via `invocation.metadata`.
+- When a script is run via `artifact_exec` or `sandbox_exec`, the caller passes the payload via the tool's `input` parameter — the gateway serializes it to the `AUTONOETIC_INPUT` env var that `load_input()` reads. Callers should prefer `input` over `args`/argv whenever the script uses `load_input()`.
 
 ## Credential Injection via Environment Variables
 

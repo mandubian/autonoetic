@@ -321,7 +321,9 @@ The gateway executes script agents directly (no interpreter prefix), so the sheb
 
 The gateway injects the `autonoetic_sdk` package into every script agent. Prefer the SDK input helper over direct environment parsing. The runtime sets `AUTONOETIC_INPUT_PATH` and `AUTONOETIC_INPUT` for the normalized task payload, and when metadata exists it also sets `AUTONOETIC_META_PATH` and `AUTONOETIC_META`. **Do NOT use `sys.argv` or `sys.stdin` for structured agent input unless you are explicitly adding a local CLI fallback.**
 
-**Structure for testability:** put the input-loading and entry-point logic inside a `main()` function, guarded by the language's entry-point gate. Unit tests import the module to call individual functions — if `load_invocation()` runs at module level, the import will crash because `AUTONOETIC_INPUT*` env vars are not set during test execution (`artifact_exec` does not set them).
+**Structure for testability:** put the input-loading and entry-point logic inside a `main()` function, guarded by the language's entry-point gate. Unit tests import the module to call individual functions — if `load_invocation()` runs at module level, the import will crash because `AUTONOETIC_INPUT*` env vars are not set during a plain `unittest`/`pytest` import (only the gateway sets them, when running through `artifact_exec`/`sandbox_exec`/script-agent spawn).
+
+**How callers deliver payload at runtime.** When your script is run through `artifact_exec` or `sandbox_exec`, the caller should pass payload via the tool's first-class `input` parameter (the gateway wires it to `AUTONOETIC_INPUT` so `load_input()` returns it). Callers should NOT pass it via `args`/argv — argv is only for scripts that explicitly read `sys.argv`. If you write your script against `load_input()`, document that expectation in the artifact's README so the executor knows to use `input`, not `args`.
 
 Entry-point gates by language: `if __name__ == "__main__":` (Python) · `if (require.main === module)` (Node.js) · `func main()` with package-level guard (Go) · `fn main()` (Rust)
 

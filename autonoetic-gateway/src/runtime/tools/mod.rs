@@ -945,6 +945,43 @@ where
     }
 }
 
+/// The env var the SDK's `load_input()` / `load_invocation()` reads as the
+/// inline fallback when no `AUTONOETIC_INPUT_PATH` file is present.
+///
+/// Kept alongside the helper below so both exec tools reference one name.
+/// Mirrors `autonoetic-gateway/src/runtime/script_execute.rs:8`.
+pub(crate) const AUTONOETIC_INPUT_ENV: &str = "AUTONOETIC_INPUT";
+
+/// Serialize a caller-supplied `input` JSON value into the string the SDK's
+/// `_parse_json_or_text` (autonoetic-sdk/python client.py) accepts.
+///
+/// Mirrors `script_execute.rs::normalize_script_input_payload` — strings,
+/// numbers, and bools pass through verbatim; objects and arrays become a JSON
+/// string. The SDK auto-detects JSON-or-text, so either form round-trips.
+///
+/// Used by `artifact_exec` and `sandbox_exec` when a caller supplies the
+/// first-class `input` parameter — closes the recurring discoverability gap
+/// where executors passed data via `args` (argv) for scripts that actually
+/// call `load_input()`.
+pub(crate) fn serialize_tool_input(input: &serde_json::Value) -> String {
+    match input {
+        serde_json::Value::String(s) => s.clone(),
+        // Numbers/bools render to their bare JSON form ("25", "true") which
+        // the SDK parses back faithfully via `json.loads`.
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) => input.to_string(),
+        // Objects/arrays need explicit JSON serialization to round-trip.
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => input.to_string(),
+        // Null must serialize as the JSON literal "null" — both SDKs'
+        // `_parse_json_or_text` / `parseJsonOrText` then parse it back to
+        // None/null, and `load_input(default)` returns the default. The
+        // empty-string alternative (a previous version) would round-trip as
+        // the empty string `""` (json.loads("") raises → returns raw ""),
+        // so a caller's `input: null` would NOT trigger the default fallback
+        // — a silent cross-SDK contract divergence. (Copilot PR #892.)
+        serde_json::Value::Null => "null".to_string(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct CapturePath {
     pub path: String,
@@ -1029,6 +1066,12 @@ pub(crate) struct SandboxExecArgs {
     pub capture_paths: Option<Vec<CapturePath>>,
     #[serde(default)]
     pub credential_env: Option<Vec<CredentialEnvMapping>>,
+    /// Payload delivered to the script via `autonoetic_sdk.load_input()` —
+    /// the gateway serializes it to the `AUTONOETIC_INPUT` env var the SDK
+    /// reads. Use this for scripts that call `load_input()`; use `command`
+    /// argv for scripts that read argv directly.
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
 }
 
 fn parse_dependency_plan(runtime: &str, packages: Vec<String>) -> anyhow::Result<DependencyPlan> {
@@ -1966,5 +2009,23 @@ mod tests {
         }
         let args: Args = serde_json::from_str(r#"{"limit": "3000"}"#).unwrap();
         assert_eq!(args.limit, 3000);
+    }
+
+    #[test]
+    fn sandbox_exec_args_accepts_optional_input() {
+        // Mirror artifact_exec: the `input` field carries a load_input() payload.
+        let args: SandboxExecArgs = serde_json::from_str(
+            r#"{"command":"python3 /tmp/main.py","input":{"k":"v"}}"#,
+        )
+        .unwrap();
+        assert_eq!(args.input, Some(serde_json::json!({"k":"v"})));
+    }
+
+    #[test]
+    fn sandbox_exec_args_input_defaults_to_none() {
+        // Backward compat: existing sandbox_exec calls without `input`.
+        let args: SandboxExecArgs =
+            serde_json::from_str(r#"{"command":"python3 /tmp/main.py"}"#).unwrap();
+        assert!(args.input.is_none());
     }
 }
