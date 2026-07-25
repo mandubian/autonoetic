@@ -515,6 +515,7 @@ One door (below) is the real protection: every install — regardless of `trust_
 - The gateway policy engine enforces this before any HTTP request is made.
 - No remote code is executed during install — the SKILL.md is parsed and written to disk as a Candidate revision, never promoted by this tool.
 - **One door**: activation happens only through `agent_revision_promote`, which applies the same risk-graduated evidence gates (P-9.9) and P-2.25 operator approval of the capability delta as any other newborn agent — there is no `skill_install`-specific shortcut.
+- The P-2.25 approval card carries a **`skill_preview`**: the incoming revision's instruction body (frontmatter stripped, bounded, and flagged when clipped) alongside the capability delta. The delta says what an agent *may* do; the SKILL body is what it is told to do with those capabilities — and for a crystallized skill or a graduated lesson the instruction text is the entire change (#818).
 - `trust_mode` narrows or preserves which capabilities the Candidate carries into that gate (see table above); it is not itself an approval-gate-for-all-actions mechanism. `ApprovalQueue` (added by `strict`/`audit`) only unlocks the Workflow tool tier and gates `admin_proposal_*` calls.
 - Import provenance (source URL, content digest, install time) is recorded durably on the revision and emitted as a causal event (`agent_install`/`skill_imported`), so imported agents are attributable forever.
 

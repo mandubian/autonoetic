@@ -420,6 +420,39 @@ Notes:
 - This is a setup convenience path; it does not expose eval-gating flags.
 - Activation remains explicit: `artifact -> revision create -> promote`.
 
+### `autonoetic agent revision list`
+
+List revisions and their statuses, newest first.
+
+```bash
+autonoetic agent revision list [--agent-id <ID>] [--status <candidate|ready|archived|rejected>] [--limit <N>] [--json]
+```
+
+Notes:
+- `--status candidate` is the operator's usual question: what the promotion gate is
+  holding. A Candidate exists but is not active — `agent list` will not show it,
+  which is why a stalled install used to be invisible from the CLI.
+- The status match is case-insensitive; records store `Candidate`, you can type
+  `candidate`.
+- When the list is clipped by `--limit`, the count that was dropped is printed —
+  a truncated list that reads as complete is how the thing waiting on you gets
+  missed.
+
+### `autonoetic agent revision inspect`
+
+Inspect one revision: metadata, execution closure, and the full record.
+
+```bash
+autonoetic agent revision inspect <revision_id|agent_ref> [--json]
+```
+
+Notes:
+- Accepts a full `rev_sha256:…` id or an agent ref (`agent@rev_<short>`); anything
+  that is not a revision id is resolved as a ref.
+- The human output ends with the full JSON record: this is the command an operator
+  reaches for when deciding on a Candidate, and a summary that silently omitted a
+  field would be worse than verbose.
+
 ### `autonoetic agent revision create`
 
 Create an immutable revision from an `agent_bundle` artifact.
