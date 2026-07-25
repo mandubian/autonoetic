@@ -209,6 +209,24 @@ async fn curate_with_focus_notes_enqueues_curator_on_session_workflow() -> anyho
         Some(true)
     );
 
+    // Lineage wiring (session-3739f831 gap): the curator's child session must
+    // be slash-form (`{root}/curate-*`) so timeline root derivation works,
+    // AND registered in session_spawn_lineage so parent→child traversal finds it.
+    // Without these the operator sees nothing on the timeline after /curate.
+    let child_session_id = &queued[0].child_session_id;
+    assert!(
+        child_session_id.starts_with(&format!("{root}/curate-")),
+        "child_session_id must be slash-form '{{root}}/curate-*' for timeline attribution; got: {child_session_id}"
+    );
+    let parent = env
+        .store
+        .parent_session_id(child_session_id)?
+        .expect("curator child must be registered in session_spawn_lineage");
+    assert_eq!(
+        parent, root,
+        "curator child's recorded parent must be the issuing root session"
+    );
+
     Ok(())
 }
 
