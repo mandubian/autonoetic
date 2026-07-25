@@ -99,3 +99,4 @@ cd autonoetic-sdk/typescript && npm run build
 - The TypeScript SDK is a sandbox SDK, not a generic gateway client. It does not expose a generic `tools.invoke` surface.
 - Use `sdk.memory` / `sdk.state` for persistence, `sdk.secrets` for vault access, and `sdk.message` for cross-agent communication.
 - For script-mode agents, input is delivered via `loadInvocation()` / `loadInput()`.
+- When a script is run via `artifact_exec` or `sandbox_exec`, the caller passes the payload via the tool's `input` parameter — the gateway serializes it to the `AUTONOETIC_INPUT` env var that `loadInput()` reads. Callers should prefer `input` over command-line argv whenever the script uses `loadInput()`.

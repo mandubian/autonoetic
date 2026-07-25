@@ -95,7 +95,18 @@ If the task is primarily root-cause analysis, tell the planner to use `debugger.
 
 ## Running Built Artifacts
 
-When asked to run or test a previously built artifact, use `artifact_exec` instead of `sandbox_exec`:
+When asked to run or test a previously built artifact, use `artifact_exec` instead of `sandbox_exec`. There are two input channels — pick by what the script reads:
+
+- **`input`** — for scripts that call `autonoetic_sdk.load_input()` / `load_invocation()` (the SDK input contract). The gateway serializes it to the `AUTONOETIC_INPUT` env var. **Default to this** for scripts that don't otherwise document their input mechanism.
+- **`args`** — positional argv, only for scripts that read `sys.argv` / `process.argv` directly.
+
+```json
+artifact_exec({
+  "artifact_ref": "ar.example",
+  "entrypoint": "main.py",
+  "input": 25.0
+})
+```
 
 ```json
 artifact_exec({

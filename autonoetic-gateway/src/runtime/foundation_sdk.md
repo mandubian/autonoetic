@@ -12,6 +12,8 @@ invocation = autonoetic_sdk.load_invocation()  # task = invocation.input, metada
 
 For the common case where you only need the input payload, `autonoetic_sdk.load_input()` is a shortcut that returns the normalized input directly.
 
+When you call `load_input()` from a script that will be run via `artifact_exec` or `sandbox_exec`, the caller passes the payload via the tool's `input` parameter (the gateway wires it to the `AUTONOETIC_INPUT` env var). Callers should not pass payload via `args`/argv for scripts that use `load_input()`.
+
 ## Memory Operations (`sdk.memory`)
 
 | Method | Signature | Description |

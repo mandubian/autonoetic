@@ -356,6 +356,44 @@ fn test_artifact_exec_tool_registered_and_gated() {
     );
 }
 
+#[test]
+fn test_artifact_exec_definition_exposes_input_parameter() {
+    // Schema-contract guard: the `input` parameter must appear in the tool's
+    // JSON schema so agents discover it without needing to know the
+    // AUTONOETIC_INPUT env var name (the session-3739f831 discoverability gap).
+    let registry = default_registry();
+    let manifest = manifest_with_artifact_execution("coder.default");
+    let defs = registry.available_definitions(&manifest);
+    let artifact_exec_def = defs
+        .iter()
+        .find(|d| d.name == "artifact_exec")
+        .expect("artifact_exec should be available with ArtifactExecution");
+
+    let schema = &artifact_exec_def.input_schema;
+    let properties = schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("schema must have a properties object");
+    assert!(
+        properties.contains_key("input"),
+        "artifact_exec schema must declare an `input` property; got: {properties:?}"
+    );
+    assert!(
+        properties.contains_key("args"),
+        "artifact_exec schema must still declare `args` (argv remains legitimate)"
+    );
+    // The description should mention load_input so agents can route correctly.
+    let input_desc = properties
+        .get("input")
+        .and_then(|d| d.get("description"))
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
+    assert!(
+        input_desc.contains("load_input"),
+        "`input` description should name load_input() so agents can distinguish it from args; got: {input_desc:?}"
+    );
+}
+
 fn unit_test_runner_gate_manifest() -> AgentManifest {
     AgentManifest {
         version: "1.0".to_string(),

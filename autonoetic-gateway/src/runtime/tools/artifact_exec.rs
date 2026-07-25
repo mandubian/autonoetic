@@ -45,6 +45,13 @@ struct ArtifactExecArgs {
         deserialize_with = "crate::runtime::tools::deserialize_string_map_values_lenient"
     )]
     env: std::collections::HashMap<String, String>,
+    /// Payload delivered to the script via `autonoetic_sdk.load_input()` —
+    /// the gateway serializes it to the `AUTONOETIC_INPUT` env var the SDK
+    /// reads. Use this for scripts that call `load_input()`; use `args` only
+    /// for scripts that read argv directly. Mutually exclusive with
+    /// `env.AUTONOETIC_INPUT` (supplying both is rejected as `input_env_conflict`).
+    #[serde(default)]
+    input: Option<serde_json::Value>,
     #[serde(default)]
     approval_ref: Option<String>,
     #[serde(default)]
@@ -209,7 +216,10 @@ impl NativeTool for ArtifactExecTool {
                     "env": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
-                        "description": "Environment variables to set in the sandbox"
+                        "description": "Environment variables to set in the sandbox. Note: to deliver payload to a script using `autonoetic_sdk.load_input()`, prefer the `input` field over setting AUTONOETIC_INPUT here."
+                    },
+                    "input": {
+                        "description": "Payload delivered to the script via `autonoetic_sdk.load_input()`. Pass any JSON value (number, string, object, array) — the gateway serializes it to the AUTONOETIC_INPUT env var the SDK reads. Use this for scripts that call load_input(); use `args` only for scripts that read argv. Mutually exclusive with env.AUTONOETIC_INPUT."
                     },
                     "credential_env": {
                         "type": "array",
@@ -253,6 +263,19 @@ impl NativeTool for ArtifactExecTool {
     ) -> anyhow::Result<String> {
         let args: ArtifactExecArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        // `input` and `env.AUTONOETIC_INPUT` both target the same SDK contract
+        // (load_input()). Allowing both would require the gateway to silently
+        // pick one — exactly the LLM-judgment trap P-5.11 forbids. Reject
+        // mechanically and name the rule so the caller can self-correct.
+        if args.input.is_some() && args.env.contains_key(crate::runtime::tools::AUTONOETIC_INPUT_ENV) {
+            return Ok(ToolError::conflict(
+                "artifact_exec received both `input` and `env.AUTONOETIC_INPUT` — these target the same SDK contract (load_input()).",
+                Some("Pass payload via `input` (preferred) OR `env.AUTONOETIC_INPUT`, not both."),
+            )
+            .with_code("input_env_conflict")
+            .to_error_response());
+        }
 
         let gw_dir = gateway_dir
             .ok_or_else(|| anyhow::anyhow!("artifact.exec requires a gateway directory"))?;
@@ -923,6 +946,17 @@ impl NativeTool for ArtifactExecTool {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
+        // First-class `input` parameter → AUTONOETIC_INPUT env var. Closes the
+        // recurring executor gap where argv (`args`) was wrongly used for
+        // scripts that call load_input(). The conflict with env.AUTONOETIC_INPUT
+        // is rejected earlier (mechanical, no silent override).
+        if let Some(input) = &args.input {
+            extra_env.push((
+                crate::runtime::tools::AUTONOETIC_INPUT_ENV.to_string(),
+                crate::runtime::tools::serialize_tool_input(input),
+            ));
+        }
+
         if !layer_python_paths.is_empty() {
             let layer_pp = layer_python_paths.join(":");
             match extra_env.iter().position(|(k, _)| k == "PYTHONPATH") {
@@ -1307,6 +1341,16 @@ fn execute_with_ticket(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    // First-class `input` parameter → AUTONOETIC_INPUT env var. Mirrors the
+    // main execute() path — same conflict rejection happens before this fn
+    // is entered (execute_with_ticket is only called from execute()).
+    if let Some(input) = &args.input {
+        extra_env.push((
+            crate::runtime::tools::AUTONOETIC_INPUT_ENV.to_string(),
+            crate::runtime::tools::serialize_tool_input(input),
+        ));
+    }
+
     if !layer_python_paths.is_empty() {
         let layer_pp = layer_python_paths.join(":");
         match extra_env.iter().position(|(k, _)| k == "PYTHONPATH") {
@@ -1477,6 +1521,73 @@ mod tests {
         .unwrap();
         assert_eq!(args.intent.as_deref(), Some("Smoke-test output formatting"));
         assert_eq!(args.args, vec!["--json"]);
+    }
+
+    #[test]
+    fn artifact_exec_args_accepts_optional_input_number() {
+        // The session-3739f831 shape: a numeric payload for load_input().
+        let args: ArtifactExecArgs = serde_json::from_str(
+            r#"{"artifact_ref":"ar.abcd1234","entrypoint":"sqrt_calculator.py","input":25.0}"#,
+        )
+        .unwrap();
+        assert_eq!(args.input, Some(serde_json::json!(25.0)));
+    }
+
+    #[test]
+    fn artifact_exec_args_accepts_optional_input_object() {
+        // Structured payload (the more common SDK contract).
+        let args: ArtifactExecArgs = serde_json::from_str(
+            r#"{"artifact_ref":"ar.abcd1234","entrypoint":"main.py","input":{"record_id":"abc","format":"summary"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            args.input,
+            Some(serde_json::json!({"record_id":"abc","format":"summary"}))
+        );
+    }
+
+    #[test]
+    fn artifact_exec_args_input_defaults_to_none() {
+        // Backward compat: existing calls without `input` deserialize cleanly.
+        let args: ArtifactExecArgs = serde_json::from_str(
+            r#"{"artifact_ref":"ar.abcd1234","entrypoint":"main.py"}"#,
+        )
+        .unwrap();
+        assert!(args.input.is_none());
+    }
+
+    #[test]
+    fn serialize_tool_input_round_trips_strings_verbatim() {
+        // Strings must NOT be re-quoted — the SDK's _parse_json_or_text would
+        // otherwise parse a quoted string as a JSON literal and unwrap it,
+        // changing the type the script receives.
+        use crate::runtime::tools::serialize_tool_input;
+        assert_eq!(serialize_tool_input(&serde_json::json!("hello")), "hello");
+        assert_eq!(
+            serialize_tool_input(&serde_json::json!("{\"a\":1}")),
+            "{\"a\":1}"
+        );
+    }
+
+    #[test]
+    fn serialize_tool_input_jsonifies_structured_values() {
+        // Objects/arrays must be JSON-serialized so json.loads can round-trip them.
+        use crate::runtime::tools::serialize_tool_input;
+        let s = serialize_tool_input(&serde_json::json!({"a":1,"b":[2,3]}));
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, serde_json::json!({"a":1,"b":[2,3]}));
+    }
+
+    #[test]
+    fn serialize_tool_input_renders_scalars_as_bare_json() {
+        // Numbers/bools render as their bare JSON form, which the SDK's
+        // json.loads parses back faithfully.
+        use crate::runtime::tools::serialize_tool_input;
+        assert_eq!(serialize_tool_input(&serde_json::json!(25.0)), "25.0");
+        assert_eq!(serialize_tool_input(&serde_json::json!(true)), "true");
+        // Null collapses to empty string so load_input() returns None,
+        // matching the SDK's missing-input behavior.
+        assert_eq!(serialize_tool_input(&serde_json::Value::Null), "");
     }
 
     #[test]

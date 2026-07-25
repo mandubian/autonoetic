@@ -877,6 +877,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                             },
                             "required": ["credential_id", "env_var"]
                         }
+                    },
+                    "input": {
+                        "description": "Payload delivered to the script via `autonoetic_sdk.load_input()`. Pass any JSON value (number, string, object, array) — the gateway serializes it to the AUTONOETIC_INPUT env var the SDK reads. Use this for scripts that call load_input() inside a sandbox_exec command; for scripts that read argv, pass arguments in `command` directly."
                     }
                 },
                 "required": ["command"],
@@ -2098,6 +2101,18 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         }
         if !layer_node_path_str.is_empty() {
             extra_env.push(("NODE_PATH".to_string(), layer_node_path_str));
+        }
+
+        // First-class `input` parameter → AUTONOETIC_INPUT env var. Mirrors
+        // artifact_exec: gives scripts that call load_input() a discoverable
+        // handle without the agent needing to know the env var name. No
+        // conflict check needed here — sandbox_exec has no free-form `env`
+        // field for the caller to also set AUTONOETIC_INPUT through.
+        if let Some(input) = &args.input {
+            extra_env.push((
+                crate::runtime::tools::AUTONOETIC_INPUT_ENV.to_string(),
+                crate::runtime::tools::serialize_tool_input(input),
+            ));
         }
 
         if let Some(credential_mappings) = &args.credential_env {
