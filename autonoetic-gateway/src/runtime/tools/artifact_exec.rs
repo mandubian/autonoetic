@@ -1585,9 +1585,12 @@ mod tests {
         use crate::runtime::tools::serialize_tool_input;
         assert_eq!(serialize_tool_input(&serde_json::json!(25.0)), "25.0");
         assert_eq!(serialize_tool_input(&serde_json::json!(true)), "true");
-        // Null collapses to empty string so load_input() returns None,
-        // matching the SDK's missing-input behavior.
-        assert_eq!(serialize_tool_input(&serde_json::Value::Null), "");
+        // Null serializes as the JSON literal "null" so both SDKs'
+        // json.loads/JSON.parse return None/null, which load_input(default)
+        // then replaces with the default. Empty-string would round-trip as
+        // "" (a real value), silently breaking the default fallback.
+        // (Copilot PR #892.)
+        assert_eq!(serialize_tool_input(&serde_json::Value::Null), "null");
     }
 
     #[test]

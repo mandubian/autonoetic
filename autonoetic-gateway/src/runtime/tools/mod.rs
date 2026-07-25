@@ -971,10 +971,14 @@ pub(crate) fn serialize_tool_input(input: &serde_json::Value) -> String {
         serde_json::Value::Number(_) | serde_json::Value::Bool(_) => input.to_string(),
         // Objects/arrays need explicit JSON serialization to round-trip.
         serde_json::Value::Object(_) | serde_json::Value::Array(_) => input.to_string(),
-        // Null is a no-op payload — pass empty string rather than "null",
-        // so `load_input()` returns `None` cleanly (matching the SDK's
-        // `_parse_json_or_text` behavior on missing input).
-        serde_json::Value::Null => String::new(),
+        // Null must serialize as the JSON literal "null" — both SDKs'
+        // `_parse_json_or_text` / `parseJsonOrText` then parse it back to
+        // None/null, and `load_input(default)` returns the default. The
+        // empty-string alternative (a previous version) would round-trip as
+        // the empty string `""` (json.loads("") raises → returns raw ""),
+        // so a caller's `input: null` would NOT trigger the default fallback
+        // — a silent cross-SDK contract divergence. (Copilot PR #892.)
+        serde_json::Value::Null => "null".to_string(),
     }
 }
 
