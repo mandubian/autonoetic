@@ -280,20 +280,42 @@ fn truncate_json_strings_in_place(value: &mut serde_json::Value, max_chars: usiz
     truncate_json_strings_iterative(value, per_field_budget);
 }
 
+/// Top-level JSON keys whose string values carry agent-routing directives and
+/// must survive tool-result truncation verbatim. When a result has many large
+/// fields (e.g. a long `undeclared_patterns` list), the per-field budget
+/// shrinks and `repair_hint`/`available_actions` used to get middle-truncated
+/// — destroying the one instruction telling the agent how to route the fix
+/// (manifest vs code). These fields are small by design, so exempting them
+/// costs little budget.
+const TRUNCATION_EXEMPT_KEYS: &[&str] = &[
+    "error_type",
+    "error_class",
+    "fix_target",
+    "repair_hint",
+    "repair_class",
+    "available_actions",
+    "enforced_rules",
+];
+
 fn truncate_json_strings_iterative(value: &mut serde_json::Value, per_field_budget: usize) {
-    let mut stack: Vec<&mut serde_json::Value> = vec![value];
-    while let Some(v) = stack.pop() {
+    // `exempt` propagates down subtrees rooted at an exempt top-level key
+    // (e.g. everything under `available_actions`).
+    let mut stack: Vec<(&mut serde_json::Value, bool)> = vec![(value, false)];
+    while let Some((v, exempt)) = stack.pop() {
         match v {
             serde_json::Value::String(s) => {
-                if s.chars().count() > per_field_budget {
+                if !exempt && s.chars().count() > per_field_budget {
                     *s = truncate_middle(s, per_field_budget);
                 }
             }
             serde_json::Value::Object(map) => {
-                stack.extend(map.iter_mut().map(|(_, v)| v));
+                stack.extend(map.iter_mut().map(|(k, v)| {
+                    let child_exempt = exempt || TRUNCATION_EXEMPT_KEYS.contains(&k.as_str());
+                    (v, child_exempt)
+                }));
             }
             serde_json::Value::Array(arr) => {
-                stack.extend(arr.iter_mut());
+                stack.extend(arr.iter_mut().map(|v| (v, exempt)));
             }
             _ => {}
         }
@@ -1724,6 +1746,60 @@ mod tests {
 
         let error_field = parsed["error"].as_str().unwrap();
         assert!(error_field.contains("[..."));
+    }
+
+    #[test]
+    fn truncate_tool_result_exempts_routing_directive_fields() {
+        // Many large pattern entries shrink the per-field budget; the
+        // routing directives (error_type/repair_hint/fix_target/
+        // available_actions) must survive verbatim while the bulky
+        // per-pattern strings get truncated.
+        let long_reason = "R".repeat(2000);
+        let long_hint = "This is a manifest declaration gap, not a code bug — report to caller. ".repeat(10);
+        let patterns: Vec<serde_json::Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "category": "function_call",
+                    "pattern": format!("requests.get( #{i}"),
+                    "line_number": i,
+                    "reason": long_reason,
+                })
+            })
+            .collect();
+        let content = serde_json::json!({
+            "ok": false,
+            "error_type": "undeclared_remote_pattern",
+            "error_class": "manifest_declaration_gap",
+            "fix_target": "manifest",
+            "repair_hint": long_hint,
+            "available_actions": [
+                {"action": "report_to_caller", "reason": "manifest_declaration_gap", "detail": long_hint},
+                {"action": "delegate", "delegate": "agent-factory.default", "reason": "manifest_declaration_gap", "detail": "builder only"}
+            ],
+            "undeclared_patterns": patterns,
+        })
+        .to_string();
+
+        let result = truncate_tool_result(&content, 12000);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result must stay valid JSON");
+        assert_eq!(parsed["error_type"], "undeclared_remote_pattern");
+        assert_eq!(parsed["error_class"], "manifest_declaration_gap");
+        assert_eq!(parsed["fix_target"], "manifest");
+        assert_eq!(parsed["repair_hint"], long_hint);
+        assert_eq!(parsed["available_actions"][0]["detail"], long_hint);
+        assert_eq!(
+            parsed["available_actions"][1]["delegate"],
+            "agent-factory.default"
+        );
+        let pattern_reason = parsed["undeclared_patterns"][0]["reason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            pattern_reason.len() < long_reason.len(),
+            "non-exempt pattern strings should still be truncated"
+        );
     }
 
     #[test]

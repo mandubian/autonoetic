@@ -3485,6 +3485,7 @@ pub fn run(
                                             );
                                         }
                                     } else {
+                                        gate_modal = None;
                                         input = Some(approval_gate_input(
                                             client,
                                             if approve {
@@ -3561,6 +3562,7 @@ pub fn run(
                                         }
                                         continue;
                                     }
+                                    gate_modal = None;
                                     input = Some(approval_gate_input(
                                         client,
                                         if approve {

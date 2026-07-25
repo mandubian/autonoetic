@@ -524,6 +524,7 @@ When `artifact_exec` returns `"error_type": "permission"`:
 
 - If the message is **static analysis / security policy** (destructive commands, privilege escalation, environment disclosure, etc.), **do not retry** the same command.
 - If the message says `ArtifactExecution` is unavailable, this revision has the wrong capability contract. Stop and report the manifest mismatch.
+- If `error_type` is `"undeclared_remote_pattern"` or `"missing_remote_access_declaration"`, this is a **manifest declaration gap, not a code bug**: the network access in the code is intended, but the agent's installed `remote_access` declaration doesn't cover it. Do NOT rewrite the code to remove the network access and do NOT retry — you cannot edit an installed SKILL.md. Report the `error_type` + `undeclared_patterns` to your caller; the builder flow (agent-factory / specialized_builder) must re-issue the install intent or a revision with a covering declaration.
 
 **Options:**
 1. Verify that the `artifact_ref` and `entrypoint` came from the latest `artifact_build`

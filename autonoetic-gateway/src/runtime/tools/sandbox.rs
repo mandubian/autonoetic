@@ -780,9 +780,58 @@ pub(crate) fn exec_approval_continuation_block() -> crate::runtime::guidance::Gu
 `approval_required: true` with a `request_id`, do not invent or guess ids — return that exact \
 `request_id` to your caller and stop. After the operator approves and you resume, retry the \
 **exact same** command with the `approval_ref` input set to the approved `request_id`, then continue \
-your task; do NOT `EndTurn` immediately after resumption."
+your task; do NOT `EndTurn` immediately after resumption.\n\n\
+**Manifest declaration gap.** If the result has `error_type: \"undeclared_remote_pattern\"` or \
+`\"missing_remote_access_declaration\"`, the fix is the manifest, not the code: do NOT rewrite code \
+to remove the network access, and do NOT retry the same code — you cannot edit your own installed \
+SKILL.md. Stop and report the `error_type` + `undeclared_patterns` to your caller; the caller must \
+have the builder flow (agent-factory / specialized_builder) re-issue the install intent or a \
+revision whose `remote_access` declaration covers the listed patterns."
             .to_string(),
     }
+}
+
+/// Build the rejection payload for manifest-declaration-gap errors
+/// (`missing_remote_access_declaration`, `undeclared_remote_pattern`).
+///
+/// These rejections look like code diagnostics (per-line `undeclared_patterns`)
+/// but the running agent cannot fix them: its installed SKILL.md is an
+/// immutable revision, editable only through the builder flow
+/// (agent-factory / specialized_builder via AgentRevision or a re-issued
+/// install intent). The old `repair_hint` offered "declare ... or change the
+/// code" — the first option was unactionable, so agents always picked code
+/// edits and looped for hundreds of turns (see
+/// docs/postmortems/session-b6d27af2-weather-agent.md). The payload now says
+/// `fix_target: manifest` explicitly and directs the agent to stop local
+/// repair and report to its caller.
+fn manifest_declaration_gap_response(
+    error_type: &str,
+    message: String,
+    undeclared: Vec<serde_json::Value>,
+) -> String {
+    serde_json::json!({
+        "ok": false,
+        "error_type": error_type,
+        "error_class": "manifest_declaration_gap",
+        "fix_target": "manifest",
+        "message": message,
+        "repair_hint": "This is a manifest declaration gap, not a code bug — do NOT edit code to remove the network access, and do NOT retry the same code. You cannot edit your own installed SKILL.md. Stop local repair and report error_type + undeclared_patterns to your caller; the caller must have agent-factory.default / specialized_builder.default re-issue the install intent or a revision whose remote_access declaration (imports/function_calls/shell_commands/package_manager_commands/targets) covers the listed patterns.",
+        "available_actions": [
+            {
+                "action": "report_to_caller",
+                "reason": "manifest_declaration_gap",
+                "detail": "Surface error_type + undeclared_patterns to whoever spawned you. Do not retry the same code or rewrite it to avoid the network access."
+            },
+            {
+                "action": "delegate",
+                "delegate": "agent-factory.default",
+                "reason": "manifest_declaration_gap",
+                "detail": "Only the builder flow can change an installed agent's remote_access declaration (install intent / AgentRevision)."
+            }
+        ],
+        "undeclared_patterns": undeclared,
+    })
+    .to_string()
 }
 
 impl NativeTool for SandboxExecTool {
@@ -1210,17 +1259,14 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     })
                 })
                 .collect();
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "missing_remote_access_declaration",
-                "message": format!(
-                    "Agent `{}` triggered remote-access signals but has no metadata.autonoetic.remote_access declaration in SKILL.md.",
+            return Ok(manifest_declaration_gap_response(
+                "missing_remote_access_declaration",
+                format!(
+                    "Agent `{}` triggered remote-access signals but has no metadata.autonoetic.remote_access declaration in its installed SKILL.md.",
                     manifest.agent.id
                 ),
-                "repair_hint": "Declare metadata.autonoetic.remote_access (approval_mode/targets/enabled_languages/imports/function_calls/shell_commands/package_manager_commands) before running network-related code or commands.",
-                "undeclared_patterns": undeclared,
-            })
-            .to_string());
+                undeclared,
+            ));
         }
 
         let undeclared_remote_patterns =
@@ -1240,14 +1286,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     })
                 })
                 .collect();
-            return Ok(serde_json::json!({
-                "ok": false,
-                "error_type": "undeclared_remote_pattern",
-                "message": "Remote access signals are not covered by manifest remote_access declaration.",
-                "repair_hint": "Declare required remote_access behavior in SKILL.md (targets/python_imports/function_calls/shell_commands/package_manager_commands) or change command/code to match declared behavior.",
-                "undeclared_patterns": undeclared,
-            })
-            .to_string());
+            return Ok(manifest_declaration_gap_response(
+                "undeclared_remote_pattern",
+                "The code requires network access not covered by the agent's installed remote_access declaration (see undeclared_patterns)."
+                    .to_string(),
+                undeclared,
+            ));
         }
 
         let agent_has_network_access = manifest

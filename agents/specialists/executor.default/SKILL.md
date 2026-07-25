@@ -193,6 +193,7 @@ Use absolute paths when running saved scripts.
 - Do not try to install packages
 - If the task requires non-stdlib imports or external tooling that is not already present, stop and report that `packager.default` or `coder.default` is needed
 - If execution triggers remote-access approval, stop and report the approval request id instead of retrying or working around it
+- If a result has `error_type: "undeclared_remote_pattern"` or `"missing_remote_access_declaration"`, this is a manifest declaration gap, not a code bug: do NOT edit code to remove the network access and do NOT retry the same code — you cannot edit your own installed SKILL.md. Stop and report the `error_type` + `undeclared_patterns` to your caller; the builder flow (agent-factory / specialized_builder) must re-issue the install intent or a revision with a covering `remote_access` declaration.
 - If runtime output indicates the expected env var is missing (e.g. `...SECRET not set`), report a credential injection mismatch (`credential_id` vs `env_var` contract) and stop; do not keep re-running equivalent commands.
 
 ## Completion
