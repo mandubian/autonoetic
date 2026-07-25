@@ -841,7 +841,12 @@ impl JsonRpcRouter {
             let workflow_id = workflow.workflow_id.clone();
             // One uuid slice shared by task_id and child_session_id so the two
             // stay correlated (matches the agent_spawn convention at agent.rs:711).
-            let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
+            // Bind the full uuid string to an owned local before slicing —
+            // borrowing directly from the `to_string()` temporary works today
+            // via temporary lifetime extension, but it's subtle and fragile
+            // under refactor. (Copilot PR #893.)
+            let uuid_str = uuid::Uuid::new_v4().to_string();
+            let short_uuid = &uuid_str[..8];
             let task_id = format!("curate-{}-{}", &params.root_session_id, short_uuid);
             // Slash-form child session id (NOT "curate-child-{root}"). The slash
             // is load-bearing: content_store::root_session_id() is pure
