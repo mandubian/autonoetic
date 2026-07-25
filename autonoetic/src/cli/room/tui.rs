@@ -124,7 +124,18 @@ fn main_list_page_step(terminal_height: u16, compose_open: bool) -> usize {
 /// within this window. The moment the cursor moves above the window, the
 /// viewport scrolls up to follow, with the cursor as far down in the new
 /// window as possible (i.e. the most-recent rows visible alongside it).
-fn compute_viewport_offset(selected: usize, list_height: usize, row_heights: &[usize]) -> usize {
+///
+/// When `prev_offset` is `Some`, the function first checks whether the
+/// selected row is already visible in the previous viewport. If so, the
+/// viewport stays fixed — the cursor moves freely within it. This avoids
+/// re-pinning the cursor to the top of the viewport on every incremental
+/// down-arrow move after scrolling up.
+fn compute_viewport_offset(
+    selected: usize,
+    list_height: usize,
+    row_heights: &[usize],
+    prev_offset: Option<usize>,
+) -> usize {
     if list_height == 0 || row_heights.is_empty() {
         return 0;
     }
@@ -134,9 +145,50 @@ fn compute_viewport_offset(selected: usize, list_height: usize, row_heights: &[u
         return 0;
     }
 
-    // Start from the bottom-anchored window: the largest suffix of rows that
-    // fits inside the viewport. This makes follow mode and jumps to the end
-    // look natural.
+    // When a previous viewport exists, edge-scroll from it in either
+    // direction instead of always starting from the bottom. This keeps the
+    // viewport stable as the cursor moves within it — no more re-pinning
+    // the cursor to the top of the window on every down-arrow.
+    if let Some(mut offset) = prev_offset {
+        if offset < row_count {
+            let mut height = 0usize;
+            let mut end = offset;
+            while end < row_count && height + row_heights[end] <= list_height {
+                height += row_heights[end];
+                end += 1;
+            }
+
+            // Cursor still inside the previous viewport — nothing to do.
+            if selected >= offset && selected < end {
+                return offset;
+            }
+
+            // Edge-scroll upward (cursor moved above the viewport).
+            while selected < offset && offset > 0 {
+                offset -= 1;
+                height += row_heights[offset];
+                while height > list_height {
+                    end -= 1;
+                    height -= row_heights[end];
+                }
+            }
+
+            // Edge-scroll downward (cursor moved below the viewport).
+            while selected >= end && end < row_count {
+                height += row_heights[end];
+                end += 1;
+                while height > list_height {
+                    height -= row_heights[offset];
+                    offset += 1;
+                }
+            }
+
+            return offset;
+        }
+    }
+
+    // Fallback — bottom-anchored window then edge-scroll up. Used when there
+    // is no previous viewport (follow mode, first frame, invalidated state).
     let mut offset = row_count;
     let mut height = 0usize;
     for i in (0..row_count).rev() {
@@ -146,12 +198,8 @@ fn compute_viewport_offset(selected: usize, list_height: usize, row_heights: &[u
         height += row_heights[i];
         offset = i;
     }
-    let mut end = row_count; // exclusive
+    let mut end = row_count;
 
-    // Edge-scroll upward one row at a time if the cursor is above the
-    // viewport. We only need to scroll up because the bottom window already
-    // includes every row at or below `offset`; any selection >= offset is
-    // visible. The sliding-window update is O(n) total.
     while selected < offset && offset > 0 {
         offset -= 1;
         height += row_heights[offset];
@@ -4925,6 +4973,7 @@ pub fn run(
                     floor,
                     squash,
                     follow,
+                    if follow { None } else { Some(view_viewport_offset) },
                     &view_rows,
                     selected,
                     detail.as_ref(),
@@ -4970,6 +5019,7 @@ pub fn run(
                     floor,
                     squash,
                     follow,
+                    if follow { None } else { Some(view_viewport_offset) },
                     &view_rows,
                     selected,
                     detail.as_ref(),
@@ -5457,9 +5507,9 @@ pub fn run(
             .get(safe_selected)
             .and_then(|(_, src)| spawn_agent_for_row_source(&visible, *src));
         let viewport_offset = if follow {
-            compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights)
+            compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights, None)
         } else {
-            compute_viewport_offset(safe_selected, list_height, &row_heights)
+            compute_viewport_offset(safe_selected, list_height, &row_heights, Some(view_viewport_offset))
         };
         let gate_count = count_active_gates(&entries, &resolved, &acted);
         let approval_rows = collect_approval_rows(&entries, &resolved, &acted);
@@ -5490,6 +5540,7 @@ pub fn run(
                 floor,
                 squash,
                 follow,
+                if follow { None } else { Some(view_viewport_offset) },
                 &rows,
                 selected,
                 detail.as_ref(),
@@ -7502,6 +7553,7 @@ fn draw(
     floor: Altitude,
     squash: bool,
     follow: bool,
+    prev_viewport_offset: Option<usize>,
     rows: &[RenderedRow],
     selected: usize,
     detail: Option<&DetailPane>,
@@ -7653,9 +7705,9 @@ fn draw(
     let viewport_offset = if follow {
         // Pin to the bottom; if the last row is multi-line, the offset
         // adjusts to keep the last row fully visible.
-        compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights)
+        compute_viewport_offset(row_count.saturating_sub(1), list_height, &row_heights, None)
     } else {
-        compute_viewport_offset(safe_selected, list_height, &row_heights)
+        compute_viewport_offset(safe_selected, list_height, &row_heights, prev_viewport_offset)
     };
     let highlight = Style::default().add_modifier(Modifier::REVERSED);
 
@@ -8886,20 +8938,20 @@ mod tests {
         // moves when the cursor crosses the viewport edge, so the cursor stays
         // inside the window while ↑/↓ move line-by-line.
         let h = vec![1usize; 7];
-        assert_eq!(compute_viewport_offset(0, 5, &h), 0);
-        assert_eq!(compute_viewport_offset(1, 5, &h), 1);
-        assert_eq!(compute_viewport_offset(2, 5, &h), 2);
-        assert_eq!(compute_viewport_offset(3, 5, &h), 2);
-        assert_eq!(compute_viewport_offset(4, 5, &h), 2);
-        assert_eq!(compute_viewport_offset(5, 5, &h), 2);
-        assert_eq!(compute_viewport_offset(6, 5, &h), 2);
+        assert_eq!(compute_viewport_offset(0, 5, &h, None), 0);
+        assert_eq!(compute_viewport_offset(1, 5, &h, None), 1);
+        assert_eq!(compute_viewport_offset(2, 5, &h, None), 2);
+        assert_eq!(compute_viewport_offset(3, 5, &h, None), 2);
+        assert_eq!(compute_viewport_offset(4, 5, &h, None), 2);
+        assert_eq!(compute_viewport_offset(5, 5, &h, None), 2);
+        assert_eq!(compute_viewport_offset(6, 5, &h, None), 2);
     }
 
     #[test]
     fn viewport_offset_returns_zero_when_list_fits() {
-        assert_eq!(compute_viewport_offset(0, 5, &[]), 0);
-        assert_eq!(compute_viewport_offset(0, 5, &[1, 1, 1, 1, 1]), 0);
-        assert_eq!(compute_viewport_offset(2, 5, &[1, 1, 1]), 0);
+        assert_eq!(compute_viewport_offset(0, 5, &[], None), 0);
+        assert_eq!(compute_viewport_offset(0, 5, &[1, 1, 1, 1, 1], None), 0);
+        assert_eq!(compute_viewport_offset(2, 5, &[1, 1, 1], None), 0);
     }
 
     #[test]
@@ -8909,18 +8961,41 @@ mod tests {
         // Last row (6) stays visible as the cursor moves inside the bottom
         // window. Moving above it scrolls up one row at a time.
         let h = vec![1usize, 1, 1, 1, 1, 2, 2];
-        assert_eq!(compute_viewport_offset(4, 5, &h), 4);
-        assert_eq!(compute_viewport_offset(5, 5, &h), 4);
-        assert_eq!(compute_viewport_offset(6, 5, &h), 4);
+        assert_eq!(compute_viewport_offset(4, 5, &h, None), 4);
+        assert_eq!(compute_viewport_offset(5, 5, &h, None), 4);
+        assert_eq!(compute_viewport_offset(6, 5, &h, None), 4);
         // selected=3 leaves the bottom window; viewport scrolls up by one row
         // so row 3 is at the top instead of snapping a whole page.
-        assert_eq!(compute_viewport_offset(3, 5, &h), 3);
+        assert_eq!(compute_viewport_offset(3, 5, &h, None), 3);
+    }
+
+    #[test]
+    fn viewport_offset_stable_when_cursor_within_prev_viewport() {
+        // 10 single-line rows, 5 visible. Starting from prev_offset=2,
+        // the cursor should be able to move freely within [2, 7) without
+        // changing the viewport. Only edge-crossings should scroll.
+        let h = vec![1usize; 10];
+        let prev = Some(2);
+        // Cursor within: [2, 7)
+        assert_eq!(compute_viewport_offset(2, 5, &h, prev), 2);
+        assert_eq!(compute_viewport_offset(3, 5, &h, prev), 2);
+        assert_eq!(compute_viewport_offset(4, 5, &h, prev), 2);
+        assert_eq!(compute_viewport_offset(5, 5, &h, prev), 2);
+        assert_eq!(compute_viewport_offset(6, 5, &h, prev), 2);
+        // Cursor above: edge-scroll up
+        assert_eq!(compute_viewport_offset(1, 5, &h, prev), 1);
+        assert_eq!(compute_viewport_offset(0, 5, &h, prev), 0);
+        // Cursor below: edge-scroll down
+        assert_eq!(compute_viewport_offset(7, 5, &h, prev), 3);
+        assert_eq!(compute_viewport_offset(8, 5, &h, prev), 4);
+        // Cursor to bottom: re-pin with edge-scroll
+        assert_eq!(compute_viewport_offset(9, 5, &h, prev), 5);
     }
 
     #[test]
     fn viewport_offset_follow_mode_empty_timeline_does_not_underflow() {
         // Fresh session: row_count == 0 → follow uses saturating_sub(1) == 0.
-        assert_eq!(compute_viewport_offset(0, 10, &[]), 0);
+        assert_eq!(compute_viewport_offset(0, 10, &[], None), 0);
     }
 
     #[test]
@@ -8929,7 +9004,7 @@ mod tests {
         // bottom window: row 2 (1) + row 3 (1) + row 4 (3) = 5 > 4, can't fit.
         // shrink: row 3 (1) + row 4 (3) = 4 → fits, offset=3.
         let h = vec![1usize, 1, 1, 1, 3];
-        assert_eq!(compute_viewport_offset(4, 4, &h), 3);
+        assert_eq!(compute_viewport_offset(4, 4, &h, None), 3);
     }
 
     #[test]
