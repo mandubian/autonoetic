@@ -719,7 +719,7 @@ pub fn handle_agent_revision(
             }
             rows.sort_by(|a, b| b["created_at"].as_str().cmp(&a["created_at"].as_str()));
             let total_matching = rows.len();
-            rows.truncate(*limit);
+            rows.truncate(limit.get());
 
             if *json {
                 println!(

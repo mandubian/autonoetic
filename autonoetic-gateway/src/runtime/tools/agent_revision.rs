@@ -5330,6 +5330,7 @@ const SKILL_PREVIEW_MAX_BYTES: usize = 4_000;
 /// than assuming they saw all of it.
 pub(crate) fn skill_body_preview(skill_text: &str) -> serde_json::Value {
     let body = strip_frontmatter(skill_text);
+    let body = body.as_str();
     let total_lines = body.lines().filter(|l| !l.trim().is_empty()).count();
 
     let mut lines: Vec<String> = Vec::new();
@@ -5354,22 +5355,27 @@ pub(crate) fn skill_body_preview(skill_text: &str) -> serde_json::Value {
     })
 }
 
-/// Text after the leading `---` frontmatter block, or the whole input when there
-/// is no frontmatter (a body-only SKILL is still worth previewing).
-fn strip_frontmatter(skill_text: &str) -> &str {
-    let trimmed = skill_text.trim_start();
-    if !trimmed.starts_with("---") {
-        return skill_text;
+/// Instruction body of a SKILL document, as the gateway's own parser sees it.
+///
+/// Delegates the split to `gray_matter` — the same engine
+/// `install_contract::extract_frontmatter_raw` parses SKILL.md with — rather than
+/// scanning for `---` here. A hand-rolled rule was subtly wrong (#890 review): it
+/// trimmed leading whitespace before testing for the fence, so a body-only SKILL
+/// starting with a Markdown `---` rule was mistaken for frontmatter and had its
+/// opening content stripped from the preview. Beyond that specific bug, any
+/// second rule would eventually disagree with the parser, and a preview that
+/// disagrees with what gets installed is worse than no preview.
+fn strip_frontmatter(skill_text: &str) -> String {
+    use gray_matter::{engine::YAML, Matter};
+    let matter = Matter::<YAML>::new();
+    match matter.parse::<serde_yaml::Value>(skill_text) {
+        // `content` is the input with frontmatter and delimiters removed; when
+        // there is no frontmatter it is the whole document.
+        Ok(parsed) => parsed.content,
+        // Unparseable frontmatter is not a reason to show nothing: fall back to
+        // the raw text so the operator still sees what they are approving.
+        Err(_) => skill_text.to_string(),
     }
-    let after_open = &trimmed[3..];
-    // The closing fence is a `---` on its own line.
-    for (idx, _) in after_open.match_indices("\n---") {
-        let rest = &after_open[idx + 4..];
-        if rest.starts_with('\n') || rest.starts_with("\r\n") || rest.is_empty() {
-            return rest.trim_start_matches(['\r', '\n']);
-        }
-    }
-    skill_text
 }
 
 pub(crate) fn check_capability_delta(
@@ -6666,6 +6672,37 @@ mod skill_preview_tests {
             "preview should stay under the byte ceiling, got {rendered}"
         );
         assert_eq!(v["truncated"], true);
+    }
+
+    /// A body-only SKILL whose first non-whitespace content is a Markdown `---`
+    /// rule must keep that content. The previous hand-rolled split trimmed
+    /// leading whitespace before testing for the fence, so it treated the rule as
+    /// frontmatter and silently ate the opening lines of the preview (#890
+    /// review) — a preview that omits what it omits is worse than no preview.
+    #[test]
+    fn preview_keeps_a_body_that_opens_with_a_markdown_rule() {
+        let v = skill_body_preview("\n---\n\n# Title\n\nfirst instruction\n");
+        let lines: Vec<&str> = v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
+        assert!(
+            lines.contains(&"# Title") && lines.contains(&"first instruction"),
+            "body content must survive, got {lines:?}"
+        );
+    }
+
+    /// Unparseable frontmatter falls back to the raw text rather than showing an
+    /// empty preview: the operator is deciding on this revision either way.
+    #[test]
+    fn preview_falls_back_when_frontmatter_is_malformed() {
+        let v = skill_body_preview("---\nname: \"unclosed\n# Body\n");
+        assert!(
+            !v["lines"].as_array().unwrap().is_empty(),
+            "a malformed header must not blank the preview"
+        );
     }
 
     /// `---` inside the body (a markdown rule) must not be mistaken for the

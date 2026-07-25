@@ -1126,9 +1126,10 @@ pub enum AgentRevisionCommands {
         /// Filter by status: candidate, ready, archived, rejected
         #[arg(long)]
         status: Option<String>,
-        /// Maximum rows to print (newest first)
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
+        /// Maximum rows to print (newest first). Must be >= 1: `--limit 0` would
+        /// print the empty-result message while matching revisions existed.
+        #[arg(long, default_value = "20")]
+        limit: std::num::NonZeroUsize,
         /// Emit machine-readable JSON output
         #[arg(long)]
         json: bool,

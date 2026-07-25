@@ -1344,6 +1344,19 @@ fn agent_revision_list_filters_by_status_and_reports_truncation() {
         "truncation should be reported, got:\n{stdout}"
     );
 
+    // `--limit 0` is rejected at the argument layer rather than silently printing
+    // "no revisions" while two exist (#890 review).
+    let out = run_autonoetic(
+        &["--config", cfg, "agent", "revision", "list", "--limit", "0"],
+        None,
+    );
+    assert!(!out.status.success(), "--limit 0 should be rejected");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid value") || stderr.contains("0"),
+        "rejection should explain itself, got:\n{stderr}"
+    );
+
     // An empty result says so rather than printing a bare header.
     let out = run_autonoetic(
         &[
