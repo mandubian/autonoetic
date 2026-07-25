@@ -839,19 +839,44 @@ impl JsonRpcRouter {
                 }
             };
             let workflow_id = workflow.workflow_id.clone();
-            let task_id = format!(
-                "curate-{}-{}",
+            // Use the shared `short_random_id` helper (the codebase's
+            // canonical replacement for the `&Uuid::new_v4().to_string()[..8]`
+            // idiom — see autonoetic_types::id_format). The `curate-` prefix
+            // on task_id is load-bearing: `maybe_emit_workflow_timeline` in
+            // workflow_store.rs uses `task_id.starts_with("curate-")` to
+            // discriminate manual `/curate` tasks from cron tasks when
+            // mirroring terminal events onto the root timeline.
+            let task_id = autonoetic_types::id_format::short_random_id("curate-");
+            // Slash-form child session id (NOT "curate-child-{root}"). The slash
+            // is load-bearing: content_store::root_session_id() is pure
+            // `session_id.split('/').next()`, so timeline queries that filter by
+            // root_session_id only attribute the curator's events to the root if
+            // the child id starts with "{root}/". Without the slash the curator
+            // is its own root and the operator sees nothing on the timeline
+            // after /curate — the session-3739f831 visibility gap. This matches
+            // agent_spawn's "{root}/{agent}-{rand}" convention at agent.rs:711
+            // exactly (same helper, same shape) so resolve()/workflow_wait
+            // behave consistently across both spawn paths.
+            let child_session_id = format!(
+                "{}/{}-{}",
                 &params.root_session_id,
-                &uuid::Uuid::new_v4().to_string()[..8]
+                curator_ref.agent_id,
+                autonoetic_types::id_format::short_random_id("")
             );
-            let child_session_id =
-                format!("curate-child-{}", &params.root_session_id);
             let now_rfc = chrono::Utc::now().to_rfc3339();
 
             // Memory-curator is singleton=true. The normal agent.spawn path
             // acquires a singleton slot before enqueueing to dedup; this
             // operator RPC must do the same, otherwise repeated /curate
             // within a tick window can enqueue duplicate curator tasks.
+            //
+            // NOTE: the singleton key is (workflow_id, agent_id, revision_id)
+            // — never the child session id. Cron-fired curators run in a
+            // separate sched-{job_id} workflow and do NOT consult this slot,
+            // so a cron curation and a /curate can run concurrently. That is
+            // tolerable today because /curate's focus_notes distinguishes a
+            // manual operator inspection from a routine scheduled sweep.
+            // Cross-workflow mutual exclusion is a separate follow-up.
             let is_singleton = crate::runtime::tools::agent::target_agent_is_singleton(
                 &config.agents_dir,
                 &curator_ref.agent_id,
@@ -909,7 +934,7 @@ impl JsonRpcRouter {
                     curator_ref.agent_id, curator_ref.revision_id
                 ),
                 message,
-                child_session_id,
+                child_session_id: child_session_id.clone(),
                 parent_session_id: params.root_session_id.clone(),
                 source_agent_id: "operator".to_string(),
                 metadata: Some(serde_json::json!({
@@ -948,6 +973,61 @@ impl JsonRpcRouter {
                     format!("Failed to enqueue curation task: {e}"),
                 );
             }
+
+            // Wire the curator into the root session's lineage — mirrors
+            // agent_spawn at agent.rs:798-854. Without these three calls the
+            // curator's child session (now slash-form) is not registered as a
+            // child of the root for content-store visibility, spawn-lineage
+            // queries, or the root's causal chain. The slash-form id alone
+            // fixes timeline attribution; these calls close the remaining
+            // gaps so resolve()/workflow_wait behave consistently with
+            // agent_spawn.
+            let gw_dir = crate::execution::gateway_root_dir(&config);
+            if let Ok(content_store) =
+                crate::runtime::content_store::ContentStore::new(&gw_dir)
+            {
+                if let Err(e) = content_store
+                    .set_root_session(&child_session_id, &params.root_session_id)
+                {
+                    tracing::warn!(
+                        target: "curation",
+                        error = %e,
+                        parent_session = %params.root_session_id,
+                        child_session = %child_session_id,
+                        "Failed to set root session for curator child"
+                    );
+                }
+            }
+            if let Err(e) = store.upsert_session_spawn_lineage(
+                &child_session_id,
+                &params.root_session_id,
+                &params.root_session_id,
+                0,
+                &curator_ref.agent_id,
+                &now_rfc,
+            ) {
+                tracing::warn!(
+                    target: "curation",
+                    error = %e,
+                    child_session_id = %child_session_id,
+                    "Failed to record curator spawn lineage"
+                );
+            }
+            crate::scheduler::workflow_causal::mirror_orchestration_event(
+                &config,
+                &params.root_session_id,
+                "workflow.task.spawned",
+                autonoetic_types::causal_chain::EntryStatus::Success,
+                serde_json::json!({
+                    "workflow_id": &workflow_id,
+                    "task_id": &task_id,
+                    "target_agent_id": &curator_ref.agent_id,
+                    "child_session_id": &child_session_id,
+                    "parent_session_id": &params.root_session_id,
+                    "source_agent_id": "operator",
+                    "trigger": "manual_curation",
+                }),
+            );
 
             if let Err(e) = crate::scheduler::append_workflow_event(
                 &config,

@@ -656,19 +656,43 @@ pub fn append_workflow_event(
             "Failed to refresh workflow_graph.md"
         );
     }
-    maybe_emit_scheduled_job_timeline(config, store, event);
+    maybe_emit_workflow_timeline(config, store, event);
     Ok(())
 }
 
-/// Mirror scheduled-job workflow events onto the canonical session timeline so
-/// the Session Room (and any channel reading `live_digest_events`) shows cron
-/// trigger + result lines — not just the chat TUI's workflow-event poll.
-fn maybe_emit_scheduled_job_timeline(
+/// Mirror workflow events onto the canonical session timeline so the Session
+/// Room (and any channel reading `live_digest_events`) shows trigger + result
+/// lines — not just the chat TUI's workflow-event poll.
+///
+/// Admits two event sources:
+/// - **Scheduled jobs**: workflows whose id starts with `sched-` (the cron
+///   path). Maps `scheduled_job.triggered` / `task.completed` / `task.failed`
+///   to `scheduled_job.*` timeline types.
+/// - **Manual `/curate`**: tasks whose id starts with `curate-` (the
+///   `curation.run_for_session` RPC path at router.rs). Maps `task.completed`
+///   / `task.failed` to `curation.*` timeline types. Without this arm the
+///   operator sees nothing after `/curate` — the curator's child session is
+///   slash-form now, so root attribution works, but workflow events only
+///   reach the timeline via this mirror.
+///
+/// The two paths never overlap: a task id is either `curate-...` (enqueued by
+/// the operator RPC into `wf-{root}`) or it's in a `sched-{job_id}` workflow.
+fn maybe_emit_workflow_timeline(
     config: &GatewayConfig,
     store: &crate::scheduler::gateway_store::GatewayStore,
     event: &WorkflowEventRecord,
 ) {
-    if !event.workflow_id.starts_with("sched-") {
+    let is_sched = event.workflow_id.starts_with("sched-");
+    // `/curate` task ids are minted at router.rs via
+    // `id_format::short_random_id("curate-")` → `curate-{8-hex}`. This prefix
+    // is stable and unique to the operator curation RPC — nothing else mints
+    // `curate-` task ids (the cron path uses `sched-{job_id}` workflows with
+    // `task-{...}` ids via `new_task_id()`).
+    let is_curation = event
+        .task_id
+        .as_deref()
+        .is_some_and(|t| t.starts_with("curate-"));
+    if !is_sched && !is_curation {
         return;
     }
     let root_session_id = store
@@ -686,6 +710,52 @@ fn maybe_emit_scheduled_job_timeline(
         return;
     };
     let agent_label = workflow_agent_label(event.agent_id.as_deref());
+
+    // Manual `/curate` arm — emit `curation.completed` / `curation.failed`
+    // only on terminal task transitions. The spawn is already surfaced by the
+    // `workflow.task.spawned` causal event emitted in the /curate handler; we
+    // only need to mirror the result so the operator sees when the curator
+    // finishes and what it concluded.
+    if is_curation {
+        let (timeline_type, payload) = match event.event_type.as_str() {
+            "task.completed" => {
+                let summary = event
+                    .payload
+                    .get("result_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                (
+                    "curation.completed",
+                    serde_json::json!({
+                        "agent_id": agent_label,
+                        "task_id": event.task_id,
+                        "result_summary": summary,
+                    }),
+                )
+            }
+            "task.failed" => {
+                let summary = event
+                    .payload
+                    .get("result_summary")
+                    .or_else(|| event.payload.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("curator task failed");
+                (
+                    "curation.failed",
+                    serde_json::json!({
+                        "agent_id": agent_label,
+                        "task_id": event.task_id,
+                        "result_summary": summary,
+                    }),
+                )
+            }
+            _ => return,
+        };
+        emit_timeline_event(store, &root_session_id, &agent_label, timeline_type, payload);
+        return;
+    }
+
+    // Scheduled-job arm (unchanged behavior).
     let (timeline_type, payload) = match event.event_type.as_str() {
         "scheduled_job.triggered" => (
             "scheduled_job.triggered",
@@ -728,11 +798,24 @@ fn maybe_emit_scheduled_job_timeline(
         }
         _ => return,
     };
-    let principal = autonoetic_types::principal::Principal::agent(&agent_label);
-    let role = crate::runtime::session_timeline::derive_role(&agent_label);
+    emit_timeline_event(store, &root_session_id, &agent_label, timeline_type, payload);
+}
+
+/// Build and persist a `live_digest_events` row. Shared by both arms of
+/// `maybe_emit_workflow_timeline` so the timeline-event shape stays identical
+/// for scheduled-job and curation events.
+fn emit_timeline_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    root_session_id: &str,
+    agent_label: &str,
+    timeline_type: &str,
+    payload: serde_json::Value,
+) {
+    let principal = autonoetic_types::principal::Principal::agent(agent_label);
+    let role = crate::runtime::session_timeline::derive_role(agent_label);
     let tl_event = crate::runtime::session_timeline::build_timeline_event(
-        root_session_id.clone(),
-        root_session_id,
+        root_session_id.to_string(),
+        root_session_id.to_string(),
         None,
         &principal,
         &role,
@@ -746,7 +829,7 @@ fn maybe_emit_scheduled_job_timeline(
             target: "session_timeline",
             error = %e,
             event_type = timeline_type,
-            "scheduled job timeline emit failed"
+            "workflow timeline emit failed"
         );
     }
 }
@@ -4019,6 +4102,175 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("fibonacci-next"));
+    }
+
+    /// Manual `/curate` (router.rs `curation.run_for_session`) enqueues a
+    /// task whose id starts with `curate-` into the root's `wf-{root}`
+    /// workflow. `maybe_emit_workflow_timeline` must admit it and map
+    /// `task.completed` → `curation.completed`. Without this the operator
+    /// sees nothing on the timeline after `/curate` (session-3739f831 gap).
+    #[test]
+    fn curation_task_completed_mirrors_result_to_session_timeline() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        // Mirror what `ensure_workflow_for_root_session` produces: a `wf-*`
+        // workflow for the root, registered in RootWorkflowIndex so
+        // `resolve_root_session_id` can find it.
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "root-curate", None).unwrap();
+
+        append_workflow_event(
+            &cfg,
+            Some(&store),
+            &WorkflowEventRecord {
+                event_id: "wevt-curate-test".to_string(),
+                workflow_id: wf.workflow_id.clone(),
+                event_type: "task.completed".to_string(),
+                // The discriminator: `curate-` prefix identifies operator-RPC
+                // curation tasks (router.rs mints via short_random_id("curate-")).
+                task_id: Some("curate-abcd1234".to_string()),
+                agent_id: Some("memory-curator.default@rev_sha256:abc".to_string()),
+                payload: serde_json::json!({
+                    "status": "Succeeded",
+                    "result_summary": "2 decisions, 1 promote_to_skill",
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )
+        .unwrap();
+
+        let tl = store
+            .list_session_timeline("root-curate", None, 10, None, None)
+            .unwrap();
+        let completed = tl
+            .entries
+            .iter()
+            .find(|e| e.event_type == "curation.completed")
+            .expect("curation.completed must reach the root timeline");
+        let payload_str = completed.payload.as_deref().unwrap_or("");
+        assert!(
+            payload_str.contains("2 decisions"),
+            "payload should carry the curator's result_summary; got: {payload_str}"
+        );
+        assert!(
+            payload_str.contains("memory-curator.default"),
+            "payload should name the curator agent; got: {payload_str}"
+        );
+    }
+
+    /// `task.failed` on a `curate-*` task must map to `curation.failed`
+    /// (not be silently dropped, and not be misclassified as scheduled_job).
+    #[test]
+    fn curation_task_failed_mirrors_failure_to_session_timeline() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf = ensure_workflow_for_root_session(&cfg, Some(&store), "root-curate-fail", None).unwrap();
+
+        append_workflow_event(
+            &cfg,
+            Some(&store),
+            &WorkflowEventRecord {
+                event_id: "wevt-curate-fail".to_string(),
+                workflow_id: wf.workflow_id.clone(),
+                event_type: "task.failed".to_string(),
+                task_id: Some("curate-deadbeef".to_string()),
+                agent_id: Some("memory-curator.default@rev_sha256:abc".to_string()),
+                payload: serde_json::json!({
+                    "reason": "curator exceeded turn budget",
+                }),
+                occurred_at: now_rfc3339(),
+            },
+        )
+        .unwrap();
+
+        let tl = store
+            .list_session_timeline("root-curate-fail", None, 10, None, None)
+            .unwrap();
+        let failed = tl
+            .entries
+            .iter()
+            .find(|e| e.event_type == "curation.failed")
+            .expect("curation.failed must reach the root timeline");
+        assert!(
+            failed
+                .payload
+                .as_deref()
+                .unwrap_or("")
+                .contains("curator exceeded turn budget"),
+            "curation.failed payload should carry the failure reason"
+        );
+    }
+
+    /// Regression guard: the broaden must NOT change `sched-*` behavior.
+    /// A scheduled-job completion still maps to `scheduled_job.completed`,
+    /// never to `curation.*`.
+    #[test]
+    fn scheduled_job_still_maps_to_scheduled_job_timeline_after_broaden() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+        let gateway_dir = agents.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        let wf_id = "sched-sj-regress";
+        let wf_run = autonoetic_types::workflow::WorkflowRun {
+            workflow_id: wf_id.to_string(),
+            root_session_id: "root-regress".to_string(),
+            lead_agent_id: "planner.default".to_string(),
+            status: autonoetic_types::workflow::WorkflowRunStatus::Active,
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            active_task_ids: vec![],
+            queued_task_ids: vec![],
+            join_policy: JoinPolicy::AllOf,
+            join_task_ids: vec![],
+            active_plan_ref: None,
+            reactivated_for_root_spawn: false,
+        };
+        save_workflow_run(&cfg, Some(&store), &wf_run).unwrap();
+
+        append_workflow_event(
+            &cfg,
+            Some(&store),
+            &WorkflowEventRecord {
+                event_id: "wevt-regress".to_string(),
+                workflow_id: wf_id.to_string(),
+                event_type: "task.completed".to_string(),
+                task_id: Some("task-cron-xyz".to_string()),
+                agent_id: Some("planner.default@rev_sha256:abc".to_string()),
+                payload: serde_json::json!({ "result_summary": "ok" }),
+                occurred_at: now_rfc3339(),
+            },
+        )
+        .unwrap();
+
+        let tl = store
+            .list_session_timeline("root-regress", None, 10, None, None)
+            .unwrap();
+        // scheduled_job.completed must be present…
+        assert!(
+            tl.entries
+                .iter()
+                .any(|e| e.event_type == "scheduled_job.completed"),
+            "sched-* task.completed must still map to scheduled_job.completed"
+        );
+        // …and no curation.* event should leak in for a non-curate task id.
+        assert!(
+            !tl.entries
+                .iter()
+                .any(|e| e.event_type.starts_with("curation.")),
+            "sched-* events must never be misclassified as curation.*"
+        );
     }
 
     #[test]
