@@ -3533,7 +3533,12 @@ pub fn run(
                                             );
                                         }
                                     } else {
-                                        gate_modal = None;
+                                        // Modal stays open during text capture — the in-popup
+                                        // input panel (`gate_modal_input_panel_lines`) renders
+                                        // the confirm-phrase / motivation box inside the overlay.
+                                        // Auto-dismissed by poll_pending_gate on success; on
+                                        // error `input` is restored so the operator can retry in
+                                        // place. Mirrors the Interaction gate path below.
                                         input = Some(approval_gate_input(
                                             client,
                                             if approve {
@@ -3610,7 +3615,12 @@ pub fn run(
                                         }
                                         continue;
                                     }
-                                    gate_modal = None;
+                                    // Modal stays open during text capture — the in-popup input
+                                    // panel (`gate_modal_input_panel_lines`) renders the
+                                    // confirm-phrase / motivation box inside the overlay.
+                                    // Auto-dismissed by poll_pending_gate on success; on error
+                                    // `input` is restored so the operator can retry in place.
+                                    // Mirrors the Interaction gate path below.
                                     input = Some(approval_gate_input(
                                         client,
                                         if approve {
@@ -3685,8 +3695,67 @@ pub fn run(
                                 }
                             }
                         } else {
-                            // Input mode inside the modal — block timeline navigation.
-                            continue;
+                            // Modal is open but a gate RPC is in flight (input already
+                            // taken on Enter). Keep navigation responsive: allow scroll
+                            // + quit + Esc-back to bare timeline, but block re-arming
+                            // y/n/r until the RPC settles — otherwise a second
+                            // `input = Some(...)` could race the in-flight resolve and
+                            // re-submit the same gate. Applies to every modal kind
+                            // (approval/escalation/interaction/plan).
+                            match key.code {
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.scroll = m.scroll.saturating_add(1);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.scroll = m.scroll.saturating_sub(1);
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Esc => {
+                                    gate_modal = None;
+                                    status = Some(
+                                        "⏳ still submitting… (Esc closed overlay)".to_string(),
+                                    );
+                                    continue;
+                                }
+                                KeyCode::Char('q') => {
+                                    if quit_armed(&quit_armed_until) {
+                                        break 'room;
+                                    }
+                                    arm_quit(&mut quit_armed_until, &mut status);
+                                    continue;
+                                }
+                                _ => {
+                                    // Let compose / slash triggers fall through to the
+                                    // main handler — the overlay must not block messaging.
+                                    if matches!(
+                                        key.code,
+                                        KeyCode::Char('i') | KeyCode::Char('I')
+                                            | KeyCode::Char('/')
+                                            | KeyCode::Char(':')
+                                    ) {
+                                        // fall through to compose / slash handlers below
+                                    } else {
+                                        let ctrl_c = key.code == KeyCode::Char('c')
+                                            && key.modifiers.contains(KeyModifiers::CONTROL);
+                                        if ctrl_c {
+                                            if quit_armed(&quit_armed_until) {
+                                                break 'room;
+                                            }
+                                            arm_quit(&mut quit_armed_until, &mut status);
+                                        }
+                                        if pending_gate.is_some() && status.is_none() {
+                                            status =
+                                                Some("⏳ still submitting… (wait or Esc)".to_string());
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                     }
 
