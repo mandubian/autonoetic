@@ -41,7 +41,24 @@ fn setup() -> (
         config.clone(),
         Some(store.clone()),
     ));
+
+    // Any test here that runs a real agent turn reaches
+    // `build_state_attestation_tail`, which calls the infallible
+    // `constitution_digest::constitution_version()`. Without this the process
+    // aborts with "constitution runtime not initialized" — the same setup step
+    // the sibling right-suites (`constitution_right_ri_0_5`,
+    // `constitution_right_ri_0_10`) already perform. Idempotent, so calling it
+    // once per test is safe.
+    let _ = constitution_digest_init(&config);
+
     (config, store, execution)
+}
+
+/// `initialize_constitution` is idempotent but returns an error if the
+/// constitution source cannot be read; tests must not fail on that here — the
+/// suites that assert digest behaviour do so explicitly.
+fn constitution_digest_init(config: &GatewayConfig) -> anyhow::Result<()> {
+    autonoetic_gateway::constitution_digest::initialize_constitution(config)
 }
 
 fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
