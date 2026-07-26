@@ -366,10 +366,48 @@ impl GatewayStore {
         Ok(results.pop())
     }
 
+    /// Every session ever bound to `agent_id`, finished or not.
+    ///
+    /// `session_agent_bindings` is append-only — one row per session, never
+    /// deleted (reclamation treats a binding as a live revision reference). So
+    /// this is a historical index, suitable for retrospective analysis
+    /// (`autonoetic improve --last-sessions`). It cannot answer "who can
+    /// receive a message right now": use
+    /// [`Self::list_unfinished_sessions_for_agent`] for that.
     pub fn list_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
             conn.prepare("SELECT session_id FROM session_agent_bindings WHERE agent_id = ?1")?;
+        let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r?);
+        }
+        Ok(results)
+    }
+
+    /// Sessions bound to `agent_id` that have not reached a terminal state —
+    /// the plausible recipients of an `agent_message` broadcast.
+    ///
+    /// A `session_outcomes` row is written unconditionally at session close
+    /// (`session_outcome_writer::write_session_outcome_metrics` — "every
+    /// session gets a row"). Its **presence** therefore marks a session as
+    /// closed, and a binding with no such row is one this query returns.
+    ///
+    /// Residual case: a session killed without a clean close leaves no outcome
+    /// row and stays listed here. Messaging it queues a delivery that is never
+    /// consumed — the same observable failure as messaging a hung session, and
+    /// strictly better than counting every historical session as a live
+    /// recipient.
+    pub fn list_unfinished_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT b.session_id
+             FROM session_agent_bindings b
+             LEFT JOIN session_outcomes o ON o.session_id = b.session_id
+             WHERE b.agent_id = ?1 AND o.session_id IS NULL
+             ORDER BY b.created_at ASC",
+        )?;
         let rows = stmt.query_map(params![agent_id], |row| row.get(0))?;
         let mut results = Vec::new();
         for r in rows {

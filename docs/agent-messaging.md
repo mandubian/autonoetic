@@ -42,18 +42,110 @@ CREATE TABLE IF NOT EXISTS agent_message_deliveries (
 );
 ```
 
+## Addressing and Recipient Resolution
+
+`agent_message` takes `target_session_id`, `target_agent_id`, or both; at least
+one is required. `target_session_id` wins for delivery when both are present.
+
+- **`target_session_id`** — one session. The gateway resolves that session's
+  bound agent (`session_agent_bindings`) and applies the ACL to it, so a session
+  id cannot widen a scoped grant. A session id with no binding is refused
+  (`target_session_not_found`) rather than delivered to unchecked.
+- **`target_agent_id`** — broadcast to that role's **unfinished** sessions,
+  excluding the sender's own session.
+
+"Unfinished" is `GatewayStore::list_unfinished_sessions_for_agent`: bindings with
+no `session_outcomes` row. `session_agent_bindings` is append-only — one row per
+session ever bound, never deleted — so it is a historical index, not a liveness
+index. A `session_outcomes` row is written unconditionally at session close, so
+its **presence** marks a session as closed and its absence means the session has
+not finished. Residual case: a session killed without a clean close leaves no
+outcome row and stays listed; messaging it queues a delivery nothing consumes,
+the same observable failure as messaging a hung session.
+
+Result contract — treat only `ok == true && status == "delivered" &&
+recipients_count > 0` as sent. Every other status leaves `recipients_count == 0`
+and queues nothing:
+
+| `status` | Meaning |
+|---|---|
+| `no_live_recipients` | The role is installed but has no unfinished session other than the sender's. |
+| `target_agent_not_found` | No agent with that id is installed. |
+| `target_agent_unavailable` | The agent is installed but its manifest could not be loaded — a broken bundle, not a missing one. |
+| `target_session_not_found` | The session id has no `session_agent_bindings` row, so the gateway cannot tell which agent owns it and will not deliver unchecked. |
+
+`exists` distinguishes the two `target_agent_*` cases (`false` for not-found,
+`true` for unavailable) and is absent when no `GatewayConfig` was supplied.
+
 ## Wakeup Mechanism
 
 When an agent issues a message:
-1. The message and its corresponding delivery records are inserted into SQLite.
-2. The Gateway signals the target session(s) via the existing JSON-RPC signaling loop (`event.ingest` with an `agent_message` payload).
-3. If the target session is sleeping or waiting on a background timer, the receipt of the `event.ingest` message will act as an immediate wakeup signal.
+1. The message and its per-recipient delivery rows are inserted into SQLite, and
+   a pending `AgentMessage` notification is recorded per recipient.
+2. The scheduler's notification pump (`process_pending_notifications`) delivers
+   each notification as `event.ingest` against the target session, which wakes
+   it.
+3. That ingest carries a **wake notice only** — it deliberately does not repeat
+   the message body, because the body is delivered by auto-injection (below).
+   The notice declares `metadata.signal_type = "agent_message"`, which lets the
+   ingress pass its text through verbatim instead of wrapping it in the
+   `Gateway event type: … / Message: … / Metadata: …` envelope.
+
+Carrying the body in *both* places is what made every peer message arrive twice,
+in two different formats, only one of which matched the documented block below.
 
 ## Auto-Injection
 
-Instead of forcing the recipient agent to explicitly pull messages via an inbox tool, the system will feature **auto-injection**:
-At the beginning of each execution turn (`execute_session_turn` within `AgentExecutor`), the Gateway queries `agent_message_deliveries` where `target_session_id = <current_session>` and `delivered_at IS NULL`.
-Any undelivered messages are injected directly into the LLM system/user context as synthetic events (e.g., `[Async Message from Agent X]: "..."`) and marked as delivered.
+Rather than making the recipient pull from an inbox tool, delivery is
+**auto-injected**. At each **wake** — the start of a session run, before the turn
+loop, in `AgentExecutor::execute_with_history` — the gateway queries
+`agent_message_deliveries` where `target_session_id = <current_session>` and
+`delivered_at IS NULL`. Each undelivered message is appended to history as user
+text:
+
+```
+[Direct Message from Agent '<sender_agent_id>' (Session: <sender_session_id>)]
+<message>
+```
+
+and then marked delivered, with an `agent_message`/`received` causal event.
+
+Note this is per **wake**, not per turn within a run: a message that arrives
+while the receiver is mid-loop is queued and injected when it next wakes. The
+pump's `event.ingest` is what causes that wake in the normal case.
 
 ## Tool Implementation
-The `AgentMessageTool` (`agent_message`) will be officially implemented in the native Registry, accepting `target_session_id` and `message_payload`. The tool enforces the existing `PolicyEngine::can_message_agent()` rules before allowing dispatch.
+
+`AgentMessageTool` (`agent_message`) is registered in the native tool registry
+and gated on the `AgentMessage` capability. It enforces
+`PolicyEngine::can_message_agent()` (P-11.5) against the receiving agent in both
+addressing modes.
+
+Tier: **Workflow** (`config/tools.yaml`). This matters — as `Specialized` (the
+registry default for unlisted tools) the tool is filtered out of the advertised
+tool list for every child session and every un-escalated root session, including
+agents that declare the capability, and its prompt guidance is dropped with it.
+`child_tool_tier_filter_for_manifest` already grants the Workflow tier to
+manifests declaring `AgentMessage`, so Workflow is the tier that matches.
+Regression guard: `agent_message_is_workflow_tier_so_declaring_agents_can_see_it`
+in `runtime::prompt_budget`.
+
+## Operator Surface
+
+Delivery emits an `agent.peer_message` row on the **receiving** session's
+canonical timeline (`peer_message_event`), attributed to the **sender** —
+sender acted, receiver was affected. Payload carries `message_id`,
+`sender_agent_id`, `sender_session_id`, and the redacted body.
+
+Altitude derives to **Normal**, the same floor as `operator.message`, so peer
+traffic is visible in the room without lowering the altitude filter. A sender on
+a raised seat (e.g. Sentinel) lifts it further via `role_floor`. Without this
+row, an injected peer message reads as anonymous user text — indistinguishable
+from something the operator typed.
+
+The wake-notice ingest emits no timeline row of its own: it carries no body, so a
+row there would either duplicate `agent.peer_message` or sit beside it as a
+bodyless placeholder.
+
+The `agent_message`/`received` causal event remains the audit record; the
+timeline row is the operator-facing view.

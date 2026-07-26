@@ -1832,6 +1832,28 @@ impl AgentExecutor {
                         })),
                     );
 
+                    // Surface peer traffic to the operator (#896). The causal
+                    // event above is the audit record; without a timeline row an
+                    // agent-to-agent message reads as anonymous user text in the
+                    // room, indistinguishable from something the operator typed.
+                    // Emitted here rather than at the ingest, because this is
+                    // where the sender and body are both known.
+                    let event = crate::runtime::session_timeline::peer_message_event(
+                        &session_id,
+                        &msg.sender_agent_id,
+                        &msg.sender_session_id,
+                        &msg.message_id,
+                        &crate::log_redaction::redact_text_for_logs(&msg.message),
+                    );
+                    if let Err(e) = store.create_live_digest_event(&event) {
+                        tracing::debug!(
+                            target: "session_timeline",
+                            error = %e,
+                            message_id = %msg.message_id,
+                            "peer message timeline emit failed"
+                        );
+                    }
+
                     let _ = store.mark_message_delivered(&msg.message_id, &session_id);
                 }
             }

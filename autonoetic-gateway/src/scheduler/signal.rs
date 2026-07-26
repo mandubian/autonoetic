@@ -194,25 +194,40 @@ pub fn build_delivery_request(
             notification.child_status.clone(),
             None,
         ),
+        // Wake notice only — deliberately does NOT carry the message body.
+        //
+        // The durable delivery path is the lifecycle's auto-injection, which
+        // reads `agent_message_deliveries` at wake and appends the documented
+        // `[Direct Message from Agent '<sender>' (Session: <sid>)]` block. This
+        // ingest exists to *cause* that wake. Including the body here meant the
+        // receiver saw the same text twice per message, in two different
+        // formats, only one of which matches the contract the guidance teaches.
         Signal::AgentMessage {
             message_id,
             sender_session_id,
             sender_agent_id,
-            message,
             ..
         } => (
-            serde_json::json!({
-                "type": "agent_message",
-                "message_id": message_id,
-                "sender_session_id": sender_session_id,
-                "sender_agent_id": sender_agent_id,
-                "message": message,
-            })
-            .to_string(),
+            format!(
+                "[Gateway] Wake-up: direct message {} from agent '{}' (session {}). \
+                 Its content follows below as a `[Direct Message from Agent ...]` block; \
+                 this line is only the notice that one arrived.",
+                message_id, sender_agent_id, sender_session_id
+            ),
             None,
             "agent_message".to_string(),
             None,
         ),
+    };
+
+    // Lets the ingress skip its `Gateway event type: ... / Message: ... /
+    // Metadata: ...` envelope for signals whose text is already addressed to
+    // the agent (see `raw_signal_passthrough` in `router.rs`). Child-state
+    // notifications are detected by parsing their JSON payload; this wake
+    // notice is prose, so it is declared explicitly instead.
+    let signal_type = match signal {
+        Signal::AgentMessage { .. } => Some("agent_message"),
+        _ => None,
     };
 
     let is_async = matches!(
@@ -237,6 +252,7 @@ pub fn build_delivery_request(
                 "channel_id": format!("signal-poller-{}", session_id),
                 "signal_delivered": true,
                 "signal_request_id": request_id,
+                "signal_type": signal_type,
                 "approval_request_id": approval_request_id,
                 "approval_status": signal_status,
             }
@@ -429,6 +445,83 @@ mod tests {
         assert_eq!(parsed["type"], "child_state_notification");
         assert_eq!(parsed["notification"]["task_id"], "task-a");
         assert_eq!(parsed["notification"]["failure_class"], "approval_pending");
+    }
+
+    /// The wake notice must not carry the message body.
+    ///
+    /// The body is delivered exactly once, by the lifecycle's auto-injection of
+    /// `agent_message_deliveries` as a `[Direct Message from Agent ...]` block.
+    /// When this ingest also carried the body, every peer message reached the
+    /// receiver twice in two different formats.
+    #[test]
+    fn agent_message_wake_notice_omits_the_body_and_declares_its_signal_type() {
+        let pending = PendingSignal {
+            request_id: "msg-abc".to_string(),
+            signal: Signal::AgentMessage {
+                message_id: "msg-abc".to_string(),
+                sender_session_id: "sender-session-1".to_string(),
+                sender_agent_id: "sender-agent".to_string(),
+                message: "SENTINEL-BODY-must-not-appear-here".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            },
+            filename: "msg-abc.json".to_string(),
+        };
+
+        let request = build_delivery_request(&pending, "receiver-session-2");
+        let message = request
+            .params
+            .get("message")
+            .and_then(|v| v.as_str())
+            .expect("message should be a string");
+        assert!(
+            !message.contains("SENTINEL-BODY-must-not-appear-here"),
+            "wake notice must not duplicate the message body: {message}"
+        );
+        assert!(
+            message.contains("msg-abc") && message.contains("sender-agent"),
+            "wake notice should identify the message and its sender: {message}"
+        );
+
+        // Declaring the signal type is what lets the ingress skip its
+        // `Gateway event type: ...` envelope for this prose notice.
+        let metadata = request
+            .params
+            .get("metadata")
+            .and_then(|v| v.as_object())
+            .expect("metadata should be present");
+        assert_eq!(
+            metadata.get("signal_type"),
+            Some(&serde_json::Value::String("agent_message".to_string()))
+        );
+        assert_eq!(
+            request.params.get("async_mode"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    /// Only the agent-message notice opts into raw passthrough; other signals
+    /// must keep `signal_type` null so the ingress envelope still applies.
+    #[test]
+    fn non_agent_message_signals_declare_no_signal_type() {
+        let pending = PendingSignal {
+            request_id: "wf-join-test".to_string(),
+            signal: Signal::WorkflowJoinSatisfied {
+                workflow_id: "wf-123".to_string(),
+                join_task_ids: vec!["task-a".to_string()],
+                message: "ready".to_string(),
+                child_summaries: Vec::new(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+            },
+            filename: "wf-join-test.json".to_string(),
+        };
+
+        let request = build_delivery_request(&pending, "demo-session");
+        let metadata = request
+            .params
+            .get("metadata")
+            .and_then(|v| v.as_object())
+            .expect("metadata should be present");
+        assert_eq!(metadata.get("signal_type"), Some(&serde_json::Value::Null));
     }
 
     #[tokio::test]

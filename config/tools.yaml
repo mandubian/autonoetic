@@ -50,6 +50,15 @@ rules:
     tier: workflow
   - prefix: agent_discover
     tier: workflow
+  # Peer messaging is orchestration, not an expensive side effect. Without this
+  # rule it fell to `default_tier: specialized`, which made it invisible to
+  # every child session and to un-escalated root sessions — including the very
+  # agents that declare the AgentMessage capability. The child filter already
+  # grants Workflow when AgentMessage is declared
+  # (`child_tool_tier_filter_for_manifest`), so Workflow is the tier that
+  # matches the existing intent.
+  - prefix: agent_message
+    tier: workflow
   - prefix: approval_
     tier: workflow
   - prefix: workflow_

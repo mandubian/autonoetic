@@ -234,16 +234,30 @@ impl JsonRpcRouter {
                 message,
                 metadata,
             } => {
-                let child_state_signal = metadata.as_ref().is_some_and(|value| {
-                    value.get("signal_delivered") == Some(&serde_json::Value::Bool(true))
-                        && serde_json::from_str::<serde_json::Value>(message)
-                            .ok()
-                            .is_some_and(|parsed| {
-                                parsed.get("type").and_then(|value| value.as_str())
-                                    == Some("child_state_notification")
-                            })
+                // Gateway-authored signal text that is already addressed to the
+                // agent passes through verbatim; wrapping it in the
+                // `Gateway event type: ... / Message: ... / Metadata: ...`
+                // envelope would only add noise.
+                let raw_signal_passthrough = metadata.as_ref().is_some_and(|value| {
+                    if value.get("signal_delivered") != Some(&serde_json::Value::Bool(true)) {
+                        return false;
+                    }
+                    // Prose notices declare themselves by signal type (e.g. the
+                    // `agent_message` wake-up notice); JSON payloads are
+                    // recognised by their `type` field.
+                    if value.get("signal_type").and_then(|value| value.as_str())
+                        == Some("agent_message")
+                    {
+                        return true;
+                    }
+                    serde_json::from_str::<serde_json::Value>(message)
+                        .ok()
+                        .is_some_and(|parsed| {
+                            parsed.get("type").and_then(|value| value.as_str())
+                                == Some("child_state_notification")
+                        })
                 });
-                let kickoff = if child_state_signal {
+                let kickoff = if raw_signal_passthrough {
                     message.clone()
                 } else {
                     match metadata {

@@ -421,9 +421,57 @@ pub fn ingest_chat_timeline_event(
     metadata: Option<&serde_json::Value>,
 ) -> Option<LiveDigestEventRecord> {
     if is_signal_delivered_chat(metadata) {
+        // An `agent_message` ingest is only the wake-up notice; it deliberately
+        // carries no message body. The peer message itself is timelined as
+        // `agent.peer_message` by `peer_message_event` at the point of delivery,
+        // where the sender and body are known — so emitting a row here would
+        // either duplicate it or add a bodyless placeholder beside it.
+        if metadata
+            .and_then(|m| m.get("signal_type"))
+            .and_then(|v| v.as_str())
+            == Some("agent_message")
+        {
+            return None;
+        }
         return workflow_signal_timeline_event(session_id, message);
     }
     Some(operator_message_event(session_id, source_agent_id, message))
+}
+
+/// Build the `agent.peer_message` timeline event — one agent's direct message to
+/// another, recorded on the *receiving* session's timeline as it is delivered.
+///
+/// Attributed to the **sender**, because that is who acted; the row appears on
+/// the receiver's timeline because that is where the message had an effect.
+/// Altitude derives to Normal (the `operator.message` floor): peer traffic is
+/// real conversation that changes what an agent does next, so an operator
+/// watching the room must see it without lowering the altitude filter. A sender
+/// on a raised seat (e.g. Sentinel) lifts it further via `role_floor`.
+pub fn peer_message_event(
+    receiving_session_id: &str,
+    sender_agent_id: &str,
+    sender_session_id: &str,
+    message_id: &str,
+    redacted_message: &str,
+) -> LiveDigestEventRecord {
+    let (principal, role) = actor_from_kind_id("agent", sender_agent_id);
+    let root = crate::runtime::content_store::root_session_id(receiving_session_id);
+    build_timeline_event(
+        root.to_string(),
+        receiving_session_id.to_string(),
+        None,
+        &principal,
+        &role,
+        "agent.peer_message",
+        None, // derive: max(base=Normal, role_floor(role))
+        Some(serde_json::json!({
+            "message_id": message_id,
+            "sender_agent_id": sender_agent_id,
+            "sender_session_id": sender_session_id,
+            "message": redacted_message,
+        })),
+        TimelineRefs::default(),
+    )
 }
 
 fn workflow_signal_timeline_event(
@@ -669,9 +717,9 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // ─── Normal: visible progress (the default floor). ───
         // Agent/operator narrative, session boundaries, the workbench-CREATED
         // milestone, audits, retries, and gate abandonments.
-        "agent.message" | "operator.message" | "session.start" | "session.end"
-        | "workbench.created" | "digest_annotate" | "llm.retry" | "approval.cancelled"
-        | "wiki.withdrawn" => Altitude::Normal,
+        "agent.message" | "operator.message" | "agent.peer_message" | "session.start"
+        | "session.end" | "workbench.created" | "digest_annotate" | "llm.retry"
+        | "approval.cancelled" | "wiki.withdrawn" => Altitude::Normal,
 
         // ─── Detail: hidable plumbing. ───
         // Turns, LLM rounds, reasoning, tool requests AND successful tool
@@ -849,6 +897,58 @@ mod tests {
             serde_json::from_str(event.payload.as_deref().unwrap()).unwrap();
         assert_eq!(payload["child_status"], "failed");
         assert_eq!(payload["summary"], "Script execution failed");
+    }
+
+    /// Peer messages must clear the room's default (Normal) altitude floor and
+    /// be attributed to the sending agent — otherwise agent-to-agent traffic is
+    /// indistinguishable from operator input in the room.
+    #[test]
+    fn peer_message_event_is_visible_by_default_and_attributed_to_the_sender() {
+        let event = peer_message_event(
+            "root-1/child-2",
+            "watchdog.default",
+            "root-1/watchdog-9",
+            "msg-abc",
+            "divergence detected at turn 12",
+        );
+
+        assert_eq!(event.event_type, "agent.peer_message");
+        assert_eq!(
+            event.altitude.as_deref(),
+            Some("normal"),
+            "peer traffic must not be hidden behind the Detail filter"
+        );
+        assert_eq!(event.principal_id.as_deref(), Some("watchdog.default"));
+        assert_eq!(event.root_session_id, "root-1");
+        assert_eq!(event.source_session_id, "root-1/child-2");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(event.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["message"], "divergence detected at turn 12");
+        assert_eq!(payload["sender_session_id"], "root-1/watchdog-9");
+        assert_eq!(payload["message_id"], "msg-abc");
+    }
+
+    /// The `agent_message` wake notice carries no body, so it must not emit a
+    /// timeline row of its own — `agent.peer_message` is the record, written at
+    /// delivery. Before the wake notice was stripped of the body, this ingest
+    /// produced a bodyless `workflow.signal` row instead.
+    #[test]
+    fn agent_message_wake_notice_emits_no_timeline_row() {
+        let meta = serde_json::json!({
+            "signal_delivered": true,
+            "signal_type": "agent_message",
+        });
+        assert!(
+            ingest_chat_timeline_event(
+                "session-1",
+                None,
+                "[Gateway] Wake-up: direct message msg-abc from agent 'peer' (session s-1).",
+                Some(&meta),
+            )
+            .is_none(),
+            "the wake notice must not duplicate agent.peer_message"
+        );
     }
 
     #[test]

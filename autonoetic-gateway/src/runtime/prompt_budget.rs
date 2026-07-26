@@ -1013,6 +1013,18 @@ mod tests {
         assert_eq!(tool_tier("approval_status"), ToolTier::Workflow);
     }
 
+    /// `agent_message` must be Workflow, like its sibling `agent_spawn`.
+    ///
+    /// With no rule for it in `config/tools.yaml` it fell through to
+    /// `default_tier: specialized`, which silently removed it from the
+    /// advertised tool list of every child session and every un-escalated root
+    /// session — including agents whose manifest declares `AgentMessage` and
+    /// whose SKILL.md instructs them to use it. Regression guard for that.
+    #[test]
+    fn agent_message_is_workflow_tier_so_declaring_agents_can_see_it() {
+        assert_eq!(tool_tier("agent_message"), ToolTier::Workflow);
+    }
+
     #[test]
     fn test_tool_tier_specialized() {
         assert_eq!(tool_tier("web_search"), ToolTier::Specialized);
