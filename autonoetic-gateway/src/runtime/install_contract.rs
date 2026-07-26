@@ -790,23 +790,76 @@ pub fn analyze_bundle_health(
         .collect();
 
     report.dependency_files = found_dep_files.iter().map(|(f, _)| f.to_string()).collect();
-    report.has_unresolved_dependencies = !found_dep_files.is_empty() && !has_layers;
+
+    // Content-aware gate: for Python artifacts, only block when there are
+    // *real* dependencies — either the manifest lists actual packages or
+    // the code imports non-stdlib modules. An empty/stdlib-only
+    // requirements.txt with no external imports is not a real dependency.
+    // Other ecosystems (node/go/rust/ruby) keep the structural check
+    // because we don't have import analysis for them yet.
+    let external_imports = detect_external_python_imports(file_map, script_entry);
+    report.detected_external_imports = external_imports.clone();
+
+    let has_python_manifest = found_dep_files
+        .iter()
+        .any(|(f, _)| *f == "requirements.txt" || *f == "pyproject.toml");
+    let has_non_python_manifest = found_dep_files.iter().any(|(f, eco)| {
+        (*f == "package.json" || *f == "go.mod" || *f == "Cargo.toml" || *f == "Gemfile")
+            && eco != &""
+    });
+
+    let python_manifest_has_packages = has_python_manifest
+        && found_dep_files
+            .iter()
+            .filter(|(f, _)| *f == "requirements.txt" || *f == "pyproject.toml")
+            .any(|(f, _)| {
+                file_map
+                    .get(*f)
+                    .map(|content| requirements_txt_has_real_packages(content))
+                    .unwrap_or(false)
+            });
+
+    report.has_unresolved_dependencies = !has_layers
+        && (has_non_python_manifest
+            || python_manifest_has_packages
+            || !external_imports.is_empty());
 
     if report.has_unresolved_dependencies {
+        let mut reasons = Vec::new();
+        if python_manifest_has_packages {
+            reasons.push("manifest lists packages".to_string());
+        }
+        if !external_imports.is_empty() {
+            reasons.push(format!(
+                "external imports detected ({})",
+                external_imports.join(", ")
+            ));
+        }
+        if has_non_python_manifest {
+            reasons.push(
+                found_dep_files
+                    .iter()
+                    .filter(|(f, _)| {
+                        *f == "package.json"
+                            || *f == "go.mod"
+                            || *f == "Cargo.toml"
+                            || *f == "Gemfile"
+                    })
+                    .map(|(f, _)| *f)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
         report.warnings.push(format!(
-            "Dependency files found ({}) but no layers in artifact. \
+            "Unresolved dependencies ({}): no layers in artifact. \
              Run packager.default to install dependencies as layers before evaluation.",
-            found_dep_files
-                .iter()
-                .map(|(f, eco)| format!("{f} ({eco})"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            reasons.join("; ")
         ));
     }
 
-    let external_imports = detect_external_python_imports(file_map, script_entry);
-    report.detected_external_imports = external_imports.clone();
-    if !external_imports.is_empty() && !has_layers {
+    if !external_imports.is_empty() && !has_layers && !report.has_unresolved_dependencies {
+        // This branch is unreachable because external_imports feeds into
+        // has_unresolved_dependencies above, but kept for safety.
         report.warnings.push(format!(
             "External Python imports detected: {}. \
              These modules are not in the standard library and no dependency layers are present.",
@@ -847,7 +900,105 @@ pub fn scan_body_for_migrated_doctrine(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// Scan Python files for external (non-stdlib, non-local) imports.
+/// Parse a `requirements.txt` (or `pyproject.toml` `[project.dependencies]`)
+/// blob and return true if it contains at least one real package spec.
+///
+/// Lines that are comments, blank, or pip options (`-r`, `-e`, `--hash`...)
+/// are ignored. Environment markers and inline comments are stripped before
+/// checking. For `pyproject.toml`, only the `[project.dependencies]` list
+/// is considered.
+fn requirements_txt_has_real_packages(content: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(content);
+
+    // Heuristic: if the first non-blank line looks like TOML, parse as
+    // pyproject.toml. Otherwise treat as requirements.txt (pip format).
+    let is_toml = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim_start().starts_with('['))
+        .unwrap_or(false);
+
+    if is_toml {
+        return pyproject_toml_has_dependencies(&text);
+    }
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        // pip options: -r, -e, --index-url, --hash, etc.
+        if line.starts_with('-') {
+            continue;
+        }
+        // Strip inline comment (requirements.txt allows `pkg # comment`)
+        let line = line.split('#').next().unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        // At this point we have something that looks like a package spec.
+        // Filter out `autonoetic_sdk` (platform-provided, not on PyPI).
+        let pkg_name = line
+            .split(|c: char| c == '=' || c == '>' || c == '<' || c == '!' || c == '[' || c == ';' || c == ' ')
+            .next()
+            .unwrap_or(line)
+            .trim();
+        if pkg_name.is_empty() || pkg_name == "autonoetic_sdk" {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Check a pyproject.toml body for real dependencies in
+/// `[project.dependencies]` or `[tool.poetry.dependencies]`.
+fn pyproject_toml_has_dependencies(text: &str) -> bool {
+    let mut in_deps = false;
+    let mut section_header = String::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_deps = line == "[project.dependencies]"
+                || line == "[tool.poetry.dependencies]";
+            section_header = line.to_string();
+            continue;
+        }
+        if !in_deps {
+            continue;
+        }
+        // Poetry uses `package = "version"` or `package = {version = "..."}`
+        // PEP 621 uses `package>=1.0` or just `"package>=1.0"` (quoted strings)
+        let line = line.strip_prefix('"').unwrap_or(line);
+        let line = line.split('#').next().unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Skip poetry's `python = ">=3.9"` constraint
+        let pkg_name = line
+            .split(|c: char| c == '=' || c == '>' || c == '<' || c == '!' || c == '[' || c == ';' || c == ' ' || c == '=')
+            .next()
+            .unwrap_or(line)
+            .trim();
+        if pkg_name.is_empty() || pkg_name == "python" || pkg_name == "autonoetic_sdk" {
+            continue;
+        }
+        // Poetry: `package = ...` — check there's an `=` or the line is a bare name
+        if section_header == "[tool.poetry.dependencies]" {
+            if !line.contains('=') && !line.contains(' ') {
+                // bare package name with no version — still a dependency
+                return true;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+
 ///
 /// When `script_entry` is `Some(filename)`, only that file is scanned to avoid
 /// false positives from test files and dev tooling bundled alongside the agent.
@@ -1378,6 +1529,100 @@ artifacts: "not_a_sequence"
             .dependency_files
             .contains(&"requirements.txt".to_string()));
         assert!(!report.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_empty_requirements_no_external_imports() {
+        // Empty/stdlib-only requirements.txt with no external imports should
+        // NOT trigger the unresolved-dependencies gate.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "requirements.txt".to_string(),
+            b"# No external dependencies\n# pure Python stdlib only\n".to_vec(),
+        );
+        file_map.insert(
+            "main.py".to_string(),
+            b"import json\nimport urllib.request\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            !report.has_unresolved_dependencies,
+            "empty requirements.txt + stdlib imports should not be blocked"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_external_import_triggers_gate_even_without_manifest() {
+        // No requirements.txt, but the code imports a non-stdlib package.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import requests\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            report.has_unresolved_dependencies,
+            "external import without manifest should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_requirements_with_real_packages_blocks() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "requirements.txt".to_string(),
+            b"# stdlib only\nnumpy\nscipy==1.10\n".to_vec(),
+        );
+        file_map.insert(
+            "main.py".to_string(),
+            b"import json\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            report.has_unresolved_dependencies,
+            "requirements.txt with real packages should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_non_python_manifest_always_blocks() {
+        // package.json should always trigger the gate regardless of content
+        // (we don't have JS import analysis yet).
+        let mut file_map = BTreeMap::new();
+        file_map.insert("package.json".to_string(), b"{}\n".to_vec());
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            report.has_unresolved_dependencies,
+            "non-Python manifest should always be blocked without layers"
+        );
     }
 
     #[test]
