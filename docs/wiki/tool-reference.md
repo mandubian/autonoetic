@@ -33,6 +33,7 @@ Agents interact with the gateway through tools. This page lists the major tool c
 | Tool | Description |
 |------|-------------|
 | `agent_spawn` | Spawn child agent session |
+| `agent_message` | Send an async message to a peer agent's live session (no child, no reply). See `agent-messaging` |
 | `agent_list` | List installed agents |
 | `agent_discover` | Find reusable agents matching an intent |
 | `agent_inspect` | Inspect any installed agent's metadata/capabilities |
