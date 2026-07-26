@@ -32,6 +32,7 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             name: "test-agent".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities,
         llm_overrides: None,

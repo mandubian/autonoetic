@@ -37,6 +37,7 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
             name: agent_id.to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities,
         llm_overrides: None,

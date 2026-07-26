@@ -1557,7 +1557,7 @@ important signals (progress reports, divergence findings, status updates from sp
             // delivery. `list_sessions_for_agent` is the append-only historical
             // index — using it here reported every session the role had ever run
             // as a live recipient.
-            if let Ok(sessions) = store.list_unfinished_sessions_for_agent(a_id) {
+            if let Ok(sessions) = store.list_addressable_sessions_for_agent(a_id) {
                 // A broadcast to one's own role must not loop back to the sender:
                 // a self-delivered message would be injected into the very turn
                 // that produced it.

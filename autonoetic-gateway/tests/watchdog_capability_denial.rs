@@ -37,6 +37,7 @@ fn watchdog_manifest() -> AgentManifest {
             name: "Watchdog".to_string(),
             description: "Observer that reviews agent sessions for trajectory divergence.".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             // digest_query gates on ReadAccess. execution_search and
@@ -199,6 +200,7 @@ fn researcher_manifest_with_dotted_web() -> AgentManifest {
             name: "Researcher Default".to_string(),
             description: "Research agent (regression guard)".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             // Mismatched prefix: "web." (dot) does NOT match "web_search" (underscore).

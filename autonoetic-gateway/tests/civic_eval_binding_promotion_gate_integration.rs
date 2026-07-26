@@ -124,6 +124,7 @@ fn proposer_manifest() -> AgentManifest {
             name: "specialized_builder.default".to_string(),
             description: "Proposer".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
@@ -166,6 +167,7 @@ fn gate_manifest(id: &str, allowed: Vec<&str>) -> AgentManifest {
             name: id.to_string(),
             description: "Gate role".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: allowed.into_iter().map(String::from).collect(),

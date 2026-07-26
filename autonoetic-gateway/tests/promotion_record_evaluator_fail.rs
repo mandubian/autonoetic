@@ -75,6 +75,7 @@ fn evolution_manifest() -> AgentManifest {
             name: "specialized_builder.default".to_string(),
             description: "Builder".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentSpawn {
             max_children: 10,
@@ -119,6 +120,7 @@ fn evaluator_manifest() -> AgentManifest {
             name: "sealed_evaluator.default".to_string(),
             description: "Evaluator".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
@@ -357,6 +359,7 @@ async fn test_promotion_auditor_fail_rejected() {
             name: "auditor.default".to_string(),
             description: "Auditor".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],

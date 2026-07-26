@@ -893,6 +893,42 @@ impl AgentExecutor {
         }
     }
 
+    /// Residency TTL declared by this agent's manifest, if it opted in.
+    ///
+    /// `Some(ttl)` means a completed session parks in [`YieldReason::Idle`]
+    /// and stays addressable by `agent_message` instead of terminating.
+    pub fn resident_idle_ttl_secs(&self) -> Option<u64> {
+        self.manifest
+            .agent
+            .resident_idle_ttl_secs
+            .filter(|ttl| *ttl > 0)
+    }
+
+    /// Park a finished-but-resident session: persist an [`YieldReason::Idle`]
+    /// checkpoint so an inbound message can resume it, and return the turn id
+    /// the residency row should point at.
+    ///
+    /// Returns `None` when there is nothing to park (no config, or the session
+    /// never started), in which case the caller must close normally rather than
+    /// leave an unreachable residency row behind.
+    pub fn park_idle(&self, ttl_secs: u64) -> Option<String> {
+        if !self.session_started || self.config.is_none() {
+            return None;
+        }
+        let turn_id = crate::runtime::checkpoint::turn_id_for(self.turn_counter);
+        let history = self.last_history.clone();
+        let cp = self.save_yield_checkpoint(
+            &history,
+            &turn_id,
+            YieldReason::Idle {
+                since: chrono::Utc::now().to_rfc3339(),
+                ttl_secs,
+            },
+            None,
+        );
+        Some(cp.turn_id)
+    }
+
     pub fn close_session(&mut self, outcome: SessionCloseOutcome) -> anyhow::Result<()> {
         if !self.session_started {
             return Ok(());
@@ -1155,6 +1191,10 @@ impl AgentExecutor {
                 YieldReason::ApprovalRequired { .. }
                 | YieldReason::UserInputRequired { .. }
                 | YieldReason::HumanEscalation { .. } => "awaiting_gate",
+                // Distinct from "hibernated": nothing is being waited on. The
+                // session is finished with its task and parked only so peers
+                // can still reach it.
+                YieldReason::Idle { .. } => "idle",
                 _ => "hibernated", // Hibernation, WaitingForChild, Error, BudgetExhausted, etc.
             };
             if let Err(e) = gs.set_session_lifecycle_state(&cp.session_id, lifecycle) {
@@ -4712,6 +4752,7 @@ mod tests {
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities,
             llm_overrides: None,

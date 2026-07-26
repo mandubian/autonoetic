@@ -392,6 +392,7 @@ mod tests {
                 name: "Demo".to_string(),
                 description: "a demo".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: caps,
             llm_overrides: None,

@@ -28,6 +28,7 @@ fn manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
             name: agent_id.to_string(),
             description: "test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities,
         llm_overrides: None,

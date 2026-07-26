@@ -1881,13 +1881,79 @@ impl GatewayExecutionService {
         let digest_turn_count = runtime.turn_counter;
         let gw_dir = self.config.agents_dir.join(".gateway");
 
-        if let Some(store) = self.gateway_store.as_ref() {
-            crate::runtime::session_outcome_writer::write_session_outcome_metrics(
-                &runtime,
-                store,
-                &session_id,
-                agent_id,
-            );
+        // Residency: a resident agent that finished its task parks instead of
+        // terminating, so peers can still reach it (`agent_message`). Parking
+        // means: persist an Idle checkpoint, record the session as addressable,
+        // and — critically — do NOT write the outcome row, because that row is
+        // what marks a session finished for every downstream reader.
+        //
+        // Only a clean completion parks. A suspended session is already
+        // resumable through its own gate, and re-parking it would race that
+        // resume; an errored one should close and be seen.
+        let park_ttl_secs = if is_suspended {
+            None
+        } else {
+            runtime.resident_idle_ttl_secs()
+        };
+        let mut parked = false;
+        if let (Some(ttl), Some(store)) = (park_ttl_secs, self.gateway_store.as_ref()) {
+            if let Some(turn_id) = runtime.park_idle(ttl) {
+                let now = chrono::Utc::now();
+                let record = crate::scheduler::gateway_store::SessionResidency {
+                    session_id: session_id.clone(),
+                    root_session_id: crate::runtime::live_digest::base_session_id(&session_id)
+                        .to_string(),
+                    agent_id: agent_id.to_string(),
+                    turn_id,
+                    since: now.to_rfc3339(),
+                    expires_at: (now + chrono::Duration::seconds(ttl as i64)).to_rfc3339(),
+                };
+                match store.upsert_session_residency(&record) {
+                    Ok(()) => {
+                        parked = true;
+                        tracing::info!(
+                            target: "session_residency",
+                            session_id = %session_id,
+                            agent_id = %agent_id,
+                            ttl_secs = ttl,
+                            "Session parked idle and remains addressable"
+                        );
+                    }
+                    Err(e) => {
+                        // Failing to record residency must not silently produce
+                        // an unreachable parked session: fall through and close
+                        // normally instead.
+                        tracing::warn!(
+                            target: "session_residency",
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to record residency; closing the session normally"
+                        );
+                    }
+                }
+            }
+        }
+
+        if !parked {
+            if let Some(store) = self.gateway_store.as_ref() {
+                // A previously parked session that is now closing for real must
+                // stop advertising itself, or the reaper would later "close" a
+                // session that is already gone.
+                if let Err(e) = store.clear_session_residency(&session_id) {
+                    tracing::debug!(
+                        target: "session_residency",
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to clear residency on close"
+                    );
+                }
+                crate::runtime::session_outcome_writer::write_session_outcome_metrics(
+                    &runtime,
+                    store,
+                    &session_id,
+                    agent_id,
+                );
+            }
         }
         if jsonrpc_spawn {
             if let Some(store) = self.gateway_store.as_ref() {
@@ -5007,6 +5073,7 @@ mod tests {
                 name: "Test Agent".to_string(),
                 description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: vec![],
             llm_overrides: None,
@@ -5499,6 +5566,7 @@ mod tests {
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
                 singleton: false,
+                resident_idle_ttl_secs: None,
             },
             capabilities: vec![],
             llm_overrides: None,

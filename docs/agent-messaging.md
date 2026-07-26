@@ -77,6 +77,61 @@ and queues nothing:
 `exists` distinguishes the two `target_agent_*` cases (`false` for not-found,
 `true` for unavailable) and is absent when no `GatewayConfig` was supplied.
 
+## Resident Sessions (who is reachable at all)
+
+A session normally dies with its task, so for most of this subsystem's life the
+set of addressable peers was close to empty: workers run to completion, and only
+an orchestrator blocked on children stays around. Messaging worked; it had nobody
+to talk to.
+
+An agent opts into **residency** with `agent.resident_idle_ttl_secs` in its
+SKILL.md:
+
+```yaml
+agent:
+  id: "reasoning-responder"
+  name: "Reasoning Responder"
+  description: "..."
+  resident_idle_ttl_secs: 900
+```
+
+A resident session, on finishing its task, parks in `YieldReason::Idle` instead
+of terminating: an Idle checkpoint is written, a `session_residency` row records
+it as addressable, and — critically — **no `session_outcomes` row is written**,
+because that row is what marks a session finished for every downstream reader. An
+inbound message resumes it through the normal notification pump; when it finishes
+again it re-parks, refreshing the TTL. After `resident_idle_ttl_secs` without
+traffic the scheduler's reaper writes the outcome row, clears the residency, and
+the session is closed for good.
+
+Residency does **not** reuse context across *new* tasks — an inbound message
+continues the same session, so history accumulates. Context reuse for fresh tasks
+is the separate, deferred stateful-singleton question.
+
+### Why a dedicated table
+
+Addressability used to be inferred, and both available signals are wrong:
+
+- `session_agent_bindings` is append-only — every session ever bound, dead or
+  alive.
+- `session_outcomes` receives a row at the **first** finalize, suspended sessions
+  included, so "has no outcome row" means *currently executing*, not *reachable*.
+- `session_transcripts.lifecycle_state` is only ever set to `hibernated` /
+  `awaiting_gate` and never cleared on close.
+
+`session_residency` is written when a session parks and deleted when it resumes
+or is reaped, so it states reachability instead of inferring it.
+`GatewayStore::list_addressable_sessions_for_agent` is residency plus
+still-executing sessions, and is what a broadcast resolves against.
+
+**Known gap:** a session suspended on a gate (`WaitingForChild`,
+`ApprovalRequired`, `UserInputRequired`, `HumanEscalation`) is genuinely
+resumable and would consume a queued message at its next wake, but it already has
+an outcome row and no residency row, so it is not currently counted as
+addressable. Recording residency for gate suspensions too would close that gap;
+it touches the approval and child-wait lifecycles and is deliberately out of
+scope here.
+
 ## Wakeup Mechanism
 
 When an agent issues a message:

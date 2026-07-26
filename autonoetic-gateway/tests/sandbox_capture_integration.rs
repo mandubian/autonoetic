@@ -41,6 +41,7 @@ fn test_manifest() -> AgentManifest {
             name: "Test Agent".to_string(),
             description: "Test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         llm_overrides: None,
         llm_preset: None,

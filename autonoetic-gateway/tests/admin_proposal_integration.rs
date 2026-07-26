@@ -29,6 +29,7 @@ fn test_manifest_with_approval_queue() -> AgentManifest {
             name: "Evolution Orchestrator".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ApprovalQueue {
             patterns: vec!["admin.proposal.*".to_string()],
@@ -71,6 +72,7 @@ fn test_manifest_with_read_access() -> AgentManifest {
             name: "Admin Agent".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
@@ -113,6 +115,7 @@ fn test_manifest_no_caps() -> AgentManifest {
             name: "Bare Agent".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![],
         llm_overrides: None,

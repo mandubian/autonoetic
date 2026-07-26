@@ -52,6 +52,7 @@ fn manifest(agent_id: &str, sandbox: &str) -> AgentManifest {
             name: agent_id.to_string(),
             description: "Test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::CodeExecution {
             patterns: vec!["*".to_string()],

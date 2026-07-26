@@ -824,6 +824,7 @@ mod surface_drift_tests {
                 name: "test".into(),
                 description: "test".into(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: vec![],
             llm_overrides: None,

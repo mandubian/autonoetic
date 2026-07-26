@@ -28,6 +28,7 @@ fn evolution_manifest() -> AgentManifest {
             name: "specialized_builder.default".to_string(),
             description: "Builder".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentSpawn {
             max_children: 10,

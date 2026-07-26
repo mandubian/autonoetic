@@ -53,6 +53,7 @@ fn web_manifest(agent_id: &str) -> AgentManifest {
             name: agent_id.to_string(),
             description: "web probe-budget test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::NetworkAccess {
             // Declare the exact host: a bare `*` only grants open-web when

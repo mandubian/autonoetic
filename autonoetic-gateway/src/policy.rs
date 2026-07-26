@@ -1001,6 +1001,7 @@ mod tests {
                 name: "policy-test".to_string(),
                 description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities,
             llm_overrides: None,

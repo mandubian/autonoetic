@@ -41,6 +41,7 @@ fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifes
             name: agent_id.to_string(),
             description: format!("test agent {}", agent_id),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities,
         llm_overrides: None,

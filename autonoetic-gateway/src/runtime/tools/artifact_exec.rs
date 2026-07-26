@@ -1713,6 +1713,7 @@ mod tests {
                 name: "Unit Test Runner".to_string(),
                 description: "test".to_string(),
                 singleton: false,
+                resident_idle_ttl_secs: None,
             },
             capabilities: vec![
                 Capability::SandboxFunctions {
@@ -1769,6 +1770,7 @@ mod tests {
                 name: "Auditor".to_string(),
                 description: "test".to_string(),
                 singleton: false,
+                resident_idle_ttl_secs: None,
             },
             capabilities: vec![
                 Capability::SandboxFunctions {
@@ -1830,6 +1832,7 @@ mod tests {
                 name: "Sealed Evaluator".to_string(),
                 description: "test".to_string(),
                 singleton: false,
+                resident_idle_ttl_secs: None,
             },
             capabilities: vec![
                 Capability::SandboxFunctions {
@@ -1891,6 +1894,7 @@ mod tests {
                 name: "Static Evaluator".to_string(),
                 description: "test".to_string(),
                 singleton: false,
+                resident_idle_ttl_secs: None,
             },
             capabilities: vec![
                 Capability::SandboxFunctions {

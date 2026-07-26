@@ -39,6 +39,7 @@ fn test_manifest_no_network() -> AgentManifest {
             name: "Test Agent".to_string(),
             description: "Test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         llm_overrides: None,
         llm_preset: None,

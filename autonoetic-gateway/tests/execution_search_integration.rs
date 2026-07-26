@@ -25,6 +25,7 @@ fn test_manifest() -> AgentManifest {
             name: "coder".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::CodeExecution {

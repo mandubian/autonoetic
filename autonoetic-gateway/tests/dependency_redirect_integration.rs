@@ -34,6 +34,7 @@ fn make_manifest(has_network: bool) -> AgentManifest {
             name: "Test Coder".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         llm_overrides: None,
         llm_preset: None,

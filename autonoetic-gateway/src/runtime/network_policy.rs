@@ -192,6 +192,7 @@ mod tests {
                 name: "test-agent".to_string(),
                 description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: if network {
                 vec![Capability::NetworkAccess {

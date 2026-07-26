@@ -33,6 +33,7 @@ fn test_manifest() -> AgentManifest {
             name: "test-agent".to_string(),
             description: "test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![],
         llm_overrides: None,

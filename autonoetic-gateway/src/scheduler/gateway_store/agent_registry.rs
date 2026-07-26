@@ -386,6 +386,25 @@ impl GatewayStore {
         Ok(results)
     }
 
+    /// Sessions of `agent_id` that can actually receive an `agent_message`:
+    /// parked resident sessions, plus sessions still mid-execution.
+    ///
+    /// Residency is the reliable half — it is written when a session parks and
+    /// deleted when it resumes or is reaped, so it states reachability rather
+    /// than inferring it. [`Self::list_unfinished_sessions_for_agent`] is kept
+    /// as the second half for sessions that are currently executing (no outcome
+    /// row yet); note it cannot see a *suspended* session, because the outcome
+    /// row is written at the first finalize even for suspensions.
+    pub fn list_addressable_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {
+        let mut sessions = self.list_resident_sessions_for_agent(agent_id)?;
+        for sid in self.list_unfinished_sessions_for_agent(agent_id)? {
+            if !sessions.contains(&sid) {
+                sessions.push(sid);
+            }
+        }
+        Ok(sessions)
+    }
+
     /// Sessions bound to `agent_id` that have not reached a terminal state —
     /// the plausible recipients of an `agent_message` broadcast.
     ///

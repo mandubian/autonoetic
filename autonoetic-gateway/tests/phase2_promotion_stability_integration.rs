@@ -29,6 +29,7 @@ fn revision_manifest() -> AgentManifest {
             name: "test-promoter".to_string(),
             description: "Test promotion agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
