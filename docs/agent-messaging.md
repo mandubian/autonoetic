@@ -58,15 +58,24 @@ one is required. `target_session_id` wins for delivery when both are present.
 no `session_outcomes` row. `session_agent_bindings` is append-only — one row per
 session ever bound, never deleted — so it is a historical index, not a liveness
 index. A `session_outcomes` row is written unconditionally at session close, so
-its absence is the terminal marker. Residual case: a session killed without a
-clean close leaves no outcome row and stays listed; messaging it queues a
-delivery nothing consumes, the same observable failure as messaging a hung
-session.
+its **presence** marks a session as closed and its absence means the session has
+not finished. Residual case: a session killed without a clean close leaves no
+outcome row and stays listed; messaging it queues a delivery nothing consumes,
+the same observable failure as messaging a hung session.
 
 Result contract — treat only `ok == true && status == "delivered" &&
-recipients_count > 0` as sent. Failure statuses (`recipients_count == 0`,
-nothing queued): `no_live_recipients`, `target_agent_not_found`,
-`target_session_not_found`.
+recipients_count > 0` as sent. Every other status leaves `recipients_count == 0`
+and queues nothing:
+
+| `status` | Meaning |
+|---|---|
+| `no_live_recipients` | The role is installed but has no unfinished session other than the sender's. |
+| `target_agent_not_found` | No agent with that id is installed. |
+| `target_agent_unavailable` | The agent is installed but its manifest could not be loaded — a broken bundle, not a missing one. |
+| `target_session_not_found` | The session id has no `session_agent_bindings` row, so the gateway cannot tell which agent owns it and will not deliver unchecked. |
+
+`exists` distinguishes the two `target_agent_*` cases (`false` for not-found,
+`true` for unavailable) and is absent when no `GatewayConfig` was supplied.
 
 ## Wakeup Mechanism
 

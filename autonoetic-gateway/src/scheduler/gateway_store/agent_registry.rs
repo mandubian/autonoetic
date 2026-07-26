@@ -391,7 +391,8 @@ impl GatewayStore {
     ///
     /// A `session_outcomes` row is written unconditionally at session close
     /// (`session_outcome_writer::write_session_outcome_metrics` — "every
-    /// session gets a row"), so its absence is the terminal marker.
+    /// session gets a row"). Its **presence** therefore marks a session as
+    /// closed, and a binding with no such row is one this query returns.
     ///
     /// Residual case: a session killed without a clean close leaves no outcome
     /// row and stays listed here. Messaging it queues a delivery that is never

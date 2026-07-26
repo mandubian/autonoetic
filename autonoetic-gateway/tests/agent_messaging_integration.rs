@@ -420,6 +420,70 @@ async fn test_agent_message_existing_agent_without_live_session_returns_structur
     Ok(())
 }
 
+/// An installed-but-unloadable agent is a distinct failure from a missing one:
+/// `target_agent_unavailable` with `exists: true`. Documented in the guidance and
+/// `docs/agent-messaging.md`, so it needs coverage — a broken bundle must not be
+/// reported as "not installed".
+#[serial_test::serial]
+#[tokio::test]
+async fn broken_target_agent_bundle_reports_target_agent_unavailable() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+
+    // Present on disk, but the frontmatter does not parse into a manifest.
+    let broken = h.agents_dir.join("broken-agent");
+    std::fs::create_dir_all(&broken)?;
+    std::fs::write(broken.join("runtime.lock"), "dependencies: []")?;
+    std::fs::write(
+        broken.join("SKILL.md"),
+        "---\nthis: [is, not, a, valid, manifest\n---\n# broken\n",
+    )?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_agent_id": "broken-agent",
+        "message": "hello"
+    }))?;
+
+    assert!(!parsed["ok"].as_bool().unwrap());
+    assert_eq!(
+        parsed["status"].as_str().unwrap(),
+        "target_agent_unavailable",
+        "a broken bundle must not be reported as not-installed: {parsed}"
+    );
+    assert_eq!(
+        parsed["exists"].as_bool().unwrap(),
+        true,
+        "the agent is present on disk, just unloadable: {parsed}"
+    );
+    assert_eq!(parsed["recipients_count"].as_u64().unwrap(), 0);
+
+    Ok(())
+}
+
+/// Failure messages must name the tool as agents invoke it (`agent_message`), so
+/// operators and agents can correlate a failure with the right tool.
+#[serial_test::serial]
+#[tokio::test]
+async fn failure_messages_use_the_real_tool_name() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_agent_id": "missing-agent",
+        "message": "hello"
+    }))?;
+
+    let message = parsed["message"].as_str().unwrap();
+    assert!(
+        message.contains("agent_message"),
+        "message should name the tool: {message}"
+    );
+    assert!(
+        !message.contains("agent.message"),
+        "'agent.message' is not a tool name: {message}"
+    );
+
+    Ok(())
+}
+
 #[serial_test::serial]
 #[tokio::test]
 async fn either_target_is_required() -> anyhow::Result<()> {

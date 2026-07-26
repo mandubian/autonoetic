@@ -1428,8 +1428,9 @@ is never included), or `target_session_id` to reach one specific session. After 
 the result: success only when `ok == true`, `status == \"delivered\"`, and `recipients_count > 0`. \
 Failure statuses, none of which sent anything: `no_live_recipients` (the role is installed but has \
 no unfinished session other than yours), `target_agent_not_found` (no agent with that id is \
-installed), `target_session_not_found` (that session id has no agent binding, so the gateway \
-cannot tell who owns it).\n\n\
+installed), `target_agent_unavailable` (the agent is installed but its manifest could not be \
+loaded — a broken bundle, not a missing one), `target_session_not_found` (that session id has no \
+agent binding, so the gateway cannot tell who owns it).\n\n\
 Your `AgentMessage` capability `patterns` are enforced on the receiving agent's id in both \
 addressing modes — with `target_session_id` the gateway resolves the session's bound agent and \
 checks that. A session id does not widen your grant."
@@ -1487,7 +1488,7 @@ important signals (progress reports, divergence findings, status updates from sp
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let store = gateway_store
-            .ok_or_else(|| anyhow::anyhow!("Gateway store is required for agent.message"))?;
+            .ok_or_else(|| anyhow::anyhow!("Gateway store is required for agent_message"))?;
 
         if args.target_session_id.is_none() && args.target_agent_id.is_none() {
             return Err(anyhow::anyhow!(
@@ -1570,8 +1571,12 @@ important signals (progress reports, divergence findings, status updates from sp
             if target_sessions.is_empty() {
                 let mut exists = None;
                 let mut status = "no_live_recipients";
+                // State the actual rule, not "no active sessions": a session of
+                // this role may well be running and still not be a recipient —
+                // it has closed, or it is the sender's own session.
                 let mut message = format!(
-                    "Agent '{}' exists but has no active sessions to receive the message.",
+                    "Agent '{}' is installed but has no unfinished session able to receive the \
+                     message (closed sessions and your own session are never recipients).",
                     a_id
                 );
 
@@ -1587,7 +1592,7 @@ important signals (progress reports, divergence findings, status updates from sp
                                 exists = Some(false);
                                 status = "target_agent_not_found";
                                 message = format!(
-                                    "No installed agent found with id '{}'. agent.message requires an existing target agent with at least one live session.",
+                                    "No installed agent found with id '{}'. agent_message requires an existing target agent with at least one unfinished session.",
                                     a_id
                                 );
                             } else {
