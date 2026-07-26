@@ -1423,11 +1423,16 @@ notifications that don't need a synchronous reply. Unlike `agent_spawn`, this do
 child session or expect a completed-task wake-up; the receiver finds the message as a \
 `[Direct Message from Agent '<sender>' (Session: <sender_session>)]` user-text block at the \
 start of their next turn.\n\n\
-Choose `target_agent_id` to broadcast to all active sessions of that role, or \
-`target_session_id` to reach a specific session. After sending, validate the result: success only \
-when `ok == true`, `status == \"delivered\"`, and `recipients_count > 0`. A status of \
-`no_live_recipients` means the target agent has no active sessions — the message was NOT sent; a \
-status of `target_agent_not_found` means no agent with that id is installed."
+Choose `target_agent_id` to broadcast to every unfinished session of that role (your own session \
+is never included), or `target_session_id` to reach one specific session. After sending, validate \
+the result: success only when `ok == true`, `status == \"delivered\"`, and `recipients_count > 0`. \
+Failure statuses, none of which sent anything: `no_live_recipients` (the role is installed but has \
+no unfinished session other than yours), `target_agent_not_found` (no agent with that id is \
+installed), `target_session_not_found` (that session id has no agent binding, so the gateway \
+cannot tell who owns it).\n\n\
+Your `AgentMessage` capability `patterns` are enforced on the receiving agent's id in both \
+addressing modes — with `target_session_id` the gateway resolves the session's bound agent and \
+checks that. A session id does not widen your grant."
                     .to_string(),
             },
             GuidanceBlock {
@@ -1437,7 +1442,9 @@ status of `target_agent_not_found` means no agent with that id is installed."
                 prose: "**Receiving agent messages:** Messages from other agents arrive at the \
 start of your turn as a user-text block: \
 `[Direct Message from Agent '<sender>' (Session: <sender_session>)]` followed by the message \
-content on a new line.\n\n\
+content on a new line. That block is the message. A preceding \
+`[Gateway] Wake-up: direct message ...` line is only the notice that woke you and never repeats \
+the content — read the block, not the notice.\n\n\
 Treat these as asynchronous input from a peer agent. Process the content and correlate it with \
 your active goals or workflow state. If a response is needed, use `agent_message` back to the \
 sender's `agent_id` or `session_id`. Do not ignore or discard incoming messages — they carry \
@@ -1450,12 +1457,12 @@ important signals (progress reports, divergence findings, status updates from sp
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Send a direct asynchronous message to another active agent session or broadcast to all sessions of a specific agent role. At least one of target_session_id or target_agent_id must be provided; the gateway validates this at execution time.".to_string(),
+            description: "Send a direct asynchronous message to another unfinished agent session, or broadcast to every unfinished session of an agent role. At least one of target_session_id or target_agent_id must be provided; the gateway validates this at execution time. Your AgentMessage patterns are enforced on the receiving agent in both modes. Check `ok`, `status`, and `recipients_count` — only `recipients_count > 0` means it was queued for someone.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "target_session_id": { "type": "string", "description": "Specific session ID to message." },
-                    "target_agent_id": { "type": "string", "description": "Agent role to message. Broadcasts to all active sessions for this role if target_session_id is absent." },
+                    "target_session_id": { "type": "string", "description": "Specific session ID to message. Takes precedence over target_agent_id, and is the target the capability check is applied to (via that session's bound agent)." },
+                    "target_agent_id": { "type": "string", "description": "Agent role to message. Broadcasts to every unfinished session of this role, excluding your own, when target_session_id is absent." },
                     "message": { "type": "string", "description": "The message to send." }
                 },
                 "required": ["message"]
@@ -1491,28 +1498,53 @@ important signals (progress reports, divergence findings, status updates from sp
         let sender_session_id = session_id.unwrap_or("unknown_session").to_string();
         let sender_agent_id = manifest.agent.id.clone();
 
-        // Fast capability check against policy using the provided agent ID if available,
-        // else fallback to parsing bounded capability scope or checking patterns runtime.
-        if let Some(ref tid) = args.target_agent_id {
-            let decision = policy.can_message_agent(tid);
-            if !decision.is_allowed() {
-                return Err(tagged::Tagged::permission_with_rules(
-                    anyhow::anyhow!("Permission denied: cannot message agent '{}'", tid),
-                    decision
-                        .enforced_rules
-                        .into_iter()
-                        .map(|rule| rule.to_string())
-                        .collect(),
-                )
-                .into());
-            }
-        } else {
-            // For target_session_id, verify broadly if capability exists
-            if !policy.can_message_agent("*").is_allowed()
-                && !policy.can_message_agent("any").is_allowed()
-            {
-                // Technically we'd look up target_session_id's agent, but for now we require broad msg right or specific target_agent_id
-            }
+        // Capability check (P-11.5) against the agent that will actually
+        // receive the message.
+        //
+        // `target_session_id` takes precedence for delivery below, so it must
+        // also be what the ACL is evaluated against — resolved to its bound
+        // agent id. Checking `target_agent_id` while delivering to
+        // `target_session_id` would let a narrowly-scoped grant
+        // (`patterns: ["watchdog.*"]`) reach any session by id simply by
+        // naming an allowed role alongside an arbitrary session.
+        let acl_target_agent_id = match (&args.target_session_id, &args.target_agent_id) {
+            (Some(sid), _) => match store.get_session_agent_binding(sid)? {
+                Some(binding) => binding.agent_id,
+                None => {
+                    return Ok(serde_json::json!({
+                        "ok": false,
+                        "status": "target_session_not_found",
+                        "target_session_id": sid,
+                        "recipients_count": 0,
+                        "message": format!(
+                            "No agent binding found for session '{}'. agent_message cannot verify \
+                             which agent owns an unknown session, so it will not deliver to it. \
+                             Pass target_agent_id to reach a role, or a session id from this workflow.",
+                            sid
+                        ),
+                    })
+                    .to_string());
+                }
+            },
+            (None, Some(tid)) => tid.clone(),
+            // Guarded above: at least one target is always present here.
+            (None, None) => unreachable!("target presence validated above"),
+        };
+
+        let decision = policy.can_message_agent(&acl_target_agent_id);
+        if !decision.is_allowed() {
+            return Err(tagged::Tagged::permission_with_rules(
+                anyhow::anyhow!(
+                    "Permission denied: cannot message agent '{}'",
+                    acl_target_agent_id
+                ),
+                decision
+                    .enforced_rules
+                    .into_iter()
+                    .map(|rule| rule.to_string())
+                    .collect(),
+            )
+            .into());
         }
 
         // Resolve targets and save deliveries
@@ -1520,8 +1552,19 @@ important signals (progress reports, divergence findings, status updates from sp
         if let Some(ref s_id) = args.target_session_id {
             target_sessions.push(s_id.clone());
         } else if let Some(ref a_id) = args.target_agent_id {
-            if let Ok(sessions) = store.list_sessions_for_agent(a_id) {
-                target_sessions.extend(sessions);
+            // Only sessions that have not reached a terminal state can consume a
+            // delivery. `list_sessions_for_agent` is the append-only historical
+            // index — using it here reported every session the role had ever run
+            // as a live recipient.
+            if let Ok(sessions) = store.list_unfinished_sessions_for_agent(a_id) {
+                // A broadcast to one's own role must not loop back to the sender:
+                // a self-delivered message would be injected into the very turn
+                // that produced it.
+                target_sessions.extend(
+                    sessions
+                        .into_iter()
+                        .filter(|sid| sid.as_str() != sender_session_id.as_str()),
+                );
             }
 
             if target_sessions.is_empty() {
