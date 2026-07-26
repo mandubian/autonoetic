@@ -420,6 +420,94 @@ async fn test_agent_message_existing_agent_without_live_session_returns_structur
     Ok(())
 }
 
+/// Regression for a live-run defect: a message addressed to a session that had
+/// already closed reported `{"ok":true,"status":"delivered","recipients_count":1}`
+/// and queued a delivery nothing would ever consume.
+///
+/// Observed timing from the reporting run — the close preceded the send:
+///   session closed 21:46:30.45, message sent 21:46:40.25 → "delivered".
+///
+/// The broadcast path filtered finished sessions; this one did not, so the
+/// liveness guarantee held on only one of the two addressing modes.
+#[serial_test::serial]
+#[tokio::test]
+async fn message_to_a_finished_session_is_refused_not_queued() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+    bind_session(&h.store, "closed-session", "receiver-agent")?;
+    finish_session(&h.store, "closed-session", "receiver-agent")?;
+
+    let parsed = h.send(serde_json::json!({
+        "target_session_id": "closed-session",
+        "message": "you already ended"
+    }))?;
+
+    assert!(
+        !parsed["ok"].as_bool().unwrap(),
+        "a finished session must not be reported as delivered: {parsed}"
+    );
+    assert_eq!(parsed["status"].as_str().unwrap(), "target_session_finished");
+    assert_eq!(parsed["recipients_count"].as_u64().unwrap(), 0);
+    assert_eq!(
+        h.queued_for("closed-session")?,
+        0,
+        "nothing may be queued for a session that will never wake"
+    );
+
+    Ok(())
+}
+
+/// Regression for a live-run defect: `target_agent_id` returned
+/// `target_agent_not_found` for an agent that `agent_list` / `agent_inspect`
+/// showed as fully installed.
+///
+/// Cause: alias-installed agents live in `.gateway/revisions/<rev>` with no
+/// directory under `agents_dir`, and the existence check used a filesystem-only
+/// `AgentRepository::get_sync`. The correct answer here is `no_live_recipients`
+/// — the agent exists, it just has no unfinished session.
+#[serial_test::serial]
+#[tokio::test]
+async fn alias_installed_agent_without_a_directory_is_not_reported_missing() -> anyhow::Result<()> {
+    let h = Harness::new("\"*\"")?;
+
+    // Installed via the alias registry only — deliberately no agents_dir entry,
+    // which is how a promoted revision is actually installed.
+    h.store
+        .upsert_agent_alias(&autonoetic_types::agent_revision::AgentAliasRecord {
+            alias_id: "alias-only-agent".to_string(),
+            agent_id: "alias-only-agent".to_string(),
+            revision_id: "rev_sha256:deadbeef".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_by_type: "operator".to_string(),
+            updated_by_id: "test".to_string(),
+            reason: None,
+            suspended_at: None,
+            suspended_reason: None,
+            suspended_by: None,
+        })?;
+    assert!(
+        !h.agents_dir.join("alias-only-agent").exists(),
+        "test premise: the agent must have no directory"
+    );
+
+    let parsed = h.send(serde_json::json!({
+        "target_agent_id": "alias-only-agent",
+        "message": "hello"
+    }))?;
+
+    assert_eq!(
+        parsed["status"].as_str().unwrap(),
+        "no_live_recipients",
+        "an alias-installed agent exists; only its sessions are missing: {parsed}"
+    );
+    assert_eq!(
+        parsed["exists"].as_bool().unwrap(),
+        true,
+        "existence must be judged the way agent_list judges it: {parsed}"
+    );
+
+    Ok(())
+}
+
 /// An installed-but-unloadable agent is a distinct failure from a missing one:
 /// `target_agent_unavailable` with `exists: true`. Documented in the guidance and
 /// `docs/agent-messaging.md`, so it needs coverage — a broken bundle must not be
