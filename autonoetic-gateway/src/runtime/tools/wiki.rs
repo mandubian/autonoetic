@@ -394,3 +394,51 @@ impl NativeTool for WikiProposeTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every page in `index.toml` must resolve to a readable file.
+    ///
+    /// The index and the files are maintained by hand, so a typo in `file =` or
+    /// a page added to the directory but not the index fails silently: the
+    /// agent-facing `wiki_get` just errors on a page `wiki_list` advertised.
+    #[test]
+    fn every_indexed_page_resolves() {
+        let listed = list_pages(None).expect("built-in corpus index should parse");
+        assert!(
+            !listed.pages.is_empty(),
+            "built-in corpus should not be empty"
+        );
+        for page in &listed.pages {
+            get_page(None, &page.id)
+                .unwrap_or_else(|e| panic!("indexed page '{}' failed to load: {e}", page.id));
+        }
+    }
+
+    /// Conversely, every `.md` file in the corpus must be indexed — an
+    /// unindexed page is invisible to `wiki_list`, so agents never find it.
+    #[test]
+    fn every_corpus_file_is_indexed() {
+        let dir = resolve_wiki_dir(None).expect("built-in corpus dir should exist");
+        let listed = list_pages(None).expect("index should parse");
+        let indexed: std::collections::HashSet<String> =
+            listed.pages.iter().map(|p| p.id.clone()).collect();
+
+        for entry in std::fs::read_dir(&dir).expect("corpus dir should read") {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(stem) = name.strip_suffix(".md") else {
+                continue;
+            };
+            if stem == "README" {
+                continue; // authoring instructions, not a wiki page
+            }
+            assert!(
+                indexed.contains(stem),
+                "corpus file '{name}' is not in index.toml, so no agent can discover it"
+            );
+        }
+    }
+}

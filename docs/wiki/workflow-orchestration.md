@@ -36,6 +36,19 @@ Spawn all children `async=true`, then make **one** `workflow_wait(task_ids=[all]
 3. **Join for parallel** — one `workflow_wait` call to block until all children complete
 4. **Read guards on resume** — `workflow_state` once per wake, never in a loop
 
+## Spawning vs Messaging
+
+`agent_spawn` is hierarchical: it creates a child session and produces a result
+you wait for. `agent_message` is not — it sends async text to a peer's *already
+running* session, creates no child, and returns no result.
+
+Spawn when you need work done. Message when a peer needs to know something while
+it keeps doing its own work. A message will never give you a result, and it
+cannot reach an agent that has no session running.
+
+See the `agent-messaging` wiki page for addressing, the result contract, and the
+failure statuses you must check.
+
 ## Delegation Ladder (for Planner)
 
 1. **Foundational match**: route directly to the appropriate foundational agent

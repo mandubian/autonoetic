@@ -81,3 +81,9 @@ id = "workflow-orchestration"
 title = "Workflow Orchestration and Child Agents"
 file = "workflow-orchestration.md"
 tags = ["workflow", "spawn", "children", "wait", "join", "signal", "orchestration"]
+
+[[pages]]
+id = "agent-messaging"
+title = "Agent-to-Agent Messaging"
+file = "agent-messaging.md"
+tags = ["messaging", "agent_message", "peer", "broadcast", "coordination", "async"]

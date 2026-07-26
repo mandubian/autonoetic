@@ -25,7 +25,7 @@ The canonical, exhaustive list is the `Capability` enum in `autonoetic-types/src
 | `CodeExecution` | `patterns: [string]` | Execute scripts/commands in sandbox via `sandbox_exec` |
 | `ArtifactExecution` | *(none)* | Execute immutable artifact entrypoints via `artifact_exec` / `artifact_prepare` |
 | `AgentSpawn` | `max_children: number` | Create child agent sessions |
-| `AgentMessage` | `patterns: [string]` | Send messages to other agents |
+| `AgentMessage` | `patterns: [string]` | Send async messages to other agents' live sessions. `patterns` are matched against the **receiving** agent's id in both addressing modes — targeting a session id does not widen the grant |
 | `BackgroundReevaluation` | `min_interval_secs`, `allow_reasoning` | Periodic wake-ups for background processing |
 | `SchedulerAccess` | `patterns: [string]` | Create/manage cron jobs |
 | `SkillInstall` | `allowed_sources: [string]` | Fetch and install remote SKILL.md |
