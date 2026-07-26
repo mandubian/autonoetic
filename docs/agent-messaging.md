@@ -120,3 +120,23 @@ agents that declare the capability, and its prompt guidance is dropped with it.
 manifests declaring `AgentMessage`, so Workflow is the tier that matches.
 Regression guard: `agent_message_is_workflow_tier_so_declaring_agents_can_see_it`
 in `runtime::prompt_budget`.
+
+## Operator Surface
+
+Delivery emits an `agent.peer_message` row on the **receiving** session's
+canonical timeline (`peer_message_event`), attributed to the **sender** —
+sender acted, receiver was affected. Payload carries `message_id`,
+`sender_agent_id`, `sender_session_id`, and the redacted body.
+
+Altitude derives to **Normal**, the same floor as `operator.message`, so peer
+traffic is visible in the room without lowering the altitude filter. A sender on
+a raised seat (e.g. Sentinel) lifts it further via `role_floor`. Without this
+row, an injected peer message reads as anonymous user text — indistinguishable
+from something the operator typed.
+
+The wake-notice ingest emits no timeline row of its own: it carries no body, so a
+row there would either duplicate `agent.peer_message` or sit beside it as a
+bodyless placeholder.
+
+The `agent_message`/`received` causal event remains the audit record; the
+timeline row is the operator-facing view.
