@@ -466,6 +466,11 @@ impl LoopGuard {
     ///
     /// Irrecoverable errors (permission, quota exceeded, sandbox unavailable) are
     /// excluded: the agent cannot fix them by retrying.
+    ///
+    /// Validation errors are also excluded: they indicate the agent is learning
+    /// the API (wrong arguments, missing fields). Each attempt is structurally
+    /// different — the agent is failing forward, not spiraling. The
+    /// max-loops-without-progress counter still catches truly stuck agents.
     pub fn register_failure(
         &mut self,
         tool_name: &str,
@@ -474,6 +479,9 @@ impl LoopGuard {
     ) -> bool {
         if let Some(e) = error_type {
             if Self::is_irrecoverable(e) {
+                return false;
+            }
+            if matches!(e, ToolErrorType::Validation) {
                 return false;
             }
         }
@@ -1652,10 +1660,14 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_errors_count_against_tool_budget() {
+    fn test_validation_errors_do_not_count_against_tool_budget() {
         let mut guard = LoopGuard::new(100);
         assert!(guard.check_loop().is_ok());
 
+        // Validation errors are the agent learning the API (wrong arguments,
+        // missing fields). They should NOT count toward the per-tool failure
+        // budget — each attempt is structurally different, the agent is
+        // failing forward. Progress resets between each attempt.
         for _ in 0..7 {
             guard.register_failure(
                 "web_fetch",
@@ -1665,12 +1677,35 @@ mod tests {
             guard.register_progress("web_fetch", r#"{"url":"https://bad.com"}"#);
             assert!(guard.check_loop().is_ok());
         }
-        guard.register_failure(
-            "web_fetch",
-            r#"{"url":"https://bad.com"}"#,
-            Some(&ToolErrorType::Validation),
+        // The tool failure count for web_fetch should still be 0.
+        assert!(
+            guard.tool_failure_counts.get("web_fetch").is_none(),
+            "validation errors must not accumulate in tool_failure_counts"
         );
-        assert!(guard.check_loop().is_err());
+    }
+
+    #[test]
+    fn test_validation_errors_without_progress_trip_on_loops() {
+        // Even though validation errors don't count toward the per-tool budget,
+        // an agent that NEVER makes progress will still trip via max_loops.
+        let mut guard = LoopGuard::new(3);
+        for _ in 0..3 {
+            guard.register_failure(
+                "artifact_build",
+                r#"{}"#,
+                Some(&ToolErrorType::Validation),
+            );
+            // No register_progress — the agent is stuck
+            if guard.check_loop().is_err() {
+                // Guard tripped via max_loops_without_progress
+                return;
+            }
+        }
+        // Should have tripped by now
+        assert!(
+            guard.check_loop().is_err(),
+            "agent with no progress must trip via max_loops even with only validation errors"
+        );
     }
 
     #[test]

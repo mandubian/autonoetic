@@ -121,14 +121,30 @@ impl GatewayStore {
             match query_result {
                 Ok(mut rows) => {
                     let mut out = Vec::new();
-                    while let Some(row) = rows.next()? {
-                        out.push(row.get(0)?);
+                    // FTS5 may defer MATCH evaluation to row iteration (rows.next()),
+                    // not query() — so we must catch errors here too, not just from
+                    // stmt.query(). A query like "friend-chat" is parsed by FTS5 as
+                    // "friend NOT chat", which can surface as a SQL error during step.
+                    let mut fts_error: Option<rusqlite::Error> = None;
+                    loop {
+                        match rows.next() {
+                            Ok(Some(row)) => match row.get::<_, String>(0) {
+                                Ok(v) => out.push(v),
+                                Err(e) => return Err(e.into()),
+                            },
+                            Ok(None) => break,
+                            Err(e) => {
+                                fts_error = Some(e);
+                                break;
+                            }
+                        }
                     }
-                    if !out.is_empty() || !looks_like_fts_syntax(q) {
-                        return Ok(out);
+                    match fts_error {
+                        Some(e) if should_fallback_to_like(&e, q) => { /* fall through to LIKE */ }
+                        Some(e) => return Err(e.into()),
+                        None if !out.is_empty() || !looks_like_fts_syntax(q) => return Ok(out),
+                        None => {}
                     }
-                    // Empty result with FTS-special syntax — may be a parse error,
-                    // fall through to LIKE.
                 }
                 Err(ref e) if should_fallback_to_like(e, q) => {}
                 Err(e) => return Err(e.into()),
@@ -273,13 +289,26 @@ impl GatewayStore {
                 match fts_result {
                     Ok(mut rows) => {
                         let mut out = Vec::new();
-                        while let Some(row) = rows.next()? {
-                            out.push(row.get(0)?);
+                        let mut fts_error: Option<rusqlite::Error> = None;
+                        loop {
+                            match rows.next() {
+                                Ok(Some(row)) => match row.get::<_, String>(0) {
+                                    Ok(v) => out.push(v),
+                                    Err(e) => return Err(e.into()),
+                                },
+                                Ok(None) => break,
+                                Err(e) => {
+                                    fts_error = Some(e);
+                                    break;
+                                }
+                            }
                         }
-                        if !out.is_empty() || !looks_like_fts_syntax(q) {
-                            return Ok(out);
+                        match fts_error {
+                            Some(e) if should_fallback_to_like(&e, q) => { /* fall through to LIKE */ }
+                            Some(e) => return Err(e.into()),
+                            None if !out.is_empty() || !looks_like_fts_syntax(q) => return Ok(out),
+                            None => {}
                         }
-                        // Empty result with FTS-special syntax — fall through to LIKE
                     }
                     Err(ref e) if should_fallback_to_like(e, q) => {}
                     Err(e) => return Err(e.into()),

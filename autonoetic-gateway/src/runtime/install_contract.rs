@@ -790,27 +790,70 @@ pub fn analyze_bundle_health(
         .collect();
 
     report.dependency_files = found_dep_files.iter().map(|(f, _)| f.to_string()).collect();
-    report.has_unresolved_dependencies = !found_dep_files.is_empty() && !has_layers;
 
-    if report.has_unresolved_dependencies {
-        report.warnings.push(format!(
-            "Dependency files found ({}) but no layers in artifact. \
-             Run packager.default to install dependencies as layers before evaluation.",
-            found_dep_files
-                .iter()
-                .map(|(f, eco)| format!("{f} ({eco})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-
+    // Content-aware gate: for Python artifacts, only block when there are
+    // *real* dependencies — either the manifest lists actual packages or
+    // the code imports non-stdlib modules. An empty/stdlib-only
+    // requirements.txt with no external imports is not a real dependency.
+    // Other ecosystems (node/go/rust/ruby) keep the structural check
+    // because we don't have import analysis for them yet.
     let external_imports = detect_external_python_imports(file_map, script_entry);
     report.detected_external_imports = external_imports.clone();
-    if !external_imports.is_empty() && !has_layers {
+
+    let has_python_manifest = found_dep_files
+        .iter()
+        .any(|(f, _)| *f == "requirements.txt" || *f == "pyproject.toml");
+    let has_non_python_manifest = found_dep_files.iter().any(|(f, eco)| {
+        (*f == "package.json" || *f == "go.mod" || *f == "Cargo.toml" || *f == "Gemfile")
+            && eco != &""
+    });
+
+    let python_manifest_has_packages = has_python_manifest
+        && found_dep_files
+            .iter()
+            .filter(|(f, _)| *f == "requirements.txt" || *f == "pyproject.toml")
+            .any(|(f, _)| {
+                file_map
+                    .get(*f)
+                    .map(|content| requirements_txt_has_real_packages(content))
+                    .unwrap_or(false)
+            });
+
+    report.has_unresolved_dependencies = !has_layers
+        && (has_non_python_manifest
+            || python_manifest_has_packages
+            || !external_imports.is_empty());
+
+    if report.has_unresolved_dependencies {
+        let mut reasons = Vec::new();
+        if python_manifest_has_packages {
+            reasons.push("manifest lists packages".to_string());
+        }
+        if !external_imports.is_empty() {
+            reasons.push(format!(
+                "external imports detected ({})",
+                external_imports.join(", ")
+            ));
+        }
+        if has_non_python_manifest {
+            reasons.push(
+                found_dep_files
+                    .iter()
+                    .filter(|(f, _)| {
+                        *f == "package.json"
+                            || *f == "go.mod"
+                            || *f == "Cargo.toml"
+                            || *f == "Gemfile"
+                    })
+                    .map(|(f, _)| *f)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
         report.warnings.push(format!(
-            "External Python imports detected: {}. \
-             These modules are not in the standard library and no dependency layers are present.",
-            external_imports.join(", ")
+            "Unresolved dependencies ({}): no layers in artifact. \
+             Run packager.default to install dependencies as layers before evaluation.",
+            reasons.join("; ")
         ));
     }
 
@@ -847,7 +890,148 @@ pub fn scan_body_for_migrated_doctrine(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// Scan Python files for external (non-stdlib, non-local) imports.
+/// Parse a `requirements.txt` (or `pyproject.toml` `[project.dependencies]`)
+/// blob and return true if it contains at least one real package spec.
+///
+/// Lines that are comments, blank, or pip options (`-r`, `-e`, `--hash`...)
+/// are ignored. Environment markers and inline comments are stripped before
+/// checking. For `pyproject.toml`, only the `[project.dependencies]` list
+/// is considered.
+fn requirements_txt_has_real_packages(content: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(content);
+
+    // Heuristic: if the first non-blank line looks like TOML, parse as
+    // pyproject.toml. Otherwise treat as requirements.txt (pip format).
+    let is_toml = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim_start().starts_with('['))
+        .unwrap_or(false);
+
+    if is_toml {
+        return pyproject_toml_has_dependencies(&text);
+    }
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        // pip options: -r, -e, --index-url, --hash, etc.
+        if line.starts_with('-') {
+            continue;
+        }
+        // Strip inline comment (requirements.txt allows `pkg # comment`)
+        let line = line.split('#').next().unwrap_or(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        // At this point we have something that looks like a package spec.
+        // Filter out `autonoetic_sdk` (platform-provided, not on PyPI).
+        let pkg_name = line
+            .split(|c: char| c == '=' || c == '>' || c == '<' || c == '!' || c == '[' || c == ';' || c == ' ')
+            .next()
+            .unwrap_or(line)
+            .trim();
+        if pkg_name.is_empty() || pkg_name == "autonoetic_sdk" {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Check a pyproject.toml body for real dependencies.
+///
+/// Supports:
+/// - **PEP 621**: `[project]` with `dependencies = ["pkg>=1.0", ...]`
+///   (single-line or multi-line array)
+/// - **Poetry**: `[tool.poetry.dependencies]` with `pkg = "version"`
+fn pyproject_toml_has_dependencies(text: &str) -> bool {
+    let mut section = String::new();
+    let mut in_deps_multiline = false;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line.to_string();
+            in_deps_multiline = false;
+            continue;
+        }
+
+        // PEP 621: [project] → dependencies = [...]
+        if section == "[project]" {
+            if in_deps_multiline {
+                if let Some(pkg) = toml_array_entry_pkg(line) {
+                    if pkg != "autonoetic_sdk" {
+                        return true;
+                    }
+                }
+                if line.contains(']') {
+                    in_deps_multiline = false;
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("dependencies") {
+                let rest = rest.trim_start();
+                if let Some(after_eq) = rest.strip_prefix('=') {
+                    let val = after_eq.trim();
+                    if val.starts_with('[') {
+                        if val.contains(']') {
+                            // Single-line array — check each entry
+                            return val
+                                .trim_start_matches('[')
+                                .trim_end_matches(']')
+                                .split(',')
+                                .filter_map(|e| toml_array_entry_pkg(e))
+                                .any(|p| p != "autonoetic_sdk");
+                        } else {
+                            in_deps_multiline = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Poetry: [tool.poetry.dependencies] → pkg = "version"
+        if section == "[tool.poetry.dependencies]" {
+            if let Some(eq_idx) = line.find('=') {
+                let pkg = line[..eq_idx].trim();
+                if !pkg.is_empty() && pkg != "python" && pkg != "autonoetic_sdk" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Extract the package name from a single TOML array entry like
+/// `"requests>=2.0",` or `flask]`. Returns `None` for non-string entries.
+fn toml_array_entry_pkg(line: &str) -> Option<&str> {
+    let line = line.trim().trim_end_matches(',').trim();
+    // Strip inline comment
+    let line = line.split('#').next()?.trim();
+    let line = line.trim_matches('"');
+    if line.is_empty() || line == "]" {
+        return None;
+    }
+    let pkg = line
+        .split(|c: char| c == '=' || c == '>' || c == '<' || c == '!' || c == '[' || c == ';')
+        .next()?
+        .trim();
+    if pkg.is_empty() {
+        None
+    } else {
+        Some(pkg)
+    }
+}
+
+
 ///
 /// When `script_entry` is `Some(filename)`, only that file is scanned to avoid
 /// false positives from test files and dev tooling bundled alongside the agent.
@@ -1381,6 +1565,100 @@ artifacts: "not_a_sequence"
     }
 
     #[test]
+    fn test_analyze_bundle_health_empty_requirements_no_external_imports() {
+        // Empty/stdlib-only requirements.txt with no external imports should
+        // NOT trigger the unresolved-dependencies gate.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "requirements.txt".to_string(),
+            b"# No external dependencies\n# pure Python stdlib only\n".to_vec(),
+        );
+        file_map.insert(
+            "main.py".to_string(),
+            b"import json\nimport urllib.request\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            !report.has_unresolved_dependencies,
+            "empty requirements.txt + stdlib imports should not be blocked"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_external_import_triggers_gate_even_without_manifest() {
+        // No requirements.txt, but the code imports a non-stdlib package.
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "main.py".to_string(),
+            b"import requests\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            report.has_unresolved_dependencies,
+            "external import without manifest should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_requirements_with_real_packages_blocks() {
+        let mut file_map = BTreeMap::new();
+        file_map.insert(
+            "requirements.txt".to_string(),
+            b"# stdlib only\nnumpy\nscipy==1.10\n".to_vec(),
+        );
+        file_map.insert(
+            "main.py".to_string(),
+            b"import json\n".to_vec(),
+        );
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            report.has_unresolved_dependencies,
+            "requirements.txt with real packages should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_analyze_bundle_health_non_python_manifest_always_blocks() {
+        // package.json should always trigger the gate regardless of content
+        // (we don't have JS import analysis yet).
+        let mut file_map = BTreeMap::new();
+        file_map.insert("package.json".to_string(), b"{}\n".to_vec());
+        let report = analyze_bundle_health(
+            &file_map,
+            &[],
+            false,
+            None,
+            autonoetic_types::agent::ExecutionMode::Script,
+            true,
+        );
+        assert!(
+            report.has_unresolved_dependencies,
+            "non-Python manifest should always be blocked without layers"
+        );
+    }
+
+    #[test]
     fn test_analyze_bundle_health_no_warnings_when_layers_present() {
         let mut file_map = BTreeMap::new();
         file_map.insert("requirements.txt".to_string(), b"requests\n".to_vec());
@@ -1613,5 +1891,96 @@ artifacts: "not_a_sequence"
             !rendered.contains("allowed_tool_tiers"),
             "rendered SKILL.md should not contain empty 'allowed_tool_tiers'"
         );
+    }
+
+    #[test]
+    fn test_requirements_txt_empty_is_not_real() {
+        assert!(!requirements_txt_has_real_packages(b""));
+        assert!(!requirements_txt_has_real_packages(b"# empty\n\n"));
+        assert!(!requirements_txt_has_real_packages(b"-r other.txt\n"));
+    }
+
+    #[test]
+    fn test_requirements_txt_with_packages() {
+        assert!(requirements_txt_has_real_packages(b"requests>=2.0\n"));
+        assert!(requirements_txt_has_real_packages(b"# comment\nflask\n"));
+        assert!(requirements_txt_has_real_packages(b"numpy==1.20 # science\n"));
+    }
+
+    #[test]
+    fn test_requirements_txt_excludes_autonoetic_sdk() {
+        assert!(!requirements_txt_has_real_packages(b"autonoetic_sdk\n"));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_single_line() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = ["requests>=2.0", "flask"]
+"#;
+        assert!(pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_multi_line() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = [
+    "requests>=2.0",
+    "flask",
+]
+"#;
+        assert!(pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_empty_deps() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = []
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_excludes_autonoetic_sdk() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = ["autonoetic_sdk"]
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_poetry_has_deps() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = ">=3.9"
+requests = "^2.0"
+"#;
+        assert!(pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_poetry_only_python() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = ">=3.9"
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_no_deps_section() {
+        let toml = r#"
+[project]
+name = "my-agent"
+version = "0.1.0"
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
     }
 }

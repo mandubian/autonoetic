@@ -1974,7 +1974,17 @@ impl AgentExecutor {
                 // (is_available). can_invoke_tool is intentionally NOT re-applied here:
                 // it gates SandboxFunctions MCP prefixes (mcp_*), not native tool names,
                 // and would silently drop tier-discovered tools like web_search.
-                if !self.discovered_tools.is_empty() {
+                //
+                // Exception: in degraded mode (P-7.18), the tier filter is a safety
+                // boundary — discovered tools must NOT bypass it. Otherwise the root
+                // session can use previously-discovered Workflow/Specialized tools
+                // (agent_spawn, web_search, etc.) even after degradation, defeating
+                // the purpose of the circuit breaker. promotion_record is still
+                // allowed via the degraded filter's own exemption for promotion-gate
+                // agents.
+                let skip_discover_bypass = self.session_state
+                    == autonoetic_types::agent::SessionState::Degraded;
+                if !self.discovered_tools.is_empty() && !skip_discover_bypass {
                     let all_defs: Vec<ToolDefinition> = self.registry
                         .available_definitions_filtered(&self.manifest, None);
                     for def in &all_defs {
@@ -3385,11 +3395,10 @@ impl AgentExecutor {
             {
                 self.session_state = autonoetic_types::agent::SessionState::Degraded;
                 if let Some(store) = self.gateway_store.as_ref() {
-                    let session_id_for_event = self.session_id.clone().unwrap_or_default();
                     let event = autonoetic_types::causal_chain::CausalEventRecord {
                         event_id: format!("subtrip-{}", uuid::Uuid::new_v4()),
                         agent_id: self.manifest.agent.id.clone(),
-                        session_id: session_id_for_event,
+                        session_id: session_id.clone(),
                         turn_id: None,
                         event_seq: 0,
                         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -3404,6 +3413,34 @@ impl AgentExecutor {
                         reason: Some("loop_guard_sub_trip_warning".to_string()),
                     };
                     let _ = store.create_causal_event(&event);
+
+                    // Surface on the canonical timeline so the room shows
+                    // *why* the session was degraded — matching the visibility
+                    // already given to full guard trips (guard.tripped).
+                    let root = crate::runtime::content_store::root_session_id(&session_id).to_string();
+                    let principal =
+                        autonoetic_types::principal::Principal::agent(self.manifest.agent.id.clone());
+                    let role = crate::runtime::session_timeline::derive_role(&self.manifest.agent.id);
+                    let tl = crate::runtime::session_timeline::build_timeline_event(
+                        root,
+                        session_id.clone(),
+                        None,
+                        &principal,
+                        &role,
+                        "session.degraded",
+                        None,
+                        Some(serde_json::json!({
+                            "reason": "loop_guard_sub_trip_warning",
+                            "rule_id": "P-7.18",
+                        })),
+                        autonoetic_types::session_timeline::TimelineRefs {
+                            enforced_rules: vec!["P-7.18".to_string()],
+                            ..Default::default()
+                        },
+                    );
+                    if let Err(err) = store.create_live_digest_event(&tl) {
+                        tracing::debug!(target: "session_timeline", error = %err, "session.degraded timeline emit failed");
+                    }
                 }
                 if let Some(ds) = self.degraded_sessions.as_ref() {
                     ds.lock().await.insert(session_id.clone());

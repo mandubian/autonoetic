@@ -21,21 +21,33 @@ pub enum Capability {
     /// MCP tool access by prefix.
     /// Controls which external tools (from MCP servers) can be invoked.
     /// Example: ["web.", "sandbox.exec"] allows web tools and sandbox.exec.
-    SandboxFunctions { allowed: Vec<String> },
+    SandboxFunctions {
+        #[serde(default)]
+        allowed: Vec<String>,
+    },
 
     /// Read access to all storage: content, memory, knowledge.
     /// Includes search operations.
     /// The `scopes` field restricts which paths/areas can be read.
-    ReadAccess { scopes: Vec<String> },
+    ReadAccess {
+        #[serde(default)]
+        scopes: Vec<String>,
+    },
 
     /// Write access to all storage: content, memory, knowledge.
     /// Includes sharing with other agents.
     /// The `scopes` field restricts which paths/areas can be written.
-    WriteAccess { scopes: Vec<String> },
+    WriteAccess {
+        #[serde(default)]
+        scopes: Vec<String>,
+    },
 
     /// HTTP/network access - escapes the sandbox boundary.
     /// Use ["*"] for all hosts, or specific domains.
-    NetworkAccess { hosts: Vec<String> },
+    NetworkAccess {
+        #[serde(default)]
+        hosts: Vec<String>,
+    },
 
     /// Create child agent sessions.
     /// The `max_children` field limits concurrent children.
