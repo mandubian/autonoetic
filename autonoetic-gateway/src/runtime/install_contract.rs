@@ -857,16 +857,6 @@ pub fn analyze_bundle_health(
         ));
     }
 
-    if !external_imports.is_empty() && !has_layers && !report.has_unresolved_dependencies {
-        // This branch is unreachable because external_imports feeds into
-        // has_unresolved_dependencies above, but kept for safety.
-        report.warnings.push(format!(
-            "External Python imports detected: {}. \
-             These modules are not in the standard library and no dependency layers are present.",
-            external_imports.join(", ")
-        ));
-    }
-
     for cap in capabilities {
         match cap {
             Capability::NetworkAccess { .. } => report.declares_network_access = true,
@@ -954,48 +944,91 @@ fn requirements_txt_has_real_packages(content: &[u8]) -> bool {
     false
 }
 
-/// Check a pyproject.toml body for real dependencies in
-/// `[project.dependencies]` or `[tool.poetry.dependencies]`.
+/// Check a pyproject.toml body for real dependencies.
+///
+/// Supports:
+/// - **PEP 621**: `[project]` with `dependencies = ["pkg>=1.0", ...]`
+///   (single-line or multi-line array)
+/// - **Poetry**: `[tool.poetry.dependencies]` with `pkg = "version"`
 fn pyproject_toml_has_dependencies(text: &str) -> bool {
-    let mut in_deps = false;
-    let mut section_header = String::new();
+    let mut section = String::new();
+    let mut in_deps_multiline = false;
+
     for raw_line in text.lines() {
         let line = raw_line.trim();
+
         if line.starts_with('[') && line.ends_with(']') {
-            in_deps = line == "[project.dependencies]"
-                || line == "[tool.poetry.dependencies]";
-            section_header = line.to_string();
+            section = line.to_string();
+            in_deps_multiline = false;
             continue;
         }
-        if !in_deps {
-            continue;
-        }
-        // Poetry uses `package = "version"` or `package = {version = "..."}`
-        // PEP 621 uses `package>=1.0` or just `"package>=1.0"` (quoted strings)
-        let line = line.strip_prefix('"').unwrap_or(line);
-        let line = line.split('#').next().unwrap_or(line).trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Skip poetry's `python = ">=3.9"` constraint
-        let pkg_name = line
-            .split(|c: char| c == '=' || c == '>' || c == '<' || c == '!' || c == '[' || c == ';' || c == ' ' || c == '=')
-            .next()
-            .unwrap_or(line)
-            .trim();
-        if pkg_name.is_empty() || pkg_name == "python" || pkg_name == "autonoetic_sdk" {
-            continue;
-        }
-        // Poetry: `package = ...` — check there's an `=` or the line is a bare name
-        if section_header == "[tool.poetry.dependencies]" {
-            if !line.contains('=') && !line.contains(' ') {
-                // bare package name with no version — still a dependency
-                return true;
+
+        // PEP 621: [project] → dependencies = [...]
+        if section == "[project]" {
+            if in_deps_multiline {
+                if let Some(pkg) = toml_array_entry_pkg(line) {
+                    if pkg != "autonoetic_sdk" {
+                        return true;
+                    }
+                }
+                if line.contains(']') {
+                    in_deps_multiline = false;
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("dependencies") {
+                let rest = rest.trim_start();
+                if let Some(after_eq) = rest.strip_prefix('=') {
+                    let val = after_eq.trim();
+                    if val.starts_with('[') {
+                        if val.contains(']') {
+                            // Single-line array — check each entry
+                            return val
+                                .trim_start_matches('[')
+                                .trim_end_matches(']')
+                                .split(',')
+                                .filter_map(|e| toml_array_entry_pkg(e))
+                                .any(|p| p != "autonoetic_sdk");
+                        } else {
+                            in_deps_multiline = true;
+                        }
+                    }
+                }
             }
         }
-        return true;
+
+        // Poetry: [tool.poetry.dependencies] → pkg = "version"
+        if section == "[tool.poetry.dependencies]" {
+            if let Some(eq_idx) = line.find('=') {
+                let pkg = line[..eq_idx].trim();
+                if !pkg.is_empty() && pkg != "python" && pkg != "autonoetic_sdk" {
+                    return true;
+                }
+            }
+        }
     }
     false
+}
+
+/// Extract the package name from a single TOML array entry like
+/// `"requests>=2.0",` or `flask]`. Returns `None` for non-string entries.
+fn toml_array_entry_pkg(line: &str) -> Option<&str> {
+    let line = line.trim().trim_end_matches(',').trim();
+    // Strip inline comment
+    let line = line.split('#').next()?.trim();
+    let line = line.trim_matches('"');
+    if line.is_empty() || line == "]" {
+        return None;
+    }
+    let pkg = line
+        .split(|c: char| c == '=' || c == '>' || c == '<' || c == '!' || c == '[' || c == ';')
+        .next()?
+        .trim();
+    if pkg.is_empty() {
+        None
+    } else {
+        Some(pkg)
+    }
 }
 
 
@@ -1858,5 +1891,96 @@ artifacts: "not_a_sequence"
             !rendered.contains("allowed_tool_tiers"),
             "rendered SKILL.md should not contain empty 'allowed_tool_tiers'"
         );
+    }
+
+    #[test]
+    fn test_requirements_txt_empty_is_not_real() {
+        assert!(!requirements_txt_has_real_packages(b""));
+        assert!(!requirements_txt_has_real_packages(b"# empty\n\n"));
+        assert!(!requirements_txt_has_real_packages(b"-r other.txt\n"));
+    }
+
+    #[test]
+    fn test_requirements_txt_with_packages() {
+        assert!(requirements_txt_has_real_packages(b"requests>=2.0\n"));
+        assert!(requirements_txt_has_real_packages(b"# comment\nflask\n"));
+        assert!(requirements_txt_has_real_packages(b"numpy==1.20 # science\n"));
+    }
+
+    #[test]
+    fn test_requirements_txt_excludes_autonoetic_sdk() {
+        assert!(!requirements_txt_has_real_packages(b"autonoetic_sdk\n"));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_single_line() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = ["requests>=2.0", "flask"]
+"#;
+        assert!(pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_multi_line() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = [
+    "requests>=2.0",
+    "flask",
+]
+"#;
+        assert!(pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_empty_deps() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = []
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_pep621_excludes_autonoetic_sdk() {
+        let toml = r#"
+[project]
+name = "my-agent"
+dependencies = ["autonoetic_sdk"]
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_poetry_has_deps() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = ">=3.9"
+requests = "^2.0"
+"#;
+        assert!(pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_poetry_only_python() {
+        let toml = r#"
+[tool.poetry.dependencies]
+python = ">=3.9"
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
+    }
+
+    #[test]
+    fn test_pyproject_no_deps_section() {
+        let toml = r#"
+[project]
+name = "my-agent"
+version = "0.1.0"
+"#;
+        assert!(!pyproject_toml_has_dependencies(toml));
     }
 }

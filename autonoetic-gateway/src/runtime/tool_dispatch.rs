@@ -365,7 +365,17 @@ pub fn determine_tool_tier_filter(
         return crate::runtime::tools::ToolTierFilter::clarification();
     }
     if session_state == autonoetic_types::agent::SessionState::Degraded {
-        return crate::runtime::tools::ToolTierFilter::degraded();
+        let mut filter = crate::runtime::tools::ToolTierFilter::degraded();
+        // promotion_record is bookkeeping (writes a verdict to SQLite), not a
+        // dangerous operation. Promotion-gate agents (auditor, static_evaluator,
+        // unit_test_runner, sealed_evaluator) must be able to record their
+        // verdicts even in degraded mode — otherwise the promotion pipeline
+        // deadlocks (auditor can't record, builder can't promote, factory loops).
+        // The promotion ACTION (agent_revision_promote) is still blocked because
+        // it is Specialized tier and not exempted here.
+        filter.allow_promotion_record_without_specialized_tier =
+            crate::runtime::tools::promotion::manifest_may_record_promotion_verdicts(manifest);
+        return filter;
     }
 
     if !manifest.allowed_tool_tiers.is_empty() {
@@ -900,8 +910,25 @@ mod tier_filter_tests {
         assert!(filter.allows("sandbox_exec"), "sandbox_exec is core tier, allowed by tier filter");
         assert!(!filter.allows("web_search"), "web_search is specialized, blocked in degraded");
         assert!(!filter.allows("agent_spawn"), "agent_spawn is workflow, blocked in degraded");
-        assert!(!filter.allows("promotion_record"), "promotion is specialized, blocked in degraded");
+        assert!(!filter.allows("promotion_record"), "promotion_record blocked for non-promotion-gate agent in degraded");
         assert!(!filter.allows("agent_revision_create"), "agent_revision is specialized, blocked in degraded");
+    }
+
+    #[test]
+    fn test_degraded_allows_promotion_record_for_promotion_gate_agents() {
+        let mut manifest = test_manifest();
+        manifest.agent.id = "auditor.default".to_string();
+        let filter = determine_tool_tier_filter(
+            &manifest,
+            Some("root/child-auditor"),
+            false,
+            SessionState::Degraded,
+            true,
+        );
+        assert!(filter.allows("promotion_record"), "auditor must record verdicts even in degraded mode");
+        assert!(filter.allows("content_write"), "core tools still available");
+        assert!(!filter.allows("web_search"), "other specialized tools still blocked");
+        assert!(!filter.allows("agent_revision_promote"), "promotion action still blocked");
     }
 
     #[test]
