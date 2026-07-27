@@ -419,25 +419,27 @@ mod tests {
 
     /// Conversely, every `.md` file in the corpus must be indexed — an
     /// unindexed page is invisible to `wiki_list`, so agents never find it.
+    ///
+    /// Matched on the index's `file` field, not on `id`. The two are separate
+    /// columns and the format does not require them to agree, so comparing
+    /// filenames against ids would enforce a convention the data model does not
+    /// have and fail on a page that legitimately names them differently.
     #[test]
     fn every_corpus_file_is_indexed() {
         let dir = resolve_wiki_dir(None).expect("built-in corpus dir should exist");
-        let listed = list_pages(None).expect("index should parse");
-        let indexed: std::collections::HashSet<String> =
-            listed.pages.iter().map(|p| p.id.clone()).collect();
+        let index = load_index(&dir).expect("index should parse");
+        let indexed_files: std::collections::HashSet<&str> =
+            index.pages.iter().map(|p| p.file.as_str()).collect();
 
         for entry in std::fs::read_dir(&dir).expect("corpus dir should read") {
             let entry = entry.expect("dir entry");
             let name = entry.file_name().to_string_lossy().to_string();
-            let Some(stem) = name.strip_suffix(".md") else {
-                continue;
-            };
-            if stem == "README" {
-                continue; // authoring instructions, not a wiki page
+            if !name.ends_with(".md") || name == "README.md" {
+                continue; // README is authoring instructions, not a wiki page
             }
             assert!(
-                indexed.contains(stem),
-                "corpus file '{name}' is not in index.toml, so no agent can discover it"
+                indexed_files.contains(name.as_str()),
+                "corpus file '{name}' has no `file = ` entry in index.toml, so no agent can discover it"
             );
         }
     }

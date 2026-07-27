@@ -44,9 +44,15 @@ Every other status delivered nothing (`recipients_count == 0`):
 | `status` | What it means | What to do |
 |---|---|---|
 | `no_live_recipients` | The role is installed but has no unfinished session other than yours. | Nobody is listening. `agent_spawn` if the work must happen. |
-| `target_agent_not_found` | No agent with that id is installed. | Check the id with `agent_list`. Do not retry. |
+| `target_session_finished` | That session has already ended. Messages are injected when a session wakes, and it will not wake again. | Don't retry. `agent_spawn` if the work still needs doing. |
+| `target_agent_not_found` | No agent with that id is installed (checked both the alias registry and the agents directory). | Check the id with `agent_list`. Do not retry. |
 | `target_agent_unavailable` | The agent is installed but its manifest could not be loaded — a broken bundle, not a missing one. | Report it. Retrying will not fix a broken bundle. |
 | `target_session_not_found` | That session id has no agent binding, so the gateway cannot tell who owns it. | Use a session id from your own workflow, or address the role instead. |
+
+**A child you spawned is usually already finished.** A short child session can end
+seconds after it replies, so a session id you captured earlier is very often dead
+by the time you message it. Messaging is for peers that are *still running*, not
+for following up with a child. If you need more work done, spawn again.
 
 `recipients_count` counts sessions that can actually consume the message, not
 sessions the role has ever run. A count of 0 with `ok: false` is a real
