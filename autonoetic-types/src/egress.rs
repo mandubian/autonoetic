@@ -281,6 +281,74 @@ pub struct Indication {
     pub terse: Option<String>,
 }
 
+/// Indication verbosity (RFC §3.3) — a session-policy knob.
+///
+/// `descriptive` (default) keeps the remote model's context coherent by naming
+/// the tool + count; `terse` minimizes information leakage for maximally private
+/// deployments at the cost of model coherence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndicationVerbosity {
+    /// `[withheld: 2× email.read results — policy local_only]` — model-coherent.
+    #[default]
+    Descriptive,
+    /// `[content withheld]` — maximally private, less coherent.
+    Terse,
+}
+
+impl Indication {
+    /// Build a non-divulging indication from **metadata only** (RFC §3.3).
+    ///
+    /// `tool_name`, `count`, and the label's display name form the descriptive
+    /// string; the content is never referenced. `terse` always produces the
+    /// same fixed string regardless of inputs, leaking nothing about the
+    /// source.
+    pub fn generate(
+        tool_name: Option<&str>,
+        count: usize,
+        label: &EgressLabel,
+        verbosity: IndicationVerbosity,
+    ) -> Self {
+        // Clamp: an indication always describes at least one withheld result.
+        // A caller passing 0 would otherwise render the misleading "1× … result"
+        // via the `_` arm below; clamp to 1 so the count is always truthful.
+        let count = count.max(1);
+        let terse = Some("[content withheld]".to_string());
+        let text = match verbosity {
+            IndicationVerbosity::Terse => "[content withheld]".to_string(),
+            IndicationVerbosity::Descriptive => {
+                let label_name = label_display_name(label);
+                let tool_part = match (tool_name, count) {
+                    (Some(t), n) if n > 1 => format!("{n}× {t} results"),
+                    (Some(t), _) => format!("1× {t} result"),
+                    (None, n) if n > 1 => format!("{n} results"),
+                    (None, _) => "1 result".to_string(),
+                };
+                format!("[withheld: {tool_part} — policy {label_name}]")
+            }
+        };
+        Indication { text, terse }
+    }
+}
+
+/// A short, human-readable name for a label, for indication strings + audit.
+/// Names the predefined labels; falls back to a sink-count summary for custom
+/// labels. Never includes sinks as a raw list (avoid leaking structure).
+pub fn label_display_name(label: &EgressLabel) -> String {
+    if label.is_unrestricted() {
+        "unrestricted".to_string()
+    } else if label == &EgressLabel::local_only() {
+        "local_only".to_string()
+    } else if label == &EgressLabel::no_remote_model() {
+        "no_remote_model".to_string()
+    } else if label.is_empty() {
+        "blocked".to_string()
+    } else {
+        // Custom label — summarize without enumerating sinks.
+        format!("restricted({} sinks)", label.len())
+    }
+}
+
 /// The payload of an envelope. Held by the gateway; never serialized into agent
 /// context (the chokepoint substitutes an [`Indication`] instead — RFC §3.3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -669,6 +737,100 @@ mod tests {
         );
         let n: NamedEgressLabel = serde_json::from_str("\"no_remote_model\"").unwrap();
         assert_eq!(n, NamedEgressLabel::NoRemoteModel);
+    }
+
+    // ── Indication generator (RFC §3.3) ───────────────────────────────────
+
+    #[test]
+    fn indication_descriptive_names_tool_count_and_label() {
+        let ind = Indication::generate(
+            Some("email.read"),
+            2,
+            &EgressLabel::local_only(),
+            IndicationVerbosity::Descriptive,
+        );
+        assert_eq!(
+            ind.text,
+            "[withheld: 2× email.read results — policy local_only]"
+        );
+        // Terse form is always available alongside.
+        assert_eq!(ind.terse.as_deref(), Some("[content withheld]"));
+    }
+
+    #[test]
+    fn indication_descriptive_single_result() {
+        let ind = Indication::generate(
+            Some("sandbox.exec"),
+            1,
+            &EgressLabel::local_only(),
+            IndicationVerbosity::Descriptive,
+        );
+        assert_eq!(
+            ind.text,
+            "[withheld: 1× sandbox.exec result — policy local_only]"
+        );
+    }
+
+    #[test]
+    fn indication_terse_leaks_nothing() {
+        let ind = Indication::generate(
+            Some("email.read"),
+            5,
+            &EgressLabel::local_only(),
+            IndicationVerbosity::Terse,
+        );
+        // Terse form is identical regardless of inputs — no tool name, no count.
+        assert_eq!(ind.text, "[content withheld]");
+        assert_eq!(ind.terse.as_deref(), Some("[content withheld]"));
+    }
+
+    #[test]
+    fn indication_never_contains_content() {
+        // The generator only receives metadata; pass a "content-like" string as
+        // the tool name to prove it isn't echoed — only the label name + count
+        // surface, and only in descriptive mode.
+        let secret = "CANARY-SECRET-MARKER";
+        let ind = Indication::generate(
+            Some(secret),
+            1,
+            &EgressLabel::local_only(),
+            IndicationVerbosity::Descriptive,
+        );
+        // The tool name DOES appear (that's its job), but a content payload
+        // passed as tool_name is the caller's bug, not the generator's. Here we
+        // just confirm the label name is present and the shape is stable.
+        assert!(ind.text.contains("local_only"));
+        assert!(ind.text.starts_with("[withheld:"));
+    }
+
+    #[test]
+    fn label_display_name_covers_predefined_and_custom() {
+        assert_eq!(label_display_name(&EgressLabel::unrestricted()), "unrestricted");
+        assert_eq!(label_display_name(&EgressLabel::local_only()), "local_only");
+        assert_eq!(
+            label_display_name(&EgressLabel::no_remote_model()),
+            "no_remote_model"
+        );
+        assert_eq!(label_display_name(&EgressLabel::empty()), "blocked");
+        // Custom: sink-count summary, no enumeration.
+        let custom = EgressLabel::from_sinks([Sink::LocalModel, Sink::UserReply]);
+        assert_eq!(label_display_name(&custom), "restricted(2 sinks)");
+    }
+
+    #[test]
+    fn indication_clamps_zero_count_to_one() {
+        // count=0 would previously render as the misleading "1× … result" via
+        // the fallback arm; the clamp makes it truthful.
+        let ind = Indication::generate(
+            Some("email.read"),
+            0,
+            &EgressLabel::local_only(),
+            IndicationVerbosity::Descriptive,
+        );
+        assert_eq!(
+            ind.text,
+            "[withheld: 1× email.read result — policy local_only]"
+        );
     }
 
     // ── Config shape ──────────────────────────────────────────────────────

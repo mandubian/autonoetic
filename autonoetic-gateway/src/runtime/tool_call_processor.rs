@@ -61,6 +61,13 @@ pub struct ToolCallProcessor<'a> {
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
     session_state: autonoetic_types::agent::SessionState,
+    /// Egress labels accumulated for tool results in this turn, keyed by
+    /// `tool_call_id`. Consumed by the executor (via [`Self::take_egress_labels`])
+    /// and attached to the next completion request's metadata so the chokepoint
+    /// driver (RFC §5.2) can substitute indications for content whose label
+    /// excludes the target sink. Empty for unconfigured deployments (the
+    /// labeler is inert — RFC §4.2).
+    egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
 }
 
 /// Result of executing a single tool call, including whether the payload was
@@ -160,6 +167,7 @@ impl<'a> ToolCallProcessor<'a> {
             gateway_store,
             run_context,
             session_state: autonoetic_types::agent::SessionState::Normal,
+            egress_labels: std::collections::HashMap::new(),
         }
     }
 
@@ -176,6 +184,16 @@ impl<'a> ToolCallProcessor<'a> {
     pub fn with_session_state(mut self, state: autonoetic_types::agent::SessionState) -> Self {
         self.session_state = state;
         self
+    }
+
+    /// Take the egress labels accumulated for tool results in this turn, keyed
+    /// by `tool_call_id`. The executor attaches these to the next completion
+    /// request's metadata so the chokepoint driver (RFC §5.2) can withhold
+    /// content whose label excludes the target sink.
+    pub fn take_egress_labels(
+        &mut self,
+    ) -> std::collections::HashMap<String, autonoetic_types::egress::EgressLabel> {
+        std::mem::take(&mut self.egress_labels)
     }
 
     fn is_degraded_blocked_tool(&self, tool_name: &str) -> bool {
@@ -340,9 +358,12 @@ impl<'a> ToolCallProcessor<'a> {
                     // result. The label is computed from (tool, args) via the
                     // operator source rules; for sandbox.exec the command in
                     // the args is statically matched against labeled paths.
-                    // Script-body dependency reads will be picked up by the
-                    // phase 1b (#905) chokepoint which has full tool context.
-                    let _ = egress_labeler.label_tool_result(
+                    // The label is recorded for the phase 1b (#905) chokepoint:
+                    // the executor attaches the accumulated map to the next
+                    // completion request's metadata, and the wrapping
+                    // EgressChokepointDriver substitutes an indication for any
+                    // tool result whose label excludes the target sink.
+                    if let Some(outcome) = egress_labeler.label_tool_result(
                         &crate::runtime::egress_labeler::LabelRequest {
                             tool: canonical_tool,
                             arguments_json: &tc.arguments,
@@ -353,7 +374,10 @@ impl<'a> ToolCallProcessor<'a> {
                         &self.manifest.agent.id,
                         self.turn_id.as_deref(),
                         self.gateway_store.as_ref(),
-                    );
+                    ) {
+                        self.egress_labels
+                            .insert(tc.id.clone(), outcome.label);
+                    }
                     res
                 }
                 Err(e) => {
