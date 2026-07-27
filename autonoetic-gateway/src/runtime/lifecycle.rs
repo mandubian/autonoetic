@@ -2829,6 +2829,11 @@ impl AgentExecutor {
                             &self.manifest.agent.id,
                             Some(&turn_id),
                         );
+                        // Filtered wire view (RFC §9.2): record the per-request
+                        // "what left" summary on the session tracer so it sits
+                        // alongside the response log, not only in gateway.db.
+                        // Best-effort — a failed log is not fatal.
+                        let _ = tracer.log_egress_request_filtered(&routed_model, &report);
                     }
                 }
                 match response {

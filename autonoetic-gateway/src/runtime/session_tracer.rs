@@ -628,6 +628,48 @@ impl SessionTracer {
         );
     }
 
+    /// Record the **filtered wire view** for one LLM request (RFC §9.2).
+    ///
+    /// The §9.2 acceptance bar is that "what left the machine at turn N?" has a
+    /// literal answer. The chokepoint (`EgressChokepointDriver`) already
+    /// produces a `FilterReport` describing what it withheld; this method
+    /// records that summary on the session-local tracer (JSONL +
+    /// `causal_chain.jsonl`) so the answer is available alongside the response
+    /// log, not only in `gateway.db`. Content-free metadata only (sink, counts,
+    /// withheld tool_call_ids + the indication text, which is itself metadata).
+    ///
+    /// `emit_chokepoint_events` (called by lifecycle.rs next to this) writes
+    /// the per-entry `egress.envelope_withheld` / `egress.request_filtered` /
+    /// `egress.assertion_violation` events to `gateway.db`; this method writes
+    /// the consolidated per-request summary to the tracer artifact. No-op-safe:
+    /// call unconditionally; the caller already guards on
+    /// `!egress_labels.is_empty()`.
+    pub fn log_egress_request_filtered(
+        &mut self,
+        model: &str,
+        report: &crate::llm::egress_chokepoint::FilterReport,
+    ) -> anyhow::Result<()> {
+        let payload = serde_json::json!({
+            "model": model,
+            "target_sink": report.sink,
+            "withheld_count": report.withheld.len(),
+            "included_count": report.included,
+            "violation_count": report.violations.len(),
+            // Per-withheld metadata: tool_call_id + indication (content-free).
+            "withheld": report.withheld.iter().map(|w| serde_json::json!({
+                "tool_call_id": w.tool_call_id,
+                "indication": w.indication,
+            })).collect::<Vec<_>>(),
+        });
+        self.log_event(
+            "egress",
+            "request_forwarded",
+            EntryStatus::Success,
+            Some(payload),
+        )?;
+        Ok(())
+    }
+
     pub fn log_llm_completion(
         &mut self,
         model: &str,

@@ -3134,3 +3134,357 @@ pub async fn handle_gateway_workflow(
     }
     Ok(())
 }
+
+/// `gateway egress-audit <session>` — per-turn egress (data localization)
+/// report (RFC §9.3). Renders, for the given session, every egress causal
+/// event grouped by turn: the provider/preset each turn ran on, which
+/// envelopes were withheld (and the indication that replaced them), why each
+/// was labeled, and any assertion violations.
+///
+/// Answers the RFC §9.4 introspection bar (minus #5 declassification, which
+/// is phase 4 #909):
+/// 1. What left at turn N? → the `egress.request_filtered`/`request_forwarded`
+///    summary (sink, preset, withheld/included counts).
+/// 2. Why was X withheld? → `egress.envelope_withheld` (indication + label).
+/// 3. Why is this labeled? → `egress.envelope_labeled` (matched rules).
+/// 4. Why did turn N run on this provider? → `egress.request_filtered`
+///    `preset` + `target_sink` (full `provider_selected` is phase 2 #907).
+pub async fn handle_gateway_egress_audit(
+    config_path: &Path,
+    session_id: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    // Pull all causal events for the session, filter client-side to egress
+    // (search_causal_events filters on session/agent only).
+    let events = gateway_store.search_causal_events(Some(session_id), None, 5000)?;
+    let egress: Vec<autonoetic_types::causal_chain::CausalEventRecord> = events
+        .into_iter()
+        .filter(|e| e.category == "egress")
+        .collect();
+
+    let report = build_egress_audit(session_id, &egress);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    print_egress_audit(&report);
+    Ok(())
+}
+
+/// One row in the per-turn audit report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EgressAuditRow {
+    /// The egress action (`egress.envelope_labeled`, `egress.request_filtered`,
+    /// `egress.envelope_withheld`, `egress.assertion_violation`, …).
+    pub action: String,
+    /// Stable display fields derived from the event payload (content-free).
+    pub fields: EgressAuditFields,
+}
+
+/// The display fields the audit extracts from an event payload. Content-free
+/// metadata only — ids, sink, counts, indication text (itself metadata).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EgressAuditFields {
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub target_sink: Option<String>,
+    pub preset: Option<String>,
+    pub indication: Option<String>,
+    pub resolution: Option<String>,
+    pub withheld_count: Option<u64>,
+    pub included_count: Option<u64>,
+    pub violation_count: Option<u64>,
+    pub payload_digest: Option<String>,
+}
+
+/// One turn's worth of egress events, in event-seq order.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EgressAuditTurn {
+    pub turn_id: Option<String>,
+    pub rows: Vec<EgressAuditRow>,
+}
+
+/// The full audit report — session id + per-turn rows + totals.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EgressAuditReport {
+    pub session_id: String,
+    pub turns: Vec<EgressAuditTurn>,
+    pub total_withheld: u64,
+    pub total_violations: u64,
+}
+
+/// Pure rendering: derive the structured audit report from a set of egress
+/// causal events for a session. Exposed so the rendering is unit-testable
+/// without a live gateway store. `events` should already be filtered to
+/// `category == "egress"` (the handler does this; the helper tolerates
+/// non-egress events by ignoring them).
+pub fn build_egress_audit(
+    session_id: &str,
+    events: &[autonoetic_types::causal_chain::CausalEventRecord],
+) -> EgressAuditReport {
+    use std::collections::BTreeMap;
+    // Group by turn_id, preserving event_seq order within each turn.
+    let mut by_turn: BTreeMap<Option<String>, Vec<&autonoetic_types::causal_chain::CausalEventRecord>> =
+        BTreeMap::new();
+    for ev in events {
+        if ev.category != "egress" {
+            continue;
+        }
+        by_turn.entry(ev.turn_id.clone()).or_default().push(ev);
+    }
+
+    let mut total_withheld = 0u64;
+    let mut total_violations = 0u64;
+    let mut turns: Vec<EgressAuditTurn> = Vec::new();
+
+    for (turn_id, mut evs) in by_turn {
+        evs.sort_by_key(|e| e.event_seq);
+        let mut rows: Vec<EgressAuditRow> = Vec::new();
+        for ev in &evs {
+            let payload: serde_json::Value = ev
+                .payload
+                .as_ref()
+                .and_then(|p| serde_json::from_str(p).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let get = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let get_u = |k: &str| payload.get(k).and_then(|v| v.as_u64());
+            let preset = get("preset").or_else(|| get("model"));
+            let withheld_count = get_u("withheld_count");
+            let violation_count = get_u("violation_count");
+            if let Some(w) = withheld_count {
+                total_withheld += w;
+            }
+            if let Some(v) = violation_count {
+                total_violations += v;
+            }
+            let fields = EgressAuditFields {
+                tool_call_id: get("tool_call_id"),
+                tool_name: get("tool_name"),
+                target_sink: get("target_sink"),
+                preset,
+                indication: get("indication"),
+                resolution: get("resolution"),
+                withheld_count,
+                included_count: get_u("included_count"),
+                violation_count,
+                payload_digest: get("payload_digest"),
+            };
+            rows.push(EgressAuditRow {
+                action: ev.action.clone(),
+                fields,
+            });
+        }
+        turns.push(EgressAuditTurn { turn_id, rows });
+    }
+
+    EgressAuditReport {
+        session_id: session_id.to_string(),
+        turns,
+        total_withheld,
+        total_violations,
+    }
+}
+
+/// Print the human-readable audit report (ANSI-colored). Mirrors the
+/// RFC §9.3 surface.
+pub fn print_egress_audit(report: &EgressAuditReport) {
+    const DIM: &str = "\x1b[2m";
+    const BOLD: &str = "\x1b[1m";
+    const YELLOW: &str = "\x1b[33m";
+    const RED: &str = "\x1b[31m";
+    const CYAN: &str = "\x1b[36m";
+    const RESET: &str = "\x1b[0m";
+
+    println!("{BOLD}Egress audit — session {}{RESET}", report.session_id);
+    println!("{DIM}RFC data-envelopes §9.3 | source: gateway.db causal_events{RESET}");
+    println!();
+
+    if report.turns.is_empty() {
+        println!("{DIM}No egress events for this session. (Either no source rules were{RESET}");
+        println!("{DIM}configured, or no labeled content was withheld/routed.){RESET}");
+        return;
+    }
+
+    for turn in &report.turns {
+        let label = turn
+            .turn_id
+            .clone()
+            .unwrap_or_else(|| "(pre-turn)".to_string());
+        println!("{CYAN}{BOLD}═ Turn {label}{RESET}");
+        for row in &turn.rows {
+            let f = &row.fields;
+            match row.action.as_str() {
+                "egress.envelope_labeled" => {
+                    let tool = f.tool_name.as_deref().unwrap_or("?");
+                    let res = f.resolution.as_deref().unwrap_or("?");
+                    println!("  {DIM}• labeled {tool} ({res}){RESET}");
+                }
+                "egress.request_filtered" | "egress.request_forwarded" => {
+                    let sink = f.target_sink.as_deref().unwrap_or("?");
+                    let preset = f.preset.as_deref().unwrap_or("?");
+                    let wh = f.withheld_count.unwrap_or(0);
+                    let inc = f.included_count.unwrap_or(0);
+                    let vio = f.violation_count.unwrap_or(0);
+                    let vio_tag = if vio > 0 {
+                        format!(" {RED}{BOLD}⚠ {vio} violation(s){RESET}")
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  {BOLD}→ provider: {preset}{RESET} {DIM}(sink={sink}, withheld={wh}, included={inc}){RESET}{vio_tag}"
+                    );
+                }
+                "egress.envelope_withheld" => {
+                    let sink = f.target_sink.as_deref().unwrap_or("?");
+                    let ind = f.indication.as_deref().unwrap_or("");
+                    let tc = f.tool_call_id.as_deref().unwrap_or("?");
+                    println!(
+                        "    {YELLOW}⤷ withheld {tc} from {sink}{RESET}\n      {DIM}{ind}{RESET}"
+                    );
+                }
+                "egress.assertion_violation" => {
+                    let tc = f.tool_call_id.as_deref().unwrap_or("?");
+                    let digest = f.payload_digest.as_deref().unwrap_or("?");
+                    println!(
+                        "    {RED}{BOLD}‼ assertion violation: {tc} (digest {digest}) — fail-closed{RESET}"
+                    );
+                }
+                _ => {
+                    println!("  {DIM}• {}{RESET}", row.action);
+                }
+            }
+        }
+        println!();
+    }
+
+    println!("{DIM}───{RESET}");
+    println!(
+        "{BOLD}Total: {} envelope(s) withheld, {} assertion violation(s){RESET}",
+        report.total_withheld, report.total_violations
+    );
+    if report.total_violations > 0 {
+        println!(
+            "{RED}Assertions are fail-closed tripwires (RFC §5.2.3/§11) — each blocks the call.{RESET}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod egress_audit_tests {
+    use super::*;
+    use autonoetic_types::causal_chain::CausalEventRecord;
+
+    fn ev(action: &str, turn: Option<&str>, seq: u64, payload: serde_json::Value) -> CausalEventRecord {
+        CausalEventRecord {
+            event_id: format!("ev-{seq}"),
+            agent_id: "test.agent".to_string(),
+            session_id: "sess-test".to_string(),
+            turn_id: turn.map(|t| t.to_string()),
+            event_seq: seq,
+            timestamp: "2026-07-28T00:00:00Z".to_string(),
+            category: "egress".to_string(),
+            action: action.to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec![],
+            target: None,
+            payload: Some(payload.to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn empty_events_produces_empty_report() {
+        let report = build_egress_audit("sess", &[]);
+        assert!(report.turns.is_empty());
+        assert_eq!(report.total_withheld, 0);
+        assert_eq!(report.total_violations, 0);
+    }
+
+    #[test]
+    fn groups_by_turn_and_counts_totals() {
+        let events = vec![
+            ev(
+                "egress.envelope_labeled",
+                Some("turn-1"),
+                1,
+                serde_json::json!({"tool_name": "email.read", "resolution": "operator_rule"}),
+            ),
+            ev(
+                "egress.envelope_withheld",
+                Some("turn-2"),
+                2,
+                serde_json::json!({"tool_call_id": "tc_1", "target_sink": "remote_model", "indication": "[withheld: 1× email.read result — policy local_only]"}),
+            ),
+            ev(
+                "egress.request_filtered",
+                Some("turn-2"),
+                3,
+                serde_json::json!({"target_sink": "remote_model", "preset": "sonnet", "withheld_count": 1, "included_count": 2, "violation_count": 0}),
+            ),
+            ev(
+                "egress.assertion_violation",
+                Some("turn-3"),
+                4,
+                serde_json::json!({"tool_call_id": "tc_1", "payload_digest": "abc123def456"}),
+            ),
+            ev(
+                "egress.request_filtered",
+                Some("turn-3"),
+                5,
+                serde_json::json!({"target_sink": "remote_model", "preset": "sonnet", "withheld_count": 0, "included_count": 3, "violation_count": 1}),
+            ),
+        ];
+        let report = build_egress_audit("sess-test", &events);
+        assert_eq!(report.turns.len(), 3);
+        assert_eq!(report.total_withheld, 1); // turn-2 withheld 1
+        assert_eq!(report.total_violations, 1); // turn-3 violation 1
+        // turn-1 has the labeled event.
+        assert_eq!(report.turns[0].turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(report.turns[0].rows.len(), 1);
+        assert_eq!(report.turns[0].rows[0].fields.tool_name.as_deref(), Some("email.read"));
+        // turn-2 has withheld + request_filtered.
+        assert_eq!(report.turns[1].turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(report.turns[1].rows.len(), 2);
+        // The request_filtered row carries the preset + sink.
+        let rf = report.turns[1].rows.iter().find(|r| r.action == "egress.request_filtered").unwrap();
+        assert_eq!(rf.fields.preset.as_deref(), Some("sonnet"));
+        assert_eq!(rf.fields.target_sink.as_deref(), Some("remote_model"));
+        assert_eq!(rf.fields.withheld_count, Some(1));
+    }
+
+    #[test]
+    fn ignores_non_egress_events() {
+        let mut e = ev("egress.envelope_labeled", Some("t1"), 1, serde_json::json!({}));
+        e.category = "tool_call".to_string();
+        let report = build_egress_audit("sess", &[e]);
+        assert!(report.turns.is_empty());
+    }
+
+    #[test]
+    fn print_runs_without_panic_on_empty() {
+        // Smoke: the printer must not panic on an empty report.
+        let report = build_egress_audit("sess", &[]);
+        print_egress_audit(&report);
+    }
+
+    #[test]
+    fn print_runs_without_panic_on_populated() {
+        let events = vec![
+            ev("egress.envelope_labeled", Some("t1"), 1, serde_json::json!({"tool_name": "x", "resolution": "operator_rule"})),
+            ev("egress.envelope_withheld", Some("t1"), 2, serde_json::json!({"tool_call_id": "tc", "target_sink": "remote_model", "indication": "[withheld]"})),
+            ev("egress.request_filtered", Some("t1"), 3, serde_json::json!({"preset": "p", "target_sink": "remote_model", "withheld_count": 1, "included_count": 0, "violation_count": 0})),
+            ev("egress.assertion_violation", Some("t2"), 4, serde_json::json!({"tool_call_id": "tc", "payload_digest": "d"})),
+        ];
+        let report = build_egress_audit("sess", &events);
+        print_egress_audit(&report);
+    }
+}
