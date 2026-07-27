@@ -252,6 +252,7 @@ pub async fn compress_context(
     session_id: &str,
     turn_number: u64,
     existing_metadata: Option<&CompressionMetadata>,
+    egress_labels: &std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
 ) -> anyhow::Result<CompressionResult> {
     if !gateway_cfg.enabled {
         return Ok(CompressionResult {
@@ -321,6 +322,43 @@ pub async fn compress_context(
             });
         }
     };
+
+    // Egress compression-eligibility gate (RFC §5.7 rule 1): refuse to
+    // summarize a tainted band on a preset that isn't cleared for it. The
+    // compressible band is already computed above; check it against the
+    // resolved preset's class before building the driver. On refusal, return
+    // the no-op result (the caller falls back to token-budget truncation).
+    if !egress_labels.is_empty() {
+        let preset_class = llm_config
+            .egress_class
+            .unwrap_or(autonoetic_types::egress::EgressClass::Remote);
+        let elig = crate::runtime::egress_labeler::compression_preset_eligible(
+            &compressible,
+            egress_labels,
+            preset_class,
+        );
+        if !elig.is_eligible() {
+            let crate::runtime::egress_labeler::CompressionEligibility::Ineligible {
+                reason, ..
+            } = elig
+            else {
+                unreachable!("checked is_eligible above")
+            };
+            tracing::warn!(
+                target: "autonoetic::compression::egress",
+                session_id = %session_id,
+                turn = turn_number,
+                "compression eligibility gate refused — returning uncompressed (RFC §5.7)"
+            );
+            tracing::debug!(target: "autonoetic::compression::egress", reason = %reason);
+            return Ok(CompressionResult {
+                history: history.clone(),
+                original_history: history,
+                metadata: existing_metadata.cloned().unwrap_or_default(),
+                compressed: false,
+            });
+        }
+    }
 
     let driver = match build_driver(llm_config.clone(), http_client.clone()) {
         Ok(d) => d,
@@ -786,6 +824,7 @@ mod tests {
                 "sess",
                 12,
                 Some(&metadata),
+                &std::collections::HashMap::new(),
             ))
             .unwrap();
         assert!(!result.compressed);
@@ -801,6 +840,7 @@ mod tests {
                 "sess",
                 16,
                 Some(&metadata),
+                &std::collections::HashMap::new(),
             ))
             .unwrap();
         assert!(!result.compressed);
@@ -816,6 +856,7 @@ mod tests {
                 "sess",
                 20,
                 Some(&metadata),
+                &std::collections::HashMap::new(),
             ))
             .unwrap();
         assert!(!result.compressed);

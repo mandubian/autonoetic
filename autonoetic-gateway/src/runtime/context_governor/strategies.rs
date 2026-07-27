@@ -27,6 +27,12 @@ pub struct GovernorContext {
     /// decisions, artifacts, and identifiers are plan-advancing (and
     /// which detours can be compressed more aggressively).
     pub plan_anchor: Option<PlanFrameSummary>,
+    /// Egress label map for the session (RFC §5.7), keyed by `tool_call_id`.
+    /// Used by the capsule strategy's compression-eligibility gate: a
+    /// `local_only`-tainted compressible band must not be summarized on a
+    /// remote compression preset (a leak even with per-envelope filtering).
+    /// Empty for unconfigured deployments — the gate is then a no-op.
+    pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
 }
 
 impl GovernorContext {
@@ -61,6 +67,7 @@ impl GovernorContext {
             // empty shell every over-budget turn. See `seed_capsule`.
             capsule_state: initial_capsule,
             plan_anchor,
+            egress_labels: std::collections::HashMap::new(),
         }
     }
 }
@@ -155,6 +162,7 @@ mod tests {
             agent_compression: None,
             capsule_state: None,
             plan_anchor: None,
+            egress_labels: std::collections::HashMap::new(),
         }
     }
 

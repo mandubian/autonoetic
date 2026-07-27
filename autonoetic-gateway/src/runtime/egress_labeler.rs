@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use autonoetic_types::causal_chain::{default_enforced_rules, CausalEventRecord};
 use autonoetic_types::egress::{
-    matches_simple_glob, EgressConfig, EgressLabel, EgressRule, Provenance,
+    matches_simple_glob, EgressClass, EgressConfig, EgressLabel, EgressRule, Provenance, Sink,
 };
 use autonoetic_types::id_format::short_random_id;
 
@@ -530,6 +530,111 @@ fn emit_egress_event(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Compression-preset eligibility (RFC §5.7 rule 1)
+// ---------------------------------------------------------------------------
+
+/// Whether a compression preset may summarize a given band of history.
+///
+/// Compressing `local_only` history on a remote preset is a leak *even with
+/// per-envelope filtering* — the whole point of the compression call is to
+/// transmit that content (RFC §5.7). So the eligibility gate is a separate
+/// check from the chokepoint: it runs *before* the compression LLM is called,
+/// and on refusal the governor falls back to token-budget truncation for that
+/// band (an incomplete local context beats a remote leak).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompressionEligibility {
+    /// The preset may compress the band.
+    Eligible,
+    /// The preset must NOT compress the band — it would leak labeled content.
+    /// `leaked_tool_call_ids` are the tool results whose labels block the call.
+    Ineligible {
+        reason: String,
+        leaked_tool_call_ids: Vec<String>,
+    },
+}
+
+impl CompressionEligibility {
+    pub fn is_eligible(&self) -> bool {
+        matches!(self, CompressionEligibility::Eligible)
+    }
+}
+
+/// Decide whether a compression preset may summarize a band of history.
+///
+/// - Derives the band's taint by intersecting the labels of every labeled
+///   tool result in the band (joined via `tool_call_id`).
+/// - An `unrestricted` band (no labeled tool results, or all unrestricted) is
+///   always eligible.
+/// - A tainted band is eligible only if the preset's sink covers the taint —
+///   i.e. `taint.allows(preset_sink)`. A `local_only` band against a remote
+///   preset is ineligible; against a local preset it's eligible (the local
+///   model is a cleared sink). A `local_only` band against *any* preset where
+///   the taint excludes that sink is ineligible.
+///
+/// `band` is the slice of messages about to be compressed. `labels` is the
+/// session's `tool_call_id → EgressLabel` map. `preset_class` is the resolved
+/// compression preset's egress classification.
+pub fn compression_preset_eligible(
+    band: &[crate::llm::Message],
+    labels: &std::collections::HashMap<String, EgressLabel>,
+    preset_class: EgressClass,
+) -> CompressionEligibility {
+    if labels.is_empty() {
+        // Unconfigured deployment — nothing is labeled, so nothing can leak.
+        return CompressionEligibility::Eligible;
+    }
+    let preset_sink = preset_class.as_sink();
+    // Intersect the labels of every labeled tool result in the band.
+    let mut band_taint = EgressLabel::unrestricted();
+    let mut leaked: Vec<String> = Vec::new();
+    for msg in band {
+        if msg.role != crate::llm::Role::Tool {
+            continue;
+        }
+        let Some(tc_id) = msg.tool_call_id.as_ref() else {
+            continue;
+        };
+        let Some(label) = labels.get(tc_id) else {
+            // No label entry → unrestricted default → doesn't taint the band.
+            continue;
+        };
+        if !label.allows(preset_sink) {
+            // This tool result's label excludes the preset's sink.
+            leaked.push(tc_id.clone());
+        }
+        band_taint = band_taint.restrict(label);
+    }
+    if band_taint.allows(preset_sink) {
+        CompressionEligibility::Eligible
+    } else {
+        let reason = format!(
+            "compression preset (egress_class={:?}, sink={}) is not cleared for the band's taint \
+             ({} labeled result(s) would leak); falling back to token-budget truncation \
+             (RFC §5.7 — an incomplete local context beats a remote leak)",
+            preset_class,
+            sink_str(preset_sink),
+            leaked.len(),
+        );
+        CompressionEligibility::Ineligible {
+            reason,
+            leaked_tool_call_ids: leaked,
+        }
+    }
+}
+
+fn sink_str(s: Sink) -> &'static str {
+    match s {
+        Sink::LocalModel => "local_model",
+        Sink::RemoteModel => "remote_model",
+        Sink::LocalAgent => "local_agent",
+        Sink::FederatedAgent => "federated_agent",
+        Sink::Network => "network",
+        Sink::MemoryPersist => "memory_persist",
+        Sink::UserReply => "user_reply",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use autonoetic_types::egress::{EgressConfig, EgressLabel, EgressRule, NamedEgressLabel, Sink};
@@ -750,5 +855,126 @@ mod tests {
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
         assert_eq!(out.label, EgressLabel::no_remote_model());
+    }
+
+    // ── Compression-preset eligibility (RFC §5.7) ─────────────────────────
+
+    fn tool_msg(id: &str, content: &str) -> crate::llm::Message {
+        crate::llm::Message {
+            role: crate::llm::Role::Tool,
+            content: content.to_string(),
+            tool_calls: vec![],
+            tool_call_id: Some(id.to_string()),
+            reasoning_content: None,
+            reasoning_details: None,
+        }
+    }
+
+    fn user_msg(content: &str) -> crate::llm::Message {
+        crate::llm::Message {
+            role: crate::llm::Role::User,
+            content: content.to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        }
+    }
+
+    #[test]
+    fn compression_eligible_when_no_labels() {
+        // Unconfigured: nothing labeled → always eligible.
+        let band = vec![tool_msg("tc_1", "data")];
+        let elig = compression_preset_eligible(&band, &Default::default(), EgressClass::Remote);
+        assert!(elig.is_eligible());
+    }
+
+    #[test]
+    fn compression_eligible_when_all_unrestricted() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_1".to_string(), EgressLabel::unrestricted());
+        let band = vec![tool_msg("tc_1", "public data")];
+        // Unrestricted band → eligible on either sink.
+        assert!(compression_preset_eligible(&band, &labels, EgressClass::Remote).is_eligible());
+        assert!(compression_preset_eligible(&band, &labels, EgressClass::Local).is_eligible());
+    }
+
+    #[test]
+    fn compression_ineligible_local_only_on_remote_preset() {
+        // The core §5.7 case: local_only history on a remote compression preset.
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let band = vec![tool_msg("tc_secret", "CANARY-SECRET")];
+        let elig = compression_preset_eligible(&band, &labels, EgressClass::Remote);
+        assert!(!elig.is_eligible());
+        match elig {
+            CompressionEligibility::Ineligible { leaked_tool_call_ids, .. } => {
+                assert_eq!(leaked_tool_call_ids, vec!["tc_secret".to_string()]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn compression_eligible_local_only_on_local_preset() {
+        // The local model is a cleared sink for local_only — eligible.
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let band = vec![tool_msg("tc_secret", "secret")];
+        let elig = compression_preset_eligible(&band, &labels, EgressClass::Local);
+        assert!(elig.is_eligible());
+    }
+
+    #[test]
+    fn compression_ineligible_no_remote_model_on_remote_preset() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_conf".to_string(), EgressLabel::no_remote_model());
+        let band = vec![tool_msg("tc_conf", "business-confidential")];
+        assert!(
+            !compression_preset_eligible(&band, &labels, EgressClass::Remote).is_eligible(),
+            "no_remote_model band must not compress on remote preset"
+        );
+        assert!(
+            compression_preset_eligible(&band, &labels, EgressClass::Local).is_eligible(),
+            "no_remote_model band may compress on local preset"
+        );
+    }
+
+    #[test]
+    fn compression_mixed_band_tainted_by_any_local_only() {
+        // One local_only result in the band taints the whole compression call.
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_public".to_string(), EgressLabel::unrestricted());
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let band = vec![tool_msg("tc_public", "ok"), tool_msg("tc_secret", "secret")];
+        let elig = compression_preset_eligible(&band, &labels, EgressClass::Remote);
+        assert!(!elig.is_eligible());
+    }
+
+    #[test]
+    fn compression_unlabeled_tool_result_does_not_taint() {
+        // A tool result with no label entry = unrestricted default → doesn't block.
+        let labels: std::collections::HashMap<String, EgressLabel> = std::collections::HashMap::new();
+        // tc_unlabeled has no entry in `labels`.
+        let band = vec![tool_msg("tc_unlabeled", "data")];
+        assert!(
+            compression_preset_eligible(&band, &labels, EgressClass::Remote).is_eligible(),
+            "unlabeled tool result (unrestricted default) must not block compression"
+        );
+    }
+
+    #[test]
+    fn compression_ignores_non_tool_messages() {
+        // User/assistant messages don't carry tool_call_id labels in this phase.
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let band = vec![
+            user_msg("summarize my emails"),
+            tool_msg("tc_secret", "secret"),
+        ];
+        // The user message is ignored; the tool result taints → ineligible.
+        assert!(
+            !compression_preset_eligible(&band, &labels, EgressClass::Remote).is_eligible()
+        );
     }
 }

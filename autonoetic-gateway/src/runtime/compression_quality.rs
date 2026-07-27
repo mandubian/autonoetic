@@ -189,6 +189,9 @@ pub async fn run_quality_validation(
         &session.id,
         session.turns.len() as u64,
         None,
+        // Offline quality harness — no egress labels in scope; the eligibility
+        // gate is a no-op (empty map → always eligible).
+        &std::collections::HashMap::new(),
     )
     .await;
 

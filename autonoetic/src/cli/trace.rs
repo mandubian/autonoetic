@@ -1040,6 +1040,64 @@ fn handle_trace_session_from_db(
                         }
                     }
                 }
+            } else if event.category == "egress" {
+                // Egress chokepoint events (RFC §9.1/§9.3): render the
+                // security-relevant detail readably — what was withheld, why,
+                // and any assertion violations. Payloads are content-free
+                // metadata by construction, so safe to display.
+                if let Some(ref payload) = event.payload {
+                    if let Ok(p) = serde_json::from_str::<serde_json::Value>(payload) {
+                        match event.action.as_str() {
+                            "egress.envelope_withheld" => {
+                                let sink = p.get("target_sink").and_then(|v| v.as_str()).unwrap_or("?");
+                                let ind = p.get("indication").and_then(|v| v.as_str()).unwrap_or("");
+                                println!(
+                                    "      {}├─ withheld from {}{}{} — {}{}",
+                                    color::DIM,
+                                    color::BRIGHT_YELLOW,
+                                    sink,
+                                    color::DIM,
+                                    color::dim(ind),
+                                    color::RESET
+                                );
+                            }
+                            "egress.request_filtered" => {
+                                let sink = p.get("target_sink").and_then(|v| v.as_str()).unwrap_or("?");
+                                let wh = p.get("withheld_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let inc = p.get("included_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let vio = p.get("violation_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let vio_tag = if vio > 0 {
+                                    format!(" {}{}⚠ {} violation(s){}", color::BRIGHT_RED, color::BOLD, vio, color::RESET)
+                                } else {
+                                    String::new()
+                                };
+                                println!(
+                                    "      {}├─ sink={} withheld={} included={}{}{}",
+                                    color::DIM, sink, wh, inc, vio_tag, color::RESET
+                                );
+                            }
+                            "egress.assertion_violation" => {
+                                let digest = p.get("payload_digest").and_then(|v| v.as_str()).unwrap_or("?");
+                                println!(
+                                    "      {}├─ {}verbatim echo of withheld payload (digest {}) — fail-closed{}",
+                                    color::BRIGHT_RED, color::BOLD, digest, color::RESET
+                                );
+                            }
+                            "egress.envelope_labeled" => {
+                                let tool = p.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
+                                let res = p.get("resolution").and_then(|v| v.as_str()).unwrap_or("?");
+                                println!(
+                                    "      {}├─ labeled {} ({}){}",
+                                    color::DIM, tool, res, color::RESET
+                                );
+                            }
+                            _ => {
+                                let s = serde_json::to_string(&p).unwrap_or_default();
+                                println!("      {}├─ {}{}{}", color::DIM, color::BRIGHT_BLUE, s, color::RESET);
+                            }
+                        }
+                    }
+                }
             } else {
                 if let Some(ref payload) = event.payload {
                     if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(payload) {
