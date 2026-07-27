@@ -397,8 +397,11 @@ impl GatewayStore {
     /// row is written at the first finalize even for suspensions.
     pub fn list_addressable_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {
         let mut sessions = self.list_resident_sessions_for_agent(agent_id)?;
+        // Set-based dedup: a broadcast resolves against this, and an agent with
+        // many sessions would otherwise pay a quadratic scan per send.
+        let mut seen: std::collections::HashSet<String> = sessions.iter().cloned().collect();
         for sid in self.list_unfinished_sessions_for_agent(agent_id)? {
-            if !sessions.contains(&sid) {
+            if seen.insert(sid.clone()) {
                 sessions.push(sid);
             }
         }

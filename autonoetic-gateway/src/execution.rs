@@ -1889,11 +1889,14 @@ impl GatewayExecutionService {
         //
         // Only a clean completion parks. A suspended session is already
         // resumable through its own gate, and re-parking it would race that
-        // resume; an errored one should close and be seen.
-        let park_ttl_secs = if is_suspended {
-            None
-        } else {
+        // resume; an errored or escalated one must close and be seen — parking
+        // it would withhold the `session_outcomes` row that marks a session
+        // finished, so the failure would read as "still running" to every
+        // downstream reader (#902 review).
+        let park_ttl_secs = if close_outcome.is_clean_completion() {
             runtime.resident_idle_ttl_secs()
+        } else {
+            None
         };
         let mut parked = false;
         if let (Some(ttl), Some(store)) = (park_ttl_secs, self.gateway_store.as_ref()) {
@@ -2624,6 +2627,24 @@ impl GatewayExecutionService {
                 Some(checkpoint.turn_id),
             ))
         } else if should_auto_resume_checkpoint_yield_reason(&checkpoint.yield_reason) {
+            // A resuming session is executing, not parked. Drop its residency row
+            // here or the reaper can close a *running* session: the row keeps the
+            // `expires_at` it was parked with, so a message that takes longer than
+            // the remaining TTL to handle gets a terminal `session_outcomes` row
+            // written underneath it (#902 review). Addressability is unaffected —
+            // `list_addressable_sessions_for_agent` covers executing sessions
+            // through its unfinished-sessions arm — and re-parking at close
+            // re-adds the row with a fresh TTL.
+            if let Some(store) = self.gateway_store.as_ref() {
+                if let Err(e) = store.clear_session_residency(session_id) {
+                    tracing::warn!(
+                        target: "session_residency",
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to clear residency on resume; the reaper may close this session while it runs"
+                    );
+                }
+            }
             tracing::info!(
                 target: "checkpoint",
                 agent_id = %runtime.manifest.agent.id,

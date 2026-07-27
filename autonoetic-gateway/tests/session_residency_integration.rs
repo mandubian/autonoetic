@@ -208,11 +208,9 @@ async fn residency_does_not_leak_across_agents() -> anyhow::Result<()> {
     close(&store, "resident-1", "peer-agent")?;
     park(&store, "resident-1", "peer-agent", "2999-01-01T00:00:00Z")?;
 
-    assert!(
-        store
-            .list_addressable_sessions_for_agent("other-agent")?
-            .is_empty()
-    );
+    assert!(store
+        .list_addressable_sessions_for_agent("other-agent")?
+        .is_empty());
     Ok(())
 }
 
@@ -232,5 +230,76 @@ async fn a_non_resident_agent_has_no_residency_row() -> anyhow::Result<()> {
             .is_empty(),
         "a finished non-resident session is not a recipient"
     );
+    Ok(())
+}
+
+/// Review finding (#902): the reaper closes sessions whose park has expired, but
+/// a resumed session keeps the `expires_at` it parked with. Unless resume clears
+/// the row, handling a message for longer than the remaining TTL gets the session
+/// a terminal `session_outcomes` row written underneath it while it is still
+/// running — after which every downstream reader, including the `agent_message`
+/// liveness gate, treats a live session as finished.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_resumed_session_is_no_longer_reapable() -> anyhow::Result<()> {
+    let (_ws, store) = store()?;
+    bind(&store, "sess-resume", "responder.default")?;
+    // Parked with a TTL that has already elapsed — the state a long message
+    // handler would be in by the time the reaper ticks.
+    park(
+        &store,
+        "sess-resume",
+        "responder.default",
+        "2020-01-01T00:00:00Z",
+    )?;
+    assert_eq!(store.list_expired_session_residencies()?.len(), 1);
+
+    // What resume now does (execution.rs, checkpoint auto-resume path).
+    store.clear_session_residency("sess-resume")?;
+
+    assert!(
+        store.list_expired_session_residencies()?.is_empty(),
+        "a running session must not be visible to the reaper"
+    );
+    // Still addressable while it runs — through the unfinished-sessions arm,
+    // not residency.
+    assert!(
+        store
+            .list_addressable_sessions_for_agent("responder.default")?
+            .contains(&"sess-resume".to_string()),
+        "a resumed session stays addressable while executing"
+    );
+    assert!(
+        store.get_session_outcome("sess-resume")?.is_none(),
+        "no terminal outcome row should exist for a running session"
+    );
+    Ok(())
+}
+
+/// Deduplication must not depend on `Vec::contains`: a resident agent with many
+/// sessions pays that cost on every broadcast. Order is still residency-first.
+#[serial_test::serial]
+#[tokio::test]
+async fn addressable_sessions_are_deduplicated_and_ordered() -> anyhow::Result<()> {
+    let (_ws, store) = store()?;
+    for sid in ["sess-a", "sess-b"] {
+        bind(&store, sid, "responder.default")?;
+    }
+    // sess-a is parked *and* has no outcome row, so it appears in both arms.
+    park(
+        &store,
+        "sess-a",
+        "responder.default",
+        "2099-01-01T00:00:00Z",
+    )?;
+
+    let listed = store.list_addressable_sessions_for_agent("responder.default")?;
+    assert_eq!(
+        listed.iter().filter(|s| s.as_str() == "sess-a").count(),
+        1,
+        "a session in both arms must be listed once, got {listed:?}"
+    );
+    assert_eq!(listed.first().map(String::as_str), Some("sess-a"));
+    assert!(listed.contains(&"sess-b".to_string()));
     Ok(())
 }

@@ -39,8 +39,9 @@ pub struct AgentIdentity {
     #[serde(default)]
     pub singleton: bool,
     /// Opt in to **residency**: when set, a session of this agent does not
-    /// terminate once its task is done. It parks in
-    /// [`YieldReason::Idle`](crate::agent::SessionState) and stays addressable
+    /// terminate once its task is done. It parks in the gateway's
+    /// `YieldReason::Idle` checkpoint state (`autonoetic-gateway`, not linkable
+    /// from this crate) and stays addressable
     /// by `agent_message` until this many seconds pass without traffic, at
     /// which point the gateway reaps it and the session closes normally.
     ///
