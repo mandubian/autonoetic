@@ -71,7 +71,20 @@ impl EgressPathMatcher {
     /// `~/mail/archive.mbox`). It does **not** resolve indirection — see the
     /// module docs.
     pub fn analyze(command: &str, script_body: Option<&str>, patterns: &[LabeledPathPattern]) -> PathMatchResult {
-        let tokens = extract_path_tokens(command, script_body);
+        let sources: Vec<&str> = script_body.into_iter().collect();
+        Self::analyze_sources(command, &sources, patterns)
+    }
+
+    /// Same as [`Self::analyze`] over any number of source texts — the command
+    /// plus every dependency source resolved by
+    /// [`collect_exec_dependency_sources`] (artifact bundle files, workspace
+    /// scripts).
+    pub fn analyze_sources(
+        command: &str,
+        sources: &[&str],
+        patterns: &[LabeledPathPattern],
+    ) -> PathMatchResult {
+        let tokens = extract_path_tokens(command, sources);
         let mut matched: Vec<String> = Vec::new();
         for pat in patterns {
             if tokens.iter().any(|tok| pattern_matches_token(&pat.pattern, tok)) {
@@ -119,7 +132,7 @@ fn pattern_matches_token(pattern: &str, token: &str) -> bool {
 /// Deliberately over-broad: false positives only produce an over-restricted
 /// (safer) label; false negatives are the residual risk documented in the
 /// module docs.
-fn extract_path_tokens(command: &str, script_body: Option<&str>) -> Vec<String> {
+fn extract_path_tokens(command: &str, sources: &[&str]) -> Vec<String> {
     use std::sync::OnceLock;
     // Match `~`-prefixed or `/`-containing path runs, including dots, hyphens,
     // underscores, alphanumerics. Requires at least one `/` to qualify.
@@ -153,7 +166,7 @@ fn extract_path_tokens(command: &str, script_body: Option<&str>) -> Vec<String> 
         }
     };
 
-    for chunk in [Some(command), script_body].into_iter().flatten() {
+    for chunk in std::iter::once(command).chain(sources.iter().copied()) {
         // Pass 1: whitespace tokens.
         for tok in chunk.split_whitespace() {
             push_if_pathlike(tok, &mut tokens);
@@ -174,6 +187,180 @@ fn extract_path_tokens(command: &str, script_body: Option<&str>) -> Vec<String> 
     tokens.sort();
     tokens.dedup();
     tokens
+}
+
+// ---------------------------------------------------------------------------
+// Dependency sources — the "and its script dependencies" half of RFC §4.2.
+// ---------------------------------------------------------------------------
+
+/// Where an exec-shaped tool call's dependency sources can be found.
+///
+/// Scanning only the command line covers the *direct* read (`cat ~/mail/…`).
+/// The RFC also requires the **dependency** read: `python3 parse_mail.py`, where
+/// the labeled path appears in the script, not on the command line. This context
+/// is what lets the matcher go find that script — the same resolution
+/// `extract_code_for_analysis` (`runtime/tools/sandbox.rs`) already performs for
+/// the network predicate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecSourceContext<'a> {
+    /// The agent's directory — the root for relative script paths.
+    pub agent_dir: Option<&'a Path>,
+    /// The gateway directory — hosts the content store and artifact store.
+    pub gateway_dir: Option<&'a Path>,
+    /// Session id, for resolving `/tmp/<name>` session content mounts.
+    pub session_id: Option<&'a str>,
+}
+
+/// Max dependency files read per exec, and max bytes per file. Static analysis
+/// runs inline on the tool-result path, so it stays cheap by construction: a
+/// pathological command naming hundreds of scripts costs a bounded number of
+/// reads, and the residual risk (a labeled path only in the 9th script) is the
+/// same class of miss the module docs already own.
+const MAX_DEPENDENCY_FILES: usize = 8;
+const MAX_DEPENDENCY_BYTES: u64 = 256 * 1024;
+
+/// File extensions treated as script sources worth scanning. Extension-gated on
+/// purpose: it keeps the collector from reading arbitrary files whose names
+/// happen to appear on a command line.
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    "py", "js", "mjs", "cjs", "ts", "sh", "bash", "zsh", "rb", "pl", "lua", "r", "jl", "php",
+    "awk", "sql", "ps1",
+];
+
+/// Collect the source text of an exec's dependencies: the artifact bundle it
+/// runs (when `artifact_id`/`artifact_ref` is present) plus script files named
+/// on its command line.
+///
+/// Best-effort throughout — an unreadable file is skipped, not an error. A miss
+/// yields a less restrictive label, which is why the RFC pairs static analysis
+/// with the runtime backstops (§11); it is never a hard failure.
+pub fn collect_exec_dependency_sources(
+    arguments_json: &str,
+    command: &str,
+    ctx: &ExecSourceContext<'_>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    if let Some(gw_dir) = ctx.gateway_dir {
+        for id in artifact_ids_from_args(arguments_json) {
+            collect_artifact_sources(gw_dir, &id, &mut out);
+            if out.len() >= MAX_DEPENDENCY_FILES {
+                return out;
+            }
+        }
+    }
+
+    for token in script_tokens(command) {
+        if out.len() >= MAX_DEPENDENCY_FILES {
+            break;
+        }
+        if let Some(text) = read_script_source(&token, ctx) {
+            out.push(text);
+        }
+    }
+
+    out
+}
+
+/// `artifact_id` / `artifact_ref` from a `sandbox.exec` / `artifact.exec` args
+/// JSON. Both are tried as bundle ids: `inspect` resolves what it can and the
+/// caller tolerates a miss.
+fn artifact_ids_from_args(arguments_json: &str) -> Vec<String> {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments_json) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for key in ["artifact_id", "artifact_ref"] {
+        if let Some(s) = parsed.get(key).and_then(|v| v.as_str()) {
+            if !s.is_empty() && !ids.iter().any(|existing| existing == s) {
+                ids.push(s.to_string());
+            }
+        }
+    }
+    ids
+}
+
+/// Read the text files of an artifact bundle into `out`.
+fn collect_artifact_sources(gateway_dir: &Path, artifact_id: &str, out: &mut Vec<String>) {
+    let Ok(store) = crate::artifact_store::ArtifactStore::new(gateway_dir) else {
+        return;
+    };
+    let Ok(files) = store.resolve_files(artifact_id) else {
+        return;
+    };
+    for (_name, bytes) in files {
+        if out.len() >= MAX_DEPENDENCY_FILES {
+            return;
+        }
+        if bytes.len() as u64 > MAX_DEPENDENCY_BYTES {
+            continue;
+        }
+        if let Ok(text) = String::from_utf8(bytes) {
+            out.push(text);
+        }
+    }
+}
+
+/// Command-line tokens that name a script file worth scanning.
+fn script_tokens(command: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in command.split_whitespace() {
+        let tok = raw.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | ',' | '(' | ')' | ';' | '`' | '&' | '|')
+        });
+        if tok.is_empty() || tok.starts_with('-') {
+            continue;
+        }
+        let is_script = Path::new(tok)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| SCRIPT_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+            .unwrap_or(false);
+        if is_script && !tokens.iter().any(|t| t == tok) {
+            tokens.push(tok.to_string());
+        }
+    }
+    tokens
+}
+
+/// Resolve one script token to its source text.
+///
+/// Mirrors the resolution order `extract_code_for_analysis` uses: session
+/// content mounts (`/tmp/<name>`) first, then the agent directory, then the
+/// literal path.
+fn read_script_source(token: &str, ctx: &ExecSourceContext<'_>) -> Option<String> {
+    if let Some(name) = token.strip_prefix("/tmp/") {
+        if let (Some(gw_dir), Some(sid)) = (ctx.gateway_dir, ctx.session_id) {
+            if let Ok(store) = crate::runtime::content_store::ContentStore::new(gw_dir) {
+                if let Ok(bytes) = store.read_by_name_or_handle(sid, name) {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+        if let Some(agent_dir) = ctx.agent_dir {
+            if let Some(text) = read_bounded(&agent_dir.join(name)) {
+                return Some(text);
+            }
+        }
+    }
+
+    let path = Path::new(token);
+    if path.is_absolute() {
+        return read_bounded(path);
+    }
+    ctx.agent_dir
+        .and_then(|agent_dir| read_bounded(&agent_dir.join(token)))
+}
+
+/// Read a file, refusing anything over [`MAX_DEPENDENCY_BYTES`].
+fn read_bounded(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_DEPENDENCY_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 /// Resolve a `~`-prefixed pattern/token against a home dir for matching, when
@@ -286,5 +473,95 @@ for msg in mb:
             &pats(&["~/mail/**"]),
         );
         assert_eq!(r.matched_patterns, vec!["~/mail/**"]);
+    }
+
+    #[test]
+    fn analyze_sources_scans_every_source() {
+        // The labeled path lives only in the second dependency source.
+        let r = EgressPathMatcher::analyze_sources(
+            "python3 main.py",
+            &["import helper", "open(\"~/mail/archive.mbox\")"],
+            &pats(&["~/mail/**"]),
+        );
+        assert!(r.matched());
+    }
+
+    // ── dependency source collection ──────────────────────────────────────
+
+    #[test]
+    fn collects_workspace_script_named_on_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("parse.py"), "open('~/mail/x')").unwrap();
+        let ctx = ExecSourceContext {
+            agent_dir: Some(dir.path()),
+            gateway_dir: None,
+            session_id: None,
+        };
+        let sources = collect_exec_dependency_sources("{}", "python3 parse.py --verbose", &ctx);
+        assert_eq!(sources, vec!["open('~/mail/x')".to_string()]);
+    }
+
+    #[test]
+    fn skips_non_script_and_flag_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.bin"), "~/mail/secret").unwrap();
+        std::fs::write(dir.path().join("-oops.py"), "~/mail/secret").unwrap();
+        let ctx = ExecSourceContext {
+            agent_dir: Some(dir.path()),
+            gateway_dir: None,
+            session_id: None,
+        };
+        // `data.bin` has no script extension; `-oops.py` looks like a flag.
+        let sources = collect_exec_dependency_sources("{}", "cat data.bin -oops.py", &ctx);
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn missing_script_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ExecSourceContext {
+            agent_dir: Some(dir.path()),
+            gateway_dir: None,
+            session_id: None,
+        };
+        assert!(collect_exec_dependency_sources("{}", "python3 absent.py", &ctx).is_empty());
+    }
+
+    #[test]
+    fn oversized_script_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "x".repeat(MAX_DEPENDENCY_BYTES as usize + 1);
+        std::fs::write(dir.path().join("big.py"), big).unwrap();
+        let ctx = ExecSourceContext {
+            agent_dir: Some(dir.path()),
+            gateway_dir: None,
+            session_id: None,
+        };
+        assert!(collect_exec_dependency_sources("{}", "python3 big.py", &ctx).is_empty());
+    }
+
+    #[test]
+    fn dependency_file_count_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = String::from("bash");
+        for i in 0..(MAX_DEPENDENCY_FILES + 4) {
+            let name = format!("s{i}.sh");
+            std::fs::write(dir.path().join(&name), "echo hi").unwrap();
+            command.push(' ');
+            command.push_str(&name);
+        }
+        let ctx = ExecSourceContext {
+            agent_dir: Some(dir.path()),
+            gateway_dir: None,
+            session_id: None,
+        };
+        let sources = collect_exec_dependency_sources("{}", &command, &ctx);
+        assert_eq!(sources.len(), MAX_DEPENDENCY_FILES);
+    }
+
+    #[test]
+    fn no_context_paths_collect_nothing() {
+        let ctx = ExecSourceContext::default();
+        assert!(collect_exec_dependency_sources("{}", "python3 parse.py", &ctx).is_empty());
     }
 }

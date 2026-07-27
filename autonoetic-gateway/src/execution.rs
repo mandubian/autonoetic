@@ -1270,6 +1270,163 @@ impl GatewayExecutionService {
         }))
     }
 
+    // ---- Session-scoped egress policy (RFC data-envelopes §5.4) ----
+    //
+    // The operator's per-room privacy declaration: "for this session, these
+    // named sources stay local." Rules are *added* to the operator-global
+    // `egress.rules` and, because label resolution intersects (§4.1), can only
+    // restrict. Keyed by root session and deleted when it closes.
+    //
+    // This is an operator surface, not an agent one: the label plane is
+    // gateway-managed metadata that agents never set, strip, or read
+    // (Lawful-Executor, RFC §2.1) — hence RPC/CLI only, no native tool.
+
+    pub fn get_session_egress_policy(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session egress policy"))?;
+        let root = crate::runtime::content_store::root_session_id(session_id);
+        let stored = store.get_egress_session_policy(root)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "root_session_id": root,
+            "policy": stored.as_ref().map(|s| s.policy.clone()),
+            "set_by": stored.as_ref().map(|s| s.set_by.clone()),
+            "created_at": stored.as_ref().map(|s| s.created_at.clone()),
+            "updated_at": stored.as_ref().map(|s| s.updated_at.clone()),
+        }))
+    }
+
+    pub fn set_session_egress_policy(
+        &self,
+        session_id: &str,
+        policy: autonoetic_types::egress::EgressSessionPolicy,
+        set_by: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session egress policy"))?;
+        let root = crate::runtime::content_store::root_session_id(session_id).to_string();
+        let stored = store.set_egress_session_policy(&root, &policy, set_by)?;
+        self.record_egress_policy_event(
+            store,
+            session_id,
+            &root,
+            "set",
+            set_by,
+            serde_json::json!({
+                "rule_count": stored.policy.rules.len(),
+                "rule_sources": stored
+                    .policy
+                    .rules
+                    .iter()
+                    .map(|r| match &r.path {
+                        Some(p) => format!("{}:{}", r.source, p),
+                        None => r.source.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                "default_label": stored.policy.default_label,
+            }),
+        );
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "root_session_id": root,
+            "policy": stored.policy,
+            "set_by": stored.set_by,
+            "updated_at": stored.updated_at,
+        }))
+    }
+
+    pub fn clear_session_egress_policy(
+        &self,
+        session_id: &str,
+        set_by: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session egress policy"))?;
+        let root = crate::runtime::content_store::root_session_id(session_id).to_string();
+        let cleared = store.delete_egress_session_policy(&root)?;
+        if cleared {
+            self.record_egress_policy_event(
+                store,
+                session_id,
+                &root,
+                "clear",
+                set_by,
+                serde_json::Value::Null,
+            );
+        }
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "root_session_id": root,
+            "cleared": cleared,
+        }))
+    }
+
+    /// Audit the declaration itself. Widening a session's rules is as
+    /// consequential as any labeling decision, so it lands in the causal chain
+    /// with its operator attribution (I-6) — content-free, like every egress
+    /// event (RFC §9).
+    fn record_egress_policy_event(
+        &self,
+        store: &std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+        session_id: &str,
+        root_session_id: &str,
+        operation: &str,
+        set_by: &str,
+        detail: serde_json::Value,
+    ) {
+        let event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: format!("egress-session-policy-{}", uuid::Uuid::new_v4()),
+            agent_id: String::new(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "egress".to_string(),
+            action: "egress.session_policy".to_string(),
+            status: "active".to_string(),
+            enforced_rules: vec![],
+            target: Some(root_session_id.to_string()),
+            payload: Some(
+                serde_json::json!({
+                    "operation": operation,
+                    "root_session_id": root_session_id,
+                    "set_by": set_by,
+                    "detail": detail,
+                })
+                .to_string(),
+            ),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some(format!("egress_session_policy_{operation}")),
+        };
+        if let Err(e) = store.create_causal_event(&event) {
+            tracing::warn!(
+                target: "egress_labeler",
+                error = %e,
+                root_session_id = %root_session_id,
+                "failed to emit egress.session_policy causal event"
+            );
+        }
+    }
+
     /// Operator / gateway / privileged-agent root-session circuit breaker (see Phase 2C).
     pub async fn emergency_stop_root_session(
         &self,
@@ -1544,6 +1701,11 @@ impl GatewayExecutionService {
                 "Failed to revoke session envelopes during emergency stop"
             );
         }
+        crate::runtime::egress_labeler::clear_session_egress_policy(
+            &store,
+            root_session_id,
+            "emergency_stop",
+        );
         if let Err(e) = store.delete_session_inference_binding(root_session_id) {
             tracing::warn!(
                 target: "emergency_stop",

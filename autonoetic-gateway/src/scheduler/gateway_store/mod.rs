@@ -8,6 +8,8 @@ pub mod attack_patterns;
 mod channel_bindings;
 pub mod constitutional_proposals;
 mod credentials;
+pub mod egress_policy;
+pub use egress_policy::StoredEgressSessionPolicy;
 mod escalations;
 mod evaluations;
 mod fork_lineage;
@@ -401,6 +403,35 @@ impl GatewayStore {
     pub fn mark_message_delivered(&self, message_id: &str, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         messages::mark_message_delivered(&conn, message_id, session_id)
+    }
+
+    // ---- Session-scoped egress policy (RFC data-envelopes §5.4) ----
+
+    /// Declare (or replace) the root session's egress policy. Session rules are
+    /// added to the operator-global set and can only restrict.
+    pub fn set_egress_session_policy(
+        &self,
+        root_session_id: &str,
+        policy: &autonoetic_types::egress::EgressSessionPolicy,
+        set_by: &str,
+    ) -> Result<StoredEgressSessionPolicy> {
+        let conn = self.conn.lock().unwrap();
+        egress_policy::set_policy(&conn, root_session_id, policy, set_by)
+    }
+
+    pub fn get_egress_session_policy(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Option<StoredEgressSessionPolicy>> {
+        let conn = self.conn.lock().unwrap();
+        egress_policy::get_policy(&conn, root_session_id)
+    }
+
+    /// Drop the policy — the root session closed, was emergency-stopped, or the
+    /// operator cleared it. Returns whether a row was removed.
+    pub fn delete_egress_session_policy(&self, root_session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        egress_policy::delete_policy(&conn, root_session_id)
     }
 
     // ---- Session residency (parked, addressable sessions) ----

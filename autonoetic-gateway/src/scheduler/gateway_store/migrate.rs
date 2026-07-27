@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 72;
+const SCHEMA_VERSION_LATEST: i64 = 73;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -557,7 +557,51 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_fork_lineage_enrichment_v70(conn)?;
     apply_session_constitution_pin_v71(conn)?;
     apply_session_residency_v72(conn)?;
+    apply_egress_session_policies_v73(conn)?;
 
+    Ok(())
+}
+
+/// v73 — `egress_session_policies`: the root session's `egress_policy`
+/// (RFC data-envelopes §5.4), the session-scoped half of the operator source
+/// rules.
+///
+/// Keyed by root session, so a child agent inherits its root's policy rather
+/// than declaring its own, and deleted when the root session closes (or on
+/// emergency stop) — the RFC's "die with the root session". It is a table
+/// rather than process memory because sessions outlive the process: suspend /
+/// resume / gateway restart must not silently drop a restriction the operator
+/// declared.
+fn apply_egress_session_policies_v73(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 73 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS egress_session_policies (
+            root_session_id TEXT PRIMARY KEY,
+            -- Serialized autonoetic_types::egress::EgressSessionPolicy.
+            policy_json     TEXT NOT NULL,
+            -- Who declared it (`operator:rpc`, `operator:cli`, …) — I-6.
+            set_by          TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            73_i64,
+            "egress_session_policies",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 
@@ -3497,6 +3541,65 @@ mod tests {
             [],
         );
         assert!(dup.is_err(), "a second park row for one session must be rejected");
+    }
+
+    /// v73 creates `egress_session_policies` and bumps SCHEMA_VERSION_LATEST.
+    #[test]
+    fn v73_creates_egress_session_policies_and_bumps_supported_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap(); // idempotent
+
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 73",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1, "v73 must be recorded exactly once");
+
+        let recorded_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            SCHEMA_VERSION_LATEST >= recorded_max,
+            "SCHEMA_VERSION_LATEST ({SCHEMA_VERSION_LATEST}) must cover the highest applied \
+             migration ({recorded_max}), or the gateway rejects its own database"
+        );
+
+        conn.execute(
+            "INSERT INTO egress_session_policies
+                (root_session_id, policy_json, set_by, created_at, updated_at)
+             VALUES ('sess-1', '{\"rules\":[]}', 'operator:cli',
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let set_by: String = conn
+            .query_row(
+                "SELECT set_by FROM egress_session_policies WHERE root_session_id = 'sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(set_by, "operator:cli");
+
+        // root_session_id is the primary key: one policy per root session,
+        // replaced in place by `set`.
+        let dup = conn.execute(
+            "INSERT INTO egress_session_policies
+                (root_session_id, policy_json, set_by, created_at, updated_at)
+             VALUES ('sess-1', '{}', 'operator:rpc',
+                     '2026-01-01T00:05:00Z', '2026-01-01T00:05:00Z')",
+            [],
+        );
+        assert!(
+            dup.is_err(),
+            "a second policy row for one root session must be rejected"
+        );
     }
 
     /// #821 — v71 adds constitution_version/constitution_digest columns to

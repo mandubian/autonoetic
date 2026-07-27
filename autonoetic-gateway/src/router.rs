@@ -3272,6 +3272,20 @@ impl JsonRpcRouter {
                 }
             }
 
+            // Session-scoped egress policy (RFC data-envelopes §5.4) — the
+            // operator's "for this room, these sources stay local". Rules are
+            // added to the operator-global `egress.rules` and can only restrict;
+            // the record dies with the root session.
+            //
+            // Bodies live out of line (`#[inline(never)]` free functions): this
+            // match is thousands of arms long and, in debug builds, every arm's
+            // locals share one stack frame. Inlining a handful more param
+            // structs here is enough to overflow the stack during server
+            // bootstrap.
+            "session.egress_policy.get" => handle_egress_policy_get(&self.execution, req),
+            "session.egress_policy.set" => handle_egress_policy_set(&self.execution, req),
+            "session.egress_policy.clear" => handle_egress_policy_clear(&self.execution, req),
+
             "session.envelope.propose" => {
                 #[derive(Deserialize)]
                 struct EnvelopeProposeParams {
@@ -5515,6 +5529,86 @@ fn emit_anomaly_decider_obligation_event(
         reason: Some(format!("§O (O-7) decider motivation {action}")),
     };
     let _ = store.create_causal_event(&event);
+}
+
+// ---------------------------------------------------------------------------
+// Session-scoped egress policy handlers (RFC data-envelopes §5.4).
+//
+// Deliberately out of line and `#[inline(never)]`: `handle_request`'s match has
+// thousands of arms and, in a debug build, one stack frame sized by the union
+// of every arm's locals. Adding these bodies inline is measurably enough to
+// overflow the stack during server bootstrap, so the param structs and their
+// deserialization live here instead.
+// ---------------------------------------------------------------------------
+
+fn default_egress_policy_actor() -> String {
+    "operator:rpc".to_string()
+}
+
+fn invalid_egress_params(id: String, method: &str, e: serde_json::Error) -> JsonRpcResponse {
+    JsonRpcResponse::error(id, -32602, format!("Invalid params for {method}: {e}"))
+}
+
+#[inline(never)]
+fn handle_egress_policy_get(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.egress_policy.get", e),
+    };
+    match execution.get_session_egress_policy(&params.session_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+#[inline(never)]
+fn handle_egress_policy_set(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+        policy: autonoetic_types::egress::EgressSessionPolicy,
+        #[serde(default = "default_egress_policy_actor")]
+        set_by: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.egress_policy.set", e),
+    };
+    match execution.set_session_egress_policy(&params.session_id, params.policy, &params.set_by) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+#[inline(never)]
+fn handle_egress_policy_clear(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+        #[serde(default = "default_egress_policy_actor")]
+        set_by: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.egress_policy.clear", e),
+    };
+    match execution.clear_session_egress_policy(&params.session_id, &params.set_by) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
 }
 
 #[cfg(test)]

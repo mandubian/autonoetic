@@ -1,25 +1,26 @@
 //! Egress labeler — RFC data-envelopes §4.1 (label resolution) + §9.1 (audit).
 //!
 //! Labels tool results at the tool-result commit boundary. Given the merged
-//! operator source rules (global `egress.rules` + session-scoped additions,
-//! the latter landing in phase 1b #905), an `EgressLabeler`:
+//! operator source rules (global `egress.rules` + the root session's
+//! `egress_policy.rules`), an `EgressLabeler`:
 //!
 //! 1. Resolves the label for a `(source, path)` pair as the **intersection**
 //!    (`restrict`) of every matching rule — no first-match-wins, rules can only
 //!    restrict (RFC §4.1). When nothing matches, the configured default
 //!    (`unrestricted` by decision) applies.
-//! 2. For `sandbox.exec`, derives the `path` via static analysis of the command
-//!    + script body (sibling of `RemoteAccessAnalyzer`) — see
-//!    [`crate::runtime::egress_path_matcher`].
+//! 2. For exec-shaped tools (`sandbox.exec`, `artifact.exec`), derives the
+//!    `path` via static analysis of the command **and its dependency sources**
+//!    — the artifact bundle it runs, the workspace scripts it names (sibling of
+//!    `RemoteAccessAnalyzer`) — see [`crate::runtime::egress_path_matcher`].
 //! 3. Mints an envelope id (`env_<id>`), builds provenance (tool, args digest,
 //!    matched rule names), and emits an `egress.envelope_labeled` causal event
-//!    so "why is this labeled?" is always answerable from the chain (RFC §9.1).
+//!    carrying every resolution input, so "why is this labeled?" is always
+//!    answerable from the chain (RFC §9.1).
 //!
-//! **Phase status (1c):** labels are computed + audited but not yet enforced
-//! at the provider boundary. The chokepoint (withholding, indication
-//! substitution, the canary test) lands in #905. Labels are recorded in-memory
-//! keyed by tool-call id for #905 to re-key onto `msg_<ulid>` when the envelope
-//! ↔ message sidecar lands.
+//! Rule sources are matched **normalized** (`autonoetic_types::egress::
+//! source_pattern_matches`): the RFC and every operator-facing example write
+//! `sandbox.exec` / `mcp.gmail.*`, while the runtime's canonical tool names are
+//! `sandbox_exec` / `mcp_gmail_send_message`. Either spelling matches.
 //!
 //! Labels are **declared metadata, manipulated only by the gateway** — agents
 //! never set, strip, or read them (Lawful-Executor, RFC §14).
@@ -28,23 +29,95 @@ use std::sync::Arc;
 
 use autonoetic_types::causal_chain::{default_enforced_rules, CausalEventRecord};
 use autonoetic_types::egress::{
-    matches_simple_glob, EgressClass, EgressConfig, EgressLabel, EgressRule, Provenance, Sink,
+    matches_simple_glob, source_pattern_matches, EgressClass, EgressConfig, EgressLabel,
+    EgressRule, EgressSessionPolicy, Provenance, Sink,
 };
 use autonoetic_types::id_format::short_random_id;
 
-use crate::runtime::egress_path_matcher::{EgressPathMatcher, LabeledPathPattern};
+use crate::runtime::egress_path_matcher::{
+    collect_exec_dependency_sources, EgressPathMatcher, ExecSourceContext, LabeledPathPattern,
+};
 use crate::scheduler::gateway_store::GatewayStore;
 
 /// A label evaluation request at the tool-result boundary.
 #[derive(Debug, Clone)]
 pub struct LabelRequest<'a> {
-    /// The canonical tool name (`email.read`, `sandbox.exec`, `fs.read`, …).
+    /// The canonical tool name (`email_read`, `sandbox_exec`, `fs_read`, …).
+    /// Rule sources are matched against it normalized, so operator rules may
+    /// use the dotted spelling.
     pub tool: &'a str,
     /// The tool-call arguments JSON, used for the args digest in provenance and
-    /// to extract the command/script for `sandbox.exec` path matching.
+    /// to extract the command/script for exec path matching.
     pub arguments_json: &'a str,
-    /// The tool-call id — keys the in-memory label record for phase 1b.
+    /// The tool-call id. Until message ids land (RFC §3.4, phase 2 #907) this
+    /// is the join key between an envelope and the content it labels.
     pub tool_call_id: &'a str,
+}
+
+/// Where a rule came from. Recorded per matched rule so the audit answers "was
+/// this the operator's standing policy or something this session declared?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleScope {
+    /// `egress.rules` in the gateway config.
+    Global,
+    /// `egress_policy.rules` on the root session — dies with the session.
+    Session,
+}
+
+impl RuleScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleScope::Global => "global",
+            RuleScope::Session => "session",
+        }
+    }
+}
+
+/// One rule that contributed to a resolved label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedRule {
+    /// Stable key — `source` or `source:path`.
+    pub key: String,
+    pub scope: RuleScope,
+}
+
+/// A resolved label plus everything that went into resolving it (RFC §9.1:
+/// "every labeling decision recorded with its inputs").
+#[derive(Debug, Clone)]
+pub struct Resolution {
+    pub label: EgressLabel,
+    pub matched: Vec<MatchedRule>,
+    /// The configured path **patterns** that fired — never the observed path.
+    /// A real path is content-adjacent (`~/mail/from-alice-re-divorce.eml`
+    /// says plenty on its own) and every trace artifact here is content-free by
+    /// design (RFC §9); the pattern is operator-authored, so it is safe to
+    /// record and is what actually explains the decision.
+    pub paths: Vec<String>,
+}
+
+impl Resolution {
+    /// The resolution path taken, as recorded in the causal event.
+    fn kind(&self) -> &'static str {
+        let global = self.matched.iter().any(|m| m.scope == RuleScope::Global);
+        let session = self.matched.iter().any(|m| m.scope == RuleScope::Session);
+        match (global, session) {
+            (true, true) => "operator_and_session_rule",
+            (true, false) => "operator_rule",
+            (false, true) => "session_rule",
+            (false, false) => "default",
+        }
+    }
+
+    fn rule_keys(&self) -> Vec<String> {
+        self.matched.iter().map(|m| m.key.clone()).collect()
+    }
+}
+
+/// A rule tagged with where it came from.
+#[derive(Debug, Clone)]
+struct ScopedRule {
+    rule: EgressRule,
+    scope: RuleScope,
 }
 
 /// The outcome of labeling one tool result.
@@ -68,11 +141,16 @@ impl LabelOutcome {
 }
 
 /// The labeler: holds the merged rule set + default label and produces a label
-/// per tool result. Cheap to construct; one per session.
+/// per tool result. Cheap to construct; one per turn.
 #[derive(Debug, Clone)]
 pub struct EgressLabeler {
-    rules: Vec<EgressRule>,
+    rules: Vec<ScopedRule>,
+    /// Effective default = global default ∩ session default.
     default_label: EgressLabel,
+    /// The operator-global default, kept for the audit event.
+    global_default: EgressLabel,
+    /// Whether the session policy narrowed the default, for the audit event.
+    session_default_applied: bool,
     /// Whether source-rule labeling is effectively off (no rules + default
     /// `unrestricted`). Lets the hot path skip provenance/event work entirely.
     inert: bool,
@@ -80,29 +158,59 @@ pub struct EgressLabeler {
 
 impl EgressLabeler {
     /// Build from the operator-global [`EgressConfig`] (session-scoped rules
-    /// merge in via [`Self::with_session_rules`]).
+    /// merge in via [`Self::with_session_policy`]).
     pub fn from_config(config: &EgressConfig) -> Self {
         let default_label = config.default_label.to_label();
         let inert = config.rules.is_empty() && default_label.is_unrestricted();
         Self {
-            rules: config.rules.clone(),
-            default_label,
+            rules: config
+                .rules
+                .iter()
+                .cloned()
+                .map(|rule| ScopedRule {
+                    rule,
+                    scope: RuleScope::Global,
+                })
+                .collect(),
+            default_label: default_label.clone(),
+            global_default: default_label,
+            session_default_applied: false,
             inert,
         }
     }
 
-    /// Merge session-scoped rules (RFC §5.4) — these die with the root session.
-    /// Session rules are appended to the operator-global set; intersection is
-    /// order-independent, so merge order doesn't matter.
-    pub fn with_session_rules(mut self, session_rules: Vec<EgressRule>) -> Self {
-        if !session_rules.is_empty() {
-            self.rules.extend(session_rules);
-            // Re-evaluate inertness: session rules can only restrict, so if the
-            // default is unrestricted but session rules exist, we are no longer
-            // inert (a rule may match).
+    /// Merge the root session's `egress_policy` (RFC §5.4) — it dies with the
+    /// session. Session rules are appended to the operator-global set;
+    /// intersection is order-independent, so merge order doesn't matter, and a
+    /// session default can only *restrict* the global one.
+    pub fn with_session_policy(mut self, policy: &EgressSessionPolicy) -> Self {
+        if !policy.rules.is_empty() {
+            self.rules
+                .extend(policy.rules.iter().cloned().map(|rule| ScopedRule {
+                    rule,
+                    scope: RuleScope::Session,
+                }));
+            // Re-evaluate inertness: a session rule may match, so the fast path
+            // no longer applies.
             self.inert = false;
         }
+        if let Some(default) = policy.default_label {
+            let narrowed = self.default_label.clone().restrict(&default.to_label());
+            if narrowed != self.default_label {
+                self.default_label = narrowed;
+                self.session_default_applied = true;
+                self.inert = self.inert && self.default_label.is_unrestricted();
+            }
+        }
         self
+    }
+
+    /// Merge session-scoped rules without a default override.
+    pub fn with_session_rules(self, session_rules: Vec<EgressRule>) -> Self {
+        self.with_session_policy(&EgressSessionPolicy {
+            rules: session_rules,
+            default_label: None,
+        })
     }
 
     /// Whether the labeler will ever produce a non-`unrestricted` label.
@@ -117,43 +225,57 @@ impl EgressLabeler {
     /// This is the pure core: intersection of all matching rules (RFC §4.1),
     /// falling back to the default. Exposed so callers can label without a
     /// `GatewayStore` (e.g. unit tests).
-    pub fn resolve_label(&self, source: &str, path: Option<&str>) -> (EgressLabel, Vec<String>) {
+    pub fn resolve_label(&self, source: &str, path: Option<&str>) -> Resolution {
         // Start from the universe (unrestricted) and restrict down. The default
         // is applied last as a floor — it can only restrict the universe, and a
         // matching rule can only restrict further. This matches RFC §4.1:
         // resolution = intersection of (operator rules, default, …).
         let mut label = EgressLabel::unrestricted();
-        let mut matched: Vec<String> = Vec::new();
-        for rule in &self.rules {
-            if rule_matches(rule, source, path) {
-                label = label.restrict(&rule.label);
-                matched.push(rule_source_key(rule));
+        let mut matched: Vec<MatchedRule> = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+        for scoped in &self.rules {
+            if rule_matches(&scoped.rule, source, path) {
+                label = label.restrict(&scoped.rule.label);
+                matched.push(MatchedRule {
+                    key: rule_source_key(&scoped.rule),
+                    scope: scoped.scope,
+                });
+                if let Some(pattern) = &scoped.rule.path {
+                    if !paths.iter().any(|p| p == pattern) {
+                        paths.push(pattern.clone());
+                    }
+                }
             }
         }
         // Apply the configured default as a floor (it restricts the universe to
         // itself when nothing matched, and is a no-op intersection when rules
         // already restricted further — unless the default is stricter).
         label = label.restrict(&self.default_label);
-        (label, matched)
+        Resolution {
+            label,
+            matched,
+            paths,
+        }
     }
 
     /// Label a tool result end-to-end: resolve, mint envelope id, build
     /// provenance, emit `egress.envelope_labeled`.
     ///
-    /// `sandbox_exec_script_body` is the inline script source for `sandbox.exec`
-    /// path matching (None for all other tools). Returns `None` when the
-    /// labeler is inert (nothing to label) — callers should treat that as
-    /// "no envelope, unrestricted".
+    /// `exec_ctx` locates an exec-shaped call's dependency sources (artifact
+    /// bundle, workspace scripts) so the static path matcher can see what the
+    /// command alone doesn't show; `None` restricts the scan to the command and
+    /// any inline script in the arguments. Returns `None` when the labeler is
+    /// inert or the result is unrestricted — callers treat that as "no
+    /// envelope".
     ///
-    /// The durable record of the labeling decision is the `egress.envelope_labeled`
-    /// causal event (persisted via `store`); the returned [`LabelOutcome`] gives
-    /// the caller the envelope id + label for any in-turn use. Phase 1b (#905)
-    /// will re-key labels onto `msg_<ulid>` when the envelope ↔ message sidecar
-    /// lands.
+    /// The durable record of the labeling decision is the
+    /// `egress.envelope_labeled` causal event (persisted via `store`); the
+    /// returned [`LabelOutcome`] gives the caller the envelope id + label for
+    /// in-turn use (the chokepoint's `tool_call_id → label` map).
     pub fn label_tool_result(
         &self,
         req: &LabelRequest<'_>,
-        sandbox_exec_script_body: Option<&str>,
+        exec_ctx: Option<&ExecSourceContext<'_>>,
         session_id: &str,
         agent_id: &str,
         turn_id: Option<&str>,
@@ -163,56 +285,12 @@ impl EgressLabeler {
             return None;
         }
 
-        // Derive the (source, path) pair. For sandbox.exec, the "path" comes
-        // from static analysis of command + script body against labeled path
-        // patterns (RFC §4.2). For other tools, path is None at this layer —
-        // structured tools surface their own path semantics later.
-        let (label, matched): (EgressLabel, Vec<String>) = if req.tool == "sandbox.exec" {
-            let (cmd, script) = extract_sandbox_command(req.arguments_json, sandbox_exec_script_body);
-            // Only consider rules whose `source` matches `sandbox.exec` — a
-            // path-bearing rule for `fs.read` must NOT label a sandbox.exec
-            // result just because the command touched the same path. The static
-            // analyzer is source-agnostic; source filtering belongs here.
-            let applicable: Vec<&EgressRule> = self
-                .rules
-                .iter()
-                .filter(|r| source_glob_matches(&r.source, req.tool))
-                .collect();
-            let patterns: Vec<LabeledPathPattern> = applicable
-                .iter()
-                .filter_map(|r| r.path.as_ref().map(|p| LabeledPathPattern::new(p.clone())))
-                .collect();
-            if patterns.is_empty() {
-                // No source+path rule applies; fall back to source-only
-                // matching (a source-only `sandbox.exec` rule still applies).
-                self.resolve_label(req.tool, None)
-            } else {
-                let m = EgressPathMatcher::analyze(&cmd, script.as_deref(), &patterns);
-                if m.matched() {
-                    // Each matched path-pattern rule restricts; collect which
-                    // rules fired for provenance. Restrict against the
-                    // source-only rules too (intersection is order-independent).
-                    let mut label = EgressLabel::unrestricted();
-                    let mut fired: Vec<String> = Vec::new();
-                    for rule in &applicable {
-                        let Some(rule_path) = &rule.path else {
-                            // Source-only rule (no path) — always applies.
-                            label = label.restrict(&rule.label);
-                            fired.push(rule_source_key(rule));
-                            continue;
-                        };
-                        // A path-bearing rule fires iff its pattern matched.
-                        if m.matched_patterns.iter().any(|mp| mp == rule_path) {
-                            label = label.restrict(&rule.label);
-                            fired.push(rule_source_key(rule));
-                        }
-                    }
-                    label = label.restrict(&self.default_label);
-                    (label, fired)
-                } else {
-                    self.resolve_label(req.tool, None)
-                }
-            }
+        // Derive the (source, path) pair. For exec-shaped tools the "path"
+        // comes from static analysis of the command and its dependency sources
+        // against labeled path patterns (RFC §4.2). For other tools, path comes
+        // from a structured argument.
+        let resolution = if is_exec_shaped(req.tool) {
+            self.resolve_exec_label(req, exec_ctx)
         } else {
             // Structured tools: extract a `path` argument (common shapes) so
             // path-scoped rules can match. Unknown shapes → None (rule still
@@ -225,7 +303,7 @@ impl EgressLabeler {
         // emitting an event for every clean tool result would be noise. The
         // default-unrestricted decision means the vast majority of results are
         // unrestricted; we only audit when a rule actually restricted.
-        if label.is_unrestricted() {
+        if resolution.label.is_unrestricted() {
             return None;
         }
 
@@ -234,19 +312,20 @@ impl EgressLabeler {
         let provenance = Provenance {
             tool: Some(req.tool.to_string()),
             args_digest: Some(args_digest),
-            matched_rules: matched.clone(),
-            parent_envelope_ids: Vec::new(), // argument-taint: phase 2 (#907)
+            matched_rules: resolution.rule_keys(),
+            // Argument taint (RFC §4.1 path 3) intersects in phase 2 (#907);
+            // the field is carried here so the event shape is already stable.
+            parent_envelope_ids: Vec::new(),
         };
 
         // Best-effort causal event — the durable record of this labeling
         // decision. A failed write is logged, not fatal.
         if let Some(store) = store {
-            emit_envelope_labeled_event(
+            self.emit_envelope_labeled_event(
                 store,
                 &envelope_id,
-                req.tool_call_id,
-                req.tool,
-                &label,
+                req,
+                &resolution,
                 &provenance,
                 session_id,
                 agent_id,
@@ -256,35 +335,217 @@ impl EgressLabeler {
 
         Some(LabelOutcome {
             envelope_id,
-            label,
+            label: resolution.label,
             provenance,
         })
     }
+
+    /// Resolve an exec-shaped call by static analysis (RFC §4.2).
+    ///
+    /// Only rules whose `source` matches this tool apply — a path-bearing
+    /// `fs.read` rule must not label a `sandbox.exec` result just because the
+    /// command touched the same path. The static analyzer is source-agnostic;
+    /// source filtering belongs here.
+    fn resolve_exec_label(
+        &self,
+        req: &LabelRequest<'_>,
+        exec_ctx: Option<&ExecSourceContext<'_>>,
+    ) -> Resolution {
+        let (cmd, inline_script) = extract_sandbox_command(req.arguments_json);
+        let applicable: Vec<&ScopedRule> = self
+            .rules
+            .iter()
+            .filter(|s| source_pattern_matches(&s.rule.source, req.tool))
+            .collect();
+        let patterns: Vec<LabeledPathPattern> = applicable
+            .iter()
+            .filter_map(|s| {
+                s.rule
+                    .path
+                    .as_ref()
+                    .map(|p| LabeledPathPattern::new(p.clone()))
+            })
+            .collect();
+        if patterns.is_empty() {
+            // No source+path rule applies; fall back to source-only matching
+            // (a source-only exec rule still applies).
+            return self.resolve_label(req.tool, None);
+        }
+
+        // Gather everything the exec will actually run: the command, any inline
+        // script in the arguments, and — the dependency half of RFC §4.2 — the
+        // artifact bundle and workspace scripts it names. Only reached when a
+        // path-bearing rule exists, so unconfigured deployments never pay for
+        // the reads.
+        let mut sources: Vec<String> = Vec::new();
+        if let Some(script) = inline_script {
+            sources.push(script);
+        }
+        if let Some(ctx) = exec_ctx {
+            sources.extend(collect_exec_dependency_sources(req.arguments_json, &cmd, ctx));
+        }
+        let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+
+        let m = EgressPathMatcher::analyze_sources(&cmd, &source_refs, &patterns);
+        if !m.matched() {
+            return self.resolve_label(req.tool, None);
+        }
+
+        // Each matched path-pattern rule restricts; collect which rules fired
+        // for provenance. Source-only rules restrict too (intersection is
+        // order-independent).
+        let mut label = EgressLabel::unrestricted();
+        let mut matched: Vec<MatchedRule> = Vec::new();
+        for scoped in &applicable {
+            let fires = match &scoped.rule.path {
+                // Source-only rule (no path) — always applies.
+                None => true,
+                // A path-bearing rule fires iff its pattern matched.
+                Some(rule_path) => m.matched_patterns.iter().any(|mp| mp == rule_path),
+            };
+            if fires {
+                label = label.restrict(&scoped.rule.label);
+                matched.push(MatchedRule {
+                    key: rule_source_key(&scoped.rule),
+                    scope: scoped.scope,
+                });
+            }
+        }
+        Resolution {
+            label: label.restrict(&self.default_label),
+            matched,
+            paths: m.matched_patterns,
+        }
+    }
+
+    /// Emit the `egress.envelope_labeled` causal event (RFC §9.1).
+    ///
+    /// Content-free metadata only — envelope id, tool, label, the rules that
+    /// matched and where they came from, the default in force, the args digest.
+    /// Never the tool-result payload. Together these are the complete input set
+    /// of the resolution, which is what makes "why is this envelope labeled?"
+    /// answerable from the chain alone.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_envelope_labeled_event(
+        &self,
+        store: &Arc<GatewayStore>,
+        envelope_id: &str,
+        req: &LabelRequest<'_>,
+        resolution: &Resolution,
+        provenance: &Provenance,
+        session_id: &str,
+        agent_id: &str,
+        turn_id: Option<&str>,
+    ) {
+        let payload = serde_json::json!({
+            "envelope_id": envelope_id,
+            // The envelope ↔ content binding in this phase. Message ids
+            // (`msg_<ulid>`, RFC §3.4) land with phase 2 (#907).
+            "tool_call_id": req.tool_call_id,
+            "tool_name": req.tool,
+            // Serialize the label as its sink-set (serde-transparent
+            // BTreeSet<Sink>, snake_case) — the same wire shape the chokepoint
+            // compares against.
+            "label": serde_json::to_value(&resolution.label).unwrap_or(serde_json::Value::Null),
+            "matched_rules": provenance.matched_rules,
+            "matched_rule_scopes": resolution
+                .matched
+                .iter()
+                .map(|m| serde_json::json!({ "rule": m.key, "scope": m.scope.as_str() }))
+                .collect::<Vec<_>>(),
+            "matched_paths": resolution.paths,
+            "args_digest": provenance.args_digest,
+            // The floor every resolution intersects against, and whether the
+            // session narrowed it — without these, a label produced by the
+            // default alone is unexplained.
+            "default_label": serde_json::to_value(&self.default_label)
+                .unwrap_or(serde_json::Value::Null),
+            "global_default_label": serde_json::to_value(&self.global_default)
+                .unwrap_or(serde_json::Value::Null),
+            "session_default_applied": self.session_default_applied,
+            // Argument taint (phase 2, #907) — always empty today, present so
+            // consumers can rely on the field.
+            "parent_envelope_ids": provenance.parent_envelope_ids,
+            // Explicitly name the resolution path so the audit answers "why?".
+            "resolution": resolution.kind(),
+        });
+        let event = CausalEventRecord {
+            event_id: format!("egress-labeled-{}", uuid::Uuid::new_v4()),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.to_string(),
+            turn_id: turn_id.map(|t| t.to_string()),
+            event_seq: 0,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "egress".to_string(),
+            action: "egress.envelope_labeled".to_string(),
+            status: "active".to_string(),
+            // Phase 1c carries only the baseline attribution rule. The
+            // constitution clause for the label-plane invariant is phase 5
+            // (#910).
+            enforced_rules: default_enforced_rules(),
+            target: Some(envelope_id.to_string()),
+            payload: Some(payload.to_string()),
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("egress_label_resolved".to_string()),
+        };
+        if let Err(e) = store.create_causal_event(&event) {
+            tracing::warn!(
+                target: "egress_labeler",
+                error = %e,
+                envelope_id = %envelope_id,
+                tool = %req.tool,
+                "failed to emit egress.envelope_labeled causal event"
+            );
+        }
+    }
+}
+
+/// Drop the root session's `egress_policy` — it dies with the session
+/// (RFC §5.4). Best-effort: a failed delete is logged, never fatal.
+///
+/// Deliberately out of line and `#[inline(never)]`. Both call sites (session
+/// close in `lifecycle.rs`, emergency stop in `execution.rs`) sit inside very
+/// large `async fn`s whose generated futures live on the stack, and the
+/// server-bootstrap path already runs close to the 2 MiB test-thread limit. A
+/// `tracing` event expands to a non-trivial set of locals; keeping them in
+/// their own frame instead of folding them into those futures costs nothing.
+#[inline(never)]
+pub fn clear_session_egress_policy(store: &GatewayStore, root_session_id: &str, context: &str) {
+    if let Err(e) = store.delete_egress_session_policy(root_session_id) {
+        tracing::warn!(
+            target: "egress_labeler",
+            error = %e,
+            root_session_id = %root_session_id,
+            context = %context,
+            "failed to delete egress session policy"
+        );
+    }
+}
+
+/// Tools whose result envelope is labeled by static analysis of what they run,
+/// rather than by a structured path argument (RFC §4.2).
+fn is_exec_shaped(tool: &str) -> bool {
+    matches!(
+        autonoetic_types::egress::normalize_source_key(tool).as_str(),
+        "sandbox_exec" | "artifact_exec"
+    )
 }
 
 /// Does a rule match a given (source, path)?
 ///
-/// Source supports `*`-suffix globs (`email.*`, `mcp.gmail.*`) and bare names.
+/// Source supports `*`-suffix globs (`email.*`, `mcp.gmail.*`) and bare names,
+/// matched normalized so the dotted and snake_case spellings are equivalent.
 /// Path is optional; when the rule has no `path`, it matches all calls to the
 /// source. Mirrors [`crate::runtime::disclosure`]'s rule semantics.
 fn rule_matches(rule: &EgressRule, source: &str, path: Option<&str>) -> bool {
-    if !source_glob_matches(&rule.source, source) {
+    if !source_pattern_matches(&rule.source, source) {
         return false;
     }
     match (&rule.path, path) {
         (None, _) => true,
         (Some(pattern), Some(actual)) => matches_simple_glob(pattern, actual),
         (Some(_), None) => false,
-    }
-}
-
-/// `email.*` matches `email.read`; `fs.read` matches `fs.read` only.
-fn source_glob_matches(pattern: &str, source: &str) -> bool {
-    if pattern.ends_with('*') {
-        let prefix = pattern.trim_end_matches('*');
-        source.starts_with(prefix)
-    } else {
-        pattern == source
     }
 }
 
@@ -303,26 +564,25 @@ fn args_digest_of(arguments_json: &str) -> String {
     autonoetic_types::id_format::hash_and_truncate(arguments_json, 12)
 }
 
-/// Extract the `command` and `script`/`code` fields from a sandbox.exec
-/// arguments JSON. Returns (command, Some(script)) — both best-effort.
-fn extract_sandbox_command(arguments_json: &str, script_body: Option<&str>) -> (String, Option<String>) {
+/// Extract the `command` and any inline `script`/`code` field from an
+/// exec-shaped arguments JSON. Returns (command, inline script) — both
+/// best-effort. Dependency sources on disk are resolved separately by
+/// [`collect_exec_dependency_sources`].
+fn extract_sandbox_command(arguments_json: &str) -> (String, Option<String>) {
     let parsed: serde_json::Value = match serde_json::from_str(arguments_json) {
         Ok(v) => v,
-        Err(_) => return (String::new(), script_body.map(|s| s.to_string())),
+        Err(_) => return (String::new(), None),
     };
     let cmd = parsed
         .get("command")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Inline script may arrive as `code` or `script`, or be passed out-of-band
-    // via `sandbox_exec_script_body` (the manifest-declared script path).
     let script = parsed
         .get("code")
         .and_then(|v| v.as_str())
         .or_else(|| parsed.get("script").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .or_else(|| script_body.map(|s| s.to_string()));
+        .map(|s| s.to_string());
     (cmd, script)
 }
 
@@ -340,68 +600,6 @@ fn extract_structured_path(arguments_json: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Emit the `egress.envelope_labeled` causal event (RFC §9.1).
-///
-/// Content-free metadata only — envelope id, tool, label, matched rules, args
-/// digest. Never the tool-result payload.
-fn emit_envelope_labeled_event(
-    store: &Arc<GatewayStore>,
-    envelope_id: &str,
-    tool_call_id: &str,
-    tool: &str,
-    label: &EgressLabel,
-    provenance: &Provenance,
-    session_id: &str,
-    agent_id: &str,
-    turn_id: Option<&str>,
-) {
-    let payload = serde_json::json!({
-        "envelope_id": envelope_id,
-        "tool_call_id": tool_call_id,
-        "tool_name": tool,
-        // Serialize the label as its sink-set (serde-transparent BTreeSet<Sink>,
-        // snake_case). This is the same wire shape the chokepoint will compare
-        // against in phase 1b.
-        "label": serde_json::to_value(label).unwrap_or(serde_json::Value::Null),
-        "matched_rules": provenance.matched_rules,
-        "args_digest": provenance.args_digest,
-        // Explicitly mark the resolution path so the audit answers "why?".
-        "resolution": if provenance.matched_rules.is_empty() {
-            "default"
-        } else {
-            "operator_rule"
-        },
-    });
-    let event = CausalEventRecord {
-        event_id: format!("egress-labeled-{}", uuid::Uuid::new_v4()),
-        agent_id: agent_id.to_string(),
-        session_id: session_id.to_string(),
-        turn_id: turn_id.map(|t| t.to_string()),
-        event_seq: 0,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        category: "egress".to_string(),
-        action: "egress.envelope_labeled".to_string(),
-        status: "active".to_string(),
-        // Phase 1c carries only the baseline attribution rule. The
-        // constitution clause for the label-plane invariant is phase 5 (#910).
-        enforced_rules: default_enforced_rules(),
-        target: Some(envelope_id.to_string()),
-        payload: Some(payload.to_string()),
-        payload_ref: None,
-        evidence_ref: None,
-        reason: Some("egress_label_resolved".to_string()),
-    };
-    if let Err(e) = store.create_causal_event(&event) {
-        tracing::warn!(
-            target: "egress_labeler",
-            error = %e,
-            envelope_id = %envelope_id,
-            tool = %tool,
-            "failed to emit egress.envelope_labeled causal event"
-        );
-    }
 }
 
 /// Emit the chokepoint causal events derived from a [`FilterReport`] (RFC §9.1).
@@ -637,7 +835,9 @@ fn sink_str(s: Sink) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use autonoetic_types::egress::{EgressConfig, EgressLabel, EgressRule, NamedEgressLabel, Sink};
+    use autonoetic_types::egress::{
+        EgressConfig, EgressLabel, EgressRule, EgressSessionPolicy, NamedEgressLabel, Sink,
+    };
 
     use super::*;
 
@@ -656,35 +856,51 @@ mod tests {
         }
     }
 
+    fn keys(r: &Resolution) -> Vec<String> {
+        r.rule_keys()
+    }
+
     // ── source matching ──────────────────────────────────────────────────
 
     #[test]
     fn bare_source_matches_exact() {
         let l = EgressLabeler::from_config(&cfg(vec![rule("fs.read", None, NamedEgressLabel::LocalOnly)]));
-        let (label, matched) = l.resolve_label("fs.read", None);
-        assert_eq!(label, EgressLabel::local_only());
-        assert_eq!(matched, vec!["fs.read"]);
+        let r = l.resolve_label("fs.read", None);
+        assert_eq!(r.label, EgressLabel::local_only());
+        assert_eq!(keys(&r), vec!["fs.read"]);
     }
 
     #[test]
     fn source_glob_matches_suffix() {
         let l = EgressLabeler::from_config(&cfg(vec![rule("email.*", None, NamedEgressLabel::LocalOnly)]));
-        let (label, _) = l.resolve_label("email.read", None);
-        assert_eq!(label, EgressLabel::local_only());
-        let (label, _) = l.resolve_label("email.send", None);
-        assert_eq!(label, EgressLabel::local_only());
+        assert_eq!(l.resolve_label("email.read", None).label, EgressLabel::local_only());
+        assert_eq!(l.resolve_label("email.send", None).label, EgressLabel::local_only());
         // Non-matching source stays unrestricted (default).
-        let (label, _) = l.resolve_label("fs.read", None);
-        assert!(label.is_unrestricted());
+        assert!(l.resolve_label("fs.read", None).label.is_unrestricted());
     }
 
     #[test]
     fn mcp_server_glob_matches() {
         let l = EgressLabeler::from_config(&cfg(vec![rule("mcp.gmail.*", None, NamedEgressLabel::LocalOnly)]));
-        let (label, _) = l.resolve_label("mcp.gmail.send_message", None);
-        assert_eq!(label, EgressLabel::local_only());
-        let (label, _) = l.resolve_label("mcp.outlook.send", None);
-        assert!(label.is_unrestricted());
+        // MCP tools reach the boundary as `mcp_<server>_<tool>`.
+        assert_eq!(
+            l.resolve_label("mcp_gmail_send_message", None).label,
+            EgressLabel::local_only()
+        );
+        assert!(l.resolve_label("mcp_outlook_send", None).label.is_unrestricted());
+    }
+
+    /// The dotted spelling in the RFC/config template must match the runtime's
+    /// canonical snake_case tool name — otherwise every documented rule is a
+    /// silent no-op.
+    #[test]
+    fn dotted_rule_source_matches_canonical_tool_name() {
+        let l = EgressLabeler::from_config(&cfg(vec![rule(
+            "fs.read",
+            None,
+            NamedEgressLabel::LocalOnly,
+        )]));
+        assert_eq!(l.resolve_label("fs_read", None).label, EgressLabel::local_only());
     }
 
     // ── path narrowing ───────────────────────────────────────────────────
@@ -695,14 +911,14 @@ mod tests {
             rule("fs.read", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
         ]));
         // path supplied → matches
-        let (label, _) = l.resolve_label("fs.read", Some("~/mail/inbox/1"));
-        assert_eq!(label, EgressLabel::local_only());
+        assert_eq!(
+            l.resolve_label("fs.read", Some("~/mail/inbox/1")).label,
+            EgressLabel::local_only()
+        );
         // different path → no match → unrestricted
-        let (label, _) = l.resolve_label("fs.read", Some("/etc/passwd"));
-        assert!(label.is_unrestricted());
+        assert!(l.resolve_label("fs.read", Some("/etc/passwd")).label.is_unrestricted());
         // no path supplied with a path-scoped rule → no match (conservative)
-        let (label, _) = l.resolve_label("fs.read", None);
-        assert!(label.is_unrestricted());
+        assert!(l.resolve_label("fs.read", None).label.is_unrestricted());
     }
 
     // ── intersection is monotonic ────────────────────────────────────────
@@ -715,9 +931,9 @@ mod tests {
             rule("fs.read", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
             rule("fs.read", Some("~/mail/**"), NamedEgressLabel::NoRemoteModel),
         ]));
-        let (label, matched) = l.resolve_label("fs.read", Some("~/mail/inbox/1"));
-        assert_eq!(label, EgressLabel::local_only());
-        assert_eq!(matched.len(), 2);
+        let r = l.resolve_label("fs.read", Some("~/mail/inbox/1"));
+        assert_eq!(r.label, EgressLabel::local_only());
+        assert_eq!(r.matched.len(), 2);
     }
 
     #[test]
@@ -725,9 +941,10 @@ mod tests {
         let mut c = cfg(vec![]);
         c.default_label = NamedEgressLabel::LocalOnly;
         let l = EgressLabeler::from_config(&c);
-        let (label, matched) = l.resolve_label("anything", None);
-        assert_eq!(label, EgressLabel::local_only());
-        assert!(matched.is_empty());
+        let r = l.resolve_label("anything", None);
+        assert_eq!(r.label, EgressLabel::local_only());
+        assert!(r.matched.is_empty());
+        assert_eq!(r.kind(), "default");
     }
 
     #[test]
@@ -738,15 +955,64 @@ mod tests {
         assert!(!l2.is_inert());
     }
 
-    // ── session rules ────────────────────────────────────────────────────
+    // ── session policy ───────────────────────────────────────────────────
 
     #[test]
     fn session_rules_merge_and_restrict() {
         let l = EgressLabeler::from_config(&cfg(vec![]))
             .with_session_rules(vec![rule("slack.*", None, NamedEgressLabel::NoRemoteModel)]);
         assert!(!l.is_inert());
-        let (label, _) = l.resolve_label("slack.read", None);
-        assert_eq!(label, EgressLabel::no_remote_model());
+        let r = l.resolve_label("slack.read", None);
+        assert_eq!(r.label, EgressLabel::no_remote_model());
+        assert_eq!(r.kind(), "session_rule");
+        assert_eq!(r.matched[0].scope, RuleScope::Session);
+    }
+
+    #[test]
+    fn global_and_session_rules_both_recorded() {
+        let l = EgressLabeler::from_config(&cfg(vec![rule(
+            "email.*",
+            None,
+            NamedEgressLabel::NoRemoteModel,
+        )]))
+        .with_session_rules(vec![rule("email.read", None, NamedEgressLabel::LocalOnly)]);
+        let r = l.resolve_label("email.read", None);
+        // Intersection of no_remote_model and local_only = local_only.
+        assert_eq!(r.label, EgressLabel::local_only());
+        assert_eq!(r.kind(), "operator_and_session_rule");
+        assert!(r.matched.iter().any(|m| m.scope == RuleScope::Global));
+        assert!(r.matched.iter().any(|m| m.scope == RuleScope::Session));
+    }
+
+    #[test]
+    fn session_default_restricts_but_cannot_widen() {
+        // Global default local_only; a session asking for no_remote_model (a
+        // *wider* label) must not loosen it — resolution intersects.
+        let mut c = cfg(vec![]);
+        c.default_label = NamedEgressLabel::LocalOnly;
+        let l = EgressLabeler::from_config(&c).with_session_policy(&EgressSessionPolicy {
+            rules: vec![],
+            default_label: Some(NamedEgressLabel::NoRemoteModel),
+        });
+        assert_eq!(l.resolve_label("anything", None).label, EgressLabel::local_only());
+
+        // The other direction genuinely restricts: unrestricted global default
+        // narrowed to local_only by the session.
+        let l2 = EgressLabeler::from_config(&EgressConfig::default()).with_session_policy(
+            &EgressSessionPolicy {
+                rules: vec![],
+                default_label: Some(NamedEgressLabel::LocalOnly),
+            },
+        );
+        assert!(!l2.is_inert(), "a restricting session default cancels the fast path");
+        assert_eq!(l2.resolve_label("anything", None).label, EgressLabel::local_only());
+    }
+
+    #[test]
+    fn empty_session_policy_leaves_the_fast_path_intact() {
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_session_policy(&EgressSessionPolicy::default());
+        assert!(l.is_inert());
     }
 
     // ── inert fast path ──────────────────────────────────────────────────
@@ -755,7 +1021,7 @@ mod tests {
     fn label_tool_result_returns_none_when_inert() {
         let l = EgressLabeler::from_config(&EgressConfig::default());
         let req = LabelRequest {
-            tool: "fs.read",
+            tool: "fs_read",
             arguments_json: "{}",
             tool_call_id: "tc_1",
         };
@@ -768,7 +1034,7 @@ mod tests {
         // A rule exists but doesn't match this source → unrestricted → no event.
         let l = EgressLabeler::from_config(&cfg(vec![rule("email.*", None, NamedEgressLabel::LocalOnly)]));
         let req = LabelRequest {
-            tool: "fs.read",
+            tool: "fs_read",
             arguments_json: "{}",
             tool_call_id: "tc_1",
         };
@@ -792,13 +1058,27 @@ mod tests {
         assert_eq!(out.provenance.matched_rules, vec!["email.read"]);
     }
 
+    // ── exec-shaped tools ────────────────────────────────────────────────
+
+    #[test]
+    fn exec_shaped_covers_both_spellings_and_both_tools() {
+        assert!(is_exec_shaped("sandbox.exec"));
+        assert!(is_exec_shaped("sandbox_exec"));
+        assert!(is_exec_shaped("artifact.exec"));
+        assert!(is_exec_shaped("artifact_exec"));
+        assert!(!is_exec_shaped("fs_read"));
+    }
+
+    /// Regression for the canonical-name mismatch: the tool arrives as
+    /// `sandbox_exec`, the rule is written `sandbox.exec`. Before normalization
+    /// the static path matcher never ran at all.
     #[test]
     fn sandbox_exec_with_labeled_path_is_restricted() {
         let l = EgressLabeler::from_config(&cfg(vec![
             rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
         ]));
         let req = LabelRequest {
-            tool: "sandbox.exec",
+            tool: "sandbox_exec",
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
         };
@@ -813,7 +1093,7 @@ mod tests {
             rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
         ]));
         let req = LabelRequest {
-            tool: "sandbox.exec",
+            tool: "sandbox_exec",
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
         };
@@ -833,7 +1113,7 @@ mod tests {
             // No sandbox.exec rule at all.
         ]));
         let req = LabelRequest {
-            tool: "sandbox.exec",
+            tool: "sandbox_exec",
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
         };
@@ -849,7 +1129,7 @@ mod tests {
             rule("sandbox.exec", None, NamedEgressLabel::NoRemoteModel),
         ]));
         let req = LabelRequest {
-            tool: "sandbox.exec",
+            tool: "sandbox_exec",
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
         };
@@ -976,5 +1256,70 @@ mod tests {
         assert!(
             !compression_preset_eligible(&band, &labels, EgressClass::Remote).is_eligible()
         );
+    }
+
+    #[test]
+    fn artifact_exec_uses_the_same_static_analysis() {
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("artifact.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "artifact_exec",
+            arguments_json: r#"{"command":"python3 read.py ~/mail/archive.mbox"}"#,
+            tool_call_id: "tc_exec",
+        };
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
+        assert_eq!(out.label, EgressLabel::local_only());
+    }
+
+    /// The dependency read (RFC §4.2, §5.6 step 3): the labeled path is only in
+    /// the *script*, which the command merely names. Scanning the command line
+    /// alone misses it.
+    #[test]
+    fn sandbox_exec_labels_a_dependency_script_read() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("parse_mail.py"),
+            "import mailbox\nmb = mailbox.mbox(\"~/mail/archive.mbox\")\n",
+        )
+        .unwrap();
+
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"python3 parse_mail.py"}"#,
+            tool_call_id: "tc_exec",
+        };
+
+        // Without the context the script is invisible → nothing labeled.
+        assert!(
+            l.label_tool_result(&req, None, "sess", "agent", None, None).is_none(),
+            "command line alone carries no labeled path"
+        );
+
+        // With it, the script's read is caught.
+        let ctx = ExecSourceContext {
+            agent_dir: Some(dir.path()),
+            gateway_dir: None,
+            session_id: Some("sess"),
+        };
+        let out = l
+            .label_tool_result(&req, Some(&ctx), "sess", "agent", None, None)
+            .expect("dependency read should be labeled");
+        assert_eq!(out.label, EgressLabel::local_only());
+    }
+
+    #[test]
+    fn sink_set_label_from_a_rule_is_honored_verbatim() {
+        // A rule may carry a raw sink-set rather than a named label.
+        let custom = EgressLabel::from_sinks([Sink::LocalModel, Sink::UserReply]);
+        let l = EgressLabeler::from_config(&cfg(vec![EgressRule {
+            source: "email.*".to_string(),
+            path: None,
+            label: custom.clone(),
+        }]));
+        assert_eq!(l.resolve_label("email_read", None).label, custom);
     }
 }

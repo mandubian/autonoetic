@@ -1000,6 +1000,14 @@ impl AgentExecutor {
                             "Failed to delete session grants on session close"
                         );
                     }
+                    // Egress: the session's `egress_policy` dies with the root
+                    // session (RFC data-envelopes §5.4). Only on a real close —
+                    // a suspended session resumes and must keep its rules.
+                    crate::runtime::egress_labeler::clear_session_egress_policy(
+                        gs,
+                        &root_sid,
+                        "session_close",
+                    );
                 }
             }
             // #853: free this session's per-host probe budget. Keyed by the

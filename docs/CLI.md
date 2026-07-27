@@ -737,6 +737,30 @@ Options:
 
 The archive directory is cleaned on re-export for the same session, so stale pages are removed.
 
+### `autonoetic session egress-policy`
+
+Declare, show, or clear a session's **egress policy** — the session-scoped half of the egress source rules (see [`docs/config-reference.md`](config-reference.md#egress-data-localization) and [RFC: data envelopes](rfc/data-envelopes-egress-localization.md) §5.4). This is the "for this room, these sources stay local" rung: name the private sources for one session without editing gateway config.
+
+```bash
+# Emails stay local for this session; the sandbox reading ~/mail/** too.
+autonoetic session egress-policy set <session_id> \
+  --rule 'email.*=local_only' \
+  --rule 'sandbox.exec:~/mail/**=local_only'
+
+autonoetic session egress-policy show <session_id>
+autonoetic session egress-policy clear <session_id>
+```
+
+| Option (`set`) | Description |
+|--------|-------------|
+| `--rule <SOURCE[:PATH]=LABEL>` | Repeatable. `SOURCE` is a tool-name pattern (dotted or snake_case, `*` suffix allowed); `PATH` narrows to a filesystem glob; `LABEL` is `unrestricted`, `local_only`, or `no_remote_model`. |
+| `--default-label <LABEL>` | Session default for content no rule labels. Can only *restrict* the gateway-wide default. |
+| `--set-by <WHO>` | Attribution recorded on the declaration (default `operator:cli`). |
+
+Session rules are **added** to the operator-global `egress.rules`, and because label resolution is an intersection they can only restrict — a session can never loosen standing policy. The policy is keyed by the **root** session (children inherit it) and is deleted when that session closes or is emergency-stopped. `set` replaces any previous declaration.
+
+The equivalent JSON-RPC methods are `session.egress_policy.set` / `.get` / `.clear`.
+
 ---
 
 ## Capsule Commands

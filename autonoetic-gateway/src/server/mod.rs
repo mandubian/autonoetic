@@ -310,8 +310,19 @@ impl GatewayServer {
 
         // Phase 5/7: start OFP, JSON-RPC, and HTTP listeners concurrently.
         // Missing federation identity is a hard failure by design.
+        //
+        // Each member is `Box::pin`ned so it lives on the heap rather than
+        // inside `run`'s future. These are the six largest futures in the
+        // process — every request handler, scheduler tick and background loop
+        // they transitively await is part of their state machines — and joining
+        // them inline makes `run`'s own future the sum of all six. That future
+        // is polled on the caller's stack, which left roughly a page of
+        // headroom before a deep `serde_json` parse or an `ed25519` verify (the
+        // constitution lock does both at startup) overflowed it. Boxing costs
+        // six one-time allocations and removes a whole class of
+        // "unrelated change elsewhere aborts startup" failures.
         tokio::try_join!(
-            ofp::start_ofp_server(
+            Box::pin(ofp::start_ofp_server(
                 ofp_addr,
                 node_id,
                 node_name,
@@ -319,16 +330,16 @@ impl GatewayServer {
                 shared_secret.clone(),
                 self.registry.clone(),
                 jsonrpc_router.clone(),
-            ),
-            jsonrpc::start_jsonrpc_server(
+            )),
+            Box::pin(jsonrpc::start_jsonrpc_server(
                 jsonrpc_addr,
                 (*jsonrpc_router).clone(),
                 Some(shared_secret),
-            ),
-            http_server,
-            background_scheduler,
-            fast_scheduler,
-            eval_runner,
+            )),
+            Box::pin(http_server),
+            Box::pin(background_scheduler),
+            Box::pin(fast_scheduler),
+            Box::pin(eval_runner),
         )?;
         Ok(())
     }

@@ -51,6 +51,124 @@ pub async fn handle_session(config_path: &Path, command: &SessionCommands) -> an
             min_altitude.as_deref(),
             output_dir.as_deref(),
         ),
+        SessionCommands::EgressPolicy { command } => handle_egress_policy(&store, command),
+    }
+}
+
+/// `autonoetic session egress-policy …` — the session-scoped half of the egress
+/// source rules (RFC data-envelopes §5.4).
+fn handle_egress_policy(
+    store: &Arc<GatewayStore>,
+    command: &crate::cli::common::EgressPolicyCommands,
+) -> anyhow::Result<()> {
+    use crate::cli::common::EgressPolicyCommands;
+    use autonoetic_gateway::runtime::content_store::root_session_id;
+
+    match command {
+        EgressPolicyCommands::Show { session_id } => {
+            let root = root_session_id(session_id);
+            match store.get_egress_session_policy(root)? {
+                Some(stored) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "root_session_id": stored.root_session_id,
+                            "policy": stored.policy,
+                            "set_by": stored.set_by,
+                            "created_at": stored.created_at,
+                            "updated_at": stored.updated_at,
+                        }))?
+                    );
+                }
+                None => {
+                    println!(
+                        "No session egress policy for root session '{}'. \
+                         Operator-global `egress.rules` still apply.",
+                        root
+                    );
+                }
+            }
+            Ok(())
+        }
+        EgressPolicyCommands::Set {
+            session_id,
+            rules,
+            default_label,
+            set_by,
+        } => {
+            anyhow::ensure!(
+                !rules.is_empty() || default_label.is_some(),
+                "nothing to declare — pass at least one --rule or a --default-label"
+            );
+            let policy = autonoetic_types::egress::EgressSessionPolicy {
+                rules: rules
+                    .iter()
+                    .map(|spec| parse_rule_spec(spec))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                default_label: match default_label {
+                    Some(l) => Some(parse_named_label(l)?),
+                    None => None,
+                },
+            };
+            let root = root_session_id(session_id).to_string();
+            let stored = store.set_egress_session_policy(&root, &policy, set_by)?;
+            println!(
+                "Declared egress policy for root session '{}' ({} rule(s)).",
+                root,
+                stored.policy.rules.len()
+            );
+            println!("{}", serde_json::to_string_pretty(&stored.policy)?);
+            Ok(())
+        }
+        EgressPolicyCommands::Clear { session_id, .. } => {
+            let root = root_session_id(session_id).to_string();
+            let cleared = store.delete_egress_session_policy(&root)?;
+            println!(
+                "{} for root session '{}'.",
+                if cleared {
+                    "Cleared egress policy"
+                } else {
+                    "No egress policy to clear"
+                },
+                root
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Parse `SOURCE[:PATH]=LABEL` into an [`autonoetic_types::egress::EgressRule`].
+///
+/// The label is split off from the right so a path may itself contain `=`; the
+/// source/path split then takes the *first* `:`, since tool names never contain
+/// one and paths may.
+pub(crate) fn parse_rule_spec(spec: &str) -> anyhow::Result<autonoetic_types::egress::EgressRule> {
+    let (lhs, label) = spec.rsplit_once('=').ok_or_else(|| {
+        anyhow::anyhow!("rule '{spec}' is missing '=LABEL' (e.g. 'email.*=local_only')")
+    })?;
+    let (source, path) = match lhs.split_once(':') {
+        Some((s, p)) => (s.trim(), Some(p.trim().to_string())),
+        None => (lhs.trim(), None),
+    };
+    anyhow::ensure!(!source.is_empty(), "rule '{spec}' has an empty source");
+    Ok(autonoetic_types::egress::EgressRule {
+        source: source.to_string(),
+        path: path.filter(|p| !p.is_empty()),
+        label: parse_named_label(label.trim())?.to_label(),
+    })
+}
+
+pub(crate) fn parse_named_label(
+    raw: &str,
+) -> anyhow::Result<autonoetic_types::egress::NamedEgressLabel> {
+    use autonoetic_types::egress::NamedEgressLabel;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "unrestricted" => Ok(NamedEgressLabel::Unrestricted),
+        "local_only" | "local-only" => Ok(NamedEgressLabel::LocalOnly),
+        "no_remote_model" | "no-remote-model" => Ok(NamedEgressLabel::NoRemoteModel),
+        other => anyhow::bail!(
+            "unknown egress label '{other}' — expected unrestricted, local_only, or no_remote_model"
+        ),
     }
 }
 
@@ -308,4 +426,50 @@ fn default_export_path(session_id: &str, format: ExportFormat) -> std::path::Pat
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
         .collect();
     std::path::PathBuf::from(format!("{}.{}", safe_id, ext))
+}
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use autonoetic_types::egress::{EgressLabel, NamedEgressLabel};
+
+    use super::{parse_named_label, parse_rule_spec};
+
+    #[test]
+    fn parses_source_only_rule() {
+        let r = parse_rule_spec("email.*=local_only").unwrap();
+        assert_eq!(r.source, "email.*");
+        assert_eq!(r.path, None);
+        assert_eq!(r.label, EgressLabel::local_only());
+    }
+
+    #[test]
+    fn parses_source_and_path_rule() {
+        let r = parse_rule_spec("sandbox.exec:~/mail/**=local_only").unwrap();
+        assert_eq!(r.source, "sandbox.exec");
+        assert_eq!(r.path.as_deref(), Some("~/mail/**"));
+    }
+
+    /// A path may contain `=`; the label is split from the right, so it still
+    /// lands where it should.
+    #[test]
+    fn label_is_split_from_the_right() {
+        let r = parse_rule_spec("fs.read:/data/a=b/**=no_remote_model").unwrap();
+        assert_eq!(r.path.as_deref(), Some("/data/a=b/**"));
+        assert_eq!(r.label, EgressLabel::no_remote_model());
+    }
+
+    #[test]
+    fn rejects_missing_label_and_empty_source() {
+        assert!(parse_rule_spec("email.*").is_err());
+        assert!(parse_rule_spec("=local_only").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_label() {
+        assert!(parse_rule_spec("email.*=super_secret").is_err());
+        assert_eq!(
+            parse_named_label("LOCAL-ONLY").unwrap(),
+            NamedEgressLabel::LocalOnly
+        );
+    }
 }

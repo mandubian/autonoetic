@@ -696,8 +696,8 @@ Labels are enforced mechanically (never by LLM judgment) and flow by **monotonic
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `egress.rules` | list | `[]` | Operator source rules. All matching rules apply (labels are intersected) — order-independent; rules can only restrict. |
-| `egress.rules[].source` | string | required | Source tool pattern. Supports `*`-suffix globs (`email.*`, `mcp.gmail.*`) and bare names (`fs.read`, `sandbox.exec`). |
-| `egress.rules[].path` | string | `null` | Optional path narrowing for path-taking tools (`~/mail/**`, `state/secrets/*`). Simple `*`-suffix glob. For `sandbox.exec`, the command and script dependencies are statically analyzed for labeled paths (sibling of the `RemoteAccessAnalyzer`). |
+| `egress.rules[].source` | string | required | Source tool pattern. Supports `*`-suffix globs (`email.*`, `mcp.gmail.*`) and bare names (`fs.read`, `sandbox.exec`). Matched **normalized**: `.` and `-` fold to `_` and case is ignored, so the dotted spelling used throughout these docs matches the runtime's canonical tool names (`sandbox.exec` ↔ `sandbox_exec`, `mcp.gmail.*` ↔ `mcp_gmail_send_message`). Either spelling works. |
+| `egress.rules[].path` | string | `null` | Optional path narrowing for path-taking tools (`~/mail/**`, `state/secrets/*`). Simple `*`-suffix glob. For `sandbox.exec` / `artifact.exec`, the command **and its dependency sources** — the artifact bundle it runs, the workspace scripts it names — are statically analyzed for labeled paths (sibling of the `RemoteAccessAnalyzer`). |
 | `egress.rules[].label` | sink-set | required | The label to apply — a set of allowed sinks. Named labels (`unrestricted`, `local_only`, `no_remote_model`) are the common case; custom labels are sink-set literals. |
 | `egress.default_label` | string | `unrestricted` | Label for content no rule labels. `unrestricted` by decision (RFC §2.2); one-line flip to tighten later. |
 | `egress.unclassified_source_mode` | string | `unrestricted` | How to treat sources no rule covers. `unrestricted` (off, the default); `prompt_once` (RFC §4.4 first-touch classification) is **deferred** and not honored yet. |
@@ -725,7 +725,42 @@ egress:
   unclassified_source_mode: unrestricted
 ```
 
-> **Phase status.** As of this phase (1a + 1c), source rules label content at the tool-result boundary and emit `egress.envelope_labeled` causal events. The LLM chokepoint (withholding content from ineligible providers, indication substitution, the canary test) lands in phase 1b (#905).
+### Session-scoped rules (`egress_policy`)
+
+The rules above are standing policy. A single session can add its own — the RFC §5.4 "named sources private" rung: *"for this room, emails stay local."* Session rules are **added** to the operator-global set and, because resolution intersects, can only restrict; they are keyed by **root** session (every child agent inherits them) and are deleted when that session closes or is emergency-stopped.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `egress_policy.rules` | list | `[]` | Session-scoped source rules. Same shape as `egress.rules[]`. |
+| `egress_policy.default_label` | string | `null` | Session default for content no rule labels. Can only *restrict* `egress.default_label`; a wider value is ignored. |
+
+Declare it from the CLI:
+
+```bash
+autonoetic session egress-policy set <session-id> \
+  --rule 'email.*=local_only' \
+  --rule 'sandbox.exec:~/mail/**=local_only'
+autonoetic session egress-policy show <session-id>
+autonoetic session egress-policy clear <session-id>
+```
+
+…or over JSON-RPC — `session.egress_policy.set` / `.get` / `.clear`:
+
+```json
+{ "method": "session.egress_policy.set",
+  "params": { "session_id": "...",
+              "policy": { "rules": [ { "source": "email.*", "label": ["local_model", "local_agent", "user_reply", "memory_persist"] } ] } } }
+```
+
+Setting a policy replaces the previous one (one policy document per session) and is itself audited as an `egress.session_policy` causal event with its operator attribution.
+
+The rest of the §5.4 ladder — `mode`, `provider_constraint`, `indication_verbosity` — is deliberately absent until the phases that honor it land; a config field that silently does nothing is worse than none.
+
+### Traceability
+
+Every restricting decision emits an `egress.envelope_labeled` causal event carrying the complete input set of the resolution — envelope id, tool call id, tool name, resulting label, the rules that matched **and whether each came from global config or the session**, the matched path patterns, the default in force, and (from phase 2) parent envelope ids for argument taint. "Why is this envelope labeled?" is answerable from the chain alone (RFC §9.1). Unrestricted results emit nothing, so the causal chain stays quiet on the common case.
+
+> **Phase status.** Source rules label content at the tool-result boundary (phase 1c) and the LLM chokepoint withholds labeled content from ineligible providers (phase 1b). Still to come: bundle-declared floors and argument taint (#907), memory and stored-content surfaces (#908), federation/MCP/sandbox composition and declassification (#909).
 
 Example:
 

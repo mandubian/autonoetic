@@ -323,6 +323,50 @@ pub enum SessionCommands {
         #[arg(long, conflicts_with = "output")]
         output_dir: Option<std::path::PathBuf>,
     },
+    /// Declare, show, or clear this session's egress policy — the
+    /// session-scoped half of `egress.rules` (RFC data-envelopes §5.4).
+    ///
+    /// Session rules are *added* to the operator-global rules and, because
+    /// label resolution intersects, can only restrict. The policy is keyed by
+    /// root session (children inherit it) and dies when that session closes.
+    EgressPolicy {
+        #[command(subcommand)]
+        command: EgressPolicyCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EgressPolicyCommands {
+    /// Print the session's egress policy as JSON.
+    Show { session_id: String },
+    /// Declare (replacing any previous declaration) the session's rules.
+    ///
+    /// Each `--rule` is `SOURCE[:PATH]=LABEL`, e.g.
+    ///   --rule 'email.*=local_only'
+    ///   --rule 'sandbox.exec:~/mail/**=local_only'
+    ///
+    /// `SOURCE` accepts the dotted or snake_case spelling of a tool name and a
+    /// `*` suffix; `LABEL` is `unrestricted`, `local_only`, or
+    /// `no_remote_model`.
+    Set {
+        session_id: String,
+        /// Repeatable. `SOURCE[:PATH]=LABEL`.
+        #[arg(long = "rule", value_name = "SOURCE[:PATH]=LABEL")]
+        rules: Vec<String>,
+        /// Default label for content no rule labels, for this session only.
+        /// Can only restrict the gateway-wide default.
+        #[arg(long)]
+        default_label: Option<String>,
+        /// Attribution recorded on the declaration (I-6).
+        #[arg(long, default_value = "operator:cli")]
+        set_by: String,
+    },
+    /// Remove the session's egress policy. Operator-global rules still apply.
+    Clear {
+        session_id: String,
+        #[arg(long, default_value = "operator:cli")]
+        set_by: String,
+    },
 }
 
 /// Arguments for the all-in-one `run` command.

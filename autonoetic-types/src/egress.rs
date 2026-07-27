@@ -474,6 +474,58 @@ impl NamedEgressLabel {
     }
 }
 
+/// Session-scoped egress policy (RFC §5.4) — the operator's per-root-session
+/// additions to the operator-global [`EgressConfig`].
+///
+/// These **die with the root session**: the gateway deletes the record when the
+/// root session closes and on emergency stop. Session rules are *added* to the
+/// global set, never substituted for it — and because label resolution is an
+/// intersection (RFC §4.1), an added rule can only restrict.
+///
+/// Only the two rungs phase 1c enforces are modeled here. The rest of the §5.4
+/// ladder belongs to later phases: `mode` / `indication_verbosity` are
+/// chokepoint knobs (#905) and `provider_constraint` is taint-following routing
+/// (#907). Adding them here before they are honored would be a config surface
+/// that silently does nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressSessionPolicy {
+    /// Session-scoped source rules, merged into the operator-global set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<EgressRule>,
+
+    /// Session default label for content nothing else labels. `None` keeps the
+    /// operator-global default; a value can only *restrict* it (resolution
+    /// intersects, so a session cannot widen a tightened global default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_label: Option<NamedEgressLabel>,
+}
+
+impl EgressSessionPolicy {
+    /// Whether this policy declares nothing (no rules, no default override) —
+    /// equivalent to having no session policy at all.
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty() && self.default_label.is_none()
+    }
+
+    /// Reject shapes that would silently never match, so a typo surfaces at
+    /// declaration time rather than as absent enforcement.
+    pub fn validate(&self) -> Result<(), String> {
+        for (i, rule) in self.rules.iter().enumerate() {
+            if rule.source.trim().is_empty() {
+                return Err(format!("egress rule #{i}: `source` must not be empty"));
+            }
+            if let Some(path) = &rule.path {
+                if path.trim().is_empty() {
+                    return Err(format!(
+                        "egress rule #{i}: `path` must not be empty (omit it to match the whole source)"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// How sources no operator rule covers are treated (RFC §4.2 / §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -485,6 +537,52 @@ pub enum UnclassifiedSourceMode {
     PromptOnce,
     /// Treat unclassified sources as `local_only`. Conservative flip.
     LocalOnly,
+}
+
+// ---------------------------------------------------------------------------
+// Source-name normalization — shared between config parsing and runtime rule
+// evaluation (RFC §4.2 `source` patterns).
+// ---------------------------------------------------------------------------
+
+/// Canonical comparison form for a tool name or an [`EgressRule::source`]
+/// pattern.
+///
+/// The RFC (and every operator-facing example) writes sources in dotted form —
+/// `sandbox.exec`, `fs.read`, `mcp.gmail.*`. The runtime's canonical tool names
+/// are snake_case — `sandbox_exec`, `mcp_gmail_send_message`. Comparing the two
+/// verbatim means a rule copied from the docs matches nothing, and *silently*:
+/// an unmatched rule leaves content `unrestricted`, so the failure mode is a
+/// missing restriction rather than an error. Normalizing both sides makes the
+/// documented syntax mean what it says.
+///
+/// Normalization is lossless for matching purposes: lowercase, and `.` and `-`
+/// folded to `_` (the separator the runtime uses). Everything else is left
+/// alone, so a `*` suffix survives for the glob step.
+pub fn normalize_source_key(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '.' | '-' => '_',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Does an [`EgressRule::source`] pattern match an observed tool name?
+///
+/// Both sides go through [`normalize_source_key`] first, then a `*`-suffix
+/// prefix match (`email.*` matches `email_read`; `fs.read` matches `fs_read`
+/// only).
+pub fn source_pattern_matches(pattern: &str, tool: &str) -> bool {
+    let pattern = normalize_source_key(pattern);
+    let tool = normalize_source_key(tool);
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        if prefix.is_empty() {
+            return !tool.is_empty();
+        }
+        tool.starts_with(prefix)
+    } else {
+        pattern == tool
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -890,5 +988,98 @@ mod tests {
     #[test]
     fn glob_empty_pattern_never_matches() {
         assert!(!matches_simple_glob("", "x"));
+    }
+
+    // ── Source-name normalization ─────────────────────────────────────────
+
+    #[test]
+    fn normalize_folds_dots_and_case_to_the_runtime_form() {
+        assert_eq!(normalize_source_key("sandbox.exec"), "sandbox_exec");
+        assert_eq!(normalize_source_key("Sandbox.Exec"), "sandbox_exec");
+        assert_eq!(normalize_source_key("mcp.gmail.send_message"), "mcp_gmail_send_message");
+        // A trailing `*` survives so the glob step still sees it.
+        assert_eq!(normalize_source_key("email.*"), "email_*");
+    }
+
+    /// The bug this closes: a rule copied verbatim from the RFC/config template
+    /// (`source: "sandbox.exec"`) must match the runtime's canonical tool name
+    /// (`sandbox_exec`) — otherwise the rule silently never fires.
+    #[test]
+    fn dotted_rule_source_matches_snake_case_tool_name() {
+        assert!(source_pattern_matches("sandbox.exec", "sandbox_exec"));
+        assert!(source_pattern_matches("fs.read", "fs_read"));
+        assert!(source_pattern_matches("artifact.exec", "artifact_exec"));
+        // …and the underscore form still works, so either spelling is fine.
+        assert!(source_pattern_matches("sandbox_exec", "sandbox_exec"));
+    }
+
+    #[test]
+    fn source_glob_matches_mcp_server_prefix() {
+        // MCP tools are exposed as `mcp_<server>_<tool>` (autonoetic-mcp).
+        assert!(source_pattern_matches("mcp.gmail.*", "mcp_gmail_send_message"));
+        assert!(!source_pattern_matches("mcp.gmail.*", "mcp_outlook_send"));
+    }
+
+    #[test]
+    fn source_pattern_star_only_matches_any_tool() {
+        assert!(source_pattern_matches("*", "anything"));
+        assert!(!source_pattern_matches("*", ""));
+    }
+
+    #[test]
+    fn source_pattern_does_not_prefix_match_without_star() {
+        assert!(!source_pattern_matches("email.read", "email_read_all"));
+    }
+
+    // ── Session policy ────────────────────────────────────────────────────
+
+    #[test]
+    fn session_policy_default_is_empty() {
+        let p = EgressSessionPolicy::default();
+        assert!(p.is_empty());
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn session_policy_rejects_blank_source_and_path() {
+        let blank_source = EgressSessionPolicy {
+            rules: vec![EgressRule {
+                source: "  ".to_string(),
+                path: None,
+                label: EgressLabel::local_only(),
+            }],
+            default_label: None,
+        };
+        assert!(blank_source.validate().is_err());
+
+        let blank_path = EgressSessionPolicy {
+            rules: vec![EgressRule {
+                source: "fs.read".to_string(),
+                path: Some(String::new()),
+                label: EgressLabel::local_only(),
+            }],
+            default_label: None,
+        };
+        assert!(blank_path.validate().is_err());
+    }
+
+    #[test]
+    fn session_policy_round_trips_through_json() {
+        let p = EgressSessionPolicy {
+            rules: vec![EgressRule {
+                source: "email.*".to_string(),
+                path: None,
+                label: EgressLabel::local_only(),
+            }],
+            default_label: Some(NamedEgressLabel::NoRemoteModel),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: EgressSessionPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+        // An empty policy serializes to `{}` — nothing declared, nothing stored.
+        assert_eq!(
+            serde_json::to_string(&EgressSessionPolicy::default()).unwrap(),
+            "{}"
+        );
     }
 }
