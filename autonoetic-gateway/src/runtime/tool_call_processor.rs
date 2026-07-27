@@ -196,6 +196,62 @@ impl<'a> ToolCallProcessor<'a> {
         std::mem::take(&mut self.egress_labels)
     }
 
+    /// This session's root id — the bucket every root-scoped policy is keyed by.
+    /// Prefers the run context (authoritative), else derives it from the session
+    /// id, matching the convention used for approval grants.
+    fn egress_root_session_id(&self) -> Option<String> {
+        let session_id = self.session_id.as_deref()?;
+        Some(
+            self.run_context
+                .as_ref()
+                .map(|c| c.root_session_id.clone())
+                .unwrap_or_else(|| {
+                    crate::runtime::content_store::root_session_id(session_id).to_string()
+                }),
+        )
+    }
+
+    /// Build the labeler for this turn: operator-global `egress.rules` plus the
+    /// root session's `egress_policy` (RFC §5.4).
+    ///
+    /// A session policy that cannot be read is treated as fail-closed *for the
+    /// turn*: rather than silently proceeding with global rules only (which
+    /// would drop a restriction the operator declared), the failure is logged
+    /// and the default label is narrowed to `local_only`, so a corrupt policy
+    /// row over-restricts instead of under-restricting (RFC §2.2).
+    fn build_egress_labeler(&self) -> crate::runtime::egress_labeler::EgressLabeler {
+        use crate::runtime::egress_labeler::EgressLabeler;
+
+        let config_egress = self
+            .config
+            .map(|cfg| cfg.egress.clone())
+            .unwrap_or_default();
+        let labeler = EgressLabeler::from_config(&config_egress);
+
+        let (Some(store), Some(root_session_id)) =
+            (self.gateway_store.as_ref(), self.egress_root_session_id())
+        else {
+            return labeler;
+        };
+
+        match store.get_egress_session_policy(&root_session_id) {
+            Ok(Some(stored)) => labeler.with_session_policy(&stored.policy),
+            Ok(None) => labeler,
+            Err(e) => {
+                tracing::error!(
+                    target: "egress_labeler",
+                    error = %e,
+                    root_session_id = %root_session_id,
+                    "unreadable egress session policy — narrowing the default label to local_only"
+                );
+                labeler.with_session_policy(&autonoetic_types::egress::EgressSessionPolicy {
+                    rules: Vec::new(),
+                    default_label: Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly),
+                })
+            }
+        }
+    }
+
     fn is_degraded_blocked_tool(&self, tool_name: &str) -> bool {
         is_degraded_mode_tool_blocked(self.session_state, tool_name)
     }
@@ -254,20 +310,13 @@ impl<'a> ToolCallProcessor<'a> {
 
         // Egress label plane (RFC data-envelopes §4): label each tool result at
         // the commit boundary. The labeler is inert (no-op) when the operator
-        // has configured no source rules and the default is `unrestricted` — the
-        // common case — so this costs one clone-free check per turn. Each
-        // restricted result is recorded durably as an `egress.envelope_labeled`
-        // causal event so "why is this labeled?" is answerable from the chain.
-        // The chokepoint (withholding content from ineligible providers) lands
-        // in phase 1b (#905).
-        let egress_labeler = self
-            .config
-            .map(|cfg| crate::runtime::egress_labeler::EgressLabeler::from_config(&cfg.egress))
-            .unwrap_or_else(|| {
-                crate::runtime::egress_labeler::EgressLabeler::from_config(
-                    &autonoetic_types::egress::EgressConfig::default(),
-                )
-            });
+        // has configured no source rules, no session rules, and the default is
+        // `unrestricted` — the common case — so this costs one check per turn.
+        // Each restricted result is recorded durably as an
+        // `egress.envelope_labeled` causal event so "why is this labeled?" is
+        // answerable from the chain, and the resulting label feeds the
+        // chokepoint via `egress_labels`.
+        let egress_labeler = self.build_egress_labeler();
 
         for tc in tool_calls {
             let started_at = Instant::now();
@@ -356,20 +405,29 @@ impl<'a> ToolCallProcessor<'a> {
                     // Egress: label this tool result at the commit boundary
                     // (RFC §4). Best-effort; labeling never blocks a tool
                     // result. The label is computed from (tool, args) via the
-                    // operator source rules; for sandbox.exec the command in
-                    // the args is statically matched against labeled paths.
-                    // The label is recorded for the phase 1b (#905) chokepoint:
-                    // the executor attaches the accumulated map to the next
-                    // completion request's metadata, and the wrapping
+                    // operator source rules; for exec-shaped tools the command
+                    // *and its dependency sources* (the artifact bundle, the
+                    // workspace scripts it names) are statically matched against
+                    // labeled paths — which is what keeps §5.6 step 3 safe when
+                    // the script, not a structured tool, does the reading.
+                    // The label feeds the chokepoint (#905): the executor
+                    // attaches the accumulated map to the next completion
+                    // request's metadata, and the wrapping
                     // EgressChokepointDriver substitutes an indication for any
                     // tool result whose label excludes the target sink.
+                    let exec_ctx = crate::runtime::egress_path_matcher::ExecSourceContext {
+                        agent_dir: Some(agent_dir),
+                        gateway_dir,
+                        session_id: self.session_id.as_deref(),
+                        gateway_store: self.gateway_store.as_deref(),
+                    };
                     if let Some(outcome) = egress_labeler.label_tool_result(
                         &crate::runtime::egress_labeler::LabelRequest {
                             tool: canonical_tool,
                             arguments_json: &tc.arguments,
                             tool_call_id: &tc.id,
                         },
-                        None,
+                        Some(&exec_ctx),
                         self.session_id.as_deref().unwrap_or(""),
                         &self.manifest.agent.id,
                         self.turn_id.as_deref(),
@@ -1878,6 +1936,114 @@ mod tests {
         assert!(!proc.is_degraded_blocked_tool("content_write"));
         assert!(!proc.is_degraded_blocked_tool("knowledge_store"));
         assert!(!proc.is_degraded_blocked_tool("artifact_build"));
+    }
+
+    // ── #906 session-scoped egress policy wiring ────────────────────────
+
+    fn make_egress_test_processor(
+        store: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+        session_id: &str,
+    ) -> ToolCallProcessor<'static> {
+        let mcp_runtime = Box::leak(Box::new(crate::runtime::mcp::McpToolRuntime::empty()));
+        let manifest = Box::leak(Box::new(test_manifest()));
+        let registry = Box::leak(Box::new(default_registry()));
+        let ds = Box::leak(Box::new(
+            crate::runtime::disclosure::DisclosureState::default(),
+        ));
+        ToolCallProcessor::new(
+            mcp_runtime,
+            registry,
+            manifest,
+            ds,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .with_session_context(Some(session_id.to_string()), None)
+    }
+
+    /// The declaration → enforcement link: a policy stored for the root session
+    /// is what the turn's labeler applies. Without this the RPC/CLI would write
+    /// rows nothing reads.
+    #[test]
+    fn turn_labeler_picks_up_the_stored_session_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap(),
+        );
+        store
+            .set_egress_session_policy(
+                "sess-egress",
+                &autonoetic_types::egress::EgressSessionPolicy {
+                    rules: vec![autonoetic_types::egress::EgressRule {
+                        source: "email.*".to_string(),
+                        path: None,
+                        label: autonoetic_types::egress::EgressLabel::local_only(),
+                    }],
+                    default_label: None,
+                },
+                "operator:test",
+            )
+            .unwrap();
+
+        let proc = make_egress_test_processor(store.clone(), "sess-egress");
+        let labeler = proc.build_egress_labeler();
+        assert!(!labeler.is_inert(), "a stored session rule must arm the labeler");
+        assert_eq!(
+            labeler.resolve_label("email_read", None).label,
+            autonoetic_types::egress::EgressLabel::local_only()
+        );
+
+        // A different root session sees none of it.
+        let other = make_egress_test_processor(store, "sess-other");
+        assert!(other.build_egress_labeler().is_inert());
+    }
+
+    /// No policy, no rules, default `unrestricted` → the labeler stays on its
+    /// fast path, which is what keeps unconfigured deployments free.
+    #[test]
+    fn turn_labeler_is_inert_without_a_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap(),
+        );
+        let proc = make_egress_test_processor(store, "sess-plain");
+        assert!(proc.build_egress_labeler().is_inert());
+    }
+
+    /// A child session resolves to its root's policy — the restriction covers
+    /// the whole tree, not just the session that declared it.
+    #[test]
+    fn child_session_inherits_the_root_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap(),
+        );
+        let child_id = "sess-root-abc/child-1";
+        let root_id = crate::runtime::content_store::root_session_id(child_id).to_string();
+        assert_ne!(root_id, child_id, "fixture must actually be a child session");
+
+        store
+            .set_egress_session_policy(
+                &root_id,
+                &autonoetic_types::egress::EgressSessionPolicy {
+                    rules: vec![autonoetic_types::egress::EgressRule {
+                        source: "email.*".to_string(),
+                        path: None,
+                        label: autonoetic_types::egress::EgressLabel::local_only(),
+                    }],
+                    default_label: None,
+                },
+                "operator:test",
+            )
+            .unwrap();
+
+        let proc = make_egress_test_processor(store, child_id);
+        assert!(
+            !proc.build_egress_labeler().is_inert(),
+            "the child must inherit its root session's egress policy"
+        );
     }
 
     // ── #289 session read-cache wiring ──────────────────────────────────

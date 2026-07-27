@@ -337,11 +337,13 @@ evidence_mode: full
 #
 # "Label the exceptions, not the corpus": name private sources here as
 # firewall-style rules; everything else defaults `unrestricted`. Labels are
-# enforced mechanically at the tool-result boundary and flow by monotonic
-# intersection (a derivation can only restrict, never widen). The chokepoint
-# (filtering/withholding at the provider boundary) lands in phase 1b (#905);
-# until then these rules label content and emit `egress.envelope_labeled`
-# causal events but do not yet withhold.
+# enforced mechanically at the tool-result boundary, flow by monotonic
+# intersection (a derivation can only restrict, never widen), and are withheld
+# from ineligible providers at the LLM chokepoint.
+#
+# `source` is matched normalized — `.` folds to `_` and case is ignored — so
+# `sandbox.exec` matches the runtime's `sandbox_exec` and `mcp.gmail.*` matches
+# `mcp_gmail_send_message`. Either spelling works.
 #
 # egress:
 #   # All matching rules apply (labels are intersected) — order-independent.
@@ -350,6 +352,9 @@ evidence_mode: full
 #     - { source: "email.*",                            label: local_only }
 #     - { source: "mcp.gmail.*",                        label: local_only }
 #     - { source: "fs.read",    path: "~/mail/**",      label: local_only }
+#     # For exec-shaped tools the command AND its dependency sources (the
+#     # artifact bundle, the workspace scripts it names) are statically
+#     # analyzed for labeled paths.
 #     - { source: "sandbox.exec", path: "~/mail/**",    label: local_only }
 #   # Default label for content no rule labels. `unrestricted` by decision
 #   # (RFC §2.2) — one-line flip to tighten later.
@@ -357,6 +362,12 @@ evidence_mode: full
 #   # How to treat sources no rule covers. `unrestricted` (default, off);
 #   # `prompt_once` (RFC §4.4 first-touch classification) is deferred.
 #   unclassified_source_mode: unrestricted
+#
+# A single session can add its own rules without touching this file:
+#   autonoetic session egress-policy set <session-id> \
+#     --rule 'email.*=local_only' --rule 'sandbox.exec:~/mail/**=local_only'
+# Those rules are added to the ones above (so they can only restrict) and die
+# with the root session.
 
 # ── Operational Flags ─────────────────────────────────────────────────
 # Whether interaction.answer orchestrates workflow task / session resume. Default: true.
