@@ -419,6 +419,7 @@ impl<'a> ToolCallProcessor<'a> {
                         agent_dir: Some(agent_dir),
                         gateway_dir,
                         session_id: self.session_id.as_deref(),
+                        gateway_store: self.gateway_store.as_deref(),
                     };
                     if let Some(outcome) = egress_labeler.label_tool_result(
                         &crate::runtime::egress_labeler::LabelRequest {

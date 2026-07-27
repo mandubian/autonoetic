@@ -546,6 +546,7 @@ fn sandbox_exec_labels_a_dependency_script_read() -> anyhow::Result<()> {
         agent_dir: Some(&agent_dir),
         gateway_dir: Some(tmp.path()),
         session_id: Some("sess-dep"),
+        gateway_store: None,
     };
     let outcome = labeler
         .label_tool_result(
@@ -658,5 +659,79 @@ fn documented_dotted_rules_match_canonical_tool_names() -> anyhow::Result<()> {
     assert_eq!(mcp.label, autonoetic_types::egress::EgressLabel::local_only());
 
     assert_eq!(egress_events(&store, "sess-norm").len(), 2);
+    Ok(())
+}
+
+/// `artifact_ref` — the short `ar.*` form the `sandbox_exec` schema tells agents
+/// to *prefer* — is not a bundle id: `ArtifactStore::inspect` asserts the `art_`
+/// prefix. Without resolving it through the ref registry, a ref-driven exec has
+/// no bundle to scan and a path-bearing rule silently fails to label.
+/// (PR #914 review.)
+#[test]
+fn artifact_ref_driven_exec_resolves_its_bundle_and_labels() -> anyhow::Result<()> {
+    use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
+
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+
+    // A real bundle whose script reads a labeled path.
+    let artifact_store = autonoetic_gateway::artifact_store::ArtifactStore::new(tmp.path())?;
+    let content = autonoetic_gateway::runtime::content_store::ContentStore::new(tmp.path())?;
+    let handle = content.write(b"import mailbox\nmailbox.mbox('~/mail/archive.mbox')\n")?;
+    content.register_name("sess-ref", "parse_mail.py", &handle)?;
+    let bundle = artifact_store.build(&["parse_mail.py".into()], None, None, "sess-ref")?;
+
+    // …reachable only by its short ref.
+    store.create_artifact_ref(&ArtifactRefRecord {
+        ref_id: "ar.mailparse01".to_string(),
+        scope_type: ArtifactRefScopeType::Session,
+        scope_id: "sess-ref".to_string(),
+        artifact_id: bundle.artifact_id.clone(),
+        artifact_manifest_digest: bundle.artifact_manifest_digest.clone(),
+        artifact_canonical_digest: bundle.artifact_canonical_digest.clone(),
+        created_by_agent_id: "coder.default".to_string(),
+        created_at: "2026-07-27T00:00:00Z".to_string(),
+        expires_at: None,
+        revoked_at: None,
+    })?;
+
+    let labeler = EgressLabeler::from_config(&config_with(vec![rule(
+        "sandbox.exec",
+        Some("~/mail/**"),
+        NamedEgressLabel::LocalOnly,
+    )]));
+    let req = LabelRequest {
+        tool: "sandbox_exec",
+        // The command names nothing labeled; only the bundle's script does.
+        arguments_json: r#"{"artifact_ref":"ar.mailparse01","command":"python3 parse_mail.py"}"#,
+        tool_call_id: "tc_ref",
+    };
+    let ctx = ExecSourceContext {
+        agent_dir: None,
+        gateway_dir: Some(tmp.path()),
+        session_id: Some("sess-ref"),
+        gateway_store: Some(&store),
+    };
+
+    let outcome = labeler
+        .label_tool_result(&req, Some(&ctx), "sess-ref", "coder.default", None, Some(&store))
+        .expect("a ref-driven exec must have its bundle scanned");
+    assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
+
+    // Without the store there is nothing to resolve the ref with — the bundle
+    // is invisible and the result goes unlabeled. This is the bug the fix
+    // closes, pinned so the wiring cannot regress silently.
+    let no_store_ctx = ExecSourceContext {
+        agent_dir: None,
+        gateway_dir: Some(tmp.path()),
+        session_id: Some("sess-ref"),
+        gateway_store: None,
+    };
+    assert!(
+        labeler
+            .label_tool_result(&req, Some(&no_store_ctx), "sess-ref", "coder.default", None, None)
+            .is_none(),
+        "an unresolved artifact_ref leaves nothing to scan"
+    );
     Ok(())
 }

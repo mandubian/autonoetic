@@ -1304,6 +1304,7 @@ mod tests {
             agent_dir: Some(dir.path()),
             gateway_dir: None,
             session_id: Some("sess"),
+            gateway_store: None,
         };
         let out = l
             .label_tool_result(&req, Some(&ctx), "sess", "agent", None, None)

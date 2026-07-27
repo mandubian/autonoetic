@@ -201,14 +201,21 @@ fn extract_path_tokens(command: &str, sources: &[&str]) -> Vec<String> {
 /// is what lets the matcher go find that script — the same resolution
 /// `extract_code_for_analysis` (`runtime/tools/sandbox.rs`) already performs for
 /// the network predicate.
-#[derive(Debug, Clone, Copy, Default)]
+// No `Debug`: `GatewayStore` is not `Debug`, and a context carrying a live
+// store handle is not something to format into a log line anyway.
+#[derive(Clone, Copy, Default)]
 pub struct ExecSourceContext<'a> {
     /// The agent's directory — the root for relative script paths.
     pub agent_dir: Option<&'a Path>,
     /// The gateway directory — hosts the content store and artifact store.
     pub gateway_dir: Option<&'a Path>,
-    /// Session id, for resolving `/tmp/<name>` session content mounts.
+    /// Session id, for resolving `/tmp/<name>` session content mounts and the
+    /// session-scoped artifact-ref registry.
     pub session_id: Option<&'a str>,
+    /// The store that resolves a short `ar.*` artifact ref to its canonical
+    /// `art_*` bundle id. Without it, an exec driven by `artifact_ref` (the
+    /// form the tool schema tells agents to prefer) has no scannable bundle.
+    pub gateway_store: Option<&'a crate::scheduler::gateway_store::GatewayStore>,
 }
 
 /// Max dependency files read per exec, and max bytes per file. Static analysis
@@ -242,7 +249,7 @@ pub fn collect_exec_dependency_sources(
     let mut out: Vec<String> = Vec::new();
 
     if let Some(gw_dir) = ctx.gateway_dir {
-        for id in artifact_ids_from_args(arguments_json) {
+        for id in canonical_artifact_ids(arguments_json, gw_dir, ctx) {
             collect_artifact_sources(gw_dir, &id, &mut out);
             if out.len() >= MAX_DEPENDENCY_FILES {
                 return out;
@@ -262,25 +269,75 @@ pub fn collect_exec_dependency_sources(
     out
 }
 
-/// `artifact_id` / `artifact_ref` from a `sandbox.exec` / `artifact.exec` args
-/// JSON. Both are tried as bundle ids: `inspect` resolves what it can and the
-/// caller tolerates a miss.
-fn artifact_ids_from_args(arguments_json: &str) -> Vec<String> {
+/// Canonical `art_*` bundle ids named by an exec's arguments.
+///
+/// `artifact_id` is already canonical. `artifact_ref` is the short `ar.*` form
+/// the tool schema tells agents to *prefer*, and `ArtifactStore::inspect`
+/// rejects it outright (it asserts the `art_` prefix) — so it must go through
+/// the same `resolve_artifact_ref_or_canonical` flow `sandbox_exec` itself
+/// uses. Skipping that resolution would leave every ref-driven exec with no
+/// bundle to scan, i.e. a path-bearing rule silently failing to label.
+fn canonical_artifact_ids(
+    arguments_json: &str,
+    gateway_dir: &Path,
+    ctx: &ExecSourceContext<'_>,
+) -> Vec<String> {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(arguments_json) else {
         return Vec::new();
     };
-    let mut ids = Vec::new();
-    for key in ["artifact_id", "artifact_ref"] {
-        if let Some(s) = parsed.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() && !ids.iter().any(|existing| existing == s) {
-                ids.push(s.to_string());
+    let mut ids: Vec<String> = Vec::new();
+    let mut push = |id: String, ids: &mut Vec<String>| {
+        if !id.is_empty() && !ids.iter().any(|existing| *existing == id) {
+            ids.push(id);
+        }
+    };
+
+    if let Some(id) = parsed.get("artifact_id").and_then(|v| v.as_str()) {
+        push(id.to_string(), &mut ids);
+    }
+
+    if let Some(aref) = parsed.get("artifact_ref").and_then(|v| v.as_str()) {
+        if !aref.is_empty() {
+            match (ctx.gateway_store, ctx.session_id) {
+                (Some(store), Some(session_id)) => {
+                    // Best-effort, like everything else in this module: an
+                    // unresolvable ref just means no bundle to scan.
+                    if let Ok(resolved) =
+                        crate::runtime::tools::artifact::resolve_artifact_ref_or_canonical(
+                            aref,
+                            session_id,
+                            store,
+                            gateway_dir,
+                        )
+                    {
+                        push(resolved.artifact_id, &mut ids);
+                    }
+                }
+                _ => {
+                    tracing::debug!(
+                        target: "egress_path_matcher",
+                        artifact_ref = %aref,
+                        "no store/session to resolve artifact_ref; bundle not scanned for labeled paths"
+                    );
+                }
             }
         }
     }
+
     ids
 }
 
 /// Read the text files of an artifact bundle into `out`.
+///
+/// Unlike a bare command-line token — which could name any file on the host,
+/// hence the extension gate there — these files *are* the code this exec is
+/// about to run, so reading them is neither an overreach nor a guess. They are
+/// not extension-filtered because a labeled path is as likely to sit in a
+/// bundled config as in the script that opens it, and a miss here is a
+/// fail-open (an unlabeled envelope), not a cheap mistake.
+///
+/// Script sources are taken **first** so a bundle carrying assets cannot
+/// exhaust [`MAX_DEPENDENCY_FILES`] before the code is ever looked at.
 fn collect_artifact_sources(gateway_dir: &Path, artifact_id: &str, out: &mut Vec<String>) {
     let Ok(store) = crate::artifact_store::ArtifactStore::new(gateway_dir) else {
         return;
@@ -288,7 +345,10 @@ fn collect_artifact_sources(gateway_dir: &Path, artifact_id: &str, out: &mut Vec
     let Ok(files) = store.resolve_files(artifact_id) else {
         return;
     };
-    for (_name, bytes) in files {
+    let (scripts, others): (Vec<_>, Vec<_>) = files
+        .into_iter()
+        .partition(|(name, _)| has_script_extension(name));
+    for (_name, bytes) in scripts.into_iter().chain(others) {
         if out.len() >= MAX_DEPENDENCY_FILES {
             return;
         }
@@ -301,6 +361,15 @@ fn collect_artifact_sources(gateway_dir: &Path, artifact_id: &str, out: &mut Vec
     }
 }
 
+/// Does this filename carry one of [`SCRIPT_EXTENSIONS`]?
+fn has_script_extension(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| SCRIPT_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// Command-line tokens that name a script file worth scanning.
 fn script_tokens(command: &str) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
@@ -311,12 +380,7 @@ fn script_tokens(command: &str) -> Vec<String> {
         if tok.is_empty() || tok.starts_with('-') {
             continue;
         }
-        let is_script = Path::new(tok)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| SCRIPT_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-            .unwrap_or(false);
-        if is_script && !tokens.iter().any(|t| t == tok) {
+        if has_script_extension(tok) && !tokens.iter().any(|t| t == tok) {
             tokens.push(tok.to_string());
         }
     }
@@ -496,6 +560,7 @@ for msg in mb:
             agent_dir: Some(dir.path()),
             gateway_dir: None,
             session_id: None,
+            gateway_store: None,
         };
         let sources = collect_exec_dependency_sources("{}", "python3 parse.py --verbose", &ctx);
         assert_eq!(sources, vec!["open('~/mail/x')".to_string()]);
@@ -510,6 +575,7 @@ for msg in mb:
             agent_dir: Some(dir.path()),
             gateway_dir: None,
             session_id: None,
+            gateway_store: None,
         };
         // `data.bin` has no script extension; `-oops.py` looks like a flag.
         let sources = collect_exec_dependency_sources("{}", "cat data.bin -oops.py", &ctx);
@@ -523,6 +589,7 @@ for msg in mb:
             agent_dir: Some(dir.path()),
             gateway_dir: None,
             session_id: None,
+            gateway_store: None,
         };
         assert!(collect_exec_dependency_sources("{}", "python3 absent.py", &ctx).is_empty());
     }
@@ -536,6 +603,7 @@ for msg in mb:
             agent_dir: Some(dir.path()),
             gateway_dir: None,
             session_id: None,
+            gateway_store: None,
         };
         assert!(collect_exec_dependency_sources("{}", "python3 big.py", &ctx).is_empty());
     }
@@ -554,6 +622,7 @@ for msg in mb:
             agent_dir: Some(dir.path()),
             gateway_dir: None,
             session_id: None,
+            gateway_store: None,
         };
         let sources = collect_exec_dependency_sources("{}", &command, &ctx);
         assert_eq!(sources.len(), MAX_DEPENDENCY_FILES);
@@ -563,5 +632,99 @@ for msg in mb:
     fn no_context_paths_collect_nothing() {
         let ctx = ExecSourceContext::default();
         assert!(collect_exec_dependency_sources("{}", "python3 parse.py", &ctx).is_empty());
+    }
+
+    #[test]
+    fn script_extension_check_is_case_insensitive_and_gated() {
+        assert!(has_script_extension("parse.py"));
+        assert!(has_script_extension("dir/Parse.PY"));
+        assert!(has_script_extension("run.sh"));
+        assert!(!has_script_extension("data.bin"));
+        assert!(!has_script_extension("README"));
+    }
+
+    // ── artifact bundles ──────────────────────────────────────────────────
+
+    /// Build a real artifact bundle and return its canonical `art_*` id.
+    fn build_bundle(gateway_dir: &Path, files: &[(&str, &str)]) -> String {
+        let store = crate::artifact_store::ArtifactStore::new(gateway_dir).unwrap();
+        let content = crate::runtime::content_store::ContentStore::new(gateway_dir).unwrap();
+        let mut inputs: Vec<String> = Vec::new();
+        for (name, body) in files {
+            let handle = content.write(body.as_bytes()).unwrap();
+            content.register_name("sess", name, &handle).unwrap();
+            inputs.push((*name).to_string());
+        }
+        store
+            .build(&inputs, None, None, "sess")
+            .unwrap()
+            .artifact_id
+    }
+
+    #[test]
+    fn artifact_id_bundle_is_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = build_bundle(
+            tmp.path(),
+            &[("main.py", "open('~/mail/archive.mbox')")],
+        );
+        let ctx = ExecSourceContext {
+            agent_dir: None,
+            gateway_dir: Some(tmp.path()),
+            session_id: Some("sess"),
+            gateway_store: None,
+        };
+        let args = format!(r#"{{"artifact_id":"{id}","command":"python3 main.py"}}"#);
+        let sources = collect_exec_dependency_sources(&args, "python3 main.py", &ctx);
+        assert_eq!(sources, vec!["open('~/mail/archive.mbox')".to_string()]);
+    }
+
+    /// A bundle full of assets must not exhaust the budget before the code is
+    /// looked at — scripts are taken first.
+    #[test]
+    fn script_files_are_taken_before_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut files: Vec<(String, String)> = (0..MAX_DEPENDENCY_FILES + 4)
+            .map(|i| (format!("asset{i}.bin"), format!("asset-{i}")))
+            .collect();
+        files.push(("reader.py".to_string(), "open('~/mail/x')".to_string()));
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(n, c)| (n.as_str(), c.as_str()))
+            .collect();
+        let id = build_bundle(tmp.path(), &refs);
+
+        let ctx = ExecSourceContext {
+            agent_dir: None,
+            gateway_dir: Some(tmp.path()),
+            session_id: Some("sess"),
+            gateway_store: None,
+        };
+        let args = format!(r#"{{"artifact_id":"{id}"}}"#);
+        let sources = collect_exec_dependency_sources(&args, "", &ctx);
+        assert_eq!(sources.len(), MAX_DEPENDENCY_FILES);
+        assert!(
+            sources.iter().any(|s| s.contains("~/mail/x")),
+            "the script must survive the budget even behind {} assets",
+            MAX_DEPENDENCY_FILES + 4
+        );
+    }
+
+    /// `artifact_ref` (the short `ar.*` form the tool schema tells agents to
+    /// prefer) is not a bundle id — without resolution there is nothing to
+    /// scan, and a path-bearing rule silently fails to label.
+    #[test]
+    fn unresolvable_artifact_ref_is_skipped_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ExecSourceContext {
+            agent_dir: None,
+            gateway_dir: Some(tmp.path()),
+            session_id: Some("sess"),
+            gateway_store: None,
+        };
+        // No store to resolve with → no sources, no panic.
+        let sources =
+            collect_exec_dependency_sources(r#"{"artifact_ref":"ar.mailparse"}"#, "", &ctx);
+        assert!(sources.is_empty());
     }
 }
