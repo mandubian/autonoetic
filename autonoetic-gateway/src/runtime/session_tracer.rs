@@ -663,7 +663,10 @@ impl SessionTracer {
         });
         self.log_event(
             "egress",
-            "request_forwarded",
+            // Full dotted action — matches the slice-1 `egress.*` convention
+            // (egress.request_filtered / egress.envelope_withheld / …) so the
+            // audit CLI's renderer and any `egress.*` tooling match it.
+            "egress.request_forwarded",
             EntryStatus::Success,
             Some(payload),
         )?;

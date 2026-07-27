@@ -623,7 +623,12 @@ fn sanitize_interpolated_for_message(s: &str) -> String {
     }
     let trimmed = out.trim().to_string();
     if trimmed.chars().count() >= MAX_LEN {
-        format!("{}…", &trimmed[..MAX_LEN.saturating_sub(1)])
+        // Truncate by CHAR boundary, not byte — byte-slicing
+        // (`&trimmed[..MAX_LEN-1]`) panics on a non-ASCII multi-byte boundary,
+        // and this runs on the response-validation path where a crafted
+        // plan_id/detail could crash the gateway.
+        let truncated: String = trimmed.chars().take(MAX_LEN.saturating_sub(1)).collect();
+        format!("{truncated}…")
     } else {
         trimmed
     }
@@ -2700,6 +2705,19 @@ mod tests {
             out.chars().count()
         );
         assert!(out.ends_with('…'), "long input gets an ellipsis truncation marker");
+    }
+
+    #[test]
+    fn sanitize_does_not_panic_on_multibyte_at_boundary() {
+        // Regression: byte-slicing at MAX_LEN panicked when the cut landed
+        // inside a multi-byte char. Use a string of 3-byte CJK chars long
+        // enough to exceed the 80-char bound; the cut boundary must land
+        // mid-character. Must not panic, and must stay valid UTF-8.
+        let s = "邮件".repeat(50); // 100 chars, each 3 bytes
+        let out = sanitize_interpolated_for_message(&s);
+        // Valid UTF-8 (String is always valid, but assert char count bound).
+        assert!(out.chars().count() <= 80, "bounded: {}", out.chars().count());
+        assert!(out.ends_with('…'));
     }
 
     #[test]

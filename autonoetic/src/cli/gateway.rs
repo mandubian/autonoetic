@@ -3159,9 +3159,13 @@ pub async fn handle_gateway_egress_audit(
     let gateway_store =
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
 
-    // Pull all causal events for the session, filter client-side to egress
-    // (search_causal_events filters on session/agent only).
-    let events = gateway_store.search_causal_events(Some(session_id), None, 5000)?;
+    // Pull causal events for the session, filter client-side to egress
+    // (search_causal_events filters on session/agent only). Egress events are
+    // sparse — they fire only on labeled content — so a generous cap covers
+    // long sessions; if hit, surface it so the audit isn't silently partial.
+    const AUDIT_LIMIT: i64 = 50_000;
+    let events = gateway_store.search_causal_events(Some(session_id), None, AUDIT_LIMIT)?;
+    let truncated = events.len() as i64 >= AUDIT_LIMIT;
     let egress: Vec<autonoetic_types::causal_chain::CausalEventRecord> = events
         .into_iter()
         .filter(|e| e.category == "egress")
@@ -3170,11 +3174,29 @@ pub async fn handle_gateway_egress_audit(
     let report = build_egress_audit(session_id, &egress);
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let body = if truncated {
+            serde_json::json!({
+                "session_id": session_id,
+                "truncated": true,
+                "limit": AUDIT_LIMIT,
+                "report": report,
+            })
+        } else {
+            serde_json::to_value(&report)?
+        };
+        println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
 
     print_egress_audit(&report);
+    if truncated {
+        const YELLOW: &str = "\x1b[33m";
+        const RESET: &str = "\x1b[0m";
+        eprintln!(
+            "{YELLOW}⚠ audit truncated at {AUDIT_LIMIT} causal events — early turns may be missing; \
+             totals are for the returned window only.{RESET}"
+        );
+    }
     Ok(())
 }
 
@@ -3258,11 +3280,16 @@ pub fn build_egress_audit(
             let preset = get("preset").or_else(|| get("model"));
             let withheld_count = get_u("withheld_count");
             let violation_count = get_u("violation_count");
-            if let Some(w) = withheld_count {
-                total_withheld += w;
-            }
-            if let Some(v) = violation_count {
-                total_violations += v;
+            // Tally totals only from the canonical `egress.request_filtered`
+            // summary event. `egress.request_forwarded` (the tracer-side
+            // mirror) carries the same counts; tallying both double-counts.
+            if ev.action == "egress.request_filtered" {
+                if let Some(w) = withheld_count {
+                    total_withheld += w;
+                }
+                if let Some(v) = violation_count {
+                    total_violations += v;
+                }
             }
             let fields = EgressAuditFields {
                 tool_call_id: get("tool_call_id"),
@@ -3467,6 +3494,34 @@ mod egress_audit_tests {
         e.category = "tool_call".to_string();
         let report = build_egress_audit("sess", &[e]);
         assert!(report.turns.is_empty());
+    }
+
+    #[test]
+    fn does_not_double_count_request_filtered_and_forwarded() {
+        // Regression: both `egress.request_filtered` (canonical) and
+        // `egress.request_forwarded` (tracer-side mirror) carry withheld_count
+        // / violation_count. The audit must tally only the canonical event, or
+        // totals double. Here, one turn has both events each reporting
+        // withheld_count=1, violation_count=1 — the totals must be 1/1, not 2/2.
+        let events = vec![
+            ev(
+                "egress.request_filtered",
+                Some("t1"),
+                1,
+                serde_json::json!({"preset": "sonnet", "target_sink": "remote_model", "withheld_count": 1, "included_count": 2, "violation_count": 1}),
+            ),
+            ev(
+                "egress.request_forwarded",
+                Some("t1"),
+                2,
+                serde_json::json!({"model": "sonnet", "target_sink": "remote_model", "withheld_count": 1, "included_count": 2, "violation_count": 1}),
+            ),
+        ];
+        let report = build_egress_audit("sess", &events);
+        assert_eq!(report.total_withheld, 1, "must not double-count the mirror event");
+        assert_eq!(report.total_violations, 1, "must not double-count the mirror event");
+        // Both rows are still rendered (the audit shows both); only the totals dedupe.
+        assert_eq!(report.turns[0].rows.len(), 2);
     }
 
     #[test]
