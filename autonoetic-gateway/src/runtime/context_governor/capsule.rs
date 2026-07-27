@@ -575,9 +575,12 @@ impl super::ReductionStrategy for CapsuleStrategy {
                     "compression eligibility gate refused — falling back to truncation (RFC §5.7)"
                 );
                 tracing::debug!(target: "autonoetic::capsule::egress", reason = %reason);
-                // Emit an egress.boundary_refused causal event (best-effort;
-                // the capsule strategy has no store handle, so we log only —
-                // lifecycle's post-governor path can persist it if wired later).
+                // NOTE: no causal event is emitted here — the capsule strategy
+                // has no GatewayStore handle. The refusal is recorded via the
+                // tracing log above, and the leak is prevented (the guarantee
+                // holds). A durable `egress.boundary_refused` event belongs in
+                // the follow-up audit-CLI slice, which can correlate these logs
+                // or thread a store through the governor.
                 return Ok(ReductionOutcome::Insufficient {
                     tokens_remaining: ctx.breakdown.total_tokens,
                 });

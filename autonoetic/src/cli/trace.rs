@@ -1052,9 +1052,11 @@ fn handle_trace_session_from_db(
                                 let sink = p.get("target_sink").and_then(|v| v.as_str()).unwrap_or("?");
                                 let ind = p.get("indication").and_then(|v| v.as_str()).unwrap_or("");
                                 println!(
-                                    "      {}├─ withheld from {} — {}{}",
+                                    "      {}├─ withheld from {}{}{} — {}{}",
                                     color::DIM,
                                     color::BRIGHT_YELLOW,
+                                    sink,
+                                    color::DIM,
                                     color::dim(ind),
                                     color::RESET
                                 );
