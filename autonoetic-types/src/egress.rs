@@ -106,8 +106,11 @@ impl EgressLabel {
 
     /// Empty label — no sink is allowed. Excludes *everything*.
     ///
-    /// Rarely the right default; prefer [`EgressLabel::unrestricted`] or one of
-    /// the named labels. Used internally as the identity of `intersect`.
+    /// This is the **absorbing element** of `intersect` (`x ∩ ∅ = ∅`), not the
+    /// identity — the identity is the universe ([`EgressLabel::unrestricted`],
+    /// since `x ∩ U = x`). Rarely the right default; prefer `unrestricted` or
+    /// one of the named labels. Used internally where an over-restrictive
+    /// fallback is the safe choice.
     pub fn empty() -> Self {
         Self(BTreeSet::new())
     }

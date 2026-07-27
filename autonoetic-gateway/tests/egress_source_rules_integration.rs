@@ -5,6 +5,8 @@
 //! - `egress.envelope_labeled` is persisted with correct provenance so
 //!   "why is this envelope labeled?" is answerable from the causal chain,
 //! - sandbox.exec reading a labeled path produces a labeled result envelope,
+//! - a path-bearing rule for one source does NOT label a different source's
+//!   result (PR #911 review regression),
 //! - session-scoped rules do not leak into another session's labeler.
 //!
 //! The test drives [`EgressLabeler`] directly against a real [`GatewayStore`]
@@ -13,12 +15,11 @@
 //! boundary being verified. A full session-level canary test lands in phase 1b
 //! (#905) once the chokepoint exists.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use autonoetic_gateway::runtime::egress_labeler::{EgressLabeler, LabelRequest};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::egress::{EgressConfig, EgressLabel, EgressRule, NamedEgressLabel, Sink};
+use autonoetic_types::egress::{EgressConfig, EgressRule, NamedEgressLabel};
 
 fn rule(source: &str, path: Option<&str>, label: NamedEgressLabel) -> EgressRule {
     EgressRule {
@@ -56,7 +57,6 @@ fn labeled_tool_result_emits_causal_event_with_provenance() -> anyhow::Result<()
 
     let cfg = config_with(vec![rule("email.read", None, NamedEgressLabel::LocalOnly)]);
     let labeler = EgressLabeler::from_config(&cfg);
-    let mut records = HashMap::new();
 
     let outcome = labeler
         .label_tool_result(
@@ -70,18 +70,14 @@ fn labeled_tool_result_emits_causal_event_with_provenance() -> anyhow::Result<()
             "researcher.default",
             Some("turn-000001"),
             Some(&store),
-            &mut records,
         )
         .expect("email.read should be labeled local_only");
 
     // The label is local_only (the rule's label).
-    assert_eq!(outcome.label, EgressLabel::local_only());
+    assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
     assert!(outcome.envelope_id.starts_with("env_"));
     assert_eq!(outcome.provenance.tool.as_deref(), Some("email.read"));
     assert_eq!(outcome.provenance.matched_rules, vec!["email.read"]);
-
-    // In-memory record keyed by tool-call id (for the phase 1b chokepoint).
-    assert_eq!(records.get("tc_email_1"), Some(&EgressLabel::local_only()));
 
     // The causal event is persisted with content-free metadata.
     let events = egress_events(&store, "sess-email");
@@ -121,7 +117,6 @@ fn sandbox_exec_reading_labeled_path_produces_labeled_envelope() -> anyhow::Resu
         rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
     ]);
     let labeler = EgressLabeler::from_config(&cfg);
-    let mut records = HashMap::new();
 
     // RFC §5.6 step 3: the script (not a structured tool) reads ~/mail/**.
     let outcome = labeler
@@ -136,11 +131,10 @@ fn sandbox_exec_reading_labeled_path_produces_labeled_envelope() -> anyhow::Resu
             "coder.default",
             Some("turn-000002"),
             Some(&store),
-            &mut records,
         )
         .expect("sandbox.exec touching ~/mail/** should be labeled");
 
-    assert_eq!(outcome.label, EgressLabel::local_only());
+    assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
     // Provenance records the path-scoped rule that fired.
     assert!(outcome
         .provenance
@@ -157,6 +151,41 @@ fn sandbox_exec_reading_labeled_path_produces_labeled_envelope() -> anyhow::Resu
     Ok(())
 }
 
+/// Regression for the source-mismatch bug (PR #911 review): a path-bearing
+/// rule for `fs.read` must NOT label a `sandbox.exec` result even when the
+/// command touches the same path. Only rules whose `source` matches the tool
+/// being labeled may apply.
+#[test]
+fn sandbox_exec_ignores_path_rules_for_other_sources() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+
+    let cfg = config_with(vec![
+        // fs.read rule with the same path pattern — must not bleed into sandbox.exec.
+        rule("fs.read", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
+    ]);
+    let labeler = EgressLabeler::from_config(&cfg);
+
+    let outcome = labeler.label_tool_result(
+        &LabelRequest {
+            tool: "sandbox.exec",
+            arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
+            tool_call_id: "tc_exec_cross",
+        },
+        None,
+        "sess-cross",
+        "coder.default",
+        None,
+        Some(&store),
+    );
+    assert!(
+        outcome.is_none(),
+        "fs.read path rule must not label a sandbox.exec result"
+    );
+    assert!(egress_events(&store, "sess-cross").is_empty());
+    Ok(())
+}
+
 #[test]
 fn clean_tool_result_emits_no_event() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -165,7 +194,6 @@ fn clean_tool_result_emits_no_event() -> anyhow::Result<()> {
     // Rule only labels email.*; a web_search call stays unrestricted.
     let cfg = config_with(vec![rule("email.*", None, NamedEgressLabel::LocalOnly)]);
     let labeler = EgressLabeler::from_config(&cfg);
-    let mut records = HashMap::new();
 
     let outcome = labeler.label_tool_result(
         &LabelRequest {
@@ -178,10 +206,8 @@ fn clean_tool_result_emits_no_event() -> anyhow::Result<()> {
         "researcher.default",
         Some("turn-000003"),
         Some(&store),
-        &mut records,
     );
     assert!(outcome.is_none(), "clean result must not be labeled");
-    assert!(records.is_empty());
     assert!(egress_events(&store, "sess-clean").is_empty());
     Ok(())
 }
@@ -198,7 +224,6 @@ fn multiple_matching_rules_intersect_in_the_event_label() -> anyhow::Result<()> 
         rule("fs.read", Some("~/mail/**"), NamedEgressLabel::NoRemoteModel),
     ]);
     let labeler = EgressLabeler::from_config(&cfg);
-    let mut records = HashMap::new();
 
     let outcome = labeler
         .label_tool_result(
@@ -212,11 +237,10 @@ fn multiple_matching_rules_intersect_in_the_event_label() -> anyhow::Result<()> 
             "researcher.default",
             Some("turn-000004"),
             Some(&store),
-            &mut records,
         )
         .expect("fs.read on ~/mail/** is labeled");
 
-    assert_eq!(outcome.label, EgressLabel::local_only());
+    assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
     assert_eq!(outcome.provenance.matched_rules.len(), 2);
 
     let events = egress_events(&store, "sess-intersect");
@@ -246,9 +270,6 @@ fn session_scoped_rules_do_not_leak_across_sessions() -> anyhow::Result<()> {
     // Session B is a fresh labeler with no session rules.
     let labeler_b = EgressLabeler::from_config(&config_with(vec![]));
 
-    let mut records_a = HashMap::new();
-    let mut records_b = HashMap::new();
-
     // Session A labels slack.read.
     let out_a = labeler_a.label_tool_result(
         &LabelRequest {
@@ -261,7 +282,6 @@ fn session_scoped_rules_do_not_leak_across_sessions() -> anyhow::Result<()> {
         "agent-a",
         None,
         Some(&store),
-        &mut records_a,
     );
     assert!(out_a.is_some(), "session A's rule labels slack.read");
 
@@ -277,10 +297,8 @@ fn session_scoped_rules_do_not_leak_across_sessions() -> anyhow::Result<()> {
         "agent-b",
         None,
         Some(&store),
-        &mut records_b,
     );
     assert!(out_b.is_none(), "session-scoped rules must not leak into session B");
-    assert!(records_b.is_empty());
 
     // And the event only lands in session A's causal chain.
     assert_eq!(egress_events(&store, "sess-a").len(), 1);
@@ -297,7 +315,6 @@ fn unconfigured_deployment_is_inert_and_emits_nothing() -> anyhow::Result<()> {
     let labeler = EgressLabeler::from_config(&EgressConfig::default());
     assert!(labeler.is_inert());
 
-    let mut records = HashMap::new();
     let outcome = labeler.label_tool_result(
         &LabelRequest {
             tool: "fs.read",
@@ -309,10 +326,8 @@ fn unconfigured_deployment_is_inert_and_emits_nothing() -> anyhow::Result<()> {
         "agent",
         None,
         Some(&store),
-        &mut records,
     );
     assert!(outcome.is_none());
-    assert!(records.is_empty());
     assert!(egress_events(&store, "sess-inert").is_empty());
     Ok(())
 }

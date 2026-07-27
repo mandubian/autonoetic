@@ -24,7 +24,6 @@
 //! Labels are **declared metadata, manipulated only by the gateway** — agents
 //! never set, strip, or read them (Lawful-Executor, RFC §14).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use autonoetic_types::causal_chain::{default_enforced_rules, CausalEventRecord};
@@ -139,12 +138,18 @@ impl EgressLabeler {
     }
 
     /// Label a tool result end-to-end: resolve, mint envelope id, build
-    /// provenance, emit `egress.envelope_labeled`, record in-memory.
+    /// provenance, emit `egress.envelope_labeled`.
     ///
     /// `sandbox_exec_script_body` is the inline script source for `sandbox.exec`
     /// path matching (None for all other tools). Returns `None` when the
     /// labeler is inert (nothing to label) — callers should treat that as
     /// "no envelope, unrestricted".
+    ///
+    /// The durable record of the labeling decision is the `egress.envelope_labeled`
+    /// causal event (persisted via `store`); the returned [`LabelOutcome`] gives
+    /// the caller the envelope id + label for any in-turn use. Phase 1b (#905)
+    /// will re-key labels onto `msg_<ulid>` when the envelope ↔ message sidecar
+    /// lands.
     pub fn label_tool_result(
         &self,
         req: &LabelRequest<'_>,
@@ -153,7 +158,6 @@ impl EgressLabeler {
         agent_id: &str,
         turn_id: Option<&str>,
         store: Option<&Arc<GatewayStore>>,
-        label_records: &mut HashMap<String, EgressLabel>,
     ) -> Option<LabelOutcome> {
         if self.inert {
             return None;
@@ -165,23 +169,39 @@ impl EgressLabeler {
         // structured tools surface their own path semantics later.
         let (label, matched): (EgressLabel, Vec<String>) = if req.tool == "sandbox.exec" {
             let (cmd, script) = extract_sandbox_command(req.arguments_json, sandbox_exec_script_body);
-            let patterns: Vec<LabeledPathPattern> = self
+            // Only consider rules whose `source` matches `sandbox.exec` — a
+            // path-bearing rule for `fs.read` must NOT label a sandbox.exec
+            // result just because the command touched the same path. The static
+            // analyzer is source-agnostic; source filtering belongs here.
+            let applicable: Vec<&EgressRule> = self
                 .rules
+                .iter()
+                .filter(|r| source_glob_matches(&r.source, req.tool))
+                .collect();
+            let patterns: Vec<LabeledPathPattern> = applicable
                 .iter()
                 .filter_map(|r| r.path.as_ref().map(|p| LabeledPathPattern::new(p.clone())))
                 .collect();
             if patterns.is_empty() {
+                // No source+path rule applies; fall back to source-only
+                // matching (a source-only `sandbox.exec` rule still applies).
                 self.resolve_label(req.tool, None)
             } else {
                 let m = EgressPathMatcher::analyze(&cmd, script.as_deref(), &patterns);
                 if m.matched() {
                     // Each matched path-pattern rule restricts; collect which
-                    // rules fired for provenance.
+                    // rules fired for provenance. Restrict against the
+                    // source-only rules too (intersection is order-independent).
                     let mut label = EgressLabel::unrestricted();
                     let mut fired: Vec<String> = Vec::new();
-                    for rule in &self.rules {
-                        let Some(rule_path) = &rule.path else { continue };
-                        // A rule matches if its pattern is among the matched set.
+                    for rule in &applicable {
+                        let Some(rule_path) = &rule.path else {
+                            // Source-only rule (no path) — always applies.
+                            label = label.restrict(&rule.label);
+                            fired.push(rule_source_key(rule));
+                            continue;
+                        };
+                        // A path-bearing rule fires iff its pattern matched.
                         if m.matched_patterns.iter().any(|mp| mp == rule_path) {
                             label = label.restrict(&rule.label);
                             fired.push(rule_source_key(rule));
@@ -218,10 +238,8 @@ impl EgressLabeler {
             parent_envelope_ids: Vec::new(), // argument-taint: phase 2 (#907)
         };
 
-        // Record for phase 1b (re-keyed onto msg_<ulid> when the sidecar lands).
-        label_records.insert(req.tool_call_id.to_string(), label.clone());
-
-        // Best-effort causal event — a failed write is logged, not fatal.
+        // Best-effort causal event — the durable record of this labeling
+        // decision. A failed write is logged, not fatal.
         if let Some(store) = store {
             emit_envelope_labeled_event(
                 store,
@@ -505,49 +523,42 @@ mod tests {
     #[test]
     fn label_tool_result_returns_none_when_inert() {
         let l = EgressLabeler::from_config(&EgressConfig::default());
-        let mut records = HashMap::new();
         let req = LabelRequest {
             tool: "fs.read",
             arguments_json: "{}",
             tool_call_id: "tc_1",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &mut records);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
         assert!(out.is_none());
-        assert!(records.is_empty());
     }
 
     #[test]
     fn label_tool_result_returns_none_when_label_is_unrestricted() {
         // A rule exists but doesn't match this source → unrestricted → no event.
         let l = EgressLabeler::from_config(&cfg(vec![rule("email.*", None, NamedEgressLabel::LocalOnly)]));
-        let mut records = HashMap::new();
         let req = LabelRequest {
             tool: "fs.read",
             arguments_json: "{}",
             tool_call_id: "tc_1",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &mut records);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
         assert!(out.is_none());
-        assert!(records.is_empty());
     }
 
     #[test]
     fn label_tool_result_emits_envelope_when_restricted() {
         let l = EgressLabeler::from_config(&cfg(vec![rule("email.read", None, NamedEgressLabel::LocalOnly)]));
-        let mut records = HashMap::new();
         let req = LabelRequest {
             tool: "email.read",
             arguments_json: r#"{"box":"inbox"}"#,
             tool_call_id: "tc_42",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &mut records).expect("restricted");
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
         assert!(out.is_restricted());
         assert!(out.envelope_id.starts_with("env_"));
         assert_eq!(out.label, EgressLabel::local_only());
         assert_eq!(out.provenance.tool.as_deref(), Some("email.read"));
         assert_eq!(out.provenance.matched_rules, vec!["email.read"]);
-        // In-memory record keyed by tool-call id for phase 1b.
-        assert_eq!(records.get("tc_42"), Some(&EgressLabel::local_only()));
     }
 
     #[test]
@@ -555,13 +566,12 @@ mod tests {
         let l = EgressLabeler::from_config(&cfg(vec![
             rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
         ]));
-        let mut records = HashMap::new();
         let req = LabelRequest {
             tool: "sandbox.exec",
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &mut records).expect("restricted");
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
         assert_eq!(out.label, EgressLabel::local_only());
         assert!(out.provenance.matched_rules.iter().any(|r| r.contains("~/mail/**")));
     }
@@ -571,13 +581,48 @@ mod tests {
         let l = EgressLabeler::from_config(&cfg(vec![
             rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
         ]));
-        let mut records = HashMap::new();
         let req = LabelRequest {
             tool: "sandbox.exec",
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &mut records);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
         assert!(out.is_none(), "clean exec should not be labeled");
+    }
+
+    /// Regression for the source-mismatch bug (PR #911 review): a path-bearing
+    /// rule for `fs.read` must NOT label a `sandbox.exec` result just because
+    /// the command touched the same path. Only rules whose `source` matches
+    /// `sandbox.exec` apply to a sandbox.exec result.
+    #[test]
+    fn sandbox_exec_ignores_path_rules_for_other_sources() {
+        let l = EgressLabeler::from_config(&cfg(vec![
+            // fs.read rule with the same path pattern as the sandbox rule.
+            rule("fs.read", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
+            // No sandbox.exec rule at all.
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox.exec",
+            arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
+            tool_call_id: "tc_exec",
+        };
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
+        // The fs.read rule does not apply to sandbox.exec → unrestricted → no label.
+        assert!(out.is_none(), "fs.read path rule must not label sandbox.exec");
+    }
+
+    #[test]
+    fn sandbox_exec_source_only_rule_applies_without_path_match() {
+        // A source-only sandbox.exec rule (no path) applies to every exec.
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", None, NamedEgressLabel::NoRemoteModel),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox.exec",
+            arguments_json: r#"{"command":"echo hello"}"#,
+            tool_call_id: "tc_exec",
+        };
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
+        assert_eq!(out.label, EgressLabel::no_remote_model());
     }
 }

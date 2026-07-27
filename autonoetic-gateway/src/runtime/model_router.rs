@@ -666,7 +666,13 @@ pub fn decision_to_llm_config(
         api_key_env: base_config.api_key_env.clone(),
         routing_preset: base_config.routing_preset.clone(),
         thinking: base_config.thinking.clone(),
-        egress_class: None,
+        // Carry the selected fixed preset's egress_class so the chokepoint
+        // (phase 1b #905) knows which sink this routed completion targets. The
+        // model entry's class wins (it reflects the actual preset resolved);
+        // fall back to the base config, then None (infer from provider name).
+        egress_class: model_entry
+            .and_then(|e| e.config.egress_class)
+            .or(base_config.egress_class),
     }
 }
 

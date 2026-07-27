@@ -638,7 +638,7 @@ Unified registry for all LLM configurations. Each preset is either **fixed** (co
 | `cost.output_per_million` | float | `null` | Cost per million output tokens (USD). |
 | `latency.ttft_ms` | u64 | `null` | Expected time-to-first-token (ms). |
 | `latency.tokens_per_second` | u64 | `null` | Expected output throughput. |
-| `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](../docs/rfc/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
+| `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](rfc/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
 
 ### Routing Preset Fields
 

@@ -237,11 +237,11 @@ impl<'a> ToolCallProcessor<'a> {
         // Egress label plane (RFC data-envelopes §4): label each tool result at
         // the commit boundary. The labeler is inert (no-op) when the operator
         // has configured no source rules and the default is `unrestricted` — the
-        // common case — so this costs one clone-free check per turn. Labels are
-        // recorded in-memory keyed by tool-call id for the phase 1b (#905)
-        // chokepoint to consume; the `egress.envelope_labeled` causal event is
-        // emitted for every restricted result so "why is this labeled?" is
-        // answerable from the chain.
+        // common case — so this costs one clone-free check per turn. Each
+        // restricted result is recorded durably as an `egress.envelope_labeled`
+        // causal event so "why is this labeled?" is answerable from the chain.
+        // The chokepoint (withholding content from ineligible providers) lands
+        // in phase 1b (#905).
         let egress_labeler = self
             .config
             .map(|cfg| crate::runtime::egress_labeler::EgressLabeler::from_config(&cfg.egress))
@@ -250,8 +250,6 @@ impl<'a> ToolCallProcessor<'a> {
                     &autonoetic_types::egress::EgressConfig::default(),
                 )
             });
-        let mut egress_label_records: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel> =
-            std::collections::HashMap::new();
 
         for tc in tool_calls {
             let started_at = Instant::now();
@@ -355,7 +353,6 @@ impl<'a> ToolCallProcessor<'a> {
                         &self.manifest.agent.id,
                         self.turn_id.as_deref(),
                         self.gateway_store.as_ref(),
-                        &mut egress_label_records,
                     );
                     res
                 }

@@ -66,7 +66,11 @@ pub fn resolve_compression_llm_config(
                 api_key_env: preset.api_key_env.clone(),
                 routing_preset: None,
                 thinking: preset.thinking.clone(),
-                egress_class: None,
+                // Carry the preset's egress classification so the compression
+                // call is gated correctly by the phase 1b (#905) chokepoint —
+                // compressing local_only history on a remote preset is a leak
+                // even with per-envelope filtering (RFC §5.7).
+                egress_class: preset.egress_class,
             });
         }
         return None;
