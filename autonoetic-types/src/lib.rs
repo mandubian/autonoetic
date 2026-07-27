@@ -14,6 +14,7 @@ pub mod channel;
 pub mod config;
 pub mod constitution;
 pub mod disclosure;
+pub mod egress;
 pub mod escalation;
 pub mod evaluation;
 pub mod hooks;

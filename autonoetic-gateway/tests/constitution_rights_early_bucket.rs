@@ -245,6 +245,7 @@ fn ri_0_7_manifest() -> AgentManifest {
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         }),
         limits: None,
         background: None,

@@ -253,6 +253,7 @@ pub fn init_agent_scaffold(
                 api_key_env: None,
                 thinking: None,
                 routing: None,
+                egress_class: None,
             },
         );
         autonoetic_gateway::config::save_config(config_path, &config)?;
@@ -1877,6 +1878,7 @@ pub fn handle_agent_import_skill(
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         })
     } else {
         let resolved = resolve_llm_config(&config, None, None, provider, model);
@@ -1892,6 +1894,7 @@ pub fn handle_agent_import_skill(
             api_key_env: resolved.api_key_env,
             routing_preset: resolved.routing_preset,
             thinking: None,
+            egress_class: None,
         })
     };
 
@@ -2638,6 +2641,7 @@ Use tools when needed.
                 api_key_env: None,
                 thinking: None,
                 routing: None,
+                egress_class: None,
             },
         );
         config
@@ -2670,6 +2674,7 @@ Use tools when needed.
                 api_key_env: None,
                 thinking: None,
                 routing: None,
+                egress_class: None,
             },
         );
         config

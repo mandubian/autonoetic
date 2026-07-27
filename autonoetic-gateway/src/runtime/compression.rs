@@ -66,6 +66,7 @@ pub fn resolve_compression_llm_config(
                 api_key_env: preset.api_key_env.clone(),
                 routing_preset: None,
                 thinking: preset.thinking.clone(),
+                egress_class: None,
             });
         }
         return None;
@@ -84,6 +85,7 @@ pub fn resolve_compression_llm_config(
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         });
     }
 
@@ -590,6 +592,7 @@ mod tests {
                 cost: None,
                 latency: None,
                 routing: None,
+                egress_class: None,
             },
         );
         let gateway = ContextCompressionConfig {

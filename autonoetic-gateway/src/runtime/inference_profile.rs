@@ -312,6 +312,7 @@ mod tests {
                 cost: None,
                 latency: None,
                 routing: None,
+                egress_class: None,
             },
         );
         let mut mapping = HashMap::new();
@@ -368,6 +369,7 @@ mod tests {
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         });
         let profile = resolve_inference_profile(
             "legacy.unmapped.agent",
@@ -401,6 +403,7 @@ mod tests {
                 effort: ThinkingEffort::Low,
                 budget_tokens: None,
             }),
+            egress_class: None,
         });
         manifest.llm_overrides = Some(LlmOverrides {
             temperature: None,
@@ -450,6 +453,7 @@ mod tests {
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         });
         let profile =
             resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
@@ -475,6 +479,7 @@ mod tests {
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         });
         let profile =
             resolve_inference_profile("coder.default", &manifest, &fixed_config(), None).unwrap();
@@ -501,6 +506,7 @@ mod tests {
                 cost: None,
                 latency: None,
                 routing: None,
+                egress_class: None,
             },
         );
         let err = validate_inference_override(&test_manifest(), &config, "chat").unwrap_err();

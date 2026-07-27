@@ -332,6 +332,32 @@ schema_enforcement:
 # full: all results (development) | errors: failures only (production) | off
 evidence_mode: full
 
+# ── Egress (Data Localization) Source Rules ───────────────────────────
+# RFC: docs/rfc/data-envelopes-egress-localization.md §4.2.
+#
+# "Label the exceptions, not the corpus": name private sources here as
+# firewall-style rules; everything else defaults `unrestricted`. Labels are
+# enforced mechanically at the tool-result boundary and flow by monotonic
+# intersection (a derivation can only restrict, never widen). The chokepoint
+# (filtering/withholding at the provider boundary) lands in phase 1b (#905);
+# until then these rules label content and emit `egress.envelope_labeled`
+# causal events but do not yet withhold.
+#
+# egress:
+#   # All matching rules apply (labels are intersected) — order-independent.
+#   # Rules can only restrict, never widen.
+#   rules:
+#     - { source: "email.*",                            label: local_only }
+#     - { source: "mcp.gmail.*",                        label: local_only }
+#     - { source: "fs.read",    path: "~/mail/**",      label: local_only }
+#     - { source: "sandbox.exec", path: "~/mail/**",    label: local_only }
+#   # Default label for content no rule labels. `unrestricted` by decision
+#   # (RFC §2.2) — one-line flip to tighten later.
+#   default_label: unrestricted
+#   # How to treat sources no rule covers. `unrestricted` (default, off);
+#   # `prompt_once` (RFC §4.4 first-touch classification) is deferred.
+#   unclassified_source_mode: unrestricted
+
 # ── Operational Flags ─────────────────────────────────────────────────
 # Whether interaction.answer orchestrates workflow task / session resume. Default: true.
 # interaction_answer_orchestration: true
@@ -755,6 +781,11 @@ llm_presets:
     model: "gemma-4-31B-it-Q5_K_M"
     temperature: 1.0
     base_url: "http://192.168.1.20:8080/v1/chat/completions"
+    # This lmstudio endpoint lives on another machine (192.168.1.20), not
+    # localhost — so override the inferred `local` classification to `remote`.
+    # Egress labels that exclude RemoteModel will withhold content from it.
+    # (RFC data-envelopes §5.1; a remote Ollama/lmstudio server is a real shape.)
+    egress_class: remote
     thinking:
       effort: medium
 

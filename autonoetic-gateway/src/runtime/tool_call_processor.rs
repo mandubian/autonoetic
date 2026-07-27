@@ -234,6 +234,25 @@ impl<'a> ToolCallProcessor<'a> {
         let mut results = Vec::with_capacity(tool_calls.len());
         let mut had_any_success = false;
 
+        // Egress label plane (RFC data-envelopes §4): label each tool result at
+        // the commit boundary. The labeler is inert (no-op) when the operator
+        // has configured no source rules and the default is `unrestricted` — the
+        // common case — so this costs one clone-free check per turn. Labels are
+        // recorded in-memory keyed by tool-call id for the phase 1b (#905)
+        // chokepoint to consume; the `egress.envelope_labeled` causal event is
+        // emitted for every restricted result so "why is this labeled?" is
+        // answerable from the chain.
+        let egress_labeler = self
+            .config
+            .map(|cfg| crate::runtime::egress_labeler::EgressLabeler::from_config(&cfg.egress))
+            .unwrap_or_else(|| {
+                crate::runtime::egress_labeler::EgressLabeler::from_config(
+                    &autonoetic_types::egress::EgressConfig::default(),
+                )
+            });
+        let mut egress_label_records: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel> =
+            std::collections::HashMap::new();
+
         for tc in tool_calls {
             let started_at = Instant::now();
             let approval_ref = extract_approval_ref_from_args(&tc.arguments);
@@ -318,6 +337,26 @@ impl<'a> ToolCallProcessor<'a> {
                     self.record_operator_activity(tc, &res, Some(event_id));
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
+                    // Egress: label this tool result at the commit boundary
+                    // (RFC §4). Best-effort; labeling never blocks a tool
+                    // result. The label is computed from (tool, args) via the
+                    // operator source rules; for sandbox.exec the command in
+                    // the args is statically matched against labeled paths.
+                    // Script-body dependency reads will be picked up by the
+                    // phase 1b (#905) chokepoint which has full tool context.
+                    let _ = egress_labeler.label_tool_result(
+                        &crate::runtime::egress_labeler::LabelRequest {
+                            tool: canonical_tool,
+                            arguments_json: &tc.arguments,
+                            tool_call_id: &tc.id,
+                        },
+                        None,
+                        self.session_id.as_deref().unwrap_or(""),
+                        &self.manifest.agent.id,
+                        self.turn_id.as_deref(),
+                        self.gateway_store.as_ref(),
+                        &mut egress_label_records,
+                    );
                     res
                 }
                 Err(e) => {

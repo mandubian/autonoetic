@@ -2454,6 +2454,7 @@ impl AgentExecutor {
                 api_key_env: None,
                 routing_preset: None,
                 thinking: None,
+                egress_class: None,
             };
             let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
 
@@ -2821,6 +2822,7 @@ impl AgentExecutor {
                                             api_key_env: preset.api_key_env.clone(),
                                             routing_preset: Some(fb_preset.clone()),
                                             thinking: preset.thinking.clone(),
+                                            egress_class: preset.egress_class,
                                         });
                                     match fb_config {
                                         Some(config) => {
@@ -5379,6 +5381,7 @@ mod tests {
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         });
         let temp = tempdir().expect("tempdir should create");
         let captured = Arc::new(Mutex::new(None));

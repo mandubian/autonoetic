@@ -151,6 +151,7 @@ mod tests {
             cost: None,
             latency: None,
             routing: None,
+            egress_class: None,
         }
     }
 
@@ -187,6 +188,7 @@ mod tests {
                 api_key_env: None,
                 routing_preset: None,
                 thinking: None,
+                egress_class: None,
             }),
             limits: None,
             background: None,
@@ -216,6 +218,7 @@ mod tests {
                 provider: Some("llamacpp".to_string()),
                 model: Some("qwen".to_string()),
                 context_window_tokens: Some(114_688),
+                egress_class: None,
                 ..empty_llm_preset()
             },
         );
@@ -247,6 +250,7 @@ mod tests {
             "default".to_string(),
             LlmPreset {
                 context_window_tokens: Some(114_688),
+                egress_class: None,
                 ..empty_llm_preset()
             },
         );

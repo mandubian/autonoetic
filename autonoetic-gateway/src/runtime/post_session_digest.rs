@@ -159,6 +159,7 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         api_key_env: None,
         routing_preset: None,
         thinking: None,
+        egress_class: None,
     })
 }
 
@@ -175,6 +176,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         api_key_env: None,
         routing_preset: None,
         thinking: p.thinking.clone(),
+        egress_class: p.egress_class,
     }
 }
 

@@ -604,6 +604,7 @@ pub fn create_router_from_preset(
                 api_key_env: None,
                 routing_preset: None,
                 thinking: None,
+                egress_class: None,
             });
             (
                 Box::new(LlmClassifierRouter::new(
@@ -627,6 +628,7 @@ pub fn create_router_from_preset(
                 api_key_env: None,
                 routing_preset: None,
                 thinking: None,
+                egress_class: None,
             });
             (
                 Box::new(HybridRouter::new(
@@ -664,6 +666,7 @@ pub fn decision_to_llm_config(
         api_key_env: base_config.api_key_env.clone(),
         routing_preset: base_config.routing_preset.clone(),
         thinking: base_config.thinking.clone(),
+        egress_class: None,
     }
 }
 
@@ -691,6 +694,7 @@ mod tests {
                     api_key_env: None,
                     routing_preset: None,
                     thinking: None,
+                    egress_class: None,
                 },
                 tier: CapabilityTier::Premium,
             },
@@ -708,6 +712,7 @@ mod tests {
                     api_key_env: None,
                     routing_preset: None,
                     thinking: None,
+                    egress_class: None,
                 },
                 tier: CapabilityTier::Standard,
             },
@@ -725,6 +730,7 @@ mod tests {
                     api_key_env: None,
                     routing_preset: None,
                     thinking: None,
+                    egress_class: None,
                 },
                 tier: CapabilityTier::Economy,
             },
@@ -744,6 +750,7 @@ mod tests {
             api_key_env: None,
             routing_preset: None,
             thinking: None,
+            egress_class: None,
         }
     }
 

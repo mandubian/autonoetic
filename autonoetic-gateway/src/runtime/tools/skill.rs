@@ -267,6 +267,7 @@ impl NativeTool for SkillInstallTool {
                     api_key_env: preset.api_key_env.clone(),
                     routing_preset: None,
                     thinking: preset.thinking.clone(),
+                    egress_class: preset.egress_class,
                 })
         });
 

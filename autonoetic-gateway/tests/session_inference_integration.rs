@@ -74,6 +74,7 @@ fn test_config() -> GatewayConfig {
             cost: None,
             latency: None,
             routing: None,
+            egress_class: None,
         },
     );
     presets.insert(
@@ -93,6 +94,7 @@ fn test_config() -> GatewayConfig {
             cost: None,
             latency: None,
             routing: None,
+            egress_class: None,
         },
     );
     GatewayConfig {
@@ -148,6 +150,7 @@ fn session_inference_override_validates_chat_only() {
             cost: None,
             latency: None,
             routing: None,
+            egress_class: None,
         },
     );
     let err = validate_inference_override(&test_manifest(), &config, "chat").unwrap_err();

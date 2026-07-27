@@ -1079,6 +1079,7 @@ mod tests {
                 extra_headers: vec![],
                 temperature: None,
                 max_tokens: None,
+                egress_class: autonoetic_types::egress::EgressClass::Remote,
             },
         )
     }

@@ -23,6 +23,8 @@ pub mod crypto;
 pub mod curator_journal;
 pub mod disclosure;
 pub mod discretion_leak;
+pub mod egress_labeler;
+pub mod egress_path_matcher;
 pub mod error_fingerprint;
 pub mod eval_stats;
 pub mod failure_classification;
