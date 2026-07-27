@@ -404,6 +404,132 @@ fn emit_envelope_labeled_event(
     }
 }
 
+/// Emit the chokepoint causal events derived from a [`FilterReport`] (RFC §9.1).
+///
+/// Called by lifecycle.rs after a completion returns. Emits, per report:
+/// - one `egress.envelope_withheld` per withheld entry,
+/// - one `egress.request_filtered` (summary),
+/// - one `egress.assertion_violation` per violation.
+///
+/// All payloads are content-free metadata (ids, labels, sink, counts). Best-
+/// effort: a failed write is logged, not fatal. No-op when the report shows
+/// nothing was withheld AND no violation fired (the common, uneventful case).
+pub fn emit_chokepoint_events(
+    store: &Arc<GatewayStore>,
+    report: &crate::llm::egress_chokepoint::FilterReport,
+    preset: &str,
+    session_id: &str,
+    agent_id: &str,
+    turn_id: Option<&str>,
+) {
+    // Skip entirely when there's nothing to report — keeps the causal chain
+    // free of noise for the vast majority of (clean) completions.
+    if !report.withheld_any() && !report.has_violations() {
+        return;
+    }
+
+    // One envelope_withheld per withheld entry.
+    for entry in &report.withheld {
+        let payload = serde_json::json!({
+            "tool_call_id": entry.tool_call_id,
+            "target_sink": report.sink,
+            "label": serde_json::to_value(&entry.label).unwrap_or(serde_json::Value::Null),
+            // The indication that replaced the content — content-free by
+            // construction (RFC §3.3), so safe to include.
+            "indication": entry.indication,
+        });
+        emit_egress_event(
+            store,
+            "egress.envelope_withheld",
+            &entry.tool_call_id,
+            Some(payload),
+            session_id,
+            agent_id,
+            turn_id,
+            "egress_envelope_withheld",
+        );
+    }
+
+    // One request_filtered summary.
+    let summary = serde_json::json!({
+        "target_sink": report.sink,
+        "preset": preset,
+        "withheld_count": report.withheld.len(),
+        "included_count": report.included,
+        "violation_count": report.violations.len(),
+    });
+    emit_egress_event(
+        store,
+        "egress.request_filtered",
+        preset,
+        Some(summary),
+        session_id,
+        agent_id,
+        turn_id,
+        "egress_request_filtered",
+    );
+
+    // One assertion_violation per violation (RFC §5.2.3 tripwire).
+    for v in &report.violations {
+        let payload = serde_json::json!({
+            "tool_call_id": v.tool_call_id,
+            "target_sink": report.sink,
+            "payload_digest": v.payload_digest,
+            "found_in_message_index": v.found_in_message_index,
+        });
+        emit_egress_event(
+            store,
+            "egress.assertion_violation",
+            &v.tool_call_id,
+            Some(payload),
+            session_id,
+            agent_id,
+            turn_id,
+            "egress_assertion_violation",
+        );
+    }
+}
+
+/// Shared builder for one egress causal event. Mirrors
+/// [`emit_envelope_labeled_event`]'s shape — content-free metadata, baseline
+/// attribution rule (the constitution clause is phase 5 #910).
+fn emit_egress_event(
+    store: &Arc<GatewayStore>,
+    action: &str,
+    target: &str,
+    payload: Option<serde_json::Value>,
+    session_id: &str,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    reason: &str,
+) {
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: format!("egress-{}-{}", action.split('.').last().unwrap_or(action), uuid::Uuid::new_v4()),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: turn_id.map(|t| t.to_string()),
+        event_seq: 0,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "egress".to_string(),
+        action: action.to_string(),
+        status: "active".to_string(),
+        enforced_rules: default_enforced_rules(),
+        target: Some(target.to_string()),
+        payload: payload.map(|p| p.to_string()),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some(reason.to_string()),
+    };
+    if let Err(e) = store.create_causal_event(&event) {
+        tracing::warn!(
+            target: "egress_labeler",
+            error = %e,
+            action = %action,
+            "failed to emit egress causal event"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use autonoetic_types::egress::{EgressConfig, EgressLabel, EgressRule, NamedEgressLabel, Sink};

@@ -12,6 +12,7 @@ const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
 const ALLOW_LLM_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES";
 
 pub mod anthropic;
+pub mod egress_chokepoint;
 pub mod gemini;
 pub mod openai;
 pub mod provider;
@@ -774,13 +775,25 @@ pub fn build_driver(
         config.egress_class,
     )?;
 
-    let driver: Arc<dyn LlmDriver> = match resolved.kind {
+    // Capture the egress sink before `resolved` is moved into the inner driver.
+    let egress_sink = resolved.egress_class.as_sink();
+    let inner: Arc<dyn LlmDriver> = match resolved.kind {
         provider::DriverKind::Anthropic => {
             Arc::new(anthropic::AnthropicDriver::new(client, resolved))
         }
         provider::DriverKind::Gemini => Arc::new(gemini::GeminiDriver::new(client, resolved)),
         provider::DriverKind::OpenAi => Arc::new(openai::OpenAiDriver::new(client, resolved)),
     };
+    // Wrap in the egress chokepoint (RFC data-envelopes §5.2). The wrapper is a
+    // zero-cost pass-through when no label map is attached to a request's
+    // metadata (the common case — unconfigured deployments, or auxiliary LLM
+    // calls like capsule/digest that don't carry labels). Wrapping here covers
+    // the primary completion AND every failover preset uniformly, closing the
+    // local→remote failover leak for free.
+    let driver = Arc::new(egress_chokepoint::EgressChokepointDriver::new(
+        inner,
+        egress_sink,
+    )) as Arc<dyn LlmDriver>;
     Ok(driver)
 }
 

@@ -139,6 +139,14 @@ pub struct AgentExecutor {
     pub session_id: Option<String>,
     pub session_started: bool,
     pub turn_counter: u64,
+    /// Egress labels accumulated for tool results this session, keyed by
+    /// `tool_call_id` (monotonic — once a tool result is labeled, it stays
+    /// labeled for every future completion in the session). Attached to each
+    /// completion request's metadata so the `EgressChokepointDriver` (RFC §5.2)
+    /// substitutes indications for content whose label excludes the target
+    /// sink. Empty for unconfigured deployments — the chokepoint is then a
+    /// zero-cost pass-through.
+    pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
     /// When set, passed to tool execution for config-dependent behavior.
     pub config: Option<Arc<GatewayConfig>>,
     /// Optional per-session LLM/tool/token/wall-clock budgets (shared `Arc` across spawns).
@@ -390,6 +398,7 @@ impl AgentExecutor {
             session_id: None,
             session_started: false,
             turn_counter: 0,
+            egress_labels: std::collections::HashMap::new(),
             config: None,
             session_budget: None,
             root_session_budget: None,
@@ -2669,7 +2678,22 @@ impl AgentExecutor {
                 tools,
                 max_tokens: None,
                 temperature,
-                metadata: None,
+                // Attach the session's egress label map (RFC §5.2) so the
+                // EgressChokepointDriver wrapper can substitute indications for
+                // tool-result messages whose label excludes the target sink.
+                // Only attached when labels exist — keeps the common
+                // (unconfigured) case at zero cost (metadata stays None → the
+                // wrapper's fast path fires, no clone).
+                metadata: if self.egress_labels.is_empty() {
+                    None
+                } else {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert(
+                        crate::llm::egress_chokepoint::EGRESS_LABELS_KEY.to_string(),
+                        serde_json::to_value(&self.egress_labels).unwrap_or_default(),
+                    );
+                    Some(m)
+                },
                 thinking: routed_llm_cfg.thinking.clone(),
                 // Stable per-session key so providers that support prompt
                 // caching reuse the cached prompt prefix across turns.
@@ -2759,6 +2783,29 @@ impl AgentExecutor {
                     }
                 }
                 let response = self.llm.complete(&req).await;
+                // Egress chokepoint audit (RFC §9.1): emit the causal events
+                // for what the wrapper withheld. Only fires when labels are
+                // attached to this request (unconfigured deployments skip
+                // entirely). Best-effort — a failed write is logged, not fatal.
+                if !self.egress_labels.is_empty() {
+                    if let Some(store) = self.gateway_store.as_ref() {
+                        let sink = routed_llm_cfg
+                            .egress_class
+                            .map(|c| c.as_sink())
+                            .unwrap_or(autonoetic_types::egress::Sink::RemoteModel);
+                        let report = crate::llm::egress_chokepoint::compute_filter_report(
+                            &req, sink,
+                        );
+                        crate::runtime::egress_labeler::emit_chokepoint_events(
+                            store,
+                            &report,
+                            &routed_model,
+                            &session_id,
+                            &self.manifest.agent.id,
+                            Some(&turn_id),
+                        );
+                    }
+                }
                 match response {
                     Ok(resp) => {
                         self.guard.register_llm_success();
@@ -3691,6 +3738,15 @@ impl AgentExecutor {
                     tracer,
                 )
                 .await?;
+            // Merge this turn's egress labels into the session-wide map. Labels
+            // are monotonic (RFC §2.4) — a tool result labeled this turn stays
+            // labeled for every future completion in the session. The map is
+            // attached to each completion request's metadata so the
+            // EgressChokepointDriver (RFC §5.2) can withhold content whose
+            // label excludes the target sink.
+            for (k, v) in processor.take_egress_labels() {
+                self.egress_labels.insert(k, v);
+            }
 
             // Hard-trip the LoopGuard if any tool call returned a deterministic
             // terminal-workflow error. Retrying agent_spawn against a terminal
