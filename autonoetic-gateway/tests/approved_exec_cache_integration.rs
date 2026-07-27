@@ -49,6 +49,7 @@ fn test_agent_manifest() -> AgentManifest {
             name: "test.agent".to_string(),
             description: "Test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::CodeExecution {
             patterns: vec!["*".to_string()],

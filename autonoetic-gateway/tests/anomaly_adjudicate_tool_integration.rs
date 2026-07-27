@@ -45,6 +45,7 @@ fn manifest_with(caps: Vec<Capability>) -> AgentManifest {
             name: "ombudsman".to_string(),
             description: "test office".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: caps,
         llm_overrides: None,

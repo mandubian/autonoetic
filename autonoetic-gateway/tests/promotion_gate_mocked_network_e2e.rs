@@ -49,6 +49,7 @@ fn base_manifest(id: &str, name: &str, capabilities: Vec<Capability>) -> AgentMa
             name: name.to_string(),
             description: "test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities,
         llm_overrides: None,

@@ -36,6 +36,7 @@ fn manifest_with_artifact_execution(agent_id: &str) -> AgentManifest {
             name: agent_id.to_string(),
             description: "Test agent".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::ArtifactExecution,
@@ -81,6 +82,7 @@ fn manifest_without_network() -> AgentManifest {
             name: "Executor".to_string(),
             description: "Test executor".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ArtifactExecution],
         llm_overrides: None,
@@ -324,6 +326,7 @@ fn test_artifact_exec_tool_registered_and_gated() {
             name: "Researcher".to_string(),
             description: "No code execution".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
@@ -410,6 +413,7 @@ fn unit_test_runner_gate_manifest() -> AgentManifest {
             name: "Custom Unit Test Runner".to_string(),
             description: "Federation unit-test gate".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::SandboxFunctions {
@@ -483,6 +487,7 @@ fn test_artifact_exec_not_available_for_static_evaluator() {
             name: "Static Evaluator".to_string(),
             description: "Static federation gate".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::SandboxFunctions {

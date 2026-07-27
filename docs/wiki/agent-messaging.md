@@ -89,12 +89,24 @@ There is no reply correlation: a response is a new message with no link back to
 the one it answers. If an exchange needs to be traceable, say what you are
 replying to in the message text.
 
-## Reaching an agent with no running session
+## Who is actually reachable
 
-You cannot. `agent_message` only reaches a session that already exists and has
-not finished; a role with nothing running returns `no_live_recipients` and
-nothing is stored for later. There is no mailbox. When the work must happen
-regardless of whether anyone is listening, use `agent_spawn`.
+Only a session that still exists. Two kinds qualify:
+
+1. **Resident sessions.** An agent whose SKILL.md sets
+   `agent.resident_idle_ttl_secs` does not die when its task finishes — it parks
+   and stays addressable until that many seconds pass without traffic. This is
+   what makes peer messaging work: spawn the peer once, then message it.
+2. **Sessions still executing.**
+
+Everything else is unreachable. An ordinary specialist ends with its task, so a
+session id you captured earlier is usually already dead — you will get
+`target_session_finished`. There is no mailbox: messaging a role with nothing
+running returns `no_live_recipients` and stores nothing for later.
+
+If you need a peer you can talk to more than once, it must be a resident agent.
+If the work simply needs doing and you do not care who is listening, use
+`agent_spawn`.
 
 ## Operator visibility
 

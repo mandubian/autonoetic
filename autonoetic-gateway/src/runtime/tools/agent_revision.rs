@@ -2223,6 +2223,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
                 name: args.agent_id.clone(),
                 description: args.description.clone(),
             singleton: false,
+                resident_idle_ttl_secs: None,
         },
             capabilities: args.capabilities.clone(),
             llm_preset: normalized_llm_preset(&args.llm_preset),
@@ -5967,6 +5968,7 @@ mod capability_lenient_deser_tests {
                 name: "specialized-builder.test".to_string(),
                 description: "test manifest".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: vec![Capability::AgentRevision {
                 patterns: vec!["*".to_string()],

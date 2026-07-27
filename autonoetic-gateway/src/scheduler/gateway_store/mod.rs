@@ -28,6 +28,7 @@ pub use observability::{CivicHealth, CivicHealthEntry};
 pub mod plan_frames;
 pub mod post_promotion_reviews;
 mod reclamation;
+mod residency;
 mod recordings;
 mod row_decode;
 mod runtime_control;
@@ -60,6 +61,7 @@ use std::sync::{Arc, Mutex, Weak};
 const LIVE_DIGEST_BUFFER_CAPACITY: usize = 32;
 
 pub use messages::AgentMessageRecord;
+pub use residency::SessionResidency;
 pub(crate) use row_decode::memory_object_from_row;
 pub(crate) use util::escape_sqlite_like_fragment;
 
@@ -399,6 +401,49 @@ impl GatewayStore {
     pub fn mark_message_delivered(&self, message_id: &str, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         messages::mark_message_delivered(&conn, message_id, session_id)
+    }
+
+    // ---- Session residency (parked, addressable sessions) ----
+
+    /// Park a resident session, or refresh its TTL after it handles a message.
+    pub fn upsert_session_residency(&self, r: &SessionResidency) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        residency::upsert_residency(&conn, r)
+    }
+
+    /// Drop the park — the session is resuming, closing, or being reaped.
+    pub fn clear_session_residency(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        residency::clear_residency(&conn, session_id)
+    }
+
+    pub fn get_session_residency(&self, session_id: &str) -> Result<Option<SessionResidency>> {
+        let conn = self.conn.lock().unwrap();
+        residency::get_residency(&conn, session_id)
+    }
+
+    /// Parked, unexpired sessions of `agent_id` — the recipients an
+    /// `agent_message` broadcast can actually reach.
+    pub fn list_resident_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        residency::list_resident_sessions_for_agent(&conn, agent_id, &chrono::Utc::now().to_rfc3339())
+    }
+
+    /// Test/deterministic variant: evaluate expiry against `now`.
+    pub fn list_resident_sessions_for_agent_at(
+        &self,
+        agent_id: &str,
+        now: &str,
+    ) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        residency::list_resident_sessions_for_agent(&conn, agent_id, now)
+    }
+
+    /// Parks whose TTL has elapsed; the caller closes each session properly
+    /// before clearing its row.
+    pub fn list_expired_session_residencies(&self) -> Result<Vec<SessionResidency>> {
+        let conn = self.conn.lock().unwrap();
+        residency::list_expired_residencies(&conn, &chrono::Utc::now().to_rfc3339())
     }
     /// Record a stage transition for idempotent builder/install/promotion flow.
     /// Returns `true` if the transition was newly inserted, `false` if it already existed.

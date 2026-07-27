@@ -27,6 +27,7 @@ fn planner_manifest() -> AgentManifest {
             name: "planner.default".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentSpawn {
             max_children: 4,
@@ -76,6 +77,7 @@ metadata:
       name: "singleton.test"
       description: "singleton test agent"
       singleton: true
+      resident_idle_ttl_secs: None,
 ---
 # Singleton test agent
 "#,

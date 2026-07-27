@@ -27,6 +27,23 @@ use std::path::{Path, PathBuf};
 pub enum YieldReason {
     /// Agent paused between turns (EndTurn / StopSequence).
     Hibernation,
+    /// Agent finished its task but is declared **resident**
+    /// (`agent.resident_idle_ttl_secs`): the session is parked and stays
+    /// addressable by `agent_message` rather than terminating. Resumes when a
+    /// message arrives; reaped and closed normally once `ttl_secs` elapse
+    /// without traffic.
+    ///
+    /// This is the only yield reason that represents "no work in flight" — every
+    /// other suspension is waiting on something specific (a child, an approval,
+    /// a human). It exists so that a peer agent has somewhere to *be* between
+    /// messages, which is what makes `agent_message` reach anything other than
+    /// an orchestrator.
+    Idle {
+        /// RFC3339 timestamp the session parked at (refreshed on each park).
+        since: String,
+        /// Seconds of inactivity after `since` before the reaper closes it.
+        ttl_secs: u64,
+    },
     /// Session budget depleted mid-execution.
     BudgetExhausted,
     /// Approval gate (overlaps TurnContinuation).

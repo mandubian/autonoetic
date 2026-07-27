@@ -36,6 +36,7 @@ fn manifest_with_reasoning_audit(targets: Vec<&str>) -> AgentManifest {
             name: "Auditor Agent".to_string(),
             description: "test auditor".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ReasoningAudit {
             targets: targets.iter().map(|t| t.to_string()).collect(),
@@ -78,6 +79,7 @@ fn manifest_without_audit() -> AgentManifest {
             name: "Plain Agent".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![],
         llm_overrides: None,

@@ -74,6 +74,7 @@ fn test_manifest() -> AgentManifest {
             name: "Escalation Test Agent".to_string(),
             description: "Test agent for escalation flow".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         llm_overrides: None,
         llm_preset: None,

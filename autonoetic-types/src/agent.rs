@@ -38,6 +38,22 @@ pub struct AgentIdentity {
     pub description: String,
     #[serde(default)]
     pub singleton: bool,
+    /// Opt in to **residency**: when set, a session of this agent does not
+    /// terminate once its task is done. It parks in the gateway's
+    /// `YieldReason::Idle` checkpoint state (`autonoetic-gateway`, not linkable
+    /// from this crate) and stays addressable
+    /// by `agent_message` until this many seconds pass without traffic, at
+    /// which point the gateway reaps it and the session closes normally.
+    ///
+    /// Absent (the default) means the historical behaviour: the session ends
+    /// with its task and can never receive a message afterwards.
+    ///
+    /// Residency does **not** reuse context across tasks — each inbound message
+    /// continues the same session, so an operator opting an agent in should
+    /// expect accumulated history. Context reuse for *new* tasks is a separate,
+    /// deferred question (stateful singleton sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_idle_ttl_secs: Option<u64>,
 }
 
 /// LLM configuration for the agent.

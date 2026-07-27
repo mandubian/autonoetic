@@ -56,6 +56,7 @@ fn installer_manifest(capabilities: Vec<Capability>) -> AgentManifest {
             name: INSTALLER_ID.to_string(),
             description: "skill_install test caller".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities,
         llm_overrides: None,

@@ -23,6 +23,7 @@ fn builder_manifest() -> AgentManifest {
             name: "specialized_builder.default".to_string(),
             description: "test installer".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],

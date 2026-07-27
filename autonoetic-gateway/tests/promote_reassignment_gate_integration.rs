@@ -50,6 +50,7 @@ fn manifest_with_revision_cap() -> AgentManifest {
             name: AGENT_ID.to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],

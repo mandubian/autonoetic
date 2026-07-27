@@ -24,6 +24,7 @@ fn plan_frame_manifest() -> AgentManifest {
             name: "Collaborative Planner".to_string(),
             description: "Test collaborative planner".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::AgentSpawn {
@@ -81,6 +82,7 @@ fn no_plan_frame_manifest() -> AgentManifest {
             name: "No Plan Agent".to_string(),
             description: "Agent without plan frame access".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],

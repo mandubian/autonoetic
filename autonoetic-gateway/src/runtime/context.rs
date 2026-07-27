@@ -1031,6 +1031,7 @@ mod agentskills_bridging_tests {
                 name: "Test".to_string(),
                 description: "Test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: vec![],
             llm_overrides: None,

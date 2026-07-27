@@ -423,6 +423,7 @@ mod tests {
                 name: "agent-1".to_string(),
                 description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
             capabilities: caps,
             llm_overrides: None,

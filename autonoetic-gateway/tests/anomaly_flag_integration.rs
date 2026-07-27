@@ -37,6 +37,7 @@ fn zero_capability_manifest() -> AgentManifest {
             name: "witness".to_string(),
             description: "test".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![],
         llm_overrides: None,

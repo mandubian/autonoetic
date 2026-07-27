@@ -32,6 +32,7 @@ fn high_privilege_manifest() -> AgentManifest {
             name: "High-Privilege Agent".to_string(),
             description: "Agent with most action capabilities, used to verify clarification clamp".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::CodeExecution {

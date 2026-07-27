@@ -326,6 +326,24 @@ impl SessionCloseOutcome {
         !self.is_suspended() && !self.is_error()
     }
 
+    /// Outcomes where the session handed control to a human and stopped. Not an
+    /// error, but not a clean finish either: the close is deliberately terminal
+    /// so the session report reflects the escalation boundary (see
+    /// `is_suspended`), which is why callers that treat "completed" as
+    /// "finished its task normally" must exclude these.
+    pub fn is_escalated(&self) -> bool {
+        matches!(self, Self::ExecuteLoopEscalated | Self::HeadlessEscalated)
+    }
+
+    /// A session that finished its task normally: not suspended, not errored,
+    /// not escalated. This is the gate for behaviour that may only follow a
+    /// clean finish — residency parking, for one, where parking an errored or
+    /// escalated session would suppress its `session_outcomes` row and make the
+    /// failure look unfinished to every downstream reader.
+    pub fn is_clean_completion(&self) -> bool {
+        self.is_completed() && !self.is_escalated()
+    }
+
     pub fn is_completed_empty(&self) -> bool {
         matches!(
             self,
@@ -558,5 +576,58 @@ mod tests {
         let json = serde_json::to_string(&outcome).unwrap();
         let back: SessionCloseOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(outcome, back);
+    }
+}
+
+#[cfg(test)]
+mod clean_completion_tests {
+    use super::SessionCloseOutcome as O;
+
+    /// Residency parks only on a clean completion. Errors and escalations must
+    /// close and be seen: parking withholds the `session_outcomes` row, so a
+    /// failure would read as "still running" to every downstream reader (#902).
+    #[test]
+    fn errors_and_escalations_are_not_clean_completions() {
+        for outcome in [
+            O::SpawnExecuteError,
+            O::ExecuteLoopError,
+            O::HeadlessError,
+            O::ScriptExecFailed,
+        ] {
+            assert!(outcome.is_error());
+            assert!(!outcome.is_clean_completion(), "{outcome:?} must not park");
+        }
+        for outcome in [O::ExecuteLoopEscalated, O::HeadlessEscalated] {
+            // Escalation is neither suspended nor an error, so the older
+            // `!is_suspended` gate would have parked it — hiding the escalation
+            // boundary the terminal close exists to record.
+            assert!(!outcome.is_suspended() && !outcome.is_error());
+            assert!(outcome.is_escalated());
+            assert!(!outcome.is_clean_completion(), "{outcome:?} must not park");
+        }
+    }
+
+    #[test]
+    fn suspensions_are_not_clean_completions() {
+        for outcome in [
+            O::JsonRpcSpawnSuspended,
+            O::CheckpointRespawnSuspendedUserInput,
+            O::ExecuteLoopSuspended,
+        ] {
+            assert!(!outcome.is_clean_completion(), "{outcome:?} must not park");
+        }
+    }
+
+    #[test]
+    fn ordinary_completions_park() {
+        for outcome in [
+            O::JsonRpcSpawnComplete,
+            O::JsonRpcSpawnCompleteEmpty,
+            O::CheckpointRespawnComplete,
+            O::ExecuteLoopComplete,
+            O::HeadlessComplete,
+        ] {
+            assert!(outcome.is_clean_completion(), "{outcome:?} should park");
+        }
     }
 }

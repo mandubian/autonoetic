@@ -97,6 +97,9 @@ async fn run_scheduler_tick_common(
         if let Err(e) = store.prune_expired_grants() {
             tracing::warn!(error = %e, "Failed to prune expired session approval grants");
         }
+        if let Err(e) = reap_expired_residencies(store.as_ref()) {
+            tracing::warn!(error = %e, "Failed to reap expired session residencies");
+        }
 
         // R++8: Check for sessions exceeding sandbox escape thresholds
         let degrade_threshold = execution.config().escape_attempt_degrade_threshold;
@@ -2833,6 +2836,54 @@ pub fn append_task_board_entry(
     entry: &autonoetic_types::task_board::TaskBoardEntry,
 ) -> anyhow::Result<()> {
     store::append_jsonl_record(&store::task_board_path(config), entry)
+}
+
+/// Close resident sessions whose idle TTL has elapsed.
+///
+/// Parking suppresses the `session_outcomes` row so the session stays
+/// addressable; the reaper is what eventually writes it. Without this, an
+/// opted-in agent would accumulate parked sessions forever and every one of
+/// them would keep answering broadcasts.
+///
+/// Deliberately does not resume the session to close it: the run is over, only
+/// the bookkeeping is outstanding. The Idle checkpoint is left in place so the
+/// session remains forkable/inspectable like any other completed session.
+fn reap_expired_residencies(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<()> {
+    let expired = store.list_expired_session_residencies()?;
+    for r in expired {
+        // Order matters: write the terminal marker first, so a crash between
+        // the two leaves a session that reads as closed rather than one that is
+        // advertised as addressable but has no way to be woken.
+        if let Err(e) = store.upsert_session_outcome_metrics(
+            &r.session_id,
+            &r.root_session_id,
+            &r.agent_id,
+            None,
+            0,
+            0,
+            0.0,
+            0.0,
+        ) {
+            tracing::warn!(
+                target: "session_residency",
+                session_id = %r.session_id,
+                error = %e,
+                "Failed to write outcome while reaping idle session; leaving residency for retry"
+            );
+            continue;
+        }
+        store.clear_session_residency(&r.session_id)?;
+        tracing::info!(
+            target: "session_residency",
+            session_id = %r.session_id,
+            agent_id = %r.agent_id,
+            since = %r.since,
+            "Idle TTL elapsed; resident session closed"
+        );
+    }
+    Ok(())
 }
 
 async fn process_pending_notifications(

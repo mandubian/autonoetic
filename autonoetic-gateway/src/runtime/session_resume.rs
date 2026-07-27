@@ -112,6 +112,9 @@ pub(crate) fn should_auto_resume_checkpoint_yield_reason(
             | YieldReason::WaitingForChild { .. }
             | YieldReason::ManualStop
             | YieldReason::Error(_)
+            // A parked resident session exists precisely to be resumed by an
+            // inbound message; excluding it here would strand every delivery.
+            | YieldReason::Idle { .. }
     )
 }
 

@@ -37,6 +37,7 @@ fn high_privilege_manifest() -> AgentManifest {
             name: "Degraded Agent".to_string(),
             description: "Agent with most action capabilities, used to verify degraded clamp keeps inspection".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::CodeExecution {

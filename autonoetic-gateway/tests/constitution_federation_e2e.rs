@@ -120,6 +120,7 @@ fn builder_manifest() -> AgentManifest {
             name: "specialized_builder.default".to_string(),
             description: "Builder".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![
             Capability::AgentSpawn {
@@ -168,6 +169,7 @@ fn evaluator_manifest() -> AgentManifest {
             name: "sealed_evaluator.default".to_string(),
             description: "Sealed Evaluator".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
@@ -210,6 +212,7 @@ fn auditor_manifest() -> AgentManifest {
             name: "auditor.default".to_string(),
             description: "Auditor".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],

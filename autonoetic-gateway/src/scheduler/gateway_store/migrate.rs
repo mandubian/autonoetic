@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 71;
+const SCHEMA_VERSION_LATEST: i64 = 72;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -556,6 +556,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_amendment_invitations_v69(conn)?;
     apply_fork_lineage_enrichment_v70(conn)?;
     apply_session_constitution_pin_v71(conn)?;
+    apply_session_residency_v72(conn)?;
 
     Ok(())
 }
@@ -3258,6 +3259,50 @@ fn apply_fork_lineage_enrichment_v70(conn: &mut Connection) -> Result<()> {
 /// already stored there. Nullable: sessions bound before this migration (or
 /// started when the constitution runtime was never initialized) have no
 /// recorded pin.
+/// v72 — `session_residency`: the explicit record of sessions the gateway is
+/// holding open and addressable.
+///
+/// Until now nothing recorded whether a session was still reachable. Both
+/// available proxies are wrong: `session_agent_bindings` is append-only (every
+/// session ever), and `session_outcomes` gets a row at the *first* finalize —
+/// including for suspended sessions — so "has no outcome row" means "currently
+/// mid-execution", not "alive". A row here is written deliberately when a
+/// resident session parks and deleted when it resumes or is reaped, so
+/// addressability is stated rather than inferred.
+fn apply_session_residency_v72(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 72 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_residency (
+            session_id      TEXT PRIMARY KEY,
+            root_session_id TEXT NOT NULL,
+            agent_id        TEXT NOT NULL,
+            -- Checkpoint turn to resume from when a message wakes this session.
+            turn_id         TEXT NOT NULL,
+            since           TEXT NOT NULL,
+            -- RFC3339; the reaper closes the session once now() passes this.
+            expires_at      TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_residency_agent
+            ON session_residency(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_session_residency_expires
+            ON session_residency(expires_at);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![72_i64, "session_residency", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn apply_session_constitution_pin_v71(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
@@ -3392,6 +3437,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION_LATEST);
+    }
+
+    /// v72 creates `session_residency` and bumps SCHEMA_VERSION_LATEST.
+    ///
+    /// The version bump is asserted explicitly: adding a migration without it
+    /// makes every gateway that runs the migration refuse to open its own
+    /// database ("schema version is newer than this binary supports").
+    #[test]
+    fn v72_creates_session_residency_and_bumps_supported_version() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap(); // idempotent
+
+        let applied: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 72",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1, "v72 must be recorded exactly once");
+
+        let recorded_max: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            SCHEMA_VERSION_LATEST >= recorded_max,
+            "SCHEMA_VERSION_LATEST ({SCHEMA_VERSION_LATEST}) must cover the highest applied \
+             migration ({recorded_max}), or the gateway rejects its own database"
+        );
+
+        // Round-trip a park through the real schema.
+        conn.execute(
+            "INSERT INTO session_residency
+                (session_id, root_session_id, agent_id, turn_id, since, expires_at)
+             VALUES ('sess-1', 'sess-1', 'peer.default', 'turn-000002',
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:10:00Z')",
+            [],
+        )
+        .unwrap();
+        let agent: String = conn
+            .query_row(
+                "SELECT agent_id FROM session_residency WHERE session_id = 'sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(agent, "peer.default");
+
+        // session_id is the primary key: one park per session, refreshed in place.
+        let dup = conn.execute(
+            "INSERT INTO session_residency
+                (session_id, root_session_id, agent_id, turn_id, since, expires_at)
+             VALUES ('sess-1', 'sess-1', 'peer.default', 'turn-000003',
+                     '2026-01-01T00:05:00Z', '2026-01-01T00:15:00Z')",
+            [],
+        );
+        assert!(dup.is_err(), "a second park row for one session must be rejected");
     }
 
     /// #821 — v71 adds constitution_version/constitution_digest columns to

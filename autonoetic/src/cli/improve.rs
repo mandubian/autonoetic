@@ -607,6 +607,7 @@ async fn handle_propose_code_fix(
             name: "Autonoetic CLI".to_string(),
             description: "CLI code-issue-proposer".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::GithubIssueCreate {
             patterns: vec!["*".into()],
@@ -780,6 +781,7 @@ fn run_ab_replay(
             name: "Autonoetic CLI".to_string(),
             description: "CLI improve command".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::Evaluation {
             patterns: vec!["*".into()],
@@ -891,6 +893,7 @@ fn promote_manifest() -> AgentManifest {
             name: "Autonoetic CLI".to_string(),
             description: "CLI improve command".to_string(),
             singleton: false,
+            resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".into()],
