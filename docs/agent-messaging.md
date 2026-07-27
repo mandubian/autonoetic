@@ -72,10 +72,24 @@ and queues nothing:
 | `no_live_recipients` | The role is installed but has no unfinished session other than the sender's. |
 | `target_agent_not_found` | No agent with that id is installed. |
 | `target_agent_unavailable` | The agent is installed but its manifest could not be loaded — a broken bundle, not a missing one. |
+| `target_session_finished` | The session has a terminal `session_outcomes` row. Injection happens at wake and a finished session does not wake again, so nothing is queued. |
 | `target_session_not_found` | The session id has no `session_agent_bindings` row, so the gateway cannot tell which agent owns it and will not deliver unchecked. |
 
 `exists` distinguishes the two `target_agent_*` cases (`false` for not-found,
 `true` for unavailable) and is absent when no `GatewayConfig` was supplied.
+
+Existence is resolved through the **alias registry first**, then the agents
+directory. A promoted revision is installed as an `agent_aliases` row pointing at
+`.gateway/revisions/<rev>` and has no directory under `agents_dir`, so a
+filesystem-only lookup reports a fully installed, `agent_inspect`-able agent as
+missing. `agent_message` must answer the existence question the same way
+`agent_list` does.
+
+The liveness gate applies to **both** addressing modes. `target_agent_id`
+enumerates unfinished sessions; `target_session_id` checks the one session it was
+given. Gating only the enumerating path left the session path reporting
+`delivered` for a session that had already closed — observed in a live run with
+the close preceding the send by several seconds.
 
 ## Wakeup Mechanism
 

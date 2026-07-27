@@ -1427,10 +1427,13 @@ Choose `target_agent_id` to broadcast to every unfinished session of that role (
 is never included), or `target_session_id` to reach one specific session. After sending, validate \
 the result: success only when `ok == true`, `status == \"delivered\"`, and `recipients_count > 0`. \
 Failure statuses, none of which sent anything: `no_live_recipients` (the role is installed but has \
-no unfinished session other than yours), `target_agent_not_found` (no agent with that id is \
-installed), `target_agent_unavailable` (the agent is installed but its manifest could not be \
-loaded — a broken bundle, not a missing one), `target_session_not_found` (that session id has no \
-agent binding, so the gateway cannot tell who owns it).\n\n\
+no unfinished session other than yours), `target_session_finished` (that session has already \
+ended — it will not wake again, so nothing was queued), `target_agent_not_found` (no agent with \
+that id is installed), `target_agent_unavailable` (the agent is installed but its manifest could \
+not be loaded — a broken bundle, not a missing one), `target_session_not_found` (that session id \
+has no agent binding, so the gateway cannot tell who owns it).\n\n\
+A child session you spawned is usually finished by the time you would message it. If you need work \
+done, `agent_spawn`; `agent_message` only reaches a session that is still running.\n\n\
 Your `AgentMessage` capability `patterns` are enforced on the receiving agent's id in both \
 addressing modes — with `target_session_id` the gateway resolves the session's bound agent and \
 checks that. A session id does not widen your grant."
@@ -1510,7 +1513,32 @@ important signals (progress reports, divergence findings, status updates from sp
         // naming an allowed role alongside an arbitrary session.
         let acl_target_agent_id = match (&args.target_session_id, &args.target_agent_id) {
             (Some(sid), _) => match store.get_session_agent_binding(sid)? {
-                Some(binding) => binding.agent_id,
+                Some(binding) => {
+                    // A closed session can never consume a delivery: injection
+                    // happens at wake, and a finished session does not wake
+                    // again. Queueing anyway and reporting `delivered` is the
+                    // same dishonesty the broadcast path had — the liveness
+                    // filter must apply to both addressing modes, not just the
+                    // one that enumerates sessions itself.
+                    if store.get_session_outcome(sid)?.is_some() {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "status": "target_session_finished",
+                            "target_session_id": sid,
+                            "target_agent_id": binding.agent_id,
+                            "recipients_count": 0,
+                            "message": format!(
+                                "Session '{}' (agent '{}') has already finished, so it cannot receive \
+                                 a message — messages are injected when a session wakes, and this one \
+                                 will not wake again. Nothing was queued. Use agent_spawn if the work \
+                                 still needs doing.",
+                                sid, binding.agent_id
+                            ),
+                        })
+                        .to_string());
+                    }
+                    binding.agent_id
+                }
                 None => {
                     return Ok(serde_json::json!({
                         "ok": false,
@@ -1580,7 +1608,22 @@ important signals (progress reports, divergence findings, status updates from sp
                     a_id
                 );
 
-                if let Some(cfg) = config {
+                // Existence must be decided the same way `agent_list` /
+                // `agent_inspect` decide it, or the status contradicts what the
+                // agent can plainly see. An alias-installed agent lives in
+                // `.gateway/revisions/<rev>` with NO directory under
+                // `agents_dir`, so a filesystem-only `get_sync` reports it
+                // missing — which is how a fully installed, inspectable agent
+                // came back as `target_agent_not_found`.
+                let alias_known = store
+                    .get_agent_alias(a_id)
+                    .ok()
+                    .flatten()
+                    .is_some();
+
+                if alias_known {
+                    exists = Some(true);
+                } else if let Some(cfg) = config {
                     let repo = crate::agent::AgentRepository::new(cfg.agents_dir.clone());
                     match repo.get_sync(a_id) {
                         Ok(_) => {
@@ -1592,8 +1635,9 @@ important signals (progress reports, divergence findings, status updates from sp
                                 exists = Some(false);
                                 status = "target_agent_not_found";
                                 message = format!(
-                                    "No installed agent found with id '{}'. agent_message requires an existing target agent with at least one unfinished session.",
-                                    a_id
+                                    "No installed agent found with id '{}' (checked both the alias registry and {}). agent_message requires an existing target agent with at least one unfinished session.",
+                                    a_id,
+                                    cfg.agents_dir.display()
                                 );
                             } else {
                                 exists = Some(true);
