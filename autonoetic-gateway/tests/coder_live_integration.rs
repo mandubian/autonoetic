@@ -29,6 +29,7 @@ fn make_openrouter_driver(model: &str) -> anyhow::Result<Arc<dyn LlmDriver>> {
         None,
         None,
         false, // chat_only
+        None,  // egress_class (infer from provider defaults)
     )?;
 
     Ok(Arc::new(llm::openai::OpenAiDriver::new(client, resolved)))

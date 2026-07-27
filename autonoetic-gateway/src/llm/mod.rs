@@ -771,6 +771,7 @@ pub fn build_driver(
         base_url_override.as_deref(),
         api_key_override.as_deref(),
         config.chat_only,
+        config.egress_class,
     )?;
 
     let driver: Arc<dyn LlmDriver> = match resolved.kind {

@@ -4,6 +4,8 @@
 //! Drivers should never read environment variables directly; they receive a
 //! `ResolvedProvider` already populated by this module.
 
+use autonoetic_types::egress::EgressClass;
+
 /// How an OpenAI-compatible provider expects reasoning/thinking to be requested.
 /// Drivers use this to pick the right request-body shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +145,12 @@ pub struct ResolvedProvider {
     pub extra_headers: Vec<(String, String)>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Egress classification of this resolved endpoint — RFC data-envelopes
+    /// §5.1. `Local` for ollama/vllm/lmstudio/llamacpp (or explicit override),
+    /// `Remote` otherwise (fail-closed default). The chokepoint (phase 1b #905)
+    /// maps this to a [`autonoetic_types::egress::Sink`] to filter outbound
+    /// content.
+    pub egress_class: EgressClass,
 }
 
 /// Map a provider name to the reasoning-request schema its API expects.
@@ -169,6 +177,11 @@ struct ProviderDefaults {
     /// If set, this provider/model requires this exact temperature and ignores
     /// the preset/agent-level temperature (e.g. Kimi Code only accepts 1.0).
     fixed_temperature: Option<f32>,
+    /// Inferred egress classification of this provider (RFC data-envelopes
+    /// §5.1): `Local` for ollama/vllm/lmstudio/llamacpp, `Remote` otherwise.
+    /// Overridable from the preset's `egress_class` — a remote Ollama server is
+    /// a real deployment shape.
+    egress_class: EgressClass,
 }
 
 fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
@@ -179,6 +192,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::Anthropic,
             capabilities: ProviderCapabilities::anthropic,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "gemini" | "google" => Some(ProviderDefaults {
             base_url: "https://generativelanguage.googleapis.com/v1beta",
@@ -186,6 +200,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::Gemini,
             capabilities: ProviderCapabilities::gemini,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         // ----------- OpenAI-compatible providers (single code path) -----------
         "openai" | "codex" => Some(ProviderDefaults {
@@ -194,6 +209,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "opencode" => Some(ProviderDefaults {
             base_url: "https://opencode.ai/zen/go/v1/chat/completions",
@@ -201,6 +217,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "openrouter" => Some(ProviderDefaults {
             base_url: "https://openrouter.ai/api/v1/chat/completions",
@@ -208,6 +225,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "groq" => Some(ProviderDefaults {
             base_url: "https://api.groq.com/openai/v1/chat/completions",
@@ -215,6 +233,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "together" => Some(ProviderDefaults {
             base_url: "https://api.together.xyz/v1/chat/completions",
@@ -222,6 +241,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "deepseek" => Some(ProviderDefaults {
             base_url: "https://api.deepseek.com/v1/chat/completions",
@@ -229,6 +249,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "mistral" => Some(ProviderDefaults {
             base_url: "https://api.mistral.ai/v1/chat/completions",
@@ -236,6 +257,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "fireworks" => Some(ProviderDefaults {
             base_url: "https://api.fireworks.ai/inference/v1/chat/completions",
@@ -243,6 +265,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "perplexity" => Some(ProviderDefaults {
             base_url: "https://api.perplexity.ai/chat/completions",
@@ -250,6 +273,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "cohere" => Some(ProviderDefaults {
             base_url: "https://api.cohere.com/compatibility/v1/chat/completions",
@@ -257,6 +281,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "ai21" => Some(ProviderDefaults {
             base_url: "https://api.ai21.com/studio/v1/chat/completions",
@@ -264,6 +289,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "cerebras" => Some(ProviderDefaults {
             base_url: "https://api.cerebras.ai/v1/chat/completions",
@@ -271,6 +297,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "sambanova" => Some(ProviderDefaults {
             base_url: "https://api.sambanova.ai/v1/chat/completions",
@@ -278,6 +305,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "huggingface" => Some(ProviderDefaults {
             base_url: "https://api-inference.huggingface.co/v1/chat/completions",
@@ -285,6 +313,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "xai" => Some(ProviderDefaults {
             base_url: "https://api.x.ai/v1/chat/completions",
@@ -292,6 +321,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "replicate" => Some(ProviderDefaults {
             base_url: "https://api.replicate.com/v1/deployments",
@@ -299,6 +329,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "moonshot" | "kimi" => Some(ProviderDefaults {
             base_url: "https://api.moonshot.cn/v1/chat/completions",
@@ -306,6 +337,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         "kimi-code" => Some(ProviderDefaults {
             base_url: "https://api.kimi.com/coding/v1/chat/completions",
@@ -313,6 +345,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: Some(1.0),
+            egress_class: EgressClass::Remote,
         }),
         "qwen" | "dashscope" => Some(ProviderDefaults {
             base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
@@ -320,6 +353,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Remote,
         }),
         // Local providers — no API key needed
         "ollama" => Some(ProviderDefaults {
@@ -328,6 +362,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Local,
         }),
         "vllm" => Some(ProviderDefaults {
             base_url: "http://localhost:8000/v1/chat/completions",
@@ -335,6 +370,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Local,
         }),
         "lmstudio" => Some(ProviderDefaults {
             base_url: "http://localhost:1234/v1/chat/completions",
@@ -342,6 +378,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Local,
         }),
         "llamacpp" | "llama.cpp" => Some(ProviderDefaults {
             base_url: "http://localhost:8080/v1/chat/completions",
@@ -349,6 +386,7 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
             kind: DriverKind::OpenAi,
             capabilities: ProviderCapabilities::openai_compatible,
             fixed_temperature: None,
+            egress_class: EgressClass::Local,
         }),
         _ => None,
     }
@@ -356,6 +394,12 @@ fn provider_defaults(name: &str) -> Option<ProviderDefaults> {
 
 /// Resolve a provider name + optional overrides into a `ResolvedProvider`.
 /// Returns an error if an API key is required but missing from the environment.
+///
+/// `egress_class_override` (RFC data-envelopes §5.1): when set, takes
+/// precedence over the inferred class — the preset's explicit classification
+/// wins. Otherwise the class is inferred from [`provider_defaults`] (local for
+/// ollama/vllm/lmstudio/llamacpp) and falls back to `Remote` for unknown
+/// providers (fail-closed, RFC §2.2).
 pub fn resolve(
     provider: &str,
     model: &str,
@@ -364,30 +408,38 @@ pub fn resolve(
     base_url_override: Option<&str>,
     api_key_override: Option<&str>,
     chat_only: bool,
+    egress_class_override: Option<EgressClass>,
 ) -> anyhow::Result<ResolvedProvider> {
     let defaults = provider_defaults(provider);
 
-    let (kind, base_url, mut capabilities, fixed_temperature) = if let Some(ref d) = defaults {
-        (
-            d.kind.clone(),
-            base_url_override.unwrap_or(d.base_url).to_string(),
-            (d.capabilities)(),
-            d.fixed_temperature,
-        )
-    } else if let Some(url) = base_url_override {
-        // Unknown provider with a custom URL — treat as OpenAI-compatible
-        (
-            DriverKind::OpenAi,
-            url.to_string(),
-            ProviderCapabilities::openai_compatible(),
-            None,
-        )
-    } else {
-        anyhow::bail!(
-            "Unknown provider '{}' and no base_url override provided",
-            provider
-        );
-    };
+    let (kind, base_url, mut capabilities, fixed_temperature, inferred_egress_class) =
+        if let Some(ref d) = defaults {
+            (
+                d.kind.clone(),
+                base_url_override.unwrap_or(d.base_url).to_string(),
+                (d.capabilities)(),
+                d.fixed_temperature,
+                d.egress_class,
+            )
+        } else if let Some(url) = base_url_override {
+            // Unknown provider with a custom URL — treat as OpenAI-compatible
+            // and remote (fail-closed: no inference possible).
+            (
+                DriverKind::OpenAi,
+                url.to_string(),
+                ProviderCapabilities::openai_compatible(),
+                None,
+                EgressClass::Remote,
+            )
+        } else {
+            anyhow::bail!(
+                "Unknown provider '{}' and no base_url override provided",
+                provider
+            )
+        };
+
+    // Explicit preset classification wins over inference.
+    let egress_class = egress_class_override.unwrap_or(inferred_egress_class);
 
     // Override to chat-only mode if explicitly set
     if chat_only {
@@ -464,5 +516,105 @@ pub fn resolve(
         extra_headers,
         temperature,
         max_tokens,
+        egress_class,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Provider egress classification — RFC data-envelopes §5.1.
+    //!
+    //! The chokepoint (phase 1b #905) maps `ResolvedProvider.egress_class` to a
+    //! [`autonoetic_types::egress::Sink`]; these tests pin the inference + the
+    //! override precedence that the chokepoint relies on.
+    use super::*;
+
+    /// Helper: resolve without any API key in the env, swallowing the auth
+    /// error when the provider demands one. Returns the `egress_class` that
+    /// *classification* would assign (independent of auth resolution).
+    fn classify(provider: &str, override_class: Option<EgressClass>) -> EgressClass {
+        // `resolve` may fail on missing API key for providers that need one;
+        // classification itself does not depend on the key, so fall back to the
+        // inferred `provider_defaults` class on auth error.
+        match resolve(
+            provider,
+            "test-model",
+            None,
+            None,
+            None,
+            Some("dummy-key-not-sent"), // avoid env-var lookup failures
+            false,
+            override_class,
+        ) {
+            Ok(r) => r.egress_class,
+            Err(_) => provider_defaults(provider)
+                .map(|d| d.egress_class)
+                .unwrap_or(EgressClass::Remote),
+        }
+    }
+
+    #[test]
+    fn local_providers_are_inferred_local() {
+        for p in ["ollama", "vllm", "lmstudio", "llamacpp", "llama.cpp"] {
+            assert_eq!(
+                classify(p, None),
+                EgressClass::Local,
+                "{p} should infer local"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_providers_are_inferred_remote() {
+        for p in [
+            "anthropic",
+            "claude",
+            "openai",
+            "openrouter",
+            "gemini",
+            "deepseek",
+            "mistral",
+            "groq",
+            "together",
+            "xai",
+        ] {
+            assert_eq!(
+                classify(p, None),
+                EgressClass::Remote,
+                "{p} should infer remote"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_provider_is_remote_fail_closed() {
+        // No defaults entry → inferred Remote. (We bypass `resolve`'s unknown-
+        // provider bail by reading the table directly, mirroring the fail-closed
+        // semantics the chokepoint depends on.)
+        let inferred = provider_defaults("totally-unknown-provider")
+            .map(|d| d.egress_class)
+            .unwrap_or(EgressClass::Remote);
+        assert_eq!(inferred, EgressClass::Remote);
+    }
+
+    #[test]
+    fn explicit_override_wins_over_inference() {
+        // ollama infers Local; an explicit `remote` override (a remote Ollama
+        // server is a real deployment shape) must win.
+        assert_eq!(
+            classify("ollama", Some(EgressClass::Remote)),
+            EgressClass::Remote
+        );
+        // anthropic infers Remote; an explicit `local` override wins.
+        assert_eq!(
+            classify("anthropic", Some(EgressClass::Local)),
+            EgressClass::Local
+        );
+    }
+
+    #[test]
+    fn override_none_falls_back_to_inference() {
+        assert_eq!(classify("ollama", None), EgressClass::Local);
+        assert_eq!(classify("anthropic", None), EgressClass::Remote);
+    }
 }

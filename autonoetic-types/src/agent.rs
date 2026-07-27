@@ -90,6 +90,14 @@ pub struct LlmConfig {
     /// Gemma <|think|> token). The gateway translates this to provider-native format.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+
+    /// Egress (data localization) classification carried from the preset at
+    /// resolve time — RFC data-envelopes §5.1. `None` means "infer from
+    /// provider defaults" (ollama/vllm/lmstudio/llamacpp → local, else remote).
+    /// Maps to a [`crate::egress::Sink`] at request time so the chokepoint
+    /// (phase 1b #905) knows which sink a completion targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_class: Option<crate::egress::EgressClass>,
 }
 
 /// Extended thinking / reasoning configuration for models that support it.

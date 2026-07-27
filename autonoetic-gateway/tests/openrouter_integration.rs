@@ -21,6 +21,7 @@ fn make_openrouter_driver(model: &str) -> anyhow::Result<std::sync::Arc<dyn LlmD
         None,
         None,  // reads OPENROUTER_API_KEY from env
         false, // chat_only
+        None,  // egress_class (infer from provider defaults)
     )?;
 
     use autonoetic_gateway::llm::openai::OpenAiDriver;

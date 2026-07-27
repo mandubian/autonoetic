@@ -53,6 +53,15 @@ pub struct LlmPreset {
     // ── Routing preset fields (mutually exclusive with provider/model) ──
     #[serde(default)]
     pub routing: Option<RoutingPresetConfig>,
+
+    // ── Egress (data localization) classification — RFC data-envelopes §5.1 ──
+    /// Coarse egress classification of this preset's endpoint: `local` or
+    /// `remote`. Defaults to `remote` when unset (fail-closed, RFC §2.2).
+    /// `provider_defaults` infers `local` for ollama/vllm/lmstudio/llamacpp;
+    /// an explicit `egress_class: remote` overrides that (a remote Ollama
+    /// server is a real deployment shape). Maps to a [`Sink`] at request time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_class: Option<crate::egress::EgressClass>,
 }
 
 /// Schema enforcement mode for agent.spawn payloads.
@@ -1441,6 +1450,14 @@ pub struct GatewayConfig {
     /// independently for all promotions.
     #[serde(default)]
     pub protected_agents: ProtectedAgentsConfig,
+
+    /// Egress (data localization) source rules — RFC data-envelopes §4.2.
+    /// "Label the exceptions, not the corpus": operators name private sources
+    /// here; everything else defaults `unrestricted`. Enforced mechanically at
+    /// the tool-result boundary; the chokepoint (filtering/withholding) lands
+    /// in phase 1b (#905).
+    #[serde(default)]
+    pub egress: crate::egress::EgressConfig,
 
     /// Complexity profile: starter / standard / expert.
     /// Controls default behavior and visibility. Explicit config overrides always win.
@@ -3461,6 +3478,7 @@ impl Default for GatewayConfig {
             approval_dwell_multiplier: default_approval_dwell_multiplier(),
             sentinel: SentinelConfig::default(),
             protected_agents: ProtectedAgentsConfig::default(),
+            egress: crate::egress::EgressConfig::default(),
             profile: Profile::default(),
             auto_learning: AutoLearningConfig::default(),
             knowledge_store: KnowledgeStoreConfig::default(),
@@ -3678,6 +3696,7 @@ mod tests {
             cost: None,
             latency: None,
             routing: None,
+            egress_class: None,
         }
     }
 
@@ -3889,6 +3908,7 @@ mod tests {
                 cost: None,
                 latency: None,
                 routing: None,
+                egress_class: None,
             },
         );
         config.llm_presets.insert(
@@ -3915,6 +3935,7 @@ mod tests {
                     classifier: ClassifierRoutingConfig::default(),
                     hybrid: HybridRoutingConfig::default(),
                 }),
+                egress_class: None,
             },
         );
         config
@@ -3952,6 +3973,7 @@ mod tests {
                     classifier: ClassifierRoutingConfig::default(),
                     hybrid: HybridRoutingConfig::default(),
                 }),
+                egress_class: None,
             },
         );
 
@@ -3979,6 +4001,7 @@ mod tests {
                 cost: None,
                 latency: None,
                 routing: None,
+                egress_class: None,
             },
         );
 
@@ -4015,6 +4038,7 @@ mod tests {
                     classifier: ClassifierRoutingConfig::default(),
                     hybrid: HybridRoutingConfig::default(),
                 }),
+                egress_class: None,
             },
         );
 
@@ -4055,6 +4079,7 @@ mod tests {
                 cost: None,
                 latency: None,
                 routing: None,
+                egress_class: None,
             },
         );
         config.llm_presets.insert(
@@ -4081,6 +4106,7 @@ mod tests {
                     classifier: ClassifierRoutingConfig::default(),
                     hybrid: HybridRoutingConfig::default(),
                 }),
+                egress_class: None,
             },
         );
         config

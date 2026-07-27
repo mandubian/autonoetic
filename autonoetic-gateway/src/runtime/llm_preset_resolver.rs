@@ -51,6 +51,7 @@ pub fn resolve_fixed_preset(preset: &LlmPreset) -> Option<LlmConfig> {
         api_key_env: preset.api_key_env.clone(),
         routing_preset: None,
         thinking: preset.thinking.clone(),
+        egress_class: preset.egress_class,
     })
 }
 
@@ -130,6 +131,7 @@ mod tests {
             cost: None,
             latency: None,
             routing: None,
+            egress_class: None,
         }
     }
 
@@ -156,6 +158,7 @@ mod tests {
                 classifier: ClassifierRoutingConfig::default(),
                 hybrid: HybridRoutingConfig::default(),
             }),
+            egress_class: None,
         }
     }
 
@@ -254,6 +257,7 @@ mod tests {
             "default".to_string(),
             LlmPreset {
                 context_window_tokens: Some(114_688),
+                egress_class: None,
                 ..fixed_preset("llamacpp", "qwen", CapabilityTier::Economy)
             },
         );

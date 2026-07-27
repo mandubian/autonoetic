@@ -638,6 +638,7 @@ Unified registry for all LLM configurations. Each preset is either **fixed** (co
 | `cost.output_per_million` | float | `null` | Cost per million output tokens (USD). |
 | `latency.ttft_ms` | u64 | `null` | Expected time-to-first-token (ms). |
 | `latency.tokens_per_second` | u64 | `null` | Expected output throughput. |
+| `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](rfc/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
 
 ### Routing Preset Fields
 
@@ -685,6 +686,46 @@ etc.), but the following cross-cutting role keys are also honored:
 | Key | Effect |
 |-----|--------|
 | `context_compression` | Used as fallback for `context_compression.llm_preset` when that field is not set explicitly. The mapped preset must be a fixed preset (not a routing preset) — `validate_llm_presets` rejects routing presets here because the consumer needs a concrete provider/model. The fallback only fires when no compression LLM is configured at all (explicit `llm_preset`, explicit `provider`+`model`, and agent-level overrides take precedence). |
+
+## Egress (Data Localization)
+
+Operator source rules that label content by where it came from, so the gateway can keep private data from reaching disallowed sinks (a remote LLM, a peer gateway, a `share_net` sandbox, …). Specified in `docs/rfc/data-envelopes-egress-localization.md`. **"Label the exceptions, not the corpus"**: name private sources as firewall-style rules; everything else defaults `unrestricted`.
+
+Labels are enforced mechanically (never by LLM judgment) and flow by **monotonic intersection** — a derivation can only *restrict* a label, never widen it. The only widening path is an operator-approved declassification.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `egress.rules` | list | `[]` | Operator source rules. All matching rules apply (labels are intersected) — order-independent; rules can only restrict. |
+| `egress.rules[].source` | string | required | Source tool pattern. Supports `*`-suffix globs (`email.*`, `mcp.gmail.*`) and bare names (`fs.read`, `sandbox.exec`). |
+| `egress.rules[].path` | string | `null` | Optional path narrowing for path-taking tools (`~/mail/**`, `state/secrets/*`). Simple `*`-suffix glob. For `sandbox.exec`, the command and script dependencies are statically analyzed for labeled paths (sibling of the `RemoteAccessAnalyzer`). |
+| `egress.rules[].label` | sink-set | required | The label to apply — a set of allowed sinks. Named labels (`unrestricted`, `local_only`, `no_remote_model`) are the common case; custom labels are sink-set literals. |
+| `egress.default_label` | string | `unrestricted` | Label for content no rule labels. `unrestricted` by decision (RFC §2.2); one-line flip to tighten later. |
+| `egress.unclassified_source_mode` | string | `unrestricted` | How to treat sources no rule covers. `unrestricted` (off, the default); `prompt_once` (RFC §4.4 first-touch classification) is **deferred** and not honored yet. |
+
+**Predefined labels** (RFC §3.2):
+
+| Name | Allowed sinks | Use |
+|------|---------------|-----|
+| `unrestricted` | all | Default for ordinary workspace content. |
+| `local_only` | `local_model`, `local_agent`, `user_reply`, `memory_persist` | Emails, personal files — anything the operator refuses to ship off the machine. |
+| `no_remote_model` | all except `remote_model`, `federated_agent` | Business-confidential but federatable. |
+
+> **Credentials are not envelopes.** There is deliberately no `secret` label: the vault path never creates envelopes (values never enter agent context), so there is nothing to label. Residual `credential_env` exposure is documented in RFC §11.
+
+Example:
+
+```yaml
+egress:
+  rules:
+    - { source: "email.*",                         label: local_only }
+    - { source: "mcp.gmail.*",                     label: local_only }
+    - { source: "fs.read",    path: "~/mail/**",   label: local_only }
+    - { source: "sandbox.exec", path: "~/mail/**", label: local_only }
+  default_label: unrestricted
+  unclassified_source_mode: unrestricted
+```
+
+> **Phase status.** As of this phase (1a + 1c), source rules label content at the tool-result boundary and emit `egress.envelope_labeled` causal events. The LLM chokepoint (withholding content from ineligible providers, indication substitution, the canary test) lands in phase 1b (#905).
 
 Example:
 
