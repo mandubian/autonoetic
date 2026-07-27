@@ -536,6 +536,54 @@ impl super::ReductionStrategy for CapsuleStrategy {
             });
         }
 
+        // Egress compression-eligibility gate (RFC §5.7 rule 1): refuse to
+        // summarize a tainted band on a preset that isn't cleared for it.
+        // Compressing local_only history on a remote preset is a leak even with
+        // per-envelope filtering — the whole point of the call is to transmit
+        // that content. On refusal, fall back to Insufficient so the governor
+        // cascade drops/truncates the band instead (an incomplete local context
+        // beats a remote leak).
+        if !ctx.egress_labels.is_empty() {
+            let preset_cfg = resolve_compression_llm_config(
+                cfg,
+                ctx.agent_compression.as_ref(),
+                &self.presets,
+            );
+            let preset_class = preset_cfg
+                .as_ref()
+                .and_then(|c| c.egress_class)
+                .unwrap_or(autonoetic_types::egress::EgressClass::Remote);
+            let elig = crate::runtime::egress_labeler::compression_preset_eligible(
+                &compressible,
+                &ctx.egress_labels,
+                preset_class,
+            );
+            if !elig.is_eligible() {
+                let crate::runtime::egress_labeler::CompressionEligibility::Ineligible {
+                    reason,
+                    leaked_tool_call_ids,
+                } = elig
+                else {
+                    unreachable!("checked is_eligible above")
+                };
+                tracing::warn!(
+                    target: "autonoetic::capsule::egress",
+                    session_id = %ctx.session_id,
+                    turn = ctx.turn_number,
+                    preset_class = ?preset_class,
+                    leaked_count = leaked_tool_call_ids.len(),
+                    "compression eligibility gate refused — falling back to truncation (RFC §5.7)"
+                );
+                tracing::debug!(target: "autonoetic::capsule::egress", reason = %reason);
+                // Emit an egress.boundary_refused causal event (best-effort;
+                // the capsule strategy has no store handle, so we log only —
+                // lifecycle's post-governor path can persist it if wired later).
+                return Ok(ReductionOutcome::Insufficient {
+                    tokens_remaining: ctx.breakdown.total_tokens,
+                });
+            }
+        }
+
         let (mut capsule, reused) =
             seed_capsule(ctx.capsule_state.as_ref(), &ctx.session_id, &ctx.history, ctx.turn_number);
 

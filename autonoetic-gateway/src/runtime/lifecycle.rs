@@ -2276,6 +2276,11 @@ impl AgentExecutor {
                         plan_anchor,
                         self.capsule_state.clone(),
                     );
+                    // Thread the session's egress labels into the governor so
+                    // the capsule strategy's compression-eligibility gate can
+                    // refuse to summarize a local_only-tainted band on a remote
+                    // compression preset (RFC §5.7 rule 1).
+                    ctx.egress_labels = self.egress_labels.clone();
                     let governor = if self.overflow_recovery {
                         tracing::info!(
                             target: "autonoetic::context_governor",

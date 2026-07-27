@@ -137,6 +137,7 @@ async fn test_compression_structural_validation_with_real_llm() {
         &session.id,
         session.turns.len() as u64,
         None,
+        &std::collections::HashMap::new(),
     )
     .await;
 
@@ -216,6 +217,7 @@ async fn test_compression_summary_quality_with_real_llm() {
         &session.id,
         session.turns.len() as u64,
         None,
+        &std::collections::HashMap::new(),
     )
     .await;
 
