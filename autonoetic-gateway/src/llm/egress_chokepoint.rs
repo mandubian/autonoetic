@@ -58,15 +58,16 @@ use crate::llm::{CompletionRequest, CompletionResponse, LlmDriver};
 pub const EGRESS_LABELS_KEY: &str = "__egress_labels";
 
 /// Metadata key: a JSON-serialized [`FilterReport`] the wrapper stashes onto
-/// the (cloned, filtered) request so lifecycle.rs can read it after the call
-/// and emit `egress.envelope_withheld` / `egress.request_filtered` /
-/// `egress.assertion_violation` causal events. Read from the *same* `req`
-/// lifecycle.rs passed in (the wrapper mutates the clone, but lifecycle still
-/// owns a reference to the original — so the report is also returned via the
-/// [`FilterReport::extract`] helper which lifecycle calls on its owned `req`
-/// after the wrapper has run, by which point the clone's metadata has been
-/// merged back). In practice the wrapper writes the report into the request it
-/// forwards, and lifecycle reads it from there.
+/// the cloned, filtered request it forwards to the inner driver. This lets
+/// tests and the [`FilterReport::extract`] helper observe what the wrapper did
+/// to a request. **Note:** lifecycle.rs does NOT read the report from the
+/// forwarded request — it cannot, since `complete(&CompletionRequest)` is
+/// by-reference and the wrapper's filtered clone is internal. Instead,
+/// lifecycle.rs re-derives the report from the original request via
+/// [`compute_filter_report`] after the call returns, and emits the
+/// `egress.envelope_withheld` / `egress.request_filtered` /
+/// `egress.assertion_violation` causal events from that. The two reports agree
+/// because filtering is a pure function of (request × labels × sink).
 pub const EGRESS_FILTER_REPORT_KEY: &str = "__egress_filter_report";
 
 /// The number of recent messages to bound the verbatim-echo assertion to
@@ -171,20 +172,33 @@ impl EgressChokepointDriver {
         }
     }
 
-    /// Read the label map from a request's metadata. Returns an empty map when
-    /// absent (unconfigured deployment).
-    fn read_label_map(req: &CompletionRequest) -> HashMap<String, EgressLabel> {
+    /// Read the label map from a request's metadata.
+    ///
+    /// - `Ok(map)` when the key is present and parses (the map may be empty).
+    /// - `Ok(None)` when the key is **absent** — an unconfigured deployment or
+    ///   an auxiliary LLM call (capsule/digest) that carries no labels. The
+    ///   wrapper's fast path fires; no filtering, no fail.
+    /// - `Err` when the key is **present but malformed**. This is fail-closed:
+    ///   a corrupt label map on a security boundary is treated as a bug or an
+    ///   attack, not silently bypassed (RFC §2.2). The caller aborts the call.
+    fn read_label_map(
+        req: &CompletionRequest,
+    ) -> anyhow::Result<Option<HashMap<String, EgressLabel>>> {
         let Some(meta) = req.metadata.as_ref() else {
-            return HashMap::new();
+            return Ok(None);
         };
         let Some(val) = meta.get(EGRESS_LABELS_KEY) else {
-            return HashMap::new();
+            return Ok(None);
         };
         // The map serializes as a JSON object { tool_call_id: [sinks...] }.
-        match serde_json::from_value::<HashMap<String, EgressLabel>>(val.clone()) {
-            Ok(m) => m,
-            Err(_) => HashMap::new(),
-        }
+        let map = serde_json::from_value::<HashMap<String, EgressLabel>>(val.clone())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "egress label map (__egress_labels) is present but malformed: {e} — \
+                     aborting completion (fail-closed)"
+                )
+            })?;
+        Ok(Some(map))
     }
 
     /// Core filter: given a request + label map + target sink, produce a
@@ -216,6 +230,21 @@ impl EgressChokepointDriver {
         // tool_call_id → count, for grouping indications by tool (RFC §3.3
         // supports "2× email.read results"). Phase-1b slice keeps one
         // indication per envelope (per-issue #905 open question 5).
+        //
+        // Build a tool_call_id → tool_name index from assistant messages'
+        // tool_calls, so the indication can name the tool (RFC §3.3) without
+        // reading any payload content — the (id, name) pair is metadata.
+        // Collected into owned strings so the immutable borrow of
+        // `filtered.messages` ends before the mutable filter pass below.
+        let tool_names: std::collections::HashMap<String, String> = filtered
+            .messages
+            .iter()
+            .flat_map(|m| {
+                m.tool_calls
+                    .iter()
+                    .map(|tc| (tc.id.clone(), tc.name.clone()))
+            })
+            .collect();
         for (idx, msg) in filtered.messages.iter_mut().enumerate() {
             if msg.role != crate::llm::Role::Tool {
                 continue;
@@ -233,8 +262,11 @@ impl EgressChokepointDriver {
                 continue;
             }
             // Withhold: replace content with an indication built from metadata.
+            // The tool name is derived from the matching assistant tool_call —
+            // metadata only, never the payload.
+            let tool_name = tool_names.get(tc_id).map(|s| s.as_str());
             let original = std::mem::take(&mut msg.content);
-            let indication = Indication::generate(None, 1, label, self.verbosity);
+            let indication = Indication::generate(tool_name, 1, label, self.verbosity);
             msg.content = indication.text.clone();
             report.withheld.push(WithheldEntry {
                 tool_call_id: tc_id.clone(),
@@ -290,14 +322,39 @@ impl EgressChokepointDriver {
 #[async_trait]
 impl LlmDriver for EgressChokepointDriver {
     async fn complete(&self, request: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
-        let labels = Self::read_label_map(request);
-        if labels.is_empty() {
-            // Zero-cost fast path for unconfigured deployments: no clone, no
-            // filter, no report. This is the common case (no operator source
-            // rules + default unrestricted).
-            return self.inner.complete(request).await;
+        // Fail closed on a malformed label map (RFC §2.2): a corrupt map on a
+        // security boundary is a bug or an attack, not silently bypassed.
+        let labels = match Self::read_label_map(request)? {
+            None => {
+                // No label map attached → unconfigured deployment or auxiliary
+                // LLM call. Zero-cost pass-through (no clone, no filter).
+                return self.inner.complete(request).await;
+            }
+            Some(map) if map.is_empty() => {
+                // Empty map → nothing to filter. Pass through.
+                return self.inner.complete(request).await;
+            }
+            Some(map) => map,
+        };
+        let (filtered, report) = self.filter_request(request, &labels);
+        // Fail closed on an outbound-assertion violation (RFC §5.2.3): a
+        // withheld payload appearing verbatim in a non-withheld message is a
+        // bug or an echo-exfil attempt — never send the request to the
+        // provider. The violation is already recorded in the report; lifecycle
+        // re-derives the report from the original request (via
+        // `compute_filter_report`) to emit the causal event even on this abort.
+        if report.has_violations() {
+            tracing::error!(
+                target: "egress_chokepoint",
+                sink = %report.sink,
+                violation_count = report.violations.len(),
+                "egress assertion violation — aborting completion (fail-closed)"
+            );
+            return Err(anyhow::anyhow!(
+                "egress assertion violation: withheld payload appeared verbatim in a \
+                 non-withheld message — completion aborted (fail-closed, RFC §5.2.3)"
+            ));
         }
-        let (filtered, _report) = self.filter_request(request, &labels);
         self.inner.complete(&filtered).await
     }
 }
@@ -315,13 +372,29 @@ pub fn compute_filter_report(
     req: &CompletionRequest,
     sink: Sink,
 ) -> FilterReport {
-    let labels = EgressChokepointDriver::read_label_map(req);
-    if labels.is_empty() {
-        return FilterReport {
-            sink: sink_name(sink),
-            ..Default::default()
-        };
-    }
+    // Best-effort audit: a malformed map here is logged but not fatal (the
+    // completion already aborted in the driver if it was malformed; this is the
+    // post-hoc report path). Absent or empty → empty report.
+    let labels = match EgressChokepointDriver::read_label_map(req) {
+        Ok(Some(m)) if !m.is_empty() => m,
+        Ok(_) => {
+            return FilterReport {
+                sink: sink_name(sink),
+                ..Default::default()
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "egress_chokepoint",
+                error = %e,
+                "malformed label map in compute_filter_report — emitting empty report"
+            );
+            return FilterReport {
+                sink: sink_name(sink),
+                ..Default::default()
+            };
+        }
+    };
     // Reuse the driver's pure filter logic with descriptive verbosity (the
     // report's indication strings are informational; verbosity is a
     // session-policy knob that lives on the session, not the report helper).
@@ -601,7 +674,9 @@ mod tests {
         let req = req_with_labels(messages, labels);
 
         // Run the filter directly to inspect the report.
-        let labels_read = EgressChokepointDriver::read_label_map(&req);
+        let labels_read = EgressChokepointDriver::read_label_map(&req)
+            .expect("labels parse")
+            .unwrap_or_default();
         let (_filtered, report) = wrapper.filter_request(&req, &labels_read);
         assert!(report.has_violations(), "echo should trigger a violation");
         assert_eq!(report.violations[0].tool_call_id, "tc_secret");
@@ -620,7 +695,9 @@ mod tests {
             user_msg("an unrelated user message"),
         ];
         let req = req_with_labels(messages, labels);
-        let labels_read = EgressChokepointDriver::read_label_map(&req);
+        let labels_read = EgressChokepointDriver::read_label_map(&req)
+            .expect("labels parse")
+            .unwrap_or_default();
         let (_filtered, report) = wrapper.filter_request(&req, &labels_read);
         assert!(!report.has_violations());
         assert!(report.withheld_any());
@@ -644,5 +721,118 @@ mod tests {
         assert_eq!(report.withheld[0].tool_call_id, "tc_secret");
         assert_eq!(report.withheld[0].label, EgressLabel::local_only());
         assert!(!report.withheld[0].indication.contains(CANARY));
+    }
+
+    // ── Fail-closed (RFC §2.2 / §5.2.3) ───────────────────────────────────
+
+    /// A malformed label map (present but unparseable) must fail closed — the
+    /// completion aborts rather than silently bypassing the chokepoint.
+    #[tokio::test]
+    async fn malformed_label_map_fails_closed() {
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut meta = HashMap::new();
+        // Malformed: not a valid label map (a string, not an object).
+        meta.insert(
+            EGRESS_LABELS_KEY.to_string(),
+            serde_json::Value::String("not-a-map".to_string()),
+        );
+        let req = CompletionRequest {
+            model: "test".into(),
+            messages: vec![tool_msg("tc_1", CANARY)],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: Some(meta),
+            thinking: None,
+            prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
+        };
+
+        let result = wrapper.complete(&req).await;
+        assert!(
+            result.is_err(),
+            "malformed label map must fail closed, not bypass"
+        );
+        // And the inner driver was never called — no request forwarded.
+        assert!(
+            inner.captures().is_empty(),
+            "no request should be forwarded on malformed-map abort"
+        );
+    }
+
+    /// An outbound-assertion violation (verbatim echo of a withheld payload in
+    /// a non-withheld message) must abort the completion — the request is
+    /// never sent to the provider. (RFC §5.2.3 fail-closed.)
+    #[tokio::test]
+    async fn assertion_violation_aborts_completion() {
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        // The user message echoes the canary verbatim — the violation.
+        let messages = vec![
+            tool_msg("tc_secret", CANARY),
+            user_msg(&format!("the data was: {CANARY}")),
+        ];
+        let req = req_with_labels(messages, labels);
+
+        let result = wrapper.complete(&req).await;
+        assert!(
+            result.is_err(),
+            "assertion violation must abort the completion (fail-closed)"
+        );
+        assert!(
+            inner.captures().is_empty(),
+            "no request should be forwarded on assertion violation"
+        );
+    }
+
+    // ── Tool-name derivation (RFC §3.3, no content read) ─────────────────
+
+    /// The indication names the tool, derived from the matching assistant
+    /// tool_call's `name` by `tool_call_id` — metadata only, never the payload.
+    #[tokio::test]
+    async fn indication_names_tool_from_assistant_tool_call() {
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        labels.insert("tc_email".to_string(), EgressLabel::local_only());
+        // An assistant message carrying the tool_call (id, name) pair, followed
+        // by the tool result. The wrapper joins on tool_call_id to find "email.read".
+        let messages = vec![
+            user_msg("read my emails"),
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: vec![crate::llm::ToolCall {
+                    id: "tc_email".to_string(),
+                    name: "email.read".to_string(),
+                    arguments: "{}".to_string(),
+                }],
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            tool_msg("tc_email", CANARY),
+        ];
+        let req = req_with_labels(messages, labels);
+
+        wrapper.complete(&req).await.unwrap();
+        let body: String = inner.captures()[0]
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(
+            !body.contains(CANARY),
+            "canary must not leak"
+        );
+        // The indication names the tool — better model coherence (RFC §3.3).
+        assert!(
+            body.contains("email.read"),
+            "indication should name the tool 'email.read': {body}"
+        );
+        assert!(body.contains("local_only"));
     }
 }

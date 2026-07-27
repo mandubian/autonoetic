@@ -309,6 +309,10 @@ impl Indication {
         label: &EgressLabel,
         verbosity: IndicationVerbosity,
     ) -> Self {
+        // Clamp: an indication always describes at least one withheld result.
+        // A caller passing 0 would otherwise render the misleading "1× … result"
+        // via the `_` arm below; clamp to 1 so the count is always truthful.
+        let count = count.max(1);
         let terse = Some("[content withheld]".to_string());
         let text = match verbosity {
             IndicationVerbosity::Terse => "[content withheld]".to_string(),
@@ -811,6 +815,22 @@ mod tests {
         // Custom: sink-count summary, no enumeration.
         let custom = EgressLabel::from_sinks([Sink::LocalModel, Sink::UserReply]);
         assert_eq!(label_display_name(&custom), "restricted(2 sinks)");
+    }
+
+    #[test]
+    fn indication_clamps_zero_count_to_one() {
+        // count=0 would previously render as the misleading "1× … result" via
+        // the fallback arm; the clamp makes it truthful.
+        let ind = Indication::generate(
+            Some("email.read"),
+            0,
+            &EgressLabel::local_only(),
+            IndicationVerbosity::Descriptive,
+        );
+        assert_eq!(
+            ind.text,
+            "[withheld: 1× email.read result — policy local_only]"
+        );
     }
 
     // ── Config shape ──────────────────────────────────────────────────────

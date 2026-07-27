@@ -2716,7 +2716,7 @@ impl AgentExecutor {
 
             // --- Pre-process hook: transform input before LLM call ---
             let pre_hook = self.middleware.pre_process.as_ref();
-            let req = if let Some(pre_hook) = pre_hook {
+            let mut req = if let Some(pre_hook) = pre_hook {
                 self.apply_middleware_pre(
                     req,
                     pre_hook,
@@ -2728,6 +2728,26 @@ impl AgentExecutor {
             } else {
                 req
             };
+            // Egress security boundary (RFC §5.2): the pre-hook can replace the
+            // entire CompletionRequest, which would drop the egress-label
+            // metadata and let labeled content reach a disallowed sink. Re-
+            // attach the session's label map whenever it's missing, so hooks
+            // cannot accidentally or intentionally strip the chokepoint. The
+            // label map is the gateway's, not the hook's, to manage.
+            if !self.egress_labels.is_empty() {
+                let needs_reattach = req
+                    .metadata
+                    .as_ref()
+                    .map(|m| !m.contains_key(crate::llm::egress_chokepoint::EGRESS_LABELS_KEY))
+                    .unwrap_or(true);
+                if needs_reattach {
+                    let meta = req.metadata.get_or_insert_with(std::collections::HashMap::new);
+                    meta.insert(
+                        crate::llm::egress_chokepoint::EGRESS_LABELS_KEY.to_string(),
+                        serde_json::to_value(&self.egress_labels).unwrap_or_default(),
+                    );
+                }
+            }
 
             // --- Skip LLM if signaled by pre-process hook ---
             // The hook can return a response in metadata.assistant_reply and set metadata.skip_llm: true
