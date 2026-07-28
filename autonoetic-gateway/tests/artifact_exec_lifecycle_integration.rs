@@ -301,9 +301,10 @@ fn test_artifact_exec_tool_registered_and_gated() {
             patterns: vec!["*".to_string()],
             commands: vec![],
         }],
-        ..manifest_with_artifact_execution("executor.shell-only"),
-        egress: None,
-        };
+        // `..base` must be the last field; the base builder already supplies
+        // `egress`, so no explicit field is needed here (repairs #918 fallout).
+        ..manifest_with_artifact_execution("executor.shell-only")
+    };
     let shell_names: Vec<String> = registry
         .available_definitions(&shell_only)
         .into_iter()
