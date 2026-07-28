@@ -2502,7 +2502,7 @@ impl GatewayExecutionService {
                         // synthetic seed message below). Push it only if it still
                         // carries content or a completed call — an assistant
                         // message with neither is a degenerate turn.
-                        if let Some(ref am) = checkpoint.assistant_message {
+                        if let Some(am) = checkpoint.assistant_message.as_deref() {
                             let completed_ids: std::collections::HashSet<&str> = pts
                                 .completed_tool_results
                                 .iter()
@@ -2537,7 +2537,7 @@ impl GatewayExecutionService {
                     } else {
                         // Legacy / precomputed-result path: replay the assistant
                         // message + any results and nudge the LLM to re-issue.
-                        if let Some(ref am) = checkpoint.assistant_message {
+                        if let Some(am) = checkpoint.assistant_message.as_deref() {
                             let mut call_ids_with_results: std::collections::HashSet<&str> =
                                 std::collections::HashSet::new();
                             if let Some(ref pts) = checkpoint.pending_tool_state {
@@ -2825,7 +2825,7 @@ impl GatewayExecutionService {
                 crate::runtime::checkpoint::YieldReason::WaitingForChild { .. }
             ) {
                 if let Some(pts) = checkpoint.pending_tool_state.as_ref() {
-                    if let Some(ref am) = checkpoint.assistant_message {
+                    if let Some(am) = checkpoint.assistant_message.as_deref() {
                         let completed_ids: HashSet<&str> = pts
                             .completed_tool_results
                             .iter()

@@ -240,8 +240,16 @@ pub struct SessionCheckpoint {
     // --- Approval continuation fields (for TurnContinuation unification) ---
     /// The assistant message containing the tool call(s) that triggered approval.
     /// Re-appended to history on resume before the tool result messages.
+    ///
+    /// **Boxed** to keep `SessionCheckpoint` small on the stack: it is embedded
+    /// by value in the JSON-RPC dispatch/execute futures, whose poll frame is
+    /// razor-thin against libtest's 2 MiB test-thread limit (#884/#916). `Message`
+    /// is the largest inline field and is set only on the approval-continuation
+    /// path, so boxing it (8 bytes vs ~130) buys headroom for other fields (e.g.
+    /// the egress label sidecar) without a wire-format change — `Option<Box<T>>`
+    /// serializes identically to `Option<T>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_message: Option<Message>,
+    pub assistant_message: Option<Box<Message>>,
 
     /// The `ScheduledAction` pending approval — stored for TOCTOU verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1021,7 +1029,11 @@ impl SessionFork {
         // checkpoint, so the next message to the forked session resumes cleanly
         // with the full branch-point context (plus the branch message, if any).
         let forked_checkpoint = SessionCheckpoint {
-            egress_labels: Default::default(),
+            // NOTE: do *not* set `egress_labels` here — it must be inherited
+            // from `..checkpoint.clone()` below so the fork carries the source
+            // session's label sidecar (RFC data-envelopes §3.4). Overriding it
+            // to `Default::default()` would silently let the forked session
+            // ship previously-withheld content to a remote provider.
             history: history.clone(),
             session_id: new_session_id.clone(),
             yield_reason: YieldReason::Hibernation,
@@ -1127,9 +1139,10 @@ mod tests {
         assert_eq!(loaded.yield_reason, YieldReason::Hibernation);
     }
 
-    /// Minimal checkpoint for focused field-preservation tests. A new field on
-    /// `SessionCheckpoint` should touch this one helper, not every test literal
-    /// (cf. the manifest-churn lesson, #923).
+    /// Minimal checkpoint for the focused field-preservation tests below, so
+    /// they don't each repeat the full literal. (The module still has other
+    /// standalone `SessionCheckpoint` literals; consolidating them all behind a
+    /// shared builder is tracked in #923 — this helper is just the start.)
     fn sample_checkpoint() -> SessionCheckpoint {
         SessionCheckpoint {
             egress_labels: Default::default(),
@@ -1216,16 +1229,52 @@ mod tests {
         // (not a hard error). Verify both the omission and the default.
         let cp = sample_checkpoint();
         assert!(cp.egress_labels.is_empty());
-        let json = serde_json::to_string(&cp).expect("serialize");
+        // Assert key absence on the parsed object, not via substring search —
+        // "egress_labels" could otherwise appear inside serialized message text.
+        let value: serde_json::Value = serde_json::to_value(&cp).expect("serialize");
         assert!(
-            !json.contains("egress_labels"),
+            value.get("egress_labels").is_none(),
             "empty sidecar must be omitted from the wire form (skip_serializing_if)"
         );
-        let back: SessionCheckpoint = serde_json::from_str(&json).expect("deserialize");
+        let back: SessionCheckpoint = serde_json::from_value(value).expect("deserialize");
         assert!(
             back.egress_labels.is_empty(),
             "a checkpoint lacking the field must default to an empty sidecar"
         );
+    }
+
+    #[test]
+    fn fork_from_checkpoint_inherits_egress_labels() {
+        // Regression guard: `fork_from_checkpoint` must inherit the source
+        // session's label sidecar (via `..checkpoint.clone()`), not reset it.
+        // A fork that drops labels would let the branched session ship
+        // previously-withheld content to a remote provider (RFC §3.4).
+        use autonoetic_types::egress::{EgressLabel, Sink};
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+
+        let mut egress_labels = std::collections::HashMap::new();
+        egress_labels.insert("tc_email_read_1".to_string(), EgressLabel::local_only());
+        let source = SessionCheckpoint {
+            egress_labels: egress_labels.clone(),
+            ..sample_checkpoint()
+        };
+
+        let fork = SessionFork::fork_from_checkpoint(&config, &source, Some("forked-sess"), None)
+            .expect("fork should succeed");
+
+        let forked_cp = load_checkpoint(&config, &fork.new_session_id, &source.turn_id)
+            .expect("should load forked checkpoint")
+            .expect("forked checkpoint must exist");
+        assert_eq!(
+            forked_cp.egress_labels, egress_labels,
+            "fork must inherit the source session's egress label sidecar"
+        );
+        assert!(!forked_cp
+            .egress_labels
+            .get("tc_email_read_1")
+            .expect("labeled result must survive the fork")
+            .allows(Sink::RemoteModel));
     }
 
     #[test]

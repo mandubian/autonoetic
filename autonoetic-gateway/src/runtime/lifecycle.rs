@@ -3917,7 +3917,7 @@ impl AgentExecutor {
                     },
                     Some(pending_tool_state),
                 );
-                cp.assistant_message = Some(assistant_msg);
+                cp.assistant_message = Some(Box::new(assistant_msg));
                 cp.pending_action = pending_action;
                 cp.suspended_at = Some(chrono::Utc::now().to_rfc3339());
 
@@ -4126,7 +4126,7 @@ impl AgentExecutor {
                     yield_reason,
                     Some(pending_tool_state),
                 );
-                cp.assistant_message = Some(assistant_msg);
+                cp.assistant_message = Some(Box::new(assistant_msg));
 
                 if let Some(config) = self.config.as_ref() {
                     if let Err(e) = save_checkpoint(config, &cp) {
