@@ -73,6 +73,7 @@ const CANARY: &str = "CANARY-SECRET-MARKER-9b3f7c";
 
 fn tool_msg(id: &str, content: &str) -> Message {
     Message {
+        id: None,
         role: Role::Tool,
         content: content.to_string(),
         tool_calls: vec![],
@@ -84,6 +85,7 @@ fn tool_msg(id: &str, content: &str) -> Message {
 
 fn user_msg(content: &str) -> Message {
     Message {
+        id: None,
         role: Role::User,
         content: content.to_string(),
         tool_calls: vec![],
@@ -95,6 +97,7 @@ fn user_msg(content: &str) -> Message {
 
 fn assistant_msg(content: &str) -> Message {
     Message {
+        id: None,
         role: Role::Assistant,
         content: content.to_string(),
         tool_calls: vec![],

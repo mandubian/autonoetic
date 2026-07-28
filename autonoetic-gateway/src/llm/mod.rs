@@ -460,6 +460,16 @@ pub struct ToolResult {
 /// A single message in a conversation.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
+    /// Stable per-message id (`msg_<id>`), minted at history-commit time
+    /// (RFC data-envelopes §3.4). It is the join key between an assistant /
+    /// user / synthesized message and its egress label in the session sidecar
+    /// (tool-result messages join by `tool_call_id` instead). `None` for
+    /// transient / uncommitted messages and for history predating this field;
+    /// never sent to a provider (drivers translate `Message` to their own wire
+    /// shape and ignore it), and `#[serde(default, skip_if_none)]` so it is
+    /// omitted from checkpoints when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub role: Role,
     pub content: String,
     /// Optional tool calls from an assistant turn.
@@ -483,6 +493,7 @@ impl Message {
     /// Convenience: plain text user message.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
+            id: None,
             role: Role::User,
             content: content.into(),
             tool_calls: vec![],
@@ -495,6 +506,7 @@ impl Message {
     /// Convenience: system message.
     pub fn system(content: impl Into<String>) -> Self {
         Self {
+            id: None,
             role: Role::System,
             content: content.into(),
             tool_calls: vec![],
@@ -507,6 +519,7 @@ impl Message {
     /// Convenience: assistant text message.
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
+            id: None,
             role: Role::Assistant,
             content: content.into(),
             tool_calls: vec![],
@@ -524,6 +537,7 @@ impl Message {
     ) -> Self {
         let _ = tool_name; // stored via ToolResult struct; kept in signature for API clarity
         Self {
+            id: None,
             role: Role::Tool,
             content: content.into(),
             tool_calls: vec![],

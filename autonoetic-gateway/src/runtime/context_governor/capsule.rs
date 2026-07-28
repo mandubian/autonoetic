@@ -1049,6 +1049,7 @@ mod tests {
         use crate::llm::Role;
 
         let history = vec![crate::llm::Message {
+            id: None,
             role: Role::Assistant,
             content: "Some text\n[COMPRESSED CONTEXT]\nprior info here\n[/COMPRESSED CONTEXT]"
                 .into(),
@@ -1069,6 +1070,7 @@ mod tests {
     #[test]
     fn bootstrap_capsule_from_compressed_markers_absent() {
         let history = vec![crate::llm::Message {
+            id: None,
             role: crate::llm::Role::Assistant,
             content: "Just normal text".into(),
             tool_calls: vec![],
@@ -1106,6 +1108,7 @@ mod tests {
         // Legacy path: no prior capsule, but history carries a compressed
         // marker — recover the prior context from it.
         let history = vec![crate::llm::Message {
+            id: None,
             role: crate::llm::Role::System,
             content: "[COMPRESSED CONTEXT] recovered objective".into(),
             tool_calls: vec![],
@@ -1121,6 +1124,7 @@ mod tests {
     #[test]
     fn seed_capsule_fresh_shell_when_no_prior_no_marker() {
         let history = vec![crate::llm::Message {
+            id: None,
             role: crate::llm::Role::User,
             content: "hello".into(),
             tool_calls: vec![],
@@ -1153,6 +1157,7 @@ mod tests {
     #[test]
     fn delta_prompt_without_plan_omits_anchor_block() {
         let messages = vec![crate::llm::Message {
+            id: None,
             role: crate::llm::Role::User,
             content: "Discuss the auth flow".into(),
             tool_calls: vec![],
@@ -1169,6 +1174,7 @@ mod tests {
     #[test]
     fn delta_prompt_with_plan_includes_anchor_block() {
         let messages = vec![crate::llm::Message {
+            id: None,
             role: crate::llm::Role::User,
             content: "Discuss the auth flow".into(),
             tool_calls: vec![],

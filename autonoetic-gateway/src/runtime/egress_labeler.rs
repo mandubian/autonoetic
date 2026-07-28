@@ -892,23 +892,24 @@ pub fn compression_preset_eligible(
         return CompressionEligibility::Eligible;
     }
     let preset_sink = preset_class.as_sink();
-    // Intersect the labels of every labeled tool result in the band.
+    // Intersect the labels of every labeled message in the band — tool results
+    // (joined by `tool_call_id`) AND non-tool messages such as an
+    // LLM-response-labeled local summary (joined by `msg_<id>`, RFC §4.5). A
+    // labeled summary must gate the compression call exactly like a labeled
+    // tool result, or a mixed band would be summarized on an ineligible preset.
     let mut band_taint = EgressLabel::unrestricted();
     let mut leaked: Vec<String> = Vec::new();
     for msg in band {
-        if msg.role != crate::llm::Role::Tool {
-            continue;
-        }
-        let Some(tc_id) = msg.tool_call_id.as_ref() else {
+        let Some(key) = message_egress_key(msg) else {
             continue;
         };
-        let Some(label) = labels.get(tc_id) else {
+        let Some(label) = labels.get(key) else {
             // No label entry → unrestricted default → doesn't taint the band.
             continue;
         };
         if !label.allows(preset_sink) {
-            // This tool result's label excludes the preset's sink.
-            leaked.push(tc_id.clone());
+            // This message's label excludes the preset's sink.
+            leaked.push(key.to_string());
         }
         band_taint = band_taint.restrict(label);
     }
@@ -954,6 +955,21 @@ fn sink_str(s: Sink) -> &'static str {
 // in that intersection. Routing (and the failover chain) then pick among
 // eligible candidates only. The helpers here are the pure core; the lifecycle
 // wires them into the completion path.
+
+/// The egress-sidecar join key for a message (RFC §3.4): tool results join by
+/// their `tool_call_id`; every other message (assistant / user / synthesized)
+/// joins by its stable `msg_<id>`. `None` for a message carrying neither
+/// (transient or predating message ids) — such a message is treated as
+/// unlabeled. This is the single definition the chokepoint, compression
+/// eligibility, and per-band compression all key off, so they never disagree
+/// about which envelope a message belongs to.
+pub fn message_egress_key(msg: &crate::llm::Message) -> Option<&str> {
+    if msg.role == crate::llm::Role::Tool {
+        msg.tool_call_id.as_deref()
+    } else {
+        msg.id.as_deref()
+    }
+}
 
 /// The [`Sink`] a preset's completions land in (RFC §5.1): its `egress_class`
 /// mapped to a sink, defaulting to [`Sink::RemoteModel`] when unclassified
@@ -1430,6 +1446,7 @@ mod tests {
 
     fn tool_msg(id: &str, content: &str) -> crate::llm::Message {
         crate::llm::Message {
+            id: None,
             role: crate::llm::Role::Tool,
             content: content.to_string(),
             tool_calls: vec![],
@@ -1441,6 +1458,7 @@ mod tests {
 
     fn user_msg(content: &str) -> crate::llm::Message {
         crate::llm::Message {
+            id: None,
             role: crate::llm::Role::User,
             content: content.to_string(),
             tool_calls: vec![],
@@ -1965,5 +1983,45 @@ mod tests {
         );
         assert!(!plan.primary_eligible);
         assert_eq!(plan.reroute_to.as_ref().map(|c| c.name.as_str()), Some("ollama"));
+    }
+
+    // ── message_egress_key (RFC §3.4 join key) ────────────────────────────
+
+    #[test]
+    fn message_egress_key_tool_uses_tool_call_id_others_use_id() {
+        // Tool results join by tool_call_id.
+        let mut tool = tool_msg("tc_1", "x");
+        tool.id = Some("msg_ignored".to_string());
+        assert_eq!(message_egress_key(&tool), Some("tc_1"));
+
+        // Non-tool messages join by the stable msg id.
+        let mut asst = crate::llm::Message::assistant("summary");
+        asst.id = Some("msg_summary".to_string());
+        assert_eq!(message_egress_key(&asst), Some("msg_summary"));
+
+        // A non-tool message with no id has no key (treated as unlabeled).
+        let user = crate::llm::Message::user("hi");
+        assert_eq!(message_egress_key(&user), None);
+
+        // A tool message with no tool_call_id also has no key.
+        let mut orphan_tool = tool_msg("tc_x", "y");
+        orphan_tool.tool_call_id = None;
+        assert_eq!(message_egress_key(&orphan_tool), None);
+    }
+
+    #[test]
+    fn compression_band_tainted_by_labeled_assistant_message() {
+        // §5.7 + §4.5: a labeled assistant summary (joined by msg id) taints the
+        // compression band exactly like a labeled tool result — so a mixed band
+        // is ineligible on a remote preset.
+        let mut summary = crate::llm::Message::assistant("the local summary");
+        summary.id = Some("msg_summary".to_string());
+        let band = vec![crate::llm::Message::user("q"), summary];
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("msg_summary".to_string(), EgressLabel::local_only());
+        let elig = compression_preset_eligible(&band, &labels, EgressClass::Remote);
+        assert!(!elig.is_eligible(), "local_only summary must block remote compression");
+        let elig_local = compression_preset_eligible(&band, &labels, EgressClass::Local);
+        assert!(elig_local.is_eligible(), "local preset may compress the local_only band");
     }
 }
