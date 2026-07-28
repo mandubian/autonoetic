@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 73;
+const SCHEMA_VERSION_LATEST: i64 = 74;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -558,6 +558,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_constitution_pin_v71(conn)?;
     apply_session_residency_v72(conn)?;
     apply_egress_session_policies_v73(conn)?;
+    apply_session_egress_taint_v74(conn)?;
 
     Ok(())
 }
@@ -601,6 +602,38 @@ fn apply_egress_session_policies_v73(conn: &mut Connection) -> Result<()> {
             "egress_session_policies",
             chrono::Utc::now().to_rfc3339()
         ],
+    )?;
+    Ok(())
+}
+
+/// v74 — cross-agent egress taint (RFC data-envelopes §5.5). Records a
+/// session's accumulated taint (intersection of everything it touched) so that
+/// when its return value or an `agent_message` crosses to another session, the
+/// recipient can label the transferred content and withhold it from a sink the
+/// label excludes — closing the `LocalAgent` hole. Keyed by session id; written
+/// at session finalize, read when a sibling/parent surfaces the content.
+fn apply_session_egress_taint_v74(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 74 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_egress_taint (
+            session_id TEXT PRIMARY KEY,
+            -- Serialized autonoetic_types::egress::EgressLabel (sink-set JSON).
+            label_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![74_i64, "session_egress_taint", chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
 }

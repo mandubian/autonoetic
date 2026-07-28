@@ -41,6 +41,7 @@ pub mod session_envelopes;
 pub mod session_inference;
 mod session_outcomes;
 mod session_spawn_lineage;
+mod session_taint;
 mod session_timeline;
 pub mod singleton_index;
 mod user_interactions;
@@ -432,6 +433,29 @@ impl GatewayStore {
     pub fn delete_egress_session_policy(&self, root_session_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         egress_policy::delete_policy(&conn, root_session_id)
+    }
+
+    // ---- Cross-agent egress taint (RFC data-envelopes §5.5) ----
+
+    /// Record a session's accumulated egress taint at finalize, so a sibling or
+    /// parent that later surfaces its return value / message labels the
+    /// transferred content (closes the `LocalAgent` hole).
+    pub fn set_session_egress_taint(
+        &self,
+        session_id: &str,
+        label: &autonoetic_types::egress::EgressLabel,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        session_taint::set_taint(&conn, session_id, label)
+    }
+
+    /// Read a session's accumulated egress taint (`None` ⇒ unrestricted).
+    pub fn get_session_egress_taint(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<autonoetic_types::egress::EgressLabel>> {
+        let conn = self.conn.lock().unwrap();
+        session_taint::get_taint(&conn, session_id)
     }
 
     // ---- Session residency (parked, addressable sessions) ----
