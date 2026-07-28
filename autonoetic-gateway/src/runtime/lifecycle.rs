@@ -147,6 +147,15 @@ pub struct AgentExecutor {
     /// sink. Empty for unconfigured deployments — the chokepoint is then a
     /// zero-cost pass-through.
     pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+    /// Taint of the tool batch produced since the last completion (RFC §5.3):
+    /// the intersection of the labels of the results the previous turn added.
+    /// Drives taint-following routing for the *next* completion — a tainted
+    /// batch makes only eligible presets candidates. `unrestricted` when the
+    /// previous turn added no labeled results (the common, clean case), which
+    /// is the fast no-op path. Transient per-turn state, not persisted: on
+    /// resume a session starts with an unrestricted batch and the accumulated
+    /// `egress_labels` still drive chokepoint withholding for older content.
+    pub pending_batch_taint: autonoetic_types::egress::EgressLabel,
     /// When set, passed to tool execution for config-dependent behavior.
     pub config: Option<Arc<GatewayConfig>>,
     /// Optional per-session LLM/tool/token/wall-clock budgets (shared `Arc` across spawns).
@@ -372,6 +381,27 @@ pub(crate) fn detect_constitution_drift(
     Some(ConstitutionDriftNotice { payload, notice_text })
 }
 
+/// Outcome of taint-following routing for one completion (RFC §5.3), produced
+/// by [`AgentExecutor::plan_egress_routing`].
+struct EgressRoutingSelection {
+    /// Driver to run the primary completion on. `None` keeps `self.llm` (the
+    /// primary is already eligible for the batch); `Some` is a driver rebuilt
+    /// for the eligible preset the batch forced a switch to.
+    primary_driver: Option<std::sync::Arc<dyn LlmDriver>>,
+    /// The egress class actually in force for this completion (the rerouted
+    /// preset's, or the primary's) — the source of truth for the chokepoint
+    /// audit sink.
+    effective_class: Option<autonoetic_types::egress::EgressClass>,
+    /// The model name actually running this completion after a reroute (`None`
+    /// keeps the primary's `routed_model`), so cost/tracing attribute it right.
+    effective_model: Option<String>,
+    /// The failover chain filtered to presets eligible for the batch.
+    fallback_chain: Vec<(String, String, String)>,
+    /// `Some(reason)` when a tainted batch has no eligible provider — the
+    /// caller refuses the turn with `egress_no_eligible_provider` (RFC §5.3).
+    refuse_reason: Option<String>,
+}
+
 impl AgentExecutor {
     pub fn new(
         manifest: AgentManifest,
@@ -399,6 +429,7 @@ impl AgentExecutor {
             session_started: false,
             turn_counter: 0,
             egress_labels: std::collections::HashMap::new(),
+            pending_batch_taint: autonoetic_types::egress::EgressLabel::unrestricted(),
             config: None,
             session_budget: None,
             root_session_budget: None,
@@ -1110,6 +1141,176 @@ impl AgentExecutor {
         self.turn_counter = 0;
         self.ri_0_6_previous_snapshot = None;
         Ok(())
+    }
+
+    /// Build an `LlmDriver` for a named preset from `llm_presets` (RFC §5.3
+    /// taint-following reroute). Mirrors the fallback loop's per-preset driver
+    /// build. Returns `None` when the preset is unknown or lacks a
+    /// provider/model (can't be built) — the caller then treats the batch as
+    /// having no eligible provider and refuses.
+    fn build_driver_for_preset(
+        &self,
+        preset_name: &str,
+    ) -> Option<std::sync::Arc<dyn LlmDriver>> {
+        let cfg = self.config.as_ref()?;
+        let preset = cfg.llm_presets.get(preset_name)?;
+        let llm_config = autonoetic_types::agent::LlmConfig {
+            provider: preset.provider.clone()?,
+            model: preset.model.clone()?,
+            temperature: preset.temperature.unwrap_or(0.0),
+            fallback_provider: None,
+            fallback_model: None,
+            chat_only: preset.chat_only.unwrap_or(false),
+            context_window_tokens: preset.context_window_tokens,
+            base_url: preset.base_url.clone(),
+            api_key_env: preset.api_key_env.clone(),
+            routing_preset: Some(preset_name.to_string()),
+            thinking: preset.thinking.clone(),
+            egress_class: preset.egress_class,
+        };
+        crate::llm::build_driver(llm_config, self.http_client.clone()).ok()
+    }
+
+    /// Taint-following routing for one completion (RFC §5.3).
+    ///
+    /// Given the batch taint accumulated since the last completion
+    /// batch taint (`batch`), pick the driver this completion must run on and
+    /// filter the failover chain to eligible presets. Emits
+    /// `egress.provider_selected` (RFC §9.1). Kept `#[inline(never)]` so its
+    /// locals stay out of the razor-thin `execute_with_history` poll frame
+    /// (#884/#916).
+    ///
+    /// `routed_preset` is the primary's *preset* identity for the audit event
+    /// (not a model name), so "why did turn N run on this provider?" reads the
+    /// same whether or not a reroute happened. Only called when `batch` is
+    /// restricted; a clean (unrestricted) batch keeps the primary driver and
+    /// the full failover chain with zero cost.
+    #[inline(never)]
+    fn plan_egress_routing(
+        &self,
+        batch: &autonoetic_types::egress::EgressLabel,
+        routed_preset: &str,
+        primary_class: Option<autonoetic_types::egress::EgressClass>,
+        fallback_chain: &[(String, String, String)],
+        session_id: &str,
+        turn_id: &str,
+    ) -> EgressRoutingSelection {
+        use crate::runtime::egress_labeler as el;
+        let presets = self.config.as_ref().map(|c| &c.llm_presets);
+
+        // Candidates are **buildable fixed presets only**: skip routing presets
+        // (no direct provider/model) and presets missing provider/model, so the
+        // reroute pick is always something `build_driver_for_preset` can build.
+        // Otherwise a deterministic pick of an unbuildable preset would refuse
+        // the turn even when another eligible, buildable preset exists.
+        let candidates: Vec<el::PresetCandidate> = presets
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, p)| {
+                        p.routing.is_none() && p.provider.is_some() && p.model.is_some()
+                    })
+                    .map(|(name, p)| el::PresetCandidate {
+                        name: name.clone(),
+                        egress_class: p.egress_class,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let plan = el::plan_taint_following_route(batch, primary_class, &candidates);
+
+        // Filter the failover chain to eligible presets: a tainted turn must
+        // never fail over into an ineligible (e.g. all-indications remote)
+        // context — worse than refusing (RFC §5.3).
+        let mut fallback_skipped: Vec<String> = Vec::new();
+        let filtered_fallback: Vec<(String, String, String)> = fallback_chain
+            .iter()
+            .filter(|(preset, _, _)| {
+                let class = presets.and_then(|m| m.get(preset)).and_then(|p| p.egress_class);
+                let ok = el::preset_batch_eligible(batch, class);
+                if !ok {
+                    fallback_skipped.push(preset.clone());
+                }
+                ok
+            })
+            .cloned()
+            .collect();
+
+        let emit = |chosen: Option<&str>, rerouted: bool| {
+            if let Some(store) = self.gateway_store.as_ref() {
+                el::emit_provider_selected(
+                    store,
+                    session_id,
+                    &self.manifest.agent.id,
+                    Some(turn_id),
+                    &plan,
+                    chosen,
+                    &fallback_skipped,
+                    rerouted,
+                );
+            }
+        };
+
+        // No eligible provider for a tainted batch → refuse with a path forward.
+        if plan.no_eligible_provider() {
+            emit(None, false);
+            return EgressRoutingSelection {
+                primary_driver: None,
+                effective_class: primary_class,
+                effective_model: None,
+                fallback_chain: filtered_fallback,
+                refuse_reason: Some(format!(
+                    "egress_no_eligible_provider: this turn's new data is labeled {} and no \
+                     configured LLM preset is cleared for it. Configure a local preset \
+                     (egress_class: local), declassify the specific envelopes, or abort.",
+                    autonoetic_types::egress::label_display_name(batch)
+                )),
+            };
+        }
+
+        // Reroute the primary onto an eligible preset when it isn't cleared.
+        match plan.reroute_to.clone() {
+            Some(cand) => match self.build_driver_for_preset(&cand.name) {
+                Some(driver) => {
+                    emit(Some(&cand.name), true);
+                    let effective_model = presets
+                        .and_then(|m| m.get(&cand.name))
+                        .and_then(|p| p.model.clone());
+                    EgressRoutingSelection {
+                        primary_driver: Some(driver),
+                        effective_class: cand.egress_class,
+                        effective_model,
+                        fallback_chain: filtered_fallback,
+                        refuse_reason: None,
+                    }
+                }
+                None => {
+                    emit(None, false);
+                    EgressRoutingSelection {
+                        primary_driver: None,
+                        effective_class: primary_class,
+                        effective_model: None,
+                        fallback_chain: filtered_fallback,
+                        refuse_reason: Some(format!(
+                            "egress_no_eligible_provider: the only eligible preset '{}' for \
+                             batch {} could not be built (missing provider/model).",
+                            cand.name,
+                            autonoetic_types::egress::label_display_name(batch)
+                        )),
+                    }
+                }
+            },
+            None => {
+                // Primary already eligible — keep `self.llm`.
+                emit(Some(routed_preset), false);
+                EgressRoutingSelection {
+                    primary_driver: None,
+                    effective_class: primary_class,
+                    effective_model: None,
+                    fallback_chain: filtered_fallback,
+                    refuse_reason: None,
+                }
+            }
+        }
     }
 
     /// Build a `SessionCheckpoint` from the current executor state.
@@ -2808,6 +3009,69 @@ impl AgentExecutor {
                     .map(|d| d.fallback_chain.clone())
                     .unwrap_or_default();
 
+                // Taint-following routing (RFC §5.3): when the batch produced
+                // since the last completion carries taint, pick an eligible
+                // driver for THIS completion and filter the failover chain to
+                // eligible presets; a clean (unrestricted) batch is a zero-cost
+                // no-op that keeps the primary driver and the full chain.
+                //
+                // Consume the batch here — replace it with `unrestricted` so a
+                // completion that ends the turn WITHOUT tool use (EndTurn /
+                // StopSequence, which never reaches the tool-batch merge below)
+                // doesn't leave a stale taint that would wrongly route the next
+                // completion. The merge below re-arms it only if this turn's
+                // tools produce fresh labeled results.
+                let batch_taint = std::mem::replace(
+                    &mut self.pending_batch_taint,
+                    autonoetic_types::egress::EgressLabel::unrestricted(),
+                );
+                let primary_egress_class = routed_llm_cfg.egress_class;
+                // The primary's *preset* identity for the audit event (not a
+                // model name), so `chosen_preset` is consistent with the
+                // reroute path and "why did turn N run here?" reads uniformly.
+                let primary_preset_label: String = matched_entry
+                    .as_ref()
+                    .map(|e| e.preset_name.clone())
+                    .or_else(|| {
+                        self.manifest
+                            .llm_config
+                            .as_ref()
+                            .and_then(|c| c.routing_preset.clone())
+                    })
+                    .unwrap_or_else(|| routed_model.clone());
+                let (primary_egress_driver, egress_effective_class, fallback_chain) =
+                    if batch_taint.is_unrestricted() {
+                        (None, primary_egress_class, fallback_chain)
+                    } else {
+                        let sel = self.plan_egress_routing(
+                            &batch_taint,
+                            &primary_preset_label,
+                            primary_egress_class,
+                            &fallback_chain,
+                            &session_id,
+                            &turn_id,
+                        );
+                        if let Some(reason) = sel.refuse_reason {
+                            // No eligible provider for a tainted batch — refuse
+                            // the turn with a path forward, never ship taint to
+                            // an ineligible provider (RFC §5.3, fail-closed).
+                            return Err(self.save_and_yield(
+                                history,
+                                &turn_id,
+                                YieldReason::Error(reason.clone()),
+                                None,
+                                anyhow::anyhow!(reason),
+                            ));
+                        }
+                        // A reroute runs on a different model — reflect it in
+                        // cost/tracing (the driver ignores `req.model` and uses
+                        // its own).
+                        if let Some(m) = sel.effective_model.clone() {
+                            actual_model = m;
+                        }
+                        (sel.primary_driver, sel.effective_class, sel.fallback_chain)
+                    };
+
                 let mut last_err = None;
                 if let Err(e) = self
                     .enforce_cost_catalog_preflight(&actual_model, allow_unpriced_budget)
@@ -2820,15 +3084,23 @@ impl AgentExecutor {
                         return Err(self.save_and_yield_root_budget(history, &turn_id, e));
                     }
                 }
-                let response = self.llm.complete(&req).await;
+                // Run the primary completion on the taint-following driver when
+                // the batch forced a reroute; otherwise the session's primary
+                // (`self.llm`). Both are already wrapped by the egress
+                // chokepoint at build time (RFC §5.2), so filtering applies
+                // either way.
+                let primary_driver = primary_egress_driver.as_ref().unwrap_or(&self.llm);
+                let response = primary_driver.complete(&req).await;
                 // Egress chokepoint audit (RFC §9.1): emit the causal events
                 // for what the wrapper withheld. Only fires when labels are
                 // attached to this request (unconfigured deployments skip
                 // entirely). Best-effort — a failed write is logged, not fatal.
                 if !self.egress_labels.is_empty() {
                     if let Some(store) = self.gateway_store.as_ref() {
-                        let sink = routed_llm_cfg
-                            .egress_class
+                        // Use the *effective* class (rerouted preset's, or the
+                        // primary's) so the audit records the sink content
+                        // actually reached.
+                        let sink = egress_effective_class
                             .map(|c| c.as_sink())
                             .unwrap_or(autonoetic_types::egress::Sink::RemoteModel);
                         let report = crate::llm::egress_chokepoint::compute_filter_report(
@@ -3787,9 +4059,19 @@ impl AgentExecutor {
             // attached to each completion request's metadata so the
             // EgressChokepointDriver (RFC §5.2) can withhold content whose
             // label excludes the target sink.
+            //
+            // Also capture this turn's *batch taint* (RFC §5.3): the
+            // intersection of the labels this turn just added. It steers
+            // taint-following routing for the NEXT completion — a tainted batch
+            // makes only eligible presets candidates. An empty delta leaves the
+            // batch `unrestricted` (the fast no-op path), which correctly
+            // resets the batch after a clean turn.
+            let mut batch_taint = autonoetic_types::egress::EgressLabel::unrestricted();
             for (k, v) in processor.take_egress_labels() {
+                batch_taint = batch_taint.restrict(&v);
                 self.egress_labels.insert(k, v);
             }
+            self.pending_batch_taint = batch_taint;
 
             // Hard-trip the LoopGuard if any tool call returned a deterministic
             // terminal-workflow error. Retrying agent_spawn against a terminal
