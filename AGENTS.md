@@ -176,6 +176,15 @@ When modifying `LoopGuard`, update all checkpoint construction sites (grep `loop
 
 Integration tests use `tempfile::tempdir()` for isolated workspaces and `serial_test::serial` for state isolation. Tests are self-contained — no external services required.
 
+**Grouped test binaries (#922, in progress):** `autonoetic-gateway/tests/` is
+being collapsed from ~240 single-file binaries into ~5–10 domain binaries
+(`tests/<domain>/main.rs` with one module per former file — done: `egress`).
+When adding a new integration suite, put it in the matching domain binary
+rather than creating a new top-level `tests/*.rs` file. Suites that bind
+ports, use fixed paths, or spawn singleton daemons must stay in their own
+binary (or be refactored to `tempfile` + port-0 first) — cohabiting one
+process requires no cross-test external state.
+
 Notable test suites:
 - `turn_continuation_approval_integration.rs` — suspend/resume, timeout, cancellation, restart, parallel-join
 - `approved_exec_cache_integration.rs` — cache fingerprint, normalization, full cycle
