@@ -486,6 +486,16 @@ pub enum GatewayCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Egress (data localization) audit for a session — per-turn provider,
+    /// withheld envelopes with indications, labeling provenance, assertion
+    /// violations (RFC data-envelopes §9.3).
+    EgressAudit {
+        /// Session id to audit.
+        session_id: String,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage system agents (declared in config, auto-scheduled on startup).
     SystemAgents {
         #[command(subcommand)]

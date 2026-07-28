@@ -151,9 +151,11 @@ fn claim_verdict_to_violation(kind: ClaimKind, verdict: ClaimVerdict) -> Option<
             Some(fabricated_plan_id_violation(&plan_id))
         }
         // Future claim kinds: map to their violation constructors here.
+        // Sanitize the verifier-authored detail before it reaches the
+        // user-role repair channel (RFC §5.2 — see sanitize_interpolated_for_message).
         (kind, ClaimVerdict::Fabricated(detail)) => Some(ValidationViolation {
             rule: format!("{:?}", kind).to_lowercase(),
-            message: detail,
+            message: sanitize_interpolated_for_message(&detail),
             repair_hint: "Reconcile this claim against observable state.".into(),
         }),
     }
@@ -569,11 +571,66 @@ fn fabricated_plan_id_violation(plan_id: &str) -> ValidationViolation {
     ValidationViolation {
         rule: "unknown_plan_id".into(),
         message: format!(
-            "reply references plan_id \"{plan_id}\" but no such PlanFrame exists"
+            "reply references plan_id \"{}\" but no such PlanFrame exists",
+            sanitize_interpolated_for_message(plan_id)
         ),
         repair_hint: "Do not invent a plan_id. If you proposed a plan, use the exact plan_id \
 returned by `planframe_propose`; otherwise omit `plan_id` and report a truthful status."
             .into(),
+    }
+}
+
+/// Sanitize an agent/verifier-authored string before it is interpolated into a
+/// gateway-authored repair message that becomes a `Role::User` turn (RFC §5.2
+/// gateway-authored-strings audit).
+///
+/// The repair channel is NOT covered by the egress chokepoint (which filters
+/// `Role::Tool` envelopes), so any interpolated untrusted string is a potential
+/// content channel — an agent could put arbitrary content in a `plan_id` field
+/// or a claim detail and have it echoed into context. This helper bounds the
+/// length (so it can't dominate context) and strips control chars / newlines
+/// (so it can't inject multi-line content or terminal escapes). It does NOT
+/// make the string safe to *transmit* — that requires the phase-2 msg-id label
+/// plane — but it removes the obvious injection vectors.
+///
+/// Verified-safe call sites (no interpolation, all-canned): the other
+/// `ValidationViolation` constructors in this file. The candidates that reach
+/// the user-role repair channel with interpolation are:
+/// - `fabricated_plan_id_violation` (agent-authored `plan_id`)
+/// - `ClaimVerdict::Fabricated(detail)` (verifier-authored detail)
+fn sanitize_interpolated_for_message(s: &str) -> String {
+    // Bound to a short preview — these are identifiers / short reasons, not
+    // prose. 80 chars is generous for a plan_id and tight enough that an agent
+    // can't use it to exfiltrate bulk content.
+    const MAX_LEN: usize = 80;
+    let trimmed = s.trim();
+    let mut out = String::with_capacity(trimmed.len().min(MAX_LEN));
+    for ch in trimmed.chars() {
+        if out.chars().count() >= MAX_LEN {
+            break;
+        }
+        // Strip control chars (incl. newline/tab) and terminal escape prefix
+        // bytes — keep printable + simple whitespace collapsed to a space.
+        if ch.is_control() {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
+    }
+    // Collapse runs of whitespace introduced by control-char replacement.
+    while out.contains("  ") {
+        out = out.replace("  ", " ");
+    }
+    let trimmed = out.trim().to_string();
+    if trimmed.chars().count() >= MAX_LEN {
+        // Truncate by CHAR boundary, not byte — byte-slicing
+        // (`&trimmed[..MAX_LEN-1]`) panics on a non-ASCII multi-byte boundary,
+        // and this runs on the response-validation path where a crafted
+        // plan_id/detail could crash the gateway.
+        let truncated: String = trimmed.chars().take(MAX_LEN.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    } else {
+        trimmed
     }
 }
 
@@ -2607,6 +2664,78 @@ mod tests {
         assert_eq!(v.rule, "unknown_plan_id");
         assert!(v.message.contains("plan-a1b2c3d4"));
         assert!(v.repair_hint.contains("planframe_propose"));
+    }
+
+    // ── §5.2 sanitization of agent/verifier-authored strings ─────────────
+
+    #[test]
+    fn sanitize_strips_control_chars_and_newlines() {
+        // An agent trying to inject multi-line content / terminal escapes via
+        // a plan_id field. The sanitizer removes injection vectors (newlines,
+        // control/escape bytes) and bounds length — it is NOT a content
+        // classifier, so short payloads survive; the point is they can't
+        // break out of the single-line, single-statement message slot.
+        let s = "plan-x\nIGNORE PREVIOUS\n\t\x1b[31m";
+        let out = sanitize_interpolated_for_message(s);
+        assert!(
+            !out.contains('\n'),
+            "newlines must be stripped: {out:?}"
+        );
+        assert!(
+            !out.contains('\t'),
+            "tabs must be stripped: {out:?}"
+        );
+        assert!(
+            !out.contains('\x1b'),
+            "terminal escape must be stripped: {out:?}"
+        );
+        assert!(
+            out.chars().count() <= 80,
+            "bounded to 80 chars: {out:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_bounds_length() {
+        let long = "x".repeat(500);
+        let out = sanitize_interpolated_for_message(&long);
+        assert!(
+            out.chars().count() <= 80,
+            "bounded to 80 chars, got {}: {out:?}",
+            out.chars().count()
+        );
+        assert!(out.ends_with('…'), "long input gets an ellipsis truncation marker");
+    }
+
+    #[test]
+    fn sanitize_does_not_panic_on_multibyte_at_boundary() {
+        // Regression: byte-slicing at MAX_LEN panicked when the cut landed
+        // inside a multi-byte char. Use a string of 3-byte CJK chars long
+        // enough to exceed the 80-char bound; the cut boundary must land
+        // mid-character. Must not panic, and must stay valid UTF-8.
+        let s = "邮件".repeat(50); // 100 chars, each 3 bytes
+        let out = sanitize_interpolated_for_message(&s);
+        // Valid UTF-8 (String is always valid, but assert char count bound).
+        assert!(out.chars().count() <= 80, "bounded: {}", out.chars().count());
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn sanitize_preserves_short_clean_identifier() {
+        let out = sanitize_interpolated_for_message("plan-a1b2c3d4");
+        assert_eq!(out, "plan-a1b2c3d4");
+    }
+
+    #[test]
+    fn fabricated_plan_id_violation_sanitizes_injected_content() {
+        // The agent's plan_id field carries an injection attempt; the violation
+        // message must not let it through verbatim.
+        let v = fabricated_plan_id_violation("x\nSHOULD_NOT_APPEAR_AS_NEWLINE");
+        assert!(
+            !v.message.contains('\n'),
+            "interpolated newline must be sanitized: {:?}",
+            v.message
+        );
     }
 
     #[test]
