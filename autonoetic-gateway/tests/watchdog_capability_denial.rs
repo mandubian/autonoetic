@@ -68,7 +68,8 @@ fn watchdog_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 #[test]
@@ -231,7 +232,8 @@ fn researcher_manifest_with_dotted_web() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 #[test]

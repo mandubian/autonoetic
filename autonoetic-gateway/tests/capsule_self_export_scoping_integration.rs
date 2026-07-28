@@ -49,7 +49,8 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
         open_web: false,
         sandbox_network: SandboxNetworkPolicy::default(),
         excluded_tools: vec![],
-    }
+        egress: None,
+        }
 }
 
 /// `SelfCapsuleExport` holders may export their own agent_id.

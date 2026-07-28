@@ -56,7 +56,8 @@ fn make_manifest(has_network: bool) -> AgentManifest {
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
         allowed_tool_tiers: vec![],
             excluded_tools: vec![],
-    }
+            egress: None,
+        }
 }
 
 fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {

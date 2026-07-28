@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use autonoetic_gateway::runtime::egress_labeler::{EgressLabeler, LabelRequest};
+use autonoetic_gateway::runtime::egress_labeler::{
+    EgressLabeler, LabelRequest, PriorLabeledResult,
+};
 use autonoetic_gateway::runtime::egress_path_matcher::ExecSourceContext;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::egress::{EgressConfig, EgressRule, EgressSessionPolicy, NamedEgressLabel};
@@ -51,6 +53,10 @@ fn egress_events(
         .collect()
 }
 
+fn no_prior() -> std::collections::HashMap<String, PriorLabeledResult> {
+    std::collections::HashMap::new()
+}
+
 #[test]
 fn labeled_tool_result_emits_causal_event_with_provenance() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
@@ -70,7 +76,7 @@ fn labeled_tool_result_emits_causal_event_with_provenance() -> anyhow::Result<()
             "sess-email",
             "researcher.default",
             Some("turn-000001"),
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("email.read should be labeled local_only");
 
@@ -131,7 +137,7 @@ fn sandbox_exec_reading_labeled_path_produces_labeled_envelope() -> anyhow::Resu
             "sess-exec",
             "coder.default",
             Some("turn-000002"),
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("sandbox.exec touching ~/mail/** should be labeled");
 
@@ -177,7 +183,7 @@ fn sandbox_exec_ignores_path_rules_for_other_sources() -> anyhow::Result<()> {
         "sess-cross",
         "coder.default",
         None,
-        Some(&store),
+        Some(&store), &no_prior()
     );
     assert!(
         outcome.is_none(),
@@ -206,7 +212,7 @@ fn clean_tool_result_emits_no_event() -> anyhow::Result<()> {
         "sess-clean",
         "researcher.default",
         Some("turn-000003"),
-        Some(&store),
+        Some(&store), &no_prior()
     );
     assert!(outcome.is_none(), "clean result must not be labeled");
     assert!(egress_events(&store, "sess-clean").is_empty());
@@ -237,7 +243,7 @@ fn multiple_matching_rules_intersect_in_the_event_label() -> anyhow::Result<()> 
             "sess-intersect",
             "researcher.default",
             Some("turn-000004"),
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("fs.read on ~/mail/** is labeled");
 
@@ -282,7 +288,7 @@ fn session_scoped_rules_do_not_leak_across_sessions() -> anyhow::Result<()> {
         "sess-a",
         "agent-a",
         None,
-        Some(&store),
+        Some(&store), &no_prior()
     );
     assert!(out_a.is_some(), "session A's rule labels slack.read");
 
@@ -297,7 +303,7 @@ fn session_scoped_rules_do_not_leak_across_sessions() -> anyhow::Result<()> {
         "sess-b",
         "agent-b",
         None,
-        Some(&store),
+        Some(&store), &no_prior()
     );
     assert!(out_b.is_none(), "session-scoped rules must not leak into session B");
 
@@ -326,7 +332,7 @@ fn unconfigured_deployment_is_inert_and_emits_nothing() -> anyhow::Result<()> {
         "sess-inert",
         "agent",
         None,
-        Some(&store),
+        Some(&store), &no_prior()
     );
     assert!(outcome.is_none());
     assert!(egress_events(&store, "sess-inert").is_empty());
@@ -373,7 +379,7 @@ fn stored_session_policy_labels_and_is_attributed_as_session_scoped() -> anyhow:
             "sess-scoped",
             "researcher.default",
             Some("turn-000001"),
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("session rule labels the result");
     assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
@@ -494,7 +500,7 @@ fn session_rules_intersect_with_global_rules() -> anyhow::Result<()> {
             "sess-both",
             "researcher.default",
             None,
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("labeled");
     // no_remote_model ∩ local_only = local_only (the stricter).
@@ -555,7 +561,7 @@ fn sandbox_exec_labels_a_dependency_script_read() -> anyhow::Result<()> {
             "sess-dep",
             "coder.default",
             Some("turn-000003"),
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("the script's read of ~/mail/** must label the exec envelope");
     assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
@@ -589,7 +595,7 @@ fn audit_event_carries_the_default_in_force() -> anyhow::Result<()> {
             "sess-default",
             "researcher.default",
             None,
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("a restricting default labels everything");
     assert_eq!(
@@ -637,7 +643,7 @@ fn documented_dotted_rules_match_canonical_tool_names() -> anyhow::Result<()> {
             "sess-norm",
             "coder.default",
             None,
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("`sandbox.exec` rule must match the `sandbox_exec` tool");
     assert_eq!(exec.label, autonoetic_types::egress::EgressLabel::local_only());
@@ -653,7 +659,7 @@ fn documented_dotted_rules_match_canonical_tool_names() -> anyhow::Result<()> {
             "sess-norm",
             "coder.default",
             None,
-            Some(&store),
+            Some(&store), &no_prior()
         )
         .expect("`mcp.gmail.*` rule must match `mcp_gmail_send_message`");
     assert_eq!(mcp.label, autonoetic_types::egress::EgressLabel::local_only());
@@ -714,7 +720,7 @@ fn artifact_ref_driven_exec_resolves_its_bundle_and_labels() -> anyhow::Result<(
     };
 
     let outcome = labeler
-        .label_tool_result(&req, Some(&ctx), "sess-ref", "coder.default", None, Some(&store))
+        .label_tool_result(&req, Some(&ctx), "sess-ref", "coder.default", None, Some(&store), &no_prior())
         .expect("a ref-driven exec must have its bundle scanned");
     assert_eq!(outcome.label, autonoetic_types::egress::EgressLabel::local_only());
 
@@ -729,7 +735,7 @@ fn artifact_ref_driven_exec_resolves_its_bundle_and_labels() -> anyhow::Result<(
     };
     assert!(
         labeler
-            .label_tool_result(&req, Some(&no_store_ctx), "sess-ref", "coder.default", None, None)
+            .label_tool_result(&req, Some(&no_store_ctx), "sess-ref", "coder.default", None, None, &no_prior())
             .is_none(),
         "an unresolved artifact_ref leaves nothing to scan"
     );

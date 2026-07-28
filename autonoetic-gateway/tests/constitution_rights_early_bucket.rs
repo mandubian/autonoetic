@@ -70,7 +70,8 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn setup_gateway(base: &Path) -> (std::path::PathBuf, Arc<GatewayStore>) {
@@ -263,7 +264,8 @@ fn ri_0_7_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 #[tokio::test]

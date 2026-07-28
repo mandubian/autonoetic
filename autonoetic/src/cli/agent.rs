@@ -595,7 +595,8 @@ fn admin_revision_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: Default::default(),
-    }
+        egress: None,
+        }
 }
 
 pub fn handle_agent_revision(
@@ -1990,7 +1991,8 @@ pub fn handle_agent_import_skill(
         compression: parsed_manifest.compression.clone(),
             open_web: false,
         sandbox_network: parsed_manifest.sandbox_network,
-    };
+        egress: None,
+        };
 
     let agents_dir = config_path
         .parent()

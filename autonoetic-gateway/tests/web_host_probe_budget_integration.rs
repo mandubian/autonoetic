@@ -79,7 +79,8 @@ fn web_manifest(agent_id: &str) -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// A `remote_access` declaration covering `HOST`, so `enforce_remote_target_for_web`

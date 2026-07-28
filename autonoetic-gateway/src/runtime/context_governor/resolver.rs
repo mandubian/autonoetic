@@ -206,6 +206,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: SandboxNetworkPolicy::default(),
+            egress: None,
         }
     }
 

@@ -138,7 +138,8 @@ fn builder_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn evaluator_manifest() -> AgentManifest {
@@ -182,7 +183,8 @@ fn evaluator_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn auditor_manifest() -> AgentManifest {
@@ -226,7 +228,8 @@ fn auditor_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Full promotion flow through revision create + promote (no `agent.install`).
@@ -576,7 +579,8 @@ async fn test_promotion_record_with_artifact_ref() {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    };
+        egress: None,
+        };
     let query_policy = PolicyEngine::new(query_manifest.clone());
 
     let query_args = serde_json::json!({

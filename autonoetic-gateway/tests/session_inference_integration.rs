@@ -52,7 +52,8 @@ fn test_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: Default::default(),
-    }
+        egress: None,
+        }
 }
 
 fn test_config() -> GatewayConfig {

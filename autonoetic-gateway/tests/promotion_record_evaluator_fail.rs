@@ -101,7 +101,8 @@ fn evolution_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn evaluator_manifest() -> AgentManifest {
@@ -145,7 +146,8 @@ fn evaluator_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Evaluator fails (pass=false) → specialized_builder tries to install → REJECT.
@@ -384,7 +386,8 @@ async fn test_promotion_auditor_fail_rejected() {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    };
+        egress: None,
+        };
 
     let audit_args = serde_json::json!({
         "artifact_id": artifact_id,

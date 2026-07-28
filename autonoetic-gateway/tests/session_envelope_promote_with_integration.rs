@@ -54,7 +54,8 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn skill_md(capabilities_yaml: &str) -> String {

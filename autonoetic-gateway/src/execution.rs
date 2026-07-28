@@ -5278,6 +5278,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
 
         let history = build_initial_history(
@@ -5771,6 +5772,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         // A driver that never gets used (we don't call execute_with_history).
         struct NoopDriver;

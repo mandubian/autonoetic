@@ -2249,6 +2249,7 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             compression: None,
             open_web: args.open_web,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
 
         let canonical_skill = crate::runtime::install_contract::render_skill_document(
@@ -5992,6 +5993,7 @@ mod capability_lenient_deser_tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         }
     }
 

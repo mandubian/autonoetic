@@ -58,7 +58,8 @@ fn manifest(agent_id: &str) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn run_sandbox_exec(command: &str) -> anyhow::Result<serde_json::Value> {

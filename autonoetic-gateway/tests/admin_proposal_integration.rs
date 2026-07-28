@@ -53,7 +53,8 @@ fn test_manifest_with_approval_queue() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn test_manifest_with_read_access() -> AgentManifest {
@@ -96,7 +97,8 @@ fn test_manifest_with_read_access() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn test_manifest_no_caps() -> AgentManifest {
@@ -137,7 +139,8 @@ fn test_manifest_no_caps() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn make_proposal(id: &str, title: &str, category: &str) -> AdminProposal {

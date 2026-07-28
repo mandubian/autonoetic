@@ -63,7 +63,8 @@ fn manifest_with_artifact_execution(agent_id: &str) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn manifest_without_network() -> AgentManifest {
@@ -104,7 +105,8 @@ fn manifest_without_network() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 const WEATHER_ARTIFACT_CODE: &str = r#"
@@ -299,8 +301,9 @@ fn test_artifact_exec_tool_registered_and_gated() {
             patterns: vec!["*".to_string()],
             commands: vec![],
         }],
-        ..manifest_with_artifact_execution("executor.shell-only")
-    };
+        ..manifest_with_artifact_execution("executor.shell-only"),
+        egress: None,
+        };
     let shell_names: Vec<String> = registry
         .available_definitions(&shell_only)
         .into_iter()
@@ -350,7 +353,8 @@ fn test_artifact_exec_tool_registered_and_gated() {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    };
+        egress: None,
+        };
     let defs = registry.available_definitions(&manifest_no_exec);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
@@ -446,7 +450,8 @@ fn unit_test_runner_gate_manifest() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 #[test]
@@ -516,7 +521,8 @@ fn test_artifact_exec_not_available_for_static_evaluator() {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    };
+        egress: None,
+        };
     let defs = registry.available_definitions(&manifest);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(

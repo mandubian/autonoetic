@@ -758,9 +758,33 @@ The rest of the §5.4 ladder — `mode`, `provider_constraint`, `indication_verb
 
 ### Traceability
 
-Every restricting decision emits an `egress.envelope_labeled` causal event carrying the complete input set of the resolution — envelope id, tool call id, tool name, resulting label, the rules that matched **and whether each came from global config or the session**, the matched path patterns, the default in force, and (from phase 2) parent envelope ids for argument taint. "Why is this envelope labeled?" is answerable from the chain alone (RFC §9.1). Unrestricted results emit nothing, so the causal chain stays quiet on the common case.
+Every restricting decision emits an `egress.envelope_labeled` causal event carrying the complete input set of the resolution — envelope id, tool call id, tool name, resulting label, the rules that matched **and whether each came from global config or the session**, the matched path patterns, the default in force, whether the bundle-declared floor contributed (`bundle_floor_applied`), and parent envelope ids for argument taint (`parent_envelope_ids`, `taint_applied`). "Why is this envelope labeled?" is answerable from the chain alone (RFC §9.1). Unrestricted results emit nothing, so the causal chain stays quiet on the common case.
 
-> **Phase status.** Source rules label content at the tool-result boundary (phase 1c) and the LLM chokepoint withholds labeled content from ineligible providers (phase 1b). Still to come: bundle-declared floors and argument taint (#907), memory and stored-content surfaces (#908), federation/MCP/sandbox composition and declassification (#909).
+> **Phase status.** Source rules label content at the tool-result boundary (phase 1c) and the LLM chokepoint withholds labeled content from ineligible providers (phase 1b). Bundle-declared floors and argument taint are implemented (#907 slice 1). Still to come: taint-following routing (#907), memory and stored-content surfaces (#908), federation/MCP/sandbox composition and declassification (#909).
+
+### Bundle-declared output floor (`metadata.autonoetic.egress.output_label`)
+
+An agent's SKILL.md may declare a **bundle-wide output floor** under `metadata.autonoetic.egress.output_label` (RFC §4.1 path 2). This is the most restrictive label the bundle's own tool results may carry — the email bundle ships `local_only`, the financial-data bundle ships `no_remote_model`, etc.
+
+```yaml
+metadata:
+  autonoetic:
+    egress:
+      output_label: local_only   # or no_remote_model, unrestricted
+```
+
+A floor **restricts** — it intersects into every label resolution alongside operator rules and the session policy, and can never widen what operator policy restricted. A bundle-only floor (no operator rules configured at all) makes the labeler non-inert and restricts every result from that agent.
+
+| `metadata.autonoetic.egress.output_label` | string | `null` | Named label (`unrestricted`, `local_only`, `no_remote_model`) that acts as the bundle's output floor. Intersection only — a floor can never widen operator policy. |
+
+### Argument taint (RFC §4.1 path 3)
+
+A tool called with an argument that references a prior labeled result inherits that result's label. The labeler scans tool-call arguments for two deterministic signals:
+
+1. **Handle reference** — a prior `tool_call_id` appears in the arguments JSON. Deterministic.
+2. **Verbatim content** — a bounded snippet (≤512 chars) of a prior labeled result's content appears verbatim in the arguments. Bounded tripwire, not a proof (defeated by paraphrase/encoding).
+
+When either signal fires, the prior result's label is intersected into the output label, and the prior envelope ids are recorded in `parent_envelope_ids` on the `egress.envelope_labeled` event — so derivation lineage is always answerable from the causal chain.
 
 Example:
 

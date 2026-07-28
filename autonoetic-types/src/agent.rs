@@ -2,6 +2,7 @@
 
 use crate::background::{BackgroundPolicy, GrantTarget};
 use crate::disclosure::DisclosurePolicy;
+use crate::egress::NamedEgressLabel;
 use serde::{Deserialize, Serialize};
 
 use crate::capability::Capability;
@@ -19,7 +20,7 @@ fn is_default_remote_access_approval_mode(mode: &RemoteAccessApprovalMode) -> bo
 }
 
 /// Runtime declaration block from the SKILL.md frontmatter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeDeclaration {
     pub engine: String,
     pub gateway_version: String,
@@ -31,7 +32,7 @@ pub struct RuntimeDeclaration {
 }
 
 /// Core agent identity fields.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentIdentity {
     pub id: String,
     pub name: String,
@@ -57,7 +58,7 @@ pub struct AgentIdentity {
 }
 
 /// LLM configuration for the agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmConfig {
     pub provider: String,
     pub model: String,
@@ -176,15 +177,37 @@ pub struct LlmOverrides {
 }
 
 /// Resource limits enforced by the Gateway.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceLimits {
     pub max_memory_mb: u64,
     pub max_execution_time_sec: u64,
     pub token_budget_monthly: Option<u64>,
 }
 
+/// Per-agent egress (data-localization) manifest — RFC data-envelopes §4.1 path 2.
+///
+/// Declares the bundle-wide **output floor**: the most restrictive label the
+/// bundle's own outputs may carry. A floor can only **restrict** — it
+/// intersects into every resolution alongside operator rules and can never
+/// widen what operator policy already restricted. Declared under
+/// `metadata.autonoetic.egress.output_label` in `SKILL.md`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentEgressManifest {
+    /// The named output floor for this bundle's tool results
+    /// (e.g. `local_only` for an email-reading bundle).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_label: Option<NamedEgressLabel>,
+}
+
+impl AgentEgressManifest {
+    /// Whether this manifest declares anything (no floor → no-op).
+    pub fn is_empty(&self) -> bool {
+        self.output_label.is_none()
+    }
+}
+
 /// The full parsed Agent Manifest (SKILL.md frontmatter).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentManifest {
     #[serde(default = "default_version")]
     pub version: String,
@@ -261,6 +284,11 @@ pub struct AgentManifest {
     /// `gateway.sandbox.allow_recording` is set.
     #[serde(default, skip_serializing_if = "is_default_sandbox_network_policy")]
     pub sandbox_network: SandboxNetworkPolicy,
+    /// Per-agent egress (data-localization) manifest — RFC data-envelopes §4.1
+    /// path 2. When present, the bundle-declared output floor is intersected
+    /// into every label resolution in this session, alongside operator rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<AgentEgressManifest>,
 }
 
 fn is_default_sandbox_network_policy(p: &SandboxNetworkPolicy) -> bool {

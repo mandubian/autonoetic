@@ -51,7 +51,8 @@ fn manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn sandbox_manifest(agent_id: &str) -> AgentManifest {

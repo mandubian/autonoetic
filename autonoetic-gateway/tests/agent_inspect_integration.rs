@@ -80,7 +80,8 @@ fn manifest_with_read_access(agent_id: &str) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn build_and_promote_agent(
@@ -386,7 +387,8 @@ fn tool_requires_read_access_capability() {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    };
+        egress: None,
+        };
 
     let tool = autonoetic_gateway::runtime::tools::agent_inspect::AgentInspectTool;
     assert!(!tool.is_available(&manifest_no_read), "should not be available without ReadAccess");

@@ -98,7 +98,8 @@ fn manifest(agent_id: &str) -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Seeds an agent dir and returns the freshly initialized constitution's

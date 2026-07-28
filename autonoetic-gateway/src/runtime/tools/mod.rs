@@ -1361,6 +1361,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         }
     }
 
@@ -1594,6 +1595,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         let unfiltered = registry.available_definitions(&manifest);
         let filtered = registry.available_definitions_filtered(&manifest, None);
@@ -1640,6 +1642,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         let filter = ToolTierFilter::core_only();
         let filtered = registry.available_definitions_filtered(&manifest, Some(&filter));
@@ -1775,6 +1778,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let deps = Some(SandboxExecDependencies {
@@ -1827,6 +1831,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let plan = dependency_plan_from_args_or_lock(&manifest, temp_dir.path(), None).unwrap();

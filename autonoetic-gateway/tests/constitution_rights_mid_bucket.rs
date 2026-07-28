@@ -58,7 +58,8 @@ fn minimal_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn setup_store(base: &std::path::Path) -> Arc<GatewayStore> {

@@ -55,7 +55,8 @@ fn manifest_with_sandbox(allowed: Vec<&str>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn manifest_no_capabilities() -> AgentManifest {
@@ -96,7 +97,8 @@ fn manifest_no_capabilities() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 #[test]

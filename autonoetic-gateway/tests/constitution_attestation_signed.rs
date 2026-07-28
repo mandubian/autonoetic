@@ -58,7 +58,8 @@ fn manifest_with_caps(caps: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn default_inputs<'a>(manifest: &'a AgentManifest) -> AttestationInputs<'a> {

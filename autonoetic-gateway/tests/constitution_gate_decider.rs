@@ -63,7 +63,8 @@ fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifes
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn write_agent_dir(agents_dir: &PathBuf, agent_id: &str, capabilities: &[Capability]) {

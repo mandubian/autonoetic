@@ -193,6 +193,7 @@ Markdown body with natural language instructions.
 | `metadata.autonoetic.script_entry` | For script mode | Entry script path |
 | `metadata.autonoetic.io` | No | JSON Schema for input/output |
 | `metadata.autonoetic.validation` | No | `"soft"` (LLM) or `"strict"` (script) |
+| `metadata.autonoetic.egress.output_label` | No | Bundle-wide egress output floor (`unrestricted` / `local_only` / `no_remote_model`). Intersects into every tool-result label resolution for this agent; can only restrict, never widen operator policy. See [RFC: data envelopes](rfc/data-envelopes-egress-localization.md) §4.1 path 2. |
 
 ### Markdown Body
 

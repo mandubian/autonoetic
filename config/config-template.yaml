@@ -368,6 +368,16 @@ evidence_mode: full
 #     --rule 'email.*=local_only' --rule 'sandbox.exec:~/mail/**=local_only'
 # Those rules are added to the ones above (so they can only restrict) and die
 # with the root session.
+#
+# A bundle may also declare its own output floor in SKILL.md (RFC §4.1 path 2):
+#   metadata:
+#     autonoetic:
+#       egress:
+#         output_label: local_only
+# The floor intersects every resolution from that agent's tool results — it can
+# only restrict, never widen operator policy. Tool calls whose arguments
+# reference (or verbatim-quote) a prior labeled result inherit its label
+# (argument taint, RFC §4.1 path 3).
 
 # ── Operational Flags ─────────────────────────────────────────────────
 # Whether interaction.answer orchestrates workflow task / session resume. Default: true.

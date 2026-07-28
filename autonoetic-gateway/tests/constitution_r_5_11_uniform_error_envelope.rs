@@ -45,7 +45,8 @@ fn no_capability_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn invoke(tool_name: &str, args_json: &str) -> anyhow::Result<serde_json::Value> {
