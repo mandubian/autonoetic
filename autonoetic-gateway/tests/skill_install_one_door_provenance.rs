@@ -78,7 +78,8 @@ fn installer_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// One-shot HTTP server serving `body` for a single request, on 127.0.0.1.

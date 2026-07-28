@@ -198,7 +198,8 @@ fn proposer_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn auditor_manifest(id: &str) -> AgentManifest {
@@ -241,7 +242,8 @@ fn auditor_manifest(id: &str) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Create a revision via `agent_revision_create_from_intent` (the path the

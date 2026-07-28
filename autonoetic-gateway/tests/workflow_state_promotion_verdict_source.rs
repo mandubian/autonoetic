@@ -67,7 +67,8 @@ fn read_access_manifest() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn build_agent_bundle_artifact(base_dir: &Path) -> (String, std::path::PathBuf) {

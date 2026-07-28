@@ -74,7 +74,8 @@ fn manifest_with_revision_cap() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Build a canonical SKILL.md whose shape fields (execution_mode, script_entry,

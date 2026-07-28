@@ -1,7 +1,7 @@
 //! SKILL.md Parser.
 
 use autonoetic_types::agent::{
-    AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, CompressionConfig,
+    AgentEgressManifest, AgentIO, AgentIdentity, AgentManifest, AgentSkillsImportMetadata, CompressionConfig,
     ExecutionMode, IoReturnsEnforcement, LlmConfig, Middleware, ResourceLimits, RuntimeDeclaration,
     ScriptInputMode,
 };
@@ -70,6 +70,8 @@ struct AutonoeticMetadata {
     open_web: Option<bool>,
     #[serde(default)]
     sandbox_network: Option<autonoetic_types::agent::SandboxNetworkPolicy>,
+    #[serde(default)]
+    egress: Option<AgentEgressManifest>,
 }
 
 /// Parser for `SKILL.md` files.
@@ -216,7 +218,8 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         compression: meta.compression,
         open_web: meta.open_web.unwrap_or(false),
         sandbox_network: meta.sandbox_network.unwrap_or_default(),
-    }
+        egress: meta.egress,
+        }
 }
 
 /// Permissive default `io.returns` envelope for imported external skills that
@@ -1152,5 +1155,55 @@ metadata:
         let (core, extended) = split_extended_instructions(body);
         assert_eq!(core, "Core.");
         assert!(extended.is_none());
+    }
+
+    #[test]
+    fn test_parse_egress_output_label_floor() {
+        let content = r#"---
+name: "email-agent"
+description: "An email-reading agent with a local_only floor"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "email-agent"
+      name: "Email Agent"
+      description: "Reads local emails"
+    egress:
+      output_label: local_only
+---
+# Email Agent
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        let egress = manifest.egress.expect("egress manifest should be present");
+        assert_eq!(
+            egress.output_label,
+            Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly)
+        );
+    }
+
+    #[test]
+    fn test_parse_egress_absent_when_not_declared() {
+        let content = r#"---
+name: "plain-agent"
+description: "No egress declaration"
+metadata:
+  autonoetic:
+    agent:
+      id: "plain-agent"
+      name: "Plain"
+      description: "no egress"
+---
+# Plain
+"#;
+        let (manifest, _body) = SkillParser::parse(content).expect("should parse");
+        assert!(manifest.egress.is_none());
     }
 }

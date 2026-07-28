@@ -122,7 +122,8 @@ fn base_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn build_capabilities(input: &GatewayInput) -> Vec<Capability> {

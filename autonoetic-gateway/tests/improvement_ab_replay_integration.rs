@@ -50,7 +50,8 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: Default::default(),
-    }
+        egress: None,
+        }
 }
 
 

@@ -61,14 +61,23 @@ pub struct ToolCallProcessor<'a> {
     gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
     run_context: Option<crate::runtime::active_execution_registry::NativeToolRunContext>,
     session_state: autonoetic_types::agent::SessionState,
-    /// Egress labels accumulated for tool results in this turn, keyed by
-    /// `tool_call_id`. Consumed by the executor (via [`Self::take_egress_labels`])
-    /// and attached to the next completion request's metadata so the chokepoint
-    /// driver (RFC §5.2) can substitute indications for content whose label
-    /// excludes the target sink. Empty for unconfigured deployments (the
-    /// labeler is inert — RFC §4.2).
-    egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+    /// Egress-labeled tool results accumulated in this turn, keyed by
+    /// `tool_call_id`. The labels are consumed by the executor (via
+    /// [`Self::take_egress_labels`]) and attached to the next completion
+    /// request's metadata so the chokepoint driver (RFC §5.2) can substitute
+    /// indications for content whose label excludes the target sink. The
+    /// bounded content snippets feed verbatim argument-taint detection
+    /// (RFC §4.1 path 3) on later calls in the same turn — a tripwire, not a
+    /// proof (defeated by paraphrase/encoding). Empty for unconfigured
+    /// deployments (the labeler is inert — RFC §4.2).
+    egress_results:
+        std::collections::HashMap<String, crate::runtime::egress_labeler::PriorLabeledResult>,
 }
+
+/// Maximum length of a stored content snippet for verbatim argument-taint
+/// detection (RFC §4.1 path 3). Bounded to keep the matching cost predictable;
+/// a tripwire, not a proof.
+const EGRESS_VERBATIM_SNIPPET_MAX: usize = 512;
 
 /// Result of executing a single tool call, including whether the payload was
 /// served from the session read cache.
@@ -167,7 +176,7 @@ impl<'a> ToolCallProcessor<'a> {
             gateway_store,
             run_context,
             session_state: autonoetic_types::agent::SessionState::Normal,
-            egress_labels: std::collections::HashMap::new(),
+            egress_results: std::collections::HashMap::new(),
         }
     }
 
@@ -193,7 +202,10 @@ impl<'a> ToolCallProcessor<'a> {
     pub fn take_egress_labels(
         &mut self,
     ) -> std::collections::HashMap<String, autonoetic_types::egress::EgressLabel> {
-        std::mem::take(&mut self.egress_labels)
+        std::mem::take(&mut self.egress_results)
+            .into_iter()
+            .map(|(tcid, r)| (tcid, r.label))
+            .collect()
     }
 
     /// This session's root id — the bucket every root-scoped policy is keyed by.
@@ -212,7 +224,8 @@ impl<'a> ToolCallProcessor<'a> {
     }
 
     /// Build the labeler for this turn: operator-global `egress.rules` plus the
-    /// root session's `egress_policy` (RFC §5.4).
+    /// root session's `egress_policy` (RFC §5.4), plus the bundle-declared
+    /// output floor (RFC §4.1 path 2).
     ///
     /// A session policy that cannot be read is treated as fail-closed *for the
     /// turn*: rather than silently proceeding with global rules only (which
@@ -226,7 +239,17 @@ impl<'a> ToolCallProcessor<'a> {
             .config
             .map(|cfg| cfg.egress.clone())
             .unwrap_or_default();
-        let labeler = EgressLabeler::from_config(&config_egress);
+        // Bundle-declared output floor (RFC §4.1 path 2): a manifest may
+        // declare `metadata.autonoetic.egress.output_label` to restrict the
+        // bundle's own outputs. A floor intersects every resolution and can
+        // never widen operator policy.
+        let floor = self
+            .manifest
+            .egress
+            .as_ref()
+            .and_then(|e| e.output_label)
+            .map(|named| named.to_label());
+        let labeler = EgressLabeler::from_config(&config_egress).with_manifest_floor(floor);
 
         let (Some(store), Some(root_session_id)) =
             (self.gateway_store.as_ref(), self.egress_root_session_id())
@@ -249,6 +272,65 @@ impl<'a> ToolCallProcessor<'a> {
                     default_label: Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly),
                 })
             }
+        }
+    }
+
+    /// Label one successful tool result at the commit boundary (RFC §4) and
+    /// accumulate the label + a bounded content snippet for argument taint.
+    ///
+    /// Deliberately out of line and `#[inline(never)]`, mirroring
+    /// [`clear_session_egress_policy`]: this sits inside `process_tool_calls_inner`,
+    /// a large `async fn` whose future lives on the stack, and the
+    /// server-bootstrap path already runs close to the 2 MiB test-thread limit.
+    /// The taint-source `Vec` and snippet `String` built here must live in this
+    /// fn's own frame, not in the async future's state.
+    #[inline(never)]
+    fn label_result_egress(
+        &mut self,
+        egress_labeler: &crate::runtime::egress_labeler::EgressLabeler,
+        tc: &ToolCall,
+        canonical_tool: &str,
+        res: &str,
+        agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+    ) {
+        let exec_ctx = crate::runtime::egress_path_matcher::ExecSourceContext {
+            agent_dir: Some(agent_dir),
+            gateway_dir,
+            session_id: self.session_id.as_deref(),
+            gateway_store: self.gateway_store.as_deref(),
+        };
+        // Prior labeled results in this turn feed argument taint (RFC §4.1
+        // path 3): the labeler scans the arguments for handle references
+        // (tool_call_id) and bounded verbatim content matches. Empty on the
+        // first tool call of a turn — no scan runs.
+        if let Some(outcome) = egress_labeler.label_tool_result(
+            &crate::runtime::egress_labeler::LabelRequest {
+                tool: canonical_tool,
+                arguments_json: &tc.arguments,
+                tool_call_id: &tc.id,
+            },
+            Some(&exec_ctx),
+            self.session_id.as_deref().unwrap_or(""),
+            &self.manifest.agent.id,
+            self.turn_id.as_deref(),
+            self.gateway_store.as_ref(),
+            &self.egress_results,
+        ) {
+            // Store a bounded content snippet for future verbatim taint
+            // detection (RFC §4.1 path 3) — a tripwire, not a proof.
+            let snippet: String = res.chars().take(EGRESS_VERBATIM_SNIPPET_MAX).collect();
+            self.egress_results.insert(
+                tc.id.clone(),
+                crate::runtime::egress_labeler::PriorLabeledResult {
+                    label: outcome.label,
+                    content_snippet: if snippet.is_empty() {
+                        None
+                    } else {
+                        Some(snippet)
+                    },
+                },
+            );
         }
     }
 
@@ -410,32 +492,15 @@ impl<'a> ToolCallProcessor<'a> {
                     // workspace scripts it names) are statically matched against
                     // labeled paths — which is what keeps §5.6 step 3 safe when
                     // the script, not a structured tool, does the reading.
-                    // The label feeds the chokepoint (#905): the executor
+                    // Argument taint (RFC §4.1 path 3) intersects the labels of
+                    // any prior labeled results referenced in the arguments —
+                    // by handle (tool_call_id) or by bounded verbatim content
+                    // match. The label feeds the chokepoint (#905): the executor
                     // attaches the accumulated map to the next completion
                     // request's metadata, and the wrapping
                     // EgressChokepointDriver substitutes an indication for any
                     // tool result whose label excludes the target sink.
-                    let exec_ctx = crate::runtime::egress_path_matcher::ExecSourceContext {
-                        agent_dir: Some(agent_dir),
-                        gateway_dir,
-                        session_id: self.session_id.as_deref(),
-                        gateway_store: self.gateway_store.as_deref(),
-                    };
-                    if let Some(outcome) = egress_labeler.label_tool_result(
-                        &crate::runtime::egress_labeler::LabelRequest {
-                            tool: canonical_tool,
-                            arguments_json: &tc.arguments,
-                            tool_call_id: &tc.id,
-                        },
-                        Some(&exec_ctx),
-                        self.session_id.as_deref().unwrap_or(""),
-                        &self.manifest.agent.id,
-                        self.turn_id.as_deref(),
-                        self.gateway_store.as_ref(),
-                    ) {
-                        self.egress_labels
-                            .insert(tc.id.clone(), outcome.label);
-                    }
+                    self.label_result_egress(&egress_labeler, tc, canonical_tool, &res, agent_dir, gateway_dir);
                     res
                 }
                 Err(e) => {
@@ -1178,6 +1243,7 @@ mod tests {
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         }
     }
 

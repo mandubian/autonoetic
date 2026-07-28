@@ -52,7 +52,8 @@ fn base_manifest(caps: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn network_manifest(hosts: Vec<&str>) -> AgentManifest {

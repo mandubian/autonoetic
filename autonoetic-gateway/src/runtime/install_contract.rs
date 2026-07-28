@@ -1481,6 +1481,7 @@ artifacts: "not_a_sequence"
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         let rendered = render_skill_document(&manifest, "# Instructions").unwrap();
         assert!(rendered.starts_with("---\n"));
@@ -1867,6 +1868,7 @@ artifacts: "not_a_sequence"
             compression: None,
             open_web: false,
             sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
+            egress: None,
         };
         let rendered = render_skill_document(&manifest, "# Test").unwrap();
         assert!(

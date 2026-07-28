@@ -56,8 +56,9 @@ llm_config:
 "#
     );
     let (m, _) = autonoetic_gateway::runtime::parser::SkillParser::parse(&yaml).unwrap();
-    m
-}
+    m,
+    egress: None,
+        }
 
 fn eval_curator_manifest(agent_id: &str) -> autonoetic_types::agent::AgentManifest {
     let caps = serde_json::to_string(&vec![Capability::Evaluation {
@@ -87,8 +88,9 @@ llm_config:
 "#
     );
     let (m, _) = autonoetic_gateway::runtime::parser::SkillParser::parse(&yaml).unwrap();
-    m
-}
+    m,
+    egress: None,
+        }
 
 fn open_store(tmp: &TempDir) -> Arc<GatewayStore> {
     Arc::new(GatewayStore::open(tmp.path()).unwrap())

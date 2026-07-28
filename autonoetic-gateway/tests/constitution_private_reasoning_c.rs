@@ -60,7 +60,8 @@ fn manifest_with_reasoning_audit(targets: Vec<&str>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn manifest_without_audit() -> AgentManifest {
@@ -101,7 +102,8 @@ fn manifest_without_audit() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 // ---------------------------------------------------------------------------

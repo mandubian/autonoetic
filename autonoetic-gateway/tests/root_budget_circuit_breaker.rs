@@ -117,7 +117,8 @@ fn test_manifest() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Build a workflow for `root_session` with two in-flight (Running) descendant

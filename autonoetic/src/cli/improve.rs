@@ -631,7 +631,8 @@ async fn handle_propose_code_fix(
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    };
+        egress: None,
+        };
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
     let tool = GithubIssueCreateTool;
 
@@ -805,7 +806,8 @@ fn run_ab_replay(
         compression: None,
             open_web: false,
         sandbox_network: Default::default(),
-    };
+        egress: None,
+        };
 
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
 
@@ -917,7 +919,8 @@ fn promote_manifest() -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: Default::default(),
-    }
+        egress: None,
+        }
 }
 
 fn prompt_approval(comparison: &serde_json::Value) -> anyhow::Result<bool> {

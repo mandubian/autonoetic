@@ -301,6 +301,7 @@ impl NativeTool for SkillInstallTool {
             compression: parsed_manifest.compression.clone(),
             open_web: parsed_manifest.open_web,
             sandbox_network: parsed_manifest.sandbox_network,
+            egress: None,
         };
 
         // ── 8. Write agent directory: SKILL.md + runtime.lock ─────────────────

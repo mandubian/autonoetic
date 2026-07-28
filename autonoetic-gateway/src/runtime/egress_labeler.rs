@@ -54,6 +54,24 @@ pub struct LabelRequest<'a> {
     pub tool_call_id: &'a str,
 }
 
+/// A prior labeled result held by the session for argument-taint detection
+/// (RFC §4.1 path 3).
+///
+/// The labeler scans a tool call's arguments for two deterministic signals:
+/// 1. **Handle reference** — the prior `tool_call_id` (the map key) appears in
+///    the args JSON.
+/// 2. **Verbatim content** — `content_snippet` (when present) appears as a
+///    substring of the args. Bounded and defeated by paraphrase — a tripwire,
+///    not a proof.
+#[derive(Debug, Clone)]
+pub struct PriorLabeledResult {
+    /// The label of the prior labeled result.
+    pub label: EgressLabel,
+    /// Optional truncated content from the prior result, for bounded verbatim
+    /// taint detection. `None` when unavailable or too large.
+    pub content_snippet: Option<String>,
+}
+
 /// Where a rule came from. Recorded per matched rule so the audit answers "was
 /// this the operator's standing policy or something this session declared?".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +111,13 @@ pub struct Resolution {
     /// design (RFC §9); the pattern is operator-authored, so it is safe to
     /// record and is what actually explains the decision.
     pub paths: Vec<String>,
+    /// Whether the bundle-declared floor (RFC §4.1 path 2) contributed to this
+    /// resolution. Recorded for the audit event so "why is this labeled?" is
+    /// answerable when the floor was the only restricting input.
+    pub bundle_floor_applied: bool,
+    /// Whether argument-taint contributed to this resolution (RFC §4.1 path 3).
+    /// `parent_envelope_ids` on the provenance carries the actual lineage.
+    pub taint_applied: bool,
 }
 
 impl Resolution {
@@ -151,8 +176,14 @@ pub struct EgressLabeler {
     global_default: EgressLabel,
     /// Whether the session policy narrowed the default, for the audit event.
     session_default_applied: bool,
-    /// Whether source-rule labeling is effectively off (no rules + default
-    /// `unrestricted`). Lets the hot path skip provenance/event work entirely.
+    /// The bundle-declared output floor (RFC §4.1 path 2). `None` when no
+    /// floor is declared. When present, every resolution intersects this label
+    /// — a floor restricts the bundle's own outputs, never widens operator
+    /// policy.
+    bundle_floor: Option<EgressLabel>,
+    /// Whether source-rule labeling is effectively off (no rules + no floor +
+    /// default `unrestricted`). Lets the hot path skip provenance/event work
+    /// entirely.
     inert: bool,
 }
 
@@ -175,8 +206,25 @@ impl EgressLabeler {
             default_label: default_label.clone(),
             global_default: default_label,
             session_default_applied: false,
+            bundle_floor: None,
             inert,
         }
+    }
+
+    /// Apply a bundle-declared output floor (RFC §4.1 path 2).
+    ///
+    /// A floor is a label declared in the agent's SKILL.md under
+    /// `metadata.autonoetic.egress.output_label`. It **restricts** the bundle's
+    /// own outputs: every resolution intersects it alongside operator rules,
+    /// and it can never widen what operator policy restricted. A floor clears
+    /// inertness — even with no operator rules, a bundle-only floor makes the
+    /// labeler non-inert so the floor is actually applied.
+    pub fn with_manifest_floor(mut self, floor: Option<EgressLabel>) -> Self {
+        self.bundle_floor = floor;
+        if self.bundle_floor.is_some() {
+            self.inert = false;
+        }
+        self
     }
 
     /// Merge the root session's `egress_policy` (RFC §5.4) — it dies with the
@@ -251,15 +299,27 @@ impl EgressLabeler {
         // itself when nothing matched, and is a no-op intersection when rules
         // already restricted further — unless the default is stricter).
         label = label.restrict(&self.default_label);
+
+        // Apply the bundle-declared floor (RFC §4.1 path 2). Intersection only —
+        // a floor restricts the bundle's own outputs, never widens.
+        let bundle_floor_applied = if let Some(floor) = &self.bundle_floor {
+            label = label.restrict(floor);
+            true
+        } else {
+            false
+        };
+
         Resolution {
             label,
             matched,
             paths,
+            bundle_floor_applied,
+            taint_applied: false,
         }
     }
 
-    /// Label a tool result end-to-end: resolve, mint envelope id, build
-    /// provenance, emit `egress.envelope_labeled`.
+    /// Label a tool result end-to-end: resolve, intersect argument taint,
+    /// mint envelope id, build provenance, emit `egress.envelope_labeled`.
     ///
     /// `exec_ctx` locates an exec-shaped call's dependency sources (artifact
     /// bundle, workspace scripts) so the static path matcher can see what the
@@ -267,6 +327,12 @@ impl EgressLabeler {
     /// any inline script in the arguments. Returns `None` when the labeler is
     /// inert or the result is unrestricted — callers treat that as "no
     /// envelope".
+    ///
+    /// `prior_labels` carries the accumulated prior labeled results in this
+    /// turn/session (RFC §4.1 path 3), keyed by `tool_call_id`. The labeler
+    /// scans the arguments for references to these prior envelopes — by handle
+    /// (tool_call_id) and by bounded verbatim content match — and intersects
+    /// their labels. Empty for the first tool call in a turn.
     ///
     /// The durable record of the labeling decision is the
     /// `egress.envelope_labeled` causal event (persisted via `store`); the
@@ -280,6 +346,7 @@ impl EgressLabeler {
         agent_id: &str,
         turn_id: Option<&str>,
         store: Option<&Arc<GatewayStore>>,
+        prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
     ) -> Option<LabelOutcome> {
         if self.inert {
             return None;
@@ -289,7 +356,7 @@ impl EgressLabeler {
         // comes from static analysis of the command and its dependency sources
         // against labeled path patterns (RFC §4.2). For other tools, path comes
         // from a structured argument.
-        let resolution = if is_exec_shaped(req.tool) {
+        let mut resolution = if is_exec_shaped(req.tool) {
             self.resolve_exec_label(req, exec_ctx)
         } else {
             // Structured tools: extract a `path` argument (common shapes) so
@@ -298,6 +365,31 @@ impl EgressLabeler {
             let path = extract_structured_path(req.arguments_json);
             self.resolve_label(req.tool, path.as_deref())
         };
+
+        // Argument taint (RFC §4.1 path 3): scan the arguments for references
+        // to prior labeled envelopes. Two deterministic signals:
+        // 1. Handle reference — prior tool_call_id appears in the args JSON.
+        // 2. Verbatim content — prior result content snippet appears in args.
+        let mut parent_envelope_ids: Vec<String> = Vec::new();
+        if !prior_labels.is_empty() {
+            let mut taint_label = EgressLabel::unrestricted();
+            for (prior_tcid, prior) in prior_labels {
+                let handle_match = req.arguments_json.contains(prior_tcid.as_str());
+                let verbatim_match = prior
+                    .content_snippet
+                    .as_deref()
+                    .map(|snip| !snip.is_empty() && req.arguments_json.contains(snip))
+                    .unwrap_or(false);
+                if handle_match || verbatim_match {
+                    taint_label = taint_label.restrict(&prior.label);
+                    parent_envelope_ids.push(prior_tcid.clone());
+                }
+            }
+            if !parent_envelope_ids.is_empty() {
+                resolution.label = resolution.label.restrict(&taint_label);
+                resolution.taint_applied = true;
+            }
+        }
 
         // If the resolved label is unrestricted, there's nothing to audit —
         // emitting an event for every clean tool result would be noise. The
@@ -313,9 +405,7 @@ impl EgressLabeler {
             tool: Some(req.tool.to_string()),
             args_digest: Some(args_digest),
             matched_rules: resolution.rule_keys(),
-            // Argument taint (RFC §4.1 path 3) intersects in phase 2 (#907);
-            // the field is carried here so the event shape is already stable.
-            parent_envelope_ids: Vec::new(),
+            parent_envelope_ids,
         };
 
         // Best-effort causal event — the durable record of this labeling
@@ -411,10 +501,21 @@ impl EgressLabeler {
                 });
             }
         }
+        // Apply default + bundle floor (same as resolve_label).
+        label = label.restrict(&self.default_label);
+        let bundle_floor_applied = if let Some(floor) = &self.bundle_floor {
+            label = label.restrict(floor);
+            true
+        } else {
+            false
+        };
+
         Resolution {
-            label: label.restrict(&self.default_label),
+            label,
             matched,
             paths: m.matched_patterns,
+            bundle_floor_applied,
+            taint_applied: false,
         }
     }
 
@@ -463,9 +564,12 @@ impl EgressLabeler {
             "global_default_label": serde_json::to_value(&self.global_default)
                 .unwrap_or(serde_json::Value::Null),
             "session_default_applied": self.session_default_applied,
-            // Argument taint (phase 2, #907) — always empty today, present so
-            // consumers can rely on the field.
+            // Whether the bundle-declared floor (RFC §4.1 path 2) contributed.
+            "bundle_floor_applied": resolution.bundle_floor_applied,
+            // Argument taint (RFC §4.1 path 3) — parent envelope ids whose
+            // labels were intersected into this resolution.
             "parent_envelope_ids": provenance.parent_envelope_ids,
+            "taint_applied": resolution.taint_applied,
             // Explicitly name the resolution path so the audit answers "why?".
             "resolution": resolution.kind(),
         });
@@ -860,6 +964,27 @@ mod tests {
         r.rule_keys()
     }
 
+    fn no_prior() -> std::collections::HashMap<String, PriorLabeledResult> {
+        std::collections::HashMap::new()
+    }
+
+    fn prior(
+        entries: &[(&str, EgressLabel, Option<&str>)],
+    ) -> std::collections::HashMap<String, PriorLabeledResult> {
+        entries
+            .iter()
+            .map(|(tcid, label, snip)| {
+                (
+                    tcid.to_string(),
+                    PriorLabeledResult {
+                        label: label.clone(),
+                        content_snippet: snip.map(|s| s.to_string()),
+                    },
+                )
+            })
+            .collect()
+    }
+
     // ── source matching ──────────────────────────────────────────────────
 
     #[test]
@@ -1025,7 +1150,7 @@ mod tests {
             arguments_json: "{}",
             tool_call_id: "tc_1",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         assert!(out.is_none());
     }
 
@@ -1038,7 +1163,7 @@ mod tests {
             arguments_json: "{}",
             tool_call_id: "tc_1",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         assert!(out.is_none());
     }
 
@@ -1050,7 +1175,7 @@ mod tests {
             arguments_json: r#"{"box":"inbox"}"#,
             tool_call_id: "tc_42",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert!(out.is_restricted());
         assert!(out.envelope_id.starts_with("env_"));
         assert_eq!(out.label, EgressLabel::local_only());
@@ -1082,7 +1207,7 @@ mod tests {
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::local_only());
         assert!(out.provenance.matched_rules.iter().any(|r| r.contains("~/mail/**")));
     }
@@ -1097,7 +1222,7 @@ mod tests {
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         assert!(out.is_none(), "clean exec should not be labeled");
     }
 
@@ -1117,7 +1242,7 @@ mod tests {
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None);
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         // The fs.read rule does not apply to sandbox.exec → unrestricted → no label.
         assert!(out.is_none(), "fs.read path rule must not label sandbox.exec");
     }
@@ -1133,7 +1258,7 @@ mod tests {
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::no_remote_model());
     }
 
@@ -1268,7 +1393,7 @@ mod tests {
             arguments_json: r#"{"command":"python3 read.py ~/mail/archive.mbox"}"#,
             tool_call_id: "tc_exec",
         };
-        let out = l.label_tool_result(&req, None, "sess", "agent", None, None).expect("restricted");
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::local_only());
     }
 
@@ -1295,7 +1420,7 @@ mod tests {
 
         // Without the context the script is invisible → nothing labeled.
         assert!(
-            l.label_tool_result(&req, None, "sess", "agent", None, None).is_none(),
+            l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).is_none(),
             "command line alone carries no labeled path"
         );
 
@@ -1307,7 +1432,7 @@ mod tests {
             gateway_store: None,
         };
         let out = l
-            .label_tool_result(&req, Some(&ctx), "sess", "agent", None, None)
+            .label_tool_result(&req, Some(&ctx), "sess", "agent", None, None, &no_prior())
             .expect("dependency read should be labeled");
         assert_eq!(out.label, EgressLabel::local_only());
     }
@@ -1322,5 +1447,221 @@ mod tests {
             label: custom.clone(),
         }]));
         assert_eq!(l.resolve_label("email_read", None).label, custom);
+    }
+
+    // ── Bundle-declared floor (RFC §4.1 path 2) ───────────────────────────
+
+    #[test]
+    fn floor_applies_from_manifest_with_no_operator_rules() {
+        // No operator rules, unrestricted default — but a bundle-only floor
+        // makes the labeler non-inert and restricts every result.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::local_only()));
+        assert!(!l.is_inert(), "a bundle floor clears inertness");
+        let r = l.resolve_label("anything", None);
+        assert_eq!(r.label, EgressLabel::local_only());
+        assert!(r.bundle_floor_applied);
+    }
+
+    #[test]
+    fn floor_cannot_widen_operator_policy() {
+        // Operator says local_only; bundle declares an unrestricted floor →
+        // the floor is a no-op (intersection with unrestricted = identity).
+        let l = EgressLabeler::from_config(&cfg(vec![rule(
+            "email.read",
+            None,
+            NamedEgressLabel::LocalOnly,
+        )]))
+        .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let r = l.resolve_label("email.read", None);
+        assert_eq!(r.label, EgressLabel::local_only());
+        // The floor was "applied" but didn't change anything (unrestricted is
+        // the identity for intersection).
+        assert!(r.bundle_floor_applied);
+    }
+
+    #[test]
+    fn bundle_floor_intersects_with_operator_rule() {
+        // Operator says no_remote_model; bundle floor is local_only →
+        // intersection = local_only (the stricter).
+        let l = EgressLabeler::from_config(&cfg(vec![rule(
+            "fs.read",
+            None,
+            NamedEgressLabel::NoRemoteModel,
+        )]))
+        .with_manifest_floor(Some(EgressLabel::local_only()));
+        let r = l.resolve_label("fs.read", None);
+        assert_eq!(r.label, EgressLabel::local_only());
+    }
+
+    #[test]
+    fn floor_without_rules_still_labels_clean_source() {
+        // A bundle floor applies to every tool result, even sources no rule
+        // mentions — that's the point of a bundle-wide floor.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::no_remote_model()));
+        let r = l.resolve_label("completely_unknown_tool", None);
+        assert_eq!(r.label, EgressLabel::no_remote_model());
+        assert!(r.bundle_floor_applied);
+    }
+
+    #[test]
+    fn no_floor_keeps_inert_behavior() {
+        // No floor, no rules, unrestricted default → still inert.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(None);
+        assert!(l.is_inert());
+    }
+
+    #[test]
+    fn floor_labeled_result_emits_envelope() {
+        // End-to-end: floor makes the labeler non-inert and emits an event
+        // for a restricted result, even with no operator rules at all.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::local_only()));
+        let req = LabelRequest {
+            tool: "custom_tool",
+            arguments_json: "{}",
+            tool_call_id: "tc_floor",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "agent", None, None, &no_prior())
+            .expect("floor should produce a restricted envelope");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert!(out.is_restricted());
+    }
+
+    // ── Argument taint (RFC §4.1 path 3) ──────────────────────────────────
+
+    #[test]
+    fn taint_by_handle_reference_intersects_parent_label() {
+        // Tool called with an argument referencing a prior local_only tool
+        // result → output labeled local_only, parent_envelope_ids populated.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let taint = prior(&[("tc_prior_secret", EgressLabel::local_only(), None)]);
+        // The args reference the prior tool_call_id by handle.
+        let req = LabelRequest {
+            tool: "content_write",
+            arguments_json: r#"{"source_ref":"tc_prior_secret","content":"derived"}"#,
+            tool_call_id: "tc_derived",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
+            .expect("tainted result should be labeled");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert_eq!(
+            out.provenance.parent_envelope_ids,
+            vec!["tc_prior_secret".to_string()]
+        );
+    }
+
+    #[test]
+    fn taint_by_verbatim_content_intersects_parent_label() {
+        // The arguments contain the prior result's content verbatim → taint
+        // fires even without an explicit handle reference.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let prior_content = "CANARY-SECRET-EMAIL-CONTENT";
+        let taint = prior(&[(
+            "tc_email_read",
+            EgressLabel::local_only(),
+            Some(prior_content),
+        )]);
+        let req = LabelRequest {
+            tool: "content_write",
+            arguments_json: &format!(r#"{{"content":"Here is the data: {prior_content}"}}"#),
+            tool_call_id: "tc_copy",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
+            .expect("verbatim taint should fire");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert!(out.provenance.parent_envelope_ids.contains(&"tc_email_read".to_string()));
+    }
+
+    #[test]
+    fn clean_argument_produces_no_taint() {
+        // No reference to any prior labeled result → no taint, no parents.
+        let l = EgressLabeler::from_config(&cfg(vec![rule(
+            "content_write",
+            None,
+            NamedEgressLabel::Unrestricted,
+        )]))
+        .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let taint = prior(&[(
+            "tc_prior_secret",
+            EgressLabel::local_only(),
+            Some("SECRET-DATA-NOT-IN-ARGS"),
+        )]);
+        let req = LabelRequest {
+            tool: "content_write",
+            arguments_json: r#"{"content":"completely unrelated clean content"}"#,
+            tool_call_id: "tc_clean",
+        };
+        // Unrestricted label → label_tool_result returns None (no envelope).
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &taint);
+        assert!(out.is_none(), "clean argument with unrestricted label → no envelope");
+    }
+
+    #[test]
+    fn taint_intersection_of_two_parents() {
+        // Two tainted parents: local_only ∩ no_remote_model = local_only.
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let taint = prior(&[
+            ("tc_a", EgressLabel::local_only(), None),
+            ("tc_b", EgressLabel::no_remote_model(), None),
+        ]);
+        // Args reference both prior ids.
+        let req = LabelRequest {
+            tool: "content_write",
+            arguments_json: r#"{"refs":["tc_a","tc_b"]}"#,
+            tool_call_id: "tc_combined",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
+            .expect("tainted by two parents");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert_eq!(out.provenance.parent_envelope_ids.len(), 2);
+    }
+
+    #[test]
+    fn taint_intersects_with_rule_label() {
+        // A rule already restricts to no_remote_model; a tainted parent adds
+        // local_only → intersection = local_only.
+        let l = EgressLabeler::from_config(&cfg(vec![rule(
+            "content_write",
+            None,
+            NamedEgressLabel::NoRemoteModel,
+        )]))
+        .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let taint = prior(&[("tc_secret", EgressLabel::local_only(), None)]);
+        let req = LabelRequest {
+            tool: "content_write",
+            arguments_json: r#"{"ref":"tc_secret"}"#,
+            tool_call_id: "tc_out",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
+            .expect("should be labeled");
+        assert_eq!(out.label, EgressLabel::local_only());
+    }
+
+    #[test]
+    fn empty_snippet_does_not_taint() {
+        // An empty content snippet must not match (would match everything).
+        let l = EgressLabeler::from_config(&EgressConfig::default())
+            .with_manifest_floor(Some(EgressLabel::unrestricted()));
+        let taint = prior(&[("tc_empty", EgressLabel::local_only(), Some(""))]);
+        let req = LabelRequest {
+            tool: "content_write",
+            arguments_json: r#"{"content":"anything"}"#,
+            tool_call_id: "tc_test",
+        };
+        let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &taint);
+        // No handle match (tc_empty not in args), no verbatim match (empty
+        // snippet) → unrestricted → None.
+        assert!(out.is_none());
     }
 }

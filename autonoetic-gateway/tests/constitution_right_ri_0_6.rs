@@ -102,7 +102,8 @@ fn manifest(agent_id: &str) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn seed_agent_dir(agents_dir: &std::path::Path, agent_id: &str) -> std::path::PathBuf {

@@ -67,7 +67,8 @@ fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn skill_md(agent_id: &str, executable: bool, with_credentials: bool) -> String {

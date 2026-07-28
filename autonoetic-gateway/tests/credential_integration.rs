@@ -54,7 +54,8 @@ fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn spawn_one_shot_http_server(

@@ -71,7 +71,8 @@ fn base_manifest(id: &str, name: &str, capabilities: Vec<Capability>) -> AgentMa
         compression: None,
             open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 /// Writer (needs WriteAccess) used to mint the artifact_ref.

@@ -148,7 +148,8 @@ fn proposer_manifest() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn gate_manifest(id: &str, allowed: Vec<&str>) -> AgentManifest {
@@ -191,7 +192,8 @@ fn gate_manifest(id: &str, allowed: Vec<&str>) -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 struct Fixture {

@@ -192,8 +192,9 @@ llm_config:
 "#;
     let (manifest, _instructions) =
         autonoetic_gateway::runtime::parser::SkillParser::parse(yaml).unwrap();
-    manifest
-}
+    manifest,
+    egress: None,
+        }
 
 fn is_sandbox_unavailable(err: &anyhow::Error) -> bool {
     let msg = err.to_string();

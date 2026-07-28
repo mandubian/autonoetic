@@ -48,7 +48,8 @@ fn unit_test_runner_manifest() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn auditor_manifest() -> AgentManifest {
@@ -89,7 +90,8 @@ fn auditor_manifest() -> AgentManifest {
         compression: None,
         open_web: false,
         sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-    }
+        egress: None,
+        }
 }
 
 fn setup_gateway() -> (tempfile::TempDir, std::path::PathBuf, Arc<GatewayStore>) {
