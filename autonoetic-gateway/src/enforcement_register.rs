@@ -411,7 +411,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             rule_id: "P-2.29",
             check_id: "promotion_attempts_exhausted",
             code: "runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt",
-            test: "promotion_attempt_exhaustion_integration.rs",
+            test: "promotion/attempt_exhaustion.rs",
             config: Some("promotion_governor.max_promotion_attempts_per_revision"),
         },
         // ── P-8.1 (binds agent, entrenched — correction core: tamper-evident chain) ──

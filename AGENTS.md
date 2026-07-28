@@ -185,11 +185,21 @@ ports, use fixed paths, or spawn singleton daemons must stay in their own
 binary (or be refactored to `tempfile` + port-0 first) — cohabiting one
 process requires no cross-test external state.
 
+**Enforcement-register citation coupling:** the constitution's enforcement
+register cites test files by name, and `enforcement_register.rs`'s
+`every_parseable_citation_resolves` test fails the build when a cited file
+doesn't exist. A rename/move must update **both** copies of the register
+(`docs/constitution/enforcement-register.md` and the `EnforcementEntry`
+structs in `autonoetic-gateway/src/enforcement_register.rs`) — cite the new
+path form (`promotion/attempt_exhaustion.rs` resolves under
+`autonoetic-gateway/tests/`). Bare-filename citations still resolve
+recursively, so keeping the basename unchanged also works.
+
 Notable test suites:
 - `turn_continuation_approval_integration.rs` — suspend/resume, timeout, cancellation, restart, parallel-join
 - `approved_exec_cache_integration.rs` — cache fingerprint, normalization, full cycle
 - `emergency_stop_root_session_integration.rs` — circuit breaker, grant cleanup
-- `promotion_record_e2e.rs` / `promotion_gate_hardening_integration.rs` — severity gating
+- `promotion/record_e2e.rs` / `promotion/gate_hardening.rs` — severity gating
 - `continuation_hmac_integrity_integration.rs` — HMAC signing, verification, tamper detection
 - `continuation_cleanup_integration.rs` — delete on reject/cancel/withdraw, startup reaper, emergency stop
 - `approval_scope_targets_integration.rs` — session-scoped grants, pattern-based targets, expiry
