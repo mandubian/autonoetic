@@ -106,6 +106,8 @@ fn persist_emits_one_event_per_entry_plus_summary() {
     let (_temp, store) = temp_store();
     let entries = vec![
         DecisionJournalEntry {
+            target_agent: None,
+            proposed_instruction: None,
             target: "memory://s/a".to_string(),
             action: "drop".to_string(),
             reason_code: "low_signal".to_string(),
@@ -114,6 +116,8 @@ fn persist_emits_one_event_per_entry_plus_summary() {
             confidence: Some(0.5),
         },
         DecisionJournalEntry {
+            target_agent: None,
+            proposed_instruction: None,
             target: "memory://s/b".to_string(),
             action: "keep".to_string(),
             reason_code: "high_confidence_pattern".to_string(),
@@ -158,6 +162,8 @@ fn query_by_target_returns_only_that_target() {
     let (_temp, store) = temp_store();
     let entries = vec![
         DecisionJournalEntry {
+            target_agent: None,
+            proposed_instruction: None,
             target: "memory://hot/x".to_string(),
             action: "drop".to_string(),
             reason_code: "low_signal".to_string(),
@@ -166,6 +172,8 @@ fn query_by_target_returns_only_that_target() {
             confidence: None,
         },
         DecisionJournalEntry {
+            target_agent: None,
+            proposed_instruction: None,
             target: "memory://cold/y".to_string(),
             action: "keep".to_string(),
             reason_code: "high_confidence_pattern".to_string(),
@@ -174,6 +182,8 @@ fn query_by_target_returns_only_that_target() {
             confidence: None,
         },
         DecisionJournalEntry {
+            target_agent: None,
+            proposed_instruction: None,
             target: "memory://hot/x".to_string(),
             action: "flag_for_evolution".to_string(),
             reason_code: "eval_regression".to_string(),
