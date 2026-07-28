@@ -6,7 +6,6 @@
 //! - High-risk agents with unresolved dependencies are blocked from promotion.
 //! - Low-risk agents are not subject to the promotion gate.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
@@ -319,7 +318,7 @@ fn record_promotion(
     pass: bool,
     session_id: &str,
 ) {
-    let args = support::promotion_trace::build_promotion_record_args(
+    let args = crate::support::promotion_trace::build_promotion_record_args(
         gw_store.as_ref(),
         artifact_id,
         role,
@@ -363,7 +362,7 @@ fn try_promote(
     revision_id: &str,
 ) -> Result<serde_json::Value, String> {
     let (smoke_wf, smoke_task) =
-        support::promotion_trace::seed_smoke_test_task(config, store.as_ref(), agent_id, revision_id);
+        crate::support::promotion_trace::seed_smoke_test_task(config, store.as_ref(), agent_id, revision_id);
     let promote_args = serde_json::json!({
         "agent_id": agent_id,
         "revision_id": revision_id,
@@ -856,7 +855,7 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
     let promo_store = PromotionStore::new(&gateway_dir).unwrap();
     // record_promotion auto-timestamps "now". We then create a revision with a future
     // created_at to verify timestamp ordering no longer blocks promotion.
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &promo_store,
         store.as_ref(),
         artifact_id,
@@ -866,7 +865,7 @@ fn test_promote_accepts_precreate_records_when_digest_matches() {
         "session-evaluator",
         None,
     );
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &promo_store,
         store.as_ref(),
         artifact_id,

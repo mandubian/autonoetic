@@ -21,7 +21,6 @@
 //!    at runtime inside the offline sandbox (URLError/ConnectionError → non-zero
 //!    exit), which the verdict role maps to `unable_to_evaluate`.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;

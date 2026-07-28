@@ -2,7 +2,6 @@
 //! Approval queues for other tools (e.g. sandbox.exec) remain covered in
 //! `turn_continuation_approval_integration` and related tests.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;

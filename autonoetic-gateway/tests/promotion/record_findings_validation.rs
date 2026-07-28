@@ -1,4 +1,3 @@
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
@@ -66,7 +65,7 @@ fn test_promotion_record_rejects_empty_finding_description() {
     let manifest = evaluator_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
-    support::promotion_trace::seed_execution_trace(store.as_ref(), "test-session", "trace-findings-fail", 1);
+    crate::support::promotion_trace::seed_execution_trace(store.as_ref(), "test-session", "trace-findings-fail", 1);
 
     let out = registry
         .execute(
@@ -111,7 +110,7 @@ fn test_promotion_record_accepts_valid_findings() {
     let manifest = evaluator_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
-    support::promotion_trace::seed_success_trace(store.as_ref(), "test-session", "trace-findings-ok");
+    crate::support::promotion_trace::seed_success_trace(store.as_ref(), "test-session", "trace-findings-ok");
 
     let result = registry
         .execute(

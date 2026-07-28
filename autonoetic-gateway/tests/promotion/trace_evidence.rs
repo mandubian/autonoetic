@@ -1,6 +1,5 @@
 //! Trace-based promotion evidence (#580).
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
@@ -155,7 +154,7 @@ fn execution_role_without_trace_is_rejected() {
 fn execution_role_with_failed_trace_records_pass_false() {
     let (_temp, gw, store) = setup_gateway();
     let session = "session-trace-fail";
-    support::promotion_trace::seed_execution_trace(store.as_ref(), session, "trace-fail-001", 1);
+    crate::support::promotion_trace::seed_execution_trace(store.as_ref(), session, "trace-fail-001", 1);
     let manifest = unit_test_runner_manifest();
     let result = invoke_promotion_record(
         &gw,
@@ -177,7 +176,7 @@ fn execution_role_with_failed_trace_records_pass_false() {
 fn execution_role_with_success_trace_records_pass_true() {
     let (_temp, gw, store) = setup_gateway();
     let session = "session-trace-pass";
-    support::promotion_trace::seed_success_trace(store.as_ref(), session, "trace-pass-001");
+    crate::support::promotion_trace::seed_success_trace(store.as_ref(), session, "trace-pass-001");
     let manifest = unit_test_runner_manifest();
     let result = invoke_promotion_record(
         &gw,

@@ -3,7 +3,6 @@
 //! Capability-bearing new agents must execute once before promotion.
 //! Pure-reasoning agents (no NetworkAccess / CodeExecution) are exempt.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -170,7 +169,7 @@ fn seed_promotion_records(
 ) {
     let store =
         autonoetic_gateway::runtime::promotion_store::PromotionStore::new(gateway_dir).unwrap();
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &store,
         gw_store,
         ARTIFACT_ID,
@@ -180,7 +179,7 @@ fn seed_promotion_records(
         "session-smoke-evaluator",
         Some(content_digest),
     );
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &store,
         gw_store,
         ARTIFACT_ID,
