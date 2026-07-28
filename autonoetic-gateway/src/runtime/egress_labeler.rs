@@ -971,6 +971,28 @@ pub fn message_egress_key(msg: &crate::llm::Message) -> Option<&str> {
     }
 }
 
+/// A session's **accumulated taint** (RFC §5.5): the intersection of the labels
+/// of everything the session touched — i.e. every value in its egress-label
+/// sidecar. This is the label a child session's return value (or a session's
+/// outbound `agent_message`) carries when it crosses to another session, so a
+/// tainted child can't hand content to a remote-pinned sibling (closes the
+/// `LocalAgent` hole).
+///
+/// Empty map → [`EgressLabel::unrestricted`] (the session touched nothing
+/// restrictive). Because it is an intersection it is the *most restrictive*
+/// bound — conservative by design (never under-labels a cross-session
+/// transfer), at the cost of possibly over-restricting when a session mixed
+/// clean and tainted work.
+pub fn session_accumulated_taint(
+    labels: &std::collections::HashMap<String, EgressLabel>,
+) -> EgressLabel {
+    let mut acc = EgressLabel::unrestricted();
+    for label in labels.values() {
+        acc = acc.restrict(label);
+    }
+    acc
+}
+
 /// The [`Sink`] a preset's completions land in (RFC §5.1): its `egress_class`
 /// mapped to a sink, defaulting to [`Sink::RemoteModel`] when unclassified
 /// (fail-closed).
@@ -2007,6 +2029,34 @@ mod tests {
         let mut orphan_tool = tool_msg("tc_x", "y");
         orphan_tool.tool_call_id = None;
         assert_eq!(message_egress_key(&orphan_tool), None);
+    }
+
+    // ── session_accumulated_taint (RFC §5.5 cross-agent) ──────────────────
+
+    #[test]
+    fn session_accumulated_taint_intersects_everything_touched() {
+        use std::collections::HashMap;
+        // Empty session touched nothing → unrestricted (nothing to carry).
+        assert!(session_accumulated_taint(&HashMap::new()).is_unrestricted());
+
+        // A session that touched only clean content → unrestricted.
+        let mut clean = HashMap::new();
+        clean.insert("tc_1".to_string(), EgressLabel::unrestricted());
+        assert!(session_accumulated_taint(&clean).is_unrestricted());
+
+        // A session that read email → carries local_only.
+        let mut mail = HashMap::new();
+        mail.insert("tc_email".to_string(), EgressLabel::local_only());
+        mail.insert("tc_clean".to_string(), EgressLabel::unrestricted());
+        assert_eq!(session_accumulated_taint(&mail), EgressLabel::local_only());
+
+        // Mixed restrictive labels intersect to the most restrictive.
+        let mut mixed = HashMap::new();
+        mixed.insert("a".to_string(), EgressLabel::no_remote_model());
+        mixed.insert("b".to_string(), EgressLabel::local_only());
+        let taint = session_accumulated_taint(&mixed);
+        assert_eq!(taint, EgressLabel::local_only());
+        assert!(!taint.allows(Sink::RemoteModel));
     }
 
     #[test]

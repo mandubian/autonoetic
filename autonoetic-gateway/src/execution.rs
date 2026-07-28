@@ -2044,6 +2044,31 @@ impl GatewayExecutionService {
         let digest_turn_count = runtime.turn_counter;
         let gw_dir = self.config.agents_dir.join(".gateway");
 
+        // Cross-agent egress taint (RFC data-envelopes §5.5): record what this
+        // session touched (intersection of its label sidecar) so a parent that
+        // surfaces its return value — or a sibling it messaged — labels the
+        // transferred content and withholds it from a sink the label excludes.
+        // Only restrictive taint is stored (absence ⇒ unrestricted). This is the
+        // capture half of closing the `LocalAgent` hole; the apply half labels
+        // the recipient's tool result / message.
+        if let Some(store) = runtime.gateway_store.as_ref() {
+            if !runtime.egress_labels.is_empty() {
+                let taint = crate::runtime::egress_labeler::session_accumulated_taint(
+                    &runtime.egress_labels,
+                );
+                if !taint.is_unrestricted() {
+                    if let Err(e) = store.set_session_egress_taint(&session_id, &taint) {
+                        tracing::warn!(
+                            target: "egress",
+                            error = %e,
+                            session_id = %session_id,
+                            "failed to record session egress taint (§5.5)"
+                        );
+                    }
+                }
+            }
+        }
+
         // Residency: a resident agent that finished its task parks instead of
         // terminating, so peers can still reach it (`agent_message`). Parking
         // means: persist an Idle checkpoint, record the session as addressable,

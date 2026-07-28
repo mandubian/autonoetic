@@ -332,6 +332,36 @@ impl<'a> ToolCallProcessor<'a> {
                 },
             );
         }
+
+        // Cross-agent taint inheritance (RFC data-envelopes §5.5): a tool that
+        // surfaces another session's output — `workflow_wait` returning a
+        // child's `result_summary` — makes THIS result carry the child's
+        // accumulated taint (recorded at the child's finalize). Without this a
+        // tainted child could hand content to a remote-pinned parent with
+        // nothing carrying the label (the `LocalAgent` hole). Intersecting into
+        // the result's label means a later request to a sink the child taint
+        // excludes withholds the surfaced summary.
+        if canonical_tool == "workflow_wait" {
+            if let Some(store) = self.gateway_store.as_ref() {
+                if let Some(child_taint) =
+                    child_session_taint_from_result(res, store, self.session_id.as_deref())
+                {
+                    let entry = self.egress_results.entry(tc.id.clone()).or_insert_with(|| {
+                        let snippet: String =
+                            res.chars().take(EGRESS_VERBATIM_SNIPPET_MAX).collect();
+                        crate::runtime::egress_labeler::PriorLabeledResult {
+                            label: autonoetic_types::egress::EgressLabel::unrestricted(),
+                            content_snippet: if snippet.is_empty() {
+                                None
+                            } else {
+                                Some(snippet)
+                            },
+                        }
+                    });
+                    entry.label = entry.label.clone().restrict(&child_taint);
+                }
+            }
+        }
     }
 
     fn is_degraded_blocked_tool(&self, tool_name: &str) -> bool {
@@ -991,6 +1021,89 @@ fn tool_result_requires_approval(result: &str) -> bool {
         .ok()
         .and_then(|parsed| parsed.get("approval_required").and_then(|v| v.as_bool()))
         .unwrap_or(false)
+}
+
+/// Intersected egress taint of the child sessions a `workflow_wait` result
+/// surfaces (RFC data-envelopes §5.5). Recursively collects every
+/// `"session_id"` in the result JSON (excluding the caller's own), looks up
+/// each session's accumulated taint recorded at its finalize, and intersects
+/// them. `None` when no surfaced child recorded restrictive taint.
+fn child_session_taint_from_result(
+    result_json: &str,
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    own_session_id: Option<&str>,
+) -> Option<autonoetic_types::egress::EgressLabel> {
+    use autonoetic_types::egress::EgressLabel;
+    // Fail closed (RFC §2.2): a `workflow_wait` result is gateway-built JSON, so
+    // an unparseable one is anomalous and we cannot tell whether it surfaces a
+    // tainted child. Rather than risk shipping a child's content to a remote
+    // sink, treat it conservatively as `local_only`.
+    let parsed: serde_json::Value = match serde_json::from_str(result_json) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "egress",
+                error = %e,
+                "workflow_wait result did not parse as JSON — failing closed to \
+                 local_only for cross-agent taint (RFC §5.5)"
+            );
+            return Some(EgressLabel::local_only());
+        }
+    };
+    let mut ids: Vec<String> = Vec::new();
+    collect_session_ids(&parsed, &mut ids);
+    ids.sort();
+    ids.dedup();
+    let mut acc = EgressLabel::unrestricted();
+    let mut any = false;
+    for id in ids {
+        if Some(id.as_str()) == own_session_id {
+            continue;
+        }
+        match store.get_session_egress_taint(&id) {
+            Ok(Some(taint)) => {
+                acc = acc.restrict(&taint);
+                any = true;
+            }
+            Ok(None) => { /* clean child — nothing to inherit */ }
+            Err(e) => {
+                // A lookup error must not silently drop a possibly-restrictive
+                // taint (that would fail open). Treat this child as `local_only`.
+                tracing::warn!(
+                    target: "egress",
+                    error = %e,
+                    session_id = %id,
+                    "session egress taint lookup failed — failing closed to \
+                     local_only (RFC §5.5)"
+                );
+                acc = acc.restrict(&EgressLabel::local_only());
+                any = true;
+            }
+        }
+    }
+    (any && !acc.is_unrestricted()).then_some(acc)
+}
+
+/// Recursively collect every `"session_id"` string value in a JSON value.
+fn collect_session_ids(v: &serde_json::Value, out: &mut Vec<String>) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map {
+                if k == "session_id" {
+                    if let Some(s) = val.as_str() {
+                        out.push(s.to_string());
+                    }
+                }
+                collect_session_ids(val, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for val in arr {
+                collect_session_ids(val, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn tool_result_requires_waiting_for_child(result: &str) -> bool {
@@ -2443,6 +2556,95 @@ mod tests {
         processor.process_tool_calls(&[call("c1", "resolve", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         processor.process_tool_calls(&[call("c2", "resolve", args)], temp.path(), None, &mut SessionTracer::test_tracer()).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 2, "no cache without a gateway store");
+    }
+
+    // ── Cross-agent taint inheritance (RFC data-envelopes §5.5) ───────────
+
+    #[test]
+    fn collect_session_ids_walks_nested_json() {
+        let v: serde_json::Value = serde_json::json!({
+            "tasks": [
+                { "task_id": "t1", "session_id": "child-a" },
+                { "task_id": "t2", "session_id": "child-b",
+                  "nested": { "session_id": "child-c" } }
+            ],
+            "session_id": "top"
+        });
+        let mut ids = Vec::new();
+        collect_session_ids(&v, &mut ids);
+        ids.sort();
+        assert_eq!(ids, vec!["child-a", "child-b", "child-c", "top"]);
+    }
+
+    #[test]
+    fn child_taint_from_result_inherits_and_intersects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        // A child that read email recorded local_only at finalize; a second
+        // child recorded no_remote_model; a third recorded nothing (clean).
+        store
+            .set_session_egress_taint("child-mail", &autonoetic_types::egress::EgressLabel::local_only())
+            .unwrap();
+        store
+            .set_session_egress_taint(
+                "child-biz",
+                &autonoetic_types::egress::EgressLabel::no_remote_model(),
+            )
+            .unwrap();
+
+        // Store roundtrip.
+        assert_eq!(
+            store.get_session_egress_taint("child-mail").unwrap(),
+            Some(autonoetic_types::egress::EgressLabel::local_only())
+        );
+        assert_eq!(store.get_session_egress_taint("child-clean").unwrap(), None);
+
+        // A workflow_wait result surfacing the mail child → inherits local_only.
+        let result = serde_json::json!({
+            "tasks": [ { "task_id": "t1", "session_id": "child-mail",
+                         "result_summary": "the emails say..." } ]
+        })
+        .to_string();
+        let taint = child_session_taint_from_result(&result, &store, Some("parent"))
+            .expect("should inherit the child's local_only taint");
+        assert_eq!(taint, autonoetic_types::egress::EgressLabel::local_only());
+        assert!(!taint.allows(autonoetic_types::egress::Sink::RemoteModel));
+
+        // Surfacing both children → intersection (local_only is stricter).
+        let both = serde_json::json!({
+            "tasks": [ { "session_id": "child-mail" }, { "session_id": "child-biz" } ]
+        })
+        .to_string();
+        assert_eq!(
+            child_session_taint_from_result(&both, &store, None),
+            Some(autonoetic_types::egress::EgressLabel::local_only())
+        );
+
+        // A result with only a clean child (no recorded taint) → None.
+        let clean = serde_json::json!({ "tasks": [ { "session_id": "child-clean" } ] })
+            .to_string();
+        assert_eq!(child_session_taint_from_result(&clean, &store, None), None);
+
+        // The caller's own session id is excluded from the scan.
+        let self_ref = serde_json::json!({ "session_id": "child-mail" }).to_string();
+        assert_eq!(
+            child_session_taint_from_result(&self_ref, &store, Some("child-mail")),
+            None
+        );
+    }
+
+    #[test]
+    fn child_taint_from_result_fails_closed_on_unparseable() {
+        // RFC §2.2 fail-closed: a workflow_wait result that isn't valid JSON is
+        // anomalous (gateway-built JSON should always parse). Rather than drop a
+        // possibly-tainted child summary (fail-open leak), conservatively label
+        // it local_only.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        assert_eq!(
+            child_session_taint_from_result("not json {", &store, None),
+            Some(autonoetic_types::egress::EgressLabel::local_only())
+        );
     }
 }
 
