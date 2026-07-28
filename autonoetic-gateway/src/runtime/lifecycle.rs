@@ -1139,6 +1139,11 @@ impl AgentExecutor {
             .unwrap_or((0, 0, 0.0));
 
         SessionCheckpoint {
+            // Persist the accumulated egress label sidecar so a resumed or
+            // forked session withholds the same labeled content this live
+            // session would (RFC data-envelopes §3.4). Clone is empty for
+            // unconfigured deployments.
+            egress_labels: self.egress_labels.clone(),
             history: history.to_vec(),
             turn_counter: self.turn_counter,
             loop_guard_state: self.guard.snapshot(),

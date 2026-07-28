@@ -150,6 +150,16 @@ pub struct SessionCheckpoint {
     pub turn_counter: u64,
     /// Loop guard state (failure counts, progress tracking).
     pub loop_guard_state: LoopGuard,
+    /// Egress label sidecar (RFC data-envelopes §3.4 / §5.6): the
+    /// `tool_call_id → EgressLabel` map accumulated over the session. Persisted
+    /// so labels survive suspend / resume / fork — a resumed (or forked)
+    /// session must withhold from a provider exactly what the live session
+    /// would, satisfying the "no envelope label lost across checkpoint /
+    /// continuation" acceptance bar (#907). `#[serde(default)]` +
+    /// skip-if-empty: unconfigured deployments store nothing, and checkpoints
+    /// predating this field deserialize with an empty map.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
     /// Session runtime state (Normal or Degraded).
     #[serde(default)]
     pub session_state: autonoetic_types::agent::SessionState,
@@ -266,6 +276,10 @@ impl SessionCheckpoint {
     pub fn restore_into(&self, runtime: &mut crate::runtime::lifecycle::AgentExecutor) {
         runtime.guard =
             crate::runtime::guard::LoopGuard::restore(self.loop_guard_state.clone());
+        // Restore the egress label sidecar so the resumed session withholds the
+        // same labeled content the live session would (RFC data-envelopes §3.4).
+        // `#[serde(default)]` on the field means old checkpoints restore empty.
+        runtime.egress_labels = self.egress_labels.clone();
         runtime.session_state = self.session_state;
         runtime.tool_tier_escalated = self.tool_tier_escalated;
         runtime.discovered_tools = self.discovered_tools.clone();
@@ -1007,6 +1021,7 @@ impl SessionFork {
         // checkpoint, so the next message to the forked session resumes cleanly
         // with the full branch-point context (plus the branch message, if any).
         let forked_checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: history.clone(),
             session_id: new_session_id.clone(),
             yield_reason: YieldReason::Hibernation,
@@ -1054,6 +1069,7 @@ mod tests {
         let config = test_config(&temp);
 
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard {
@@ -1111,6 +1127,107 @@ mod tests {
         assert_eq!(loaded.yield_reason, YieldReason::Hibernation);
     }
 
+    /// Minimal checkpoint for focused field-preservation tests. A new field on
+    /// `SessionCheckpoint` should touch this one helper, not every test literal
+    /// (cf. the manifest-churn lesson, #923).
+    fn sample_checkpoint() -> SessionCheckpoint {
+        SessionCheckpoint {
+            egress_labels: Default::default(),
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            agent_id: "test-agent".to_string(),
+            session_id: "session-egress".to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        }
+    }
+
+    #[test]
+    fn checkpoint_preserves_egress_labels_across_save_load() {
+        // RFC data-envelopes §3.4 / #907 acceptance bar: the egress label
+        // sidecar must survive suspend/resume. A resumed session has to
+        // withhold from a provider exactly what the live session would; without
+        // persistence the map is dropped on save and the resumed session
+        // silently ships previously-withheld content to a remote model.
+        use autonoetic_types::egress::{EgressLabel, Sink};
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+
+        let mut egress_labels = std::collections::HashMap::new();
+        egress_labels.insert("tc_email_read_1".to_string(), EgressLabel::local_only());
+        egress_labels.insert("tc_mailbox_2".to_string(), EgressLabel::no_remote_model());
+
+        let checkpoint = SessionCheckpoint {
+            egress_labels: egress_labels.clone(),
+            ..sample_checkpoint()
+        };
+
+        save_checkpoint(&config, &checkpoint).expect("should save");
+        let loaded = load_checkpoint(&config, &checkpoint.session_id, &checkpoint.turn_id)
+            .expect("should load")
+            .expect("should have checkpoint");
+
+        assert_eq!(
+            loaded.egress_labels, egress_labels,
+            "egress label sidecar must survive save/load intact"
+        );
+        // The restored local_only label must still exclude the remote model —
+        // the whole point is that a resumed turn keeps withholding.
+        let restored = loaded
+            .egress_labels
+            .get("tc_email_read_1")
+            .expect("labeled tool result must survive");
+        assert!(restored.allows(Sink::LocalModel));
+        assert!(!restored.allows(Sink::RemoteModel));
+    }
+
+    #[test]
+    fn checkpoint_without_egress_labels_deserializes_empty() {
+        // Backward compat: `#[serde(default, skip_serializing_if = empty)]`
+        // means a clean checkpoint omits the key entirely, and a checkpoint
+        // written before this field existed deserializes with an empty map
+        // (not a hard error). Verify both the omission and the default.
+        let cp = sample_checkpoint();
+        assert!(cp.egress_labels.is_empty());
+        let json = serde_json::to_string(&cp).expect("serialize");
+        assert!(
+            !json.contains("egress_labels"),
+            "empty sidecar must be omitted from the wire form (skip_serializing_if)"
+        );
+        let back: SessionCheckpoint = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            back.egress_labels.is_empty(),
+            "a checkpoint lacking the field must default to an empty sidecar"
+        );
+    }
+
     #[test]
     fn test_checkpoint_round_trips_capsule_state() {
         // The capsule must survive save/load so that on resume the governor
@@ -1140,6 +1257,7 @@ mod tests {
         };
 
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),
@@ -1197,6 +1315,7 @@ mod tests {
         let session_id = "session-456";
 
         let c1 = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![],
             turn_counter: 1,
             loop_guard_state: LoopGuard {
@@ -1269,6 +1388,7 @@ mod tests {
 
         for i in 1..=5 {
             let checkpoint = SessionCheckpoint {
+                egress_labels: Default::default(),
                 history: vec![],
                 turn_counter: i,
                 loop_guard_state: LoopGuard {
@@ -1372,6 +1492,7 @@ mod tests {
 
         // Build and save a checkpoint.
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),
@@ -1454,6 +1575,7 @@ mod tests {
         // Save two valid checkpoints; the strict loader must return the latest.
         for turn in [1u64, 2] {
             let checkpoint = SessionCheckpoint {
+                egress_labels: Default::default(),
                 history: vec![Message::user("hello")],
                 turn_counter: turn,
                 loop_guard_state: LoopGuard::default(),
@@ -1515,6 +1637,7 @@ mod tests {
         let turn_id = "turn-002";
 
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![Message::user("hello")],
             turn_counter: 2,
             loop_guard_state: LoopGuard::default(),
@@ -1588,6 +1711,7 @@ mod tests {
         let mut guard = LoopGuard::new(5);
         guard.current_loops = 3;
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![Message::user("hello")],
             turn_counter: 3,
             loop_guard_state: guard,
@@ -1649,6 +1773,7 @@ mod tests {
     #[test]
     fn checkpoint_without_constitution_pin_fields_deserializes_as_none() {
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),

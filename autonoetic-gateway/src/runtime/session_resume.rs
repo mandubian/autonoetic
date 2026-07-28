@@ -252,6 +252,7 @@ mod session_resume_tests {
             remaining_tool_calls: vec![],
         };
         let cp = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![],
             turn_counter: 0,
             loop_guard_state: LoopGuard {

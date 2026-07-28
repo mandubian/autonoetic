@@ -35,6 +35,7 @@ fn setup() -> (tempfile::TempDir, GatewayConfig, Arc<GatewayStore>) {
 
 fn checkpoint(session_id: &str, yield_reason: YieldReason) -> SessionCheckpoint {
     SessionCheckpoint {
+        egress_labels: Default::default(),
         history: vec![Message::system("sys"), Message::user("hi")],
         turn_counter: 1,
         session_state: Default::default(),

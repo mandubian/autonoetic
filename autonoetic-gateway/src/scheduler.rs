@@ -3690,6 +3690,7 @@ mod stuck_task_tests {
         store.create_approval(&mut approval).unwrap();
 
         let checkpoint = SessionCheckpoint {
+            egress_labels: Default::default(),
             history: vec![],
             turn_counter: 1,
             loop_guard_state: crate::runtime::guard::LoopGuard::default(),

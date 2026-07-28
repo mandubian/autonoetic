@@ -71,6 +71,7 @@ fn make_pending_approval(
 
 fn default_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
     SessionCheckpoint {
+        egress_labels: Default::default(),
         history: vec![Message::user("hello")],
         turn_counter: turn,
         loop_guard_state: LoopGuard::default(),
