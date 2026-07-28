@@ -40,14 +40,16 @@ jobs:
       # mold: required by .cargo/config.toml's `-fuse-ld=mold` rustflag (#920).
       - run: sudo apt-get update && sudo apt-get install -y mold
 
+      - uses: taiki-e/install-action@cargo-nextest
+
       - uses: Swatinem/rust-cache@v2
 
       # Unit tests only (lib + bin targets) — no daemons, no integration suites.
-      # Single-threaded: several gateway unit tests share process-global state
-      # (router/server/trajectory) and must not run concurrently. Integration
-      # tests in tests/ are intentionally excluded here; they run in the daily
-      # `nightly` workflow.
-      - run: cargo test --workspace --lib --bins -- --test-threads=1
+      # Serial (profile.ci): several gateway unit tests share process-global
+      # state (router/server/trajectory) and must not run concurrently.
+      # Integration tests in tests/ are intentionally excluded here; they run
+      # in the daily `nightly` workflow.
+      - run: cargo nextest run --workspace --lib --bins --profile ci
 
   # Integration-test compile gate (#921). PR CI skips *running* the 239
   # tests/ binaries for cost, but skipping *compiling* them let rot accumulate

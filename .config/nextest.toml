@@ -1,0 +1,27 @@
+# cargo-nextest configuration (#924, meta #919).
+#
+# nextest runs each test in its own PROCESS rather than as a thread inside one
+# test-binary process. Two consequences:
+#
+# 1. Process-global state that #[serial] currently guards (env vars, cwd,
+#    statics) becomes isolated *by construction* — the annotation is a no-op
+#    under nextest, but also unnecessary for in-process races.
+# 2. What process isolation does NOT cover is cross-process external state:
+#    bound ports, fixed filesystem paths, singleton daemons. Several suites
+#    still rely on serialization for that, and a parallel full-suite run can
+#    race there (this is the same surface #922's binary-grouping must respect).
+#
+# So: the CI profile keeps the historical `cargo test -- --test-threads=1`
+# semantics exactly, while the local default is parallel. If a suite flakes
+# under the local default, re-run it with `--profile ci` and file it
+# against #924 for the serial-group list.
+
+[profile.default]
+# Local default: parallel across processes (fast). Suites relying on
+# cross-process serialization may race — see the header comment.
+test-threads = "num-cpus"
+
+[profile.ci]
+# Matches the pre-nextest serial semantics; used by all CI jobs and by
+# nightly (which additionally shards across runners with --partition).
+test-threads = 1
