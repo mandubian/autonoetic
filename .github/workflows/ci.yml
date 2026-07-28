@@ -53,9 +53,12 @@ jobs:
   # tests/ binaries for cost, but skipping *compiling* them let rot accumulate
   # on main unseen (#889's curator breakage; #918 shipped two broken test
   # targets past green CI). `cargo check --tests` type-checks every test
-  # target with no codegen and no linking — catches missing struct fields,
-  # signature drift, and syntax errors at a fraction of the build cost
-  # (~45s cold on a standard runner). Runtime coverage stays in nightly.
+  # target but never produces the final test executables — no codegen for the
+  # test targets themselves and none of the 239 executable links (build
+  # scripts and proc macros are still compiled, as they must run). It catches
+  # missing struct fields, signature drift, and syntax errors at a fraction
+  # of the build cost (~45s cold on a standard runner). Runtime coverage
+  # stays in nightly.
   check-tests:
     runs-on: ubuntu-latest
     steps:
