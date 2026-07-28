@@ -27,7 +27,8 @@ pub struct GovernorContext {
     /// decisions, artifacts, and identifiers are plan-advancing (and
     /// which detours can be compressed more aggressively).
     pub plan_anchor: Option<PlanFrameSummary>,
-    /// Egress label map for the session (RFC §5.7), keyed by `tool_call_id`.
+    /// Egress label map for the session (RFC §5.7), keyed by the message's
+    /// egress key (`tool_call_id` for tool results, else `msg_<id>`).
     /// Used by the capsule strategy's compression-eligibility gate: a
     /// `local_only`-tainted compressible band must not be summarized on a
     /// remote compression preset (a leak even with per-envelope filtering).

@@ -5664,6 +5664,7 @@ mod tests {
         let mut history = vec![
             Message::user("Set up credentials"),
             Message {
+                id: None,
                 role: crate::llm::Role::Assistant,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
@@ -5699,6 +5700,7 @@ mod tests {
 
         let mut history = vec![
             Message {
+                id: None,
                 role: crate::llm::Role::Assistant,
                 content: String::new(),
                 tool_calls: vec![ToolCall {

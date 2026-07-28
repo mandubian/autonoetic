@@ -953,6 +953,7 @@ mod tests {
         // content_write with a big file body).
         let big_args = "x".repeat(3000);
         let with_tool_call = Message {
+            id: None,
             role: crate::llm::Role::Assistant,
             content: String::new(),
             tool_calls: vec![ToolCall {
@@ -980,6 +981,7 @@ mod tests {
         set_chars_per_token(1.0);
 
         let with_reasoning = Message {
+            id: None,
             role: crate::llm::Role::Assistant,
             content: "ok".to_string(),
             tool_calls: vec![],
@@ -1228,6 +1230,7 @@ mod tests {
     fn sanitize_history_strips_reasoning_from_assistant_messages() {
         let history = vec![
             Message {
+                id: None,
                 role: Role::System,
                 content: "system".to_string(),
                 tool_calls: vec![],
@@ -1236,6 +1239,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Assistant,
                 content: "hello".to_string(),
                 tool_calls: vec![],
@@ -1271,6 +1275,7 @@ mod tests {
         // Default options must keep reasoning content because many thinking/
         // reasoning models require it to be replayed across tool-call turns.
         let history = vec![Message {
+            id: None,
             role: Role::Assistant,
             content: "hello".to_string(),
             tool_calls: vec![],
@@ -1288,6 +1293,7 @@ mod tests {
     #[test]
     fn sanitize_history_keeps_reasoning_when_disabled() {
         let history = vec![Message {
+            id: None,
             role: Role::Assistant,
             content: "hello".to_string(),
             tool_calls: vec![],
@@ -1313,6 +1319,7 @@ mod tests {
     fn sanitize_history_truncates_long_tool_results() {
         let long_content = "x".repeat(5000);
         let history = vec![Message {
+            id: None,
             role: Role::Tool,
             content: long_content.clone(),
             tool_calls: vec![],
@@ -1341,6 +1348,7 @@ mod tests {
     #[test]
     fn sanitize_history_does_not_shorten_small_tool_results() {
         let history = vec![Message {
+            id: None,
             role: Role::Tool,
             content: "small result".to_string(),
             tool_calls: vec![],
@@ -1366,6 +1374,7 @@ mod tests {
     fn sanitize_history_dedups_consecutive_duplicate_tool_results() {
         let history = vec![
             Message {
+                id: None,
                 role: Role::Assistant,
                 content: "call 1".to_string(),
                 tool_calls: vec![],
@@ -1374,6 +1383,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "same result".to_string(),
                 tool_calls: vec![],
@@ -1382,6 +1392,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Assistant,
                 content: "call 2".to_string(),
                 tool_calls: vec![],
@@ -1390,6 +1401,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "same result".to_string(),
                 tool_calls: vec![],
@@ -1398,6 +1410,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "same result".to_string(),
                 tool_calls: vec![],
@@ -1435,6 +1448,7 @@ mod tests {
     fn sanitize_history_dedup_resets_on_non_duplicate() {
         let history = vec![
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "result A".to_string(),
                 tool_calls: vec![],
@@ -1443,6 +1457,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "result B".to_string(),
                 tool_calls: vec![],
@@ -1451,6 +1466,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "result A".to_string(),
                 tool_calls: vec![],
@@ -1481,6 +1497,7 @@ mod tests {
     fn sanitize_history_dedup_disabled_keeps_duplicates() {
         let history = vec![
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "same result".to_string(),
                 tool_calls: vec![],
@@ -1489,6 +1506,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: "same result".to_string(),
                 tool_calls: vec![],
@@ -1517,6 +1535,7 @@ mod tests {
         let long = "x".repeat(5000);
         let history = vec![
             Message {
+                id: None,
                 role: Role::Tool,
                 content: long.clone(),
                 tool_calls: vec![],
@@ -1525,6 +1544,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: long.clone(),
                 tool_calls: vec![],
@@ -1551,6 +1571,7 @@ mod tests {
 
     fn tool_err(id: &str, wf: &str) -> Message {
         Message {
+            id: None,
             role: Role::Tool,
             content: format!(
                 r#"{{"ok":false,"error":"workflow {wf} was reactivated and cannot accept child-session spawns"}}"#
@@ -1617,6 +1638,7 @@ mod tests {
     fn collapse_repeated_errors_ignores_distinct_errors() {
         let history = vec![
             Message {
+                id: None,
                 role: Role::Tool,
                 content: r#"{"ok":false,"error":"disk full"}"#.to_string(),
                 tool_calls: vec![],
@@ -1625,6 +1647,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: r#"{"ok":false,"error":"permission denied"}"#.to_string(),
                 tool_calls: vec![],
@@ -1652,6 +1675,7 @@ mod tests {
     fn collapse_repeated_errors_ignores_successful_results() {
         let history = vec![
             Message {
+                id: None,
                 role: Role::Tool,
                 content: r#"{"ok":true,"stdout":"same"}"#.to_string(),
                 tool_calls: vec![],
@@ -1660,6 +1684,7 @@ mod tests {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::Tool,
                 content: r#"{"ok":true,"stdout":"same"}"#.to_string(),
                 tool_calls: vec![],
@@ -1831,6 +1856,7 @@ mod tests {
         .to_string();
 
         let history = vec![Message {
+            id: None,
             role: Role::Tool,
             content: tool_result,
             tool_calls: vec![],
@@ -1862,5 +1888,49 @@ mod tests {
     #[test]
     fn default_max_tool_result_chars_is_4000() {
         assert_eq!(HistorySanitizeOptions::default().max_tool_result_chars, 4000);
+    }
+
+    #[test]
+    fn sanitize_preserves_message_ids_across_transforms() {
+        // RFC §3.4 transform-preservation: every history transform must carry
+        // message ids so the egress-label join survives. Sanitize clones and
+        // rewrites content (truncate / dedup / collapse) but must keep both the
+        // stable `msg_<id>` on assistant messages and `tool_call_id` on tool
+        // results — else a labeled message loses its label after sanitize.
+        let big = "x".repeat(9000);
+        let history = vec![
+            Message {
+                id: Some("msg_a".to_string()),
+                role: Role::Assistant,
+                content: "the local summary".to_string(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+            Message {
+                id: Some("msg_t".to_string()),
+                role: Role::Tool,
+                content: big,
+                tool_calls: vec![],
+                tool_call_id: Some("tc_1".to_string()),
+                reasoning_content: None,
+                reasoning_details: None,
+            },
+        ];
+        let opts = HistorySanitizeOptions {
+            strip_reasoning: false,
+            max_tool_result_chars: 100, // force truncation of the tool result
+            dedup_tool_results: true,
+            collapse_repeated_errors: true,
+        };
+        let out = sanitize_history_for_request(&history, &opts);
+        assert_eq!(out.len(), 2);
+        // Assistant message id preserved (its egress-label join key, §4.5).
+        assert_eq!(out[0].id.as_deref(), Some("msg_a"));
+        // Tool result: content truncated but id + tool_call_id both preserved.
+        assert_eq!(out[1].id.as_deref(), Some("msg_t"));
+        assert_eq!(out[1].tool_call_id.as_deref(), Some("tc_1"));
+        assert!(out[1].content.len() < 9000, "tool result should have been truncated");
     }
 }

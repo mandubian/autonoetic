@@ -381,6 +381,27 @@ pub(crate) fn detect_constitution_drift(
     Some(ConstitutionDriftNotice { payload, notice_text })
 }
 
+/// Mint a stable `msg_<id>` on an assistant message being committed to history
+/// and attach the turn's LLM-response label (RFC §4.5), so a later request to a
+/// sink the label excludes withholds it via the chokepoint. No-op for a clean
+/// turn (`response_label` = `None`) — the message stays id-less and unlabeled,
+/// so unconfigured deployments pay nothing. Free function (not a method) so it
+/// borrows only `msg` and the label map, never all of `&mut self`.
+fn commit_assistant_egress(
+    msg: &mut Message,
+    response_label: &Option<autonoetic_types::egress::EgressLabel>,
+    labels: &mut std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+) {
+    let Some(label) = response_label else {
+        return;
+    };
+    let id = msg
+        .id
+        .get_or_insert_with(|| autonoetic_types::id_format::short_random_id("msg_"))
+        .clone();
+    labels.insert(id, label.clone());
+}
+
 /// Outcome of taint-following routing for one completion (RFC §5.3), produced
 /// by [`AgentExecutor::plan_egress_routing`].
 struct EgressRoutingSelection {
@@ -2978,6 +2999,16 @@ impl AgentExecutor {
                 == Some(true);
 
             let mut actual_model = routed_model.clone();
+            // LLM-response label (RFC §4.5): the label the assistant message
+            // this completion produces will carry — the intersection of the
+            // labels of the envelopes actually *included* in the request (i.e.
+            // cleared for the sink the completion ran on; withheld ones were
+            // replaced by indications and so did not shape the output). Computed
+            // inside the completion branch below where the effective sink is
+            // known, then attached to the committed assistant message so a later
+            // request to an ineligible sink withholds it (the tainted-summary
+            // case, §5.6 step 4). `None` for a clean turn.
+            let mut response_egress_label: Option<autonoetic_types::egress::EgressLabel> = None;
             let response = if skip_llm {
                 let assistant_reply = req
                     .metadata
@@ -3119,6 +3150,35 @@ impl AgentExecutor {
                         // alongside the response log, not only in gateway.db.
                         // Best-effort — a failed log is not fatal.
                         let _ = tracer.log_egress_request_filtered(&routed_model, &report);
+                    }
+                }
+                // Compute the LLM-response label (RFC §4.5) for the assistant
+                // message this completion will produce: the intersection of the
+                // labels of the envelopes cleared for this sink (those actually
+                // included — withheld ones were replaced by indications and did
+                // not shape the output). A local turn that saw `local_only`
+                // email yields a `local_only` response; a remote turn that saw
+                // only indications yields a clean one.
+                if !self.egress_labels.is_empty() {
+                    let sink = egress_effective_class
+                        .map(|c| c.as_sink())
+                        .unwrap_or(autonoetic_types::egress::Sink::RemoteModel);
+                    let mut acc = autonoetic_types::egress::EgressLabel::unrestricted();
+                    let mut any = false;
+                    for m in history.iter() {
+                        if let Some(key) =
+                            crate::runtime::egress_labeler::message_egress_key(m)
+                        {
+                            if let Some(lbl) = self.egress_labels.get(key) {
+                                if lbl.allows(sink) {
+                                    acc = acc.restrict(lbl);
+                                    any = true;
+                                }
+                            }
+                        }
+                    }
+                    if any && !acc.is_unrestricted() {
+                        response_egress_label = Some(acc);
                     }
                 }
                 match response {
@@ -3494,6 +3554,13 @@ impl AgentExecutor {
                     assistant_msg.reasoning_content = response.reasoning_content.clone();
                     assistant_msg.reasoning_details = response.reasoning_details.clone();
                     assistant_msg.tool_calls = response.tool_calls.clone();
+                    // LLM-response label (RFC §4.5): tag + id the assistant
+                    // message before `handle_tool_batch` commits it to history.
+                    commit_assistant_egress(
+                        &mut assistant_msg,
+                        &response_egress_label,
+                        &mut self.egress_labels,
+                    );
 
                     if let Some(outcome) = self
                         .handle_tool_batch(
@@ -3518,6 +3585,14 @@ impl AgentExecutor {
                         let mut assistant_msg = Message::assistant(clean_text.clone());
                         assistant_msg.reasoning_content = response.reasoning_content.clone();
                         assistant_msg.reasoning_details = response.reasoning_details.clone();
+                        // LLM-response label (RFC §4.5): a local summary of
+                        // `local_only` email is itself `local_only`, so a later
+                        // remote request withholds it (scenario §5.6 step 4).
+                        commit_assistant_egress(
+                            &mut assistant_msg,
+                            &response_egress_label,
+                            &mut self.egress_labels,
+                        );
 
                         history.push(assistant_msg);
                     }
@@ -3648,6 +3723,12 @@ impl AgentExecutor {
                         let mut assistant_msg = Message::assistant(response.text.clone());
                         assistant_msg.reasoning_content = response.reasoning_content.clone();
                         assistant_msg.reasoning_details = response.reasoning_details.clone();
+                        // LLM-response label (RFC §4.5), as in the EndTurn arm.
+                        commit_assistant_egress(
+                            &mut assistant_msg,
+                            &response_egress_label,
+                            &mut self.egress_labels,
+                        );
 
                         history.push(assistant_msg);
                     }

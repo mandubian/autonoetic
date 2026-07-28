@@ -395,6 +395,7 @@ impl ModelRouter for LlmClassifierRouter {
         let prompt = Self::build_classification_prompt(ctx);
         let messages = vec![
             Message {
+                id: None,
                 role: Role::System,
                 content: CLASSIFIER_PROMPT.to_string(),
                 tool_calls: vec![],
@@ -403,6 +404,7 @@ impl ModelRouter for LlmClassifierRouter {
                 reasoning_details: None,
             },
             Message {
+                id: None,
                 role: Role::User,
                 content: prompt,
                 tool_calls: vec![],

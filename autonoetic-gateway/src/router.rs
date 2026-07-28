@@ -1572,8 +1572,10 @@ impl JsonRpcRouter {
                     metadata: params.metadata.clone(),
                 };
 
-                match self
-                    .execute_agent_request(ingress, session_id.clone())
+                // Box::pin so the large `execute_with_history` future lives on
+                // the heap, not in `dispatch`'s poll frame (#884/#916 stack
+                // budget — see the sibling call in the event.ingest arm).
+                match Box::pin(self.execute_agent_request(ingress, session_id.clone()))
                     .await
                 {
                     Ok((result, _trace_session)) => {
@@ -1874,8 +1876,12 @@ impl JsonRpcRouter {
                         }),
                     )
                 } else {
-                    match self
-                        .execute_agent_request(ingress, session_id.clone())
+                    // `Box::pin` the execute future so the (large)
+                    // `execute_with_history` state machine lives on the heap,
+                    // not inside `dispatch`'s poll frame — that frame is the sum
+                    // of all 62 match arms against libtest's 2 MiB test thread
+                    // (#884/#916), and embedding this future inline overflows it.
+                    match Box::pin(self.execute_agent_request(ingress, session_id.clone()))
                         .await
                     {
                         Ok((result, _trace_session)) => {

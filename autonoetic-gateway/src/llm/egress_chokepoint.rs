@@ -7,13 +7,17 @@
 //! ## What it does
 //!
 //! For each completion request, the wrapper:
-//! 1. Reads the `tool_call_id → EgressLabel` map from
-//!    [`CompletionRequest::metadata`] under [`EGRESS_LABELS_KEY`]. Absent/empty
-//!    → unconfigured deployment, pass through unchanged (zero-cost fast path).
-//! 2. For each `Role::Tool` message whose label excludes the target [`Sink`]
-//!    (the provider's class), replaces `content` with a non-divulging
-//!    [`Indication`] built from metadata only (RFC §3.3). Records the
-//!    withholding in a [`FilterReport`].
+//! 1. Reads the egress-label map from [`CompletionRequest::metadata`] under
+//!    [`EGRESS_LABELS_KEY`], keyed by each message's egress key (tool results
+//!    by `tool_call_id`, every other message by its stable `msg_<id>`, RFC
+//!    §3.4). Absent/empty → unconfigured deployment, pass through unchanged
+//!    (zero-cost fast path).
+//! 2. For each message whose label excludes the target [`Sink`] (the provider's
+//!    class), replaces `content` with a non-divulging [`Indication`] built from
+//!    metadata only (RFC §3.3). This covers tool results AND non-tool messages
+//!    such as an LLM-response-labeled local summary (§4.5) — a later remote
+//!    request withholds the summary exactly like the email it derived from.
+//!    Records the withholding in a [`FilterReport`].
 //! 3. **Outbound content assertion (RFC §5.2.3):** for each withheld payload,
 //!    asserts it does not appear verbatim in any *non-withheld* message of the
 //!    filtered request. A hit is a bug or an echo-exfil attempt — recorded as
@@ -246,14 +250,25 @@ impl EgressChokepointDriver {
             })
             .collect();
         for (idx, msg) in filtered.messages.iter_mut().enumerate() {
-            if msg.role != crate::llm::Role::Tool {
-                continue;
-            }
-            let Some(tc_id) = msg.tool_call_id.as_ref() else {
-                continue;
+            // Egress join key (RFC §3.4): tool results join by `tool_call_id`;
+            // every other message (assistant / user / synthesized) joins by its
+            // stable `msg_<id>`. Non-tool messages carry labels too now — e.g.
+            // the LLM-response label (§4.5) makes a local summary of email
+            // `local_only`, so it must be withheld from a later remote request
+            // exactly like the email tool result was.
+            let (key, is_tool) = if msg.role == crate::llm::Role::Tool {
+                match msg.tool_call_id.clone() {
+                    Some(id) => (id, true),
+                    None => continue,
+                }
+            } else {
+                match msg.id.clone() {
+                    Some(id) => (id, false),
+                    None => continue,
+                }
             };
-            let Some(label) = labels.get(tc_id) else {
-                // Tool result with no label → unrestricted default → passes.
+            let Some(label) = labels.get(&key) else {
+                // No label for this message → unrestricted default → passes.
                 report.included += 1;
                 continue;
             };
@@ -262,18 +277,22 @@ impl EgressChokepointDriver {
                 continue;
             }
             // Withhold: replace content with an indication built from metadata.
-            // The tool name is derived from the matching assistant tool_call —
-            // metadata only, never the payload.
-            let tool_name = tool_names.get(tc_id).map(|s| s.as_str());
+            // For a tool result the tool name comes from the matching assistant
+            // tool_call (metadata only); non-tool messages get the generic form.
+            let tool_name = if is_tool {
+                tool_names.get(&key).map(|s| s.as_str())
+            } else {
+                None
+            };
             let original = std::mem::take(&mut msg.content);
             let indication = Indication::generate(tool_name, 1, label, self.verbosity);
             msg.content = indication.text.clone();
             report.withheld.push(WithheldEntry {
-                tool_call_id: tc_id.clone(),
+                tool_call_id: key.clone(),
                 label: label.clone(),
                 indication: indication.text,
             });
-            withheld_payloads.push((idx, original, tc_id.clone()));
+            withheld_payloads.push((idx, original, key));
         }
 
         // Pass 2: outbound content assertion (RFC §5.2.3). For each withheld
@@ -291,13 +310,14 @@ impl EgressChokepointDriver {
                         continue;
                     }
                     // Skip the message the payload came from (already replaced).
-                    if msg.role == crate::llm::Role::Tool
-                        && msg
-                            .tool_call_id
-                            .as_ref()
-                            .map(|id| id == tc_id)
-                            .unwrap_or(false)
-                    {
+                    // The join key is `tool_call_id` for tool results, else the
+                    // message id — match whichever identifies this withheld one.
+                    let origin = if msg.role == crate::llm::Role::Tool {
+                        msg.tool_call_id.as_deref() == Some(tc_id.as_str())
+                    } else {
+                        msg.id.as_deref() == Some(tc_id.as_str())
+                    };
+                    if origin {
                         continue;
                     }
                     if msg.content.contains(payload.as_str()) {
@@ -482,6 +502,7 @@ mod tests {
 
     fn tool_msg(id: &str, content: &str) -> Message {
         Message {
+            id: None,
             role: Role::Tool,
             content: content.to_string(),
             tool_calls: vec![],
@@ -493,6 +514,7 @@ mod tests {
 
     fn user_msg(content: &str) -> Message {
         Message {
+            id: None,
             role: Role::User,
             content: content.to_string(),
             tool_calls: vec![],
@@ -803,6 +825,7 @@ mod tests {
         let messages = vec![
             user_msg("read my emails"),
             Message {
+                id: None,
                 role: Role::Assistant,
                 content: String::new(),
                 tool_calls: vec![crate::llm::ToolCall {
@@ -834,5 +857,93 @@ mod tests {
             "indication should name the tool 'email.read': {body}"
         );
         assert!(body.contains("local_only"));
+    }
+
+    // ── Non-tool (assistant) message withholding by msg id (RFC §3.4 + §4.5) ──
+
+    fn assistant_msg_with_id(id: &str, content: &str) -> Message {
+        Message {
+            id: Some(id.to_string()),
+            role: Role::Assistant,
+            content: content.to_string(),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning_details: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn labeled_assistant_message_withheld_from_remote_by_id() {
+        // §4.5: a local summary of email is labeled `local_only` and keyed by
+        // its stable msg id. A later REMOTE request must withhold it — "asking
+        // the remote LLM about the summary above" cannot leak it (§5.6 step 5).
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        labels.insert("msg_summary".to_string(), EgressLabel::local_only());
+        let req = req_with_labels(
+            vec![
+                user_msg("what did the emails say?"),
+                assistant_msg_with_id("msg_summary", CANARY),
+            ],
+            labels,
+        );
+        wrapper.complete(&req).await.unwrap();
+        let body: String = inner.captures()[0]
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(
+            !body.contains(CANARY),
+            "a local_only assistant message must be withheld from a remote request: {body}"
+        );
+        assert!(body.contains("local_only"), "indication should name the policy: {body}");
+    }
+
+    #[tokio::test]
+    async fn labeled_assistant_message_included_on_local() {
+        // The same `local_only` assistant message IS included for a LOCAL sink —
+        // the local model is a cleared destination, so no withholding.
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::LocalModel);
+        let mut labels = HashMap::new();
+        labels.insert("msg_summary".to_string(), EgressLabel::local_only());
+        let req = req_with_labels(
+            vec![assistant_msg_with_id("msg_summary", CANARY)],
+            labels,
+        );
+        wrapper.complete(&req).await.unwrap();
+        let body: String = inner.captures()[0]
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(
+            body.contains(CANARY),
+            "local_only content must pass through to a local sink: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_message_without_id_is_never_withheld() {
+        // A message with no id and no label entry is unlabeled → always passes,
+        // even to a remote sink (unconfigured / pre-msg-id history).
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        // A label exists for some OTHER key, so the map is non-empty (filtering active).
+        labels.insert("msg_other".to_string(), EgressLabel::local_only());
+        let mut m = assistant_msg_with_id("unused", CANARY);
+        m.id = None;
+        let req = req_with_labels(vec![m], labels);
+        wrapper.complete(&req).await.unwrap();
+        let body: String = inner.captures()[0]
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(body.contains(CANARY), "id-less unlabeled message must pass: {body}");
     }
 }
