@@ -1377,6 +1377,85 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
 }
 
 #[test]
+fn test_credential_prompt_approval_carries_secret_fields_for_inspect() {
+    // The TUI's in-modal credential entry flow reads `secret_fields` from the
+    // stored approval action (surfaced via `approvals.inspect`). This test
+    // pins the contract: a UserPrompt step with N fields produces a
+    // CredentialPrompt approval whose action carries exactly those fields,
+    // preserving name/label/masked.
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["gmail".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "gmail",
+                "steps": [{
+                    "step_type": "user_prompt",
+                    "message": "Enter your Gmail App Password",
+                    "secret_fields": [
+                        {"name": "GMAIL_APP_PASSWORD", "label": "App Password", "masked": true}
+                    ]
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential.setup should succeed");
+
+    let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert!(suspended["approval_required"].as_bool().unwrap_or(false));
+    let request_id = suspended["request_id"]
+        .as_str()
+        .expect("request_id should be present");
+
+    // The stored approval action must carry the secret-field spec so the
+    // inspect RPC (and the TUI) can render the in-modal entry flow.
+    let approval = store
+        .get_approval(request_id)
+        .expect("store lookup should succeed")
+        .expect("approval should exist");
+    use autonoetic_types::background::ScheduledAction;
+    // Pending approvals carry `status: None` until decided.
+    assert_eq!(approval.status, None);
+    match &approval.action {
+        ScheduledAction::CredentialPrompt {
+            service,
+            secret_fields,
+            ..
+        } => {
+            assert_eq!(service, "gmail");
+            assert_eq!(secret_fields.len(), 1, "exactly one secret field expected");
+            assert_eq!(secret_fields[0].name, "GMAIL_APP_PASSWORD");
+            assert_eq!(secret_fields[0].label, "App Password");
+            assert!(secret_fields[0].masked, "app password field must be masked");
+        }
+        other => panic!("expected CredentialPrompt action, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_credential_setup_json_path_dollar_prefix() {
     let _value: serde_json::Value = serde_json::json!({
         "data": {

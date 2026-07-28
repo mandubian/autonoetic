@@ -977,13 +977,19 @@ pub fn approve_request_with_options(
                 .and_then(|v| v.as_str().map(String::from))
         });
 
-        // Store secrets in vault — fail-closed, require VAULT_PATH
+        // Store secrets in vault — fail-closed, require VAULT_PATH.
+        // Fall back to the config's agents_dir when the env var is unset
+        // (the normal case for approvals arriving via the TUI; credential_setup
+        // resolves the vault path at tool-execution time but does not set the
+        // env var, so the approval handler needs the fallback).
         let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
             .ok()
             .map(std::path::PathBuf::from)
-            .ok_or_else(|| {
-                anyhow::anyhow!("AUTONOETIC_VAULT_PATH must be set for credential prompt approval")
-            })?;
+            .unwrap_or_else(|| crate::vault::default_vault_path(&config.agents_dir));
+        // Ensure the vault key is available (credential_setup already called
+        // this, but the approval handler may run in a context where the env var
+        // was cleared or unreachable — the call is idempotent/nop if already set).
+        let _ = crate::vault::ensure_default_key(&config.agents_dir);
         let mut vault = crate::vault::Vault::load_from_file(&vault_path).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to load vault from {}: {}. Ensure AUTONOETIC_VAULT_KEY or AUTONOETIC_VAULT_KEY_PATH is set.",

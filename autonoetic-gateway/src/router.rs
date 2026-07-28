@@ -4782,6 +4782,30 @@ impl JsonRpcRouter {
                                     serde_json::json!(suggested_actions),
                                 );
                             }
+                            ScheduledAction::CredentialPrompt {
+                                service,
+                                credential_id,
+                                message,
+                                secret_fields,
+                                ..
+                            } => {
+                                // Surface the secret-field spec so the TUI can render
+                                // an in-modal credential entry flow. The secret values
+                                // themselves are never part of this response — the
+                                // operator provides them at approval time.
+                                extra.insert("service".into(), serde_json::json!(service));
+                                extra.insert(
+                                    "credential_id".into(),
+                                    serde_json::json!(credential_id),
+                                );
+                                if !message.is_empty() {
+                                    extra.insert("message".into(), serde_json::json!(message));
+                                }
+                                extra.insert(
+                                    "secret_fields".into(),
+                                    serde_json::json!(secret_fields),
+                                );
+                            }
                             _ => {}
                         }
                         let mut body = serde_json::json!({

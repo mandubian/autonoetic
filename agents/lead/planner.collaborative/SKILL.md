@@ -39,7 +39,6 @@ metadata:
       - "scheduler_*"
       - "eval_*"
       - "user_profile_*"
-      - "credential_*"
       - "web_*"
       - "observability_*"
       - "wiki_*"

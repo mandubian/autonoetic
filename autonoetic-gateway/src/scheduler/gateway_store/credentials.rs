@@ -17,7 +17,7 @@ fn row_to_credential(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let refresh_headers: Option<std::collections::HashMap<String, String>> = row
-        .get::<_, Option<String>>(12)
+        .get::<_, Option<String>>(11)
         .ok()
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok());
@@ -34,7 +34,7 @@ fn row_to_credential(
         refresh_url: row.get(9)?,
         refresh_method: row.get(10)?,
         refresh_headers,
-        refresh_extract_access_token: row.get(11)?,
+        refresh_extract_access_token: row.get(12)?,
         refresh_extract_refresh_token: row.get(13)?,
         refresh_extract_expires_in: row.get(14)?,
         label: row.get(15)?,

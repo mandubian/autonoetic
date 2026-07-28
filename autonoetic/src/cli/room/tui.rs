@@ -1044,7 +1044,7 @@ fn build_footer(
             .map(|s| format!("   {s}"))
             .unwrap_or_default();
         Line::from(Span::styled(
-            format!(" {label}: {}▏{err}   {hint}", gi.buffer),
+            format!(" {label}: {}▏{err}   {hint}", rendered_input_buffer(gi)),
             Style::default().fg(Color::Cyan),
         ))
     } else if let Some(s) = status {
@@ -1819,6 +1819,13 @@ struct GateInput {
     required_confirm_phrase: Option<String>,
     /// R++2: `revision_promote` approvals — auto-filled from the timeline payload.
     acknowledged_capabilities: Vec<String>,
+    /// CredentialPrompt approvals: secret fields to collect (empty = not a cred prompt).
+    /// Populated from `approvals.inspect` when the approval action is `credential_prompt`.
+    secret_fields: Vec<autonoetic_types::agent::SecretFieldSpec>,
+    /// Collected secret values, parallel to `secret_fields`. Length = fields completed.
+    secret_values: Vec<String>,
+    /// True while collecting secrets (Phase 1). The `buffer` holds the current field's input.
+    secret_phase: bool,
 }
 
 /// A gate RPC that is running in the background so the TUI event loop stays
@@ -1932,6 +1939,33 @@ fn gate_inspect_detail_lines(value: &serde_json::Value) -> Vec<String> {
                     lines.push(format!("    {line}"));
                 }
             }
+        }
+        Some("credential_prompt") => {
+            if let Some(service) = field("service") {
+                lines.push(format!("  service: {service}"));
+            }
+            if let Some(cred_id) = field("credential_id") {
+                lines.push(format!("  credential: {}", render::one_line(&cred_id, 120)));
+            }
+            if let Some(message) = field("message") {
+                lines.push("  prompt:".to_string());
+                for line in render::wrap_display_lines(&message, 76) {
+                    lines.push(format!("    {line}"));
+                }
+            }
+            // secret_fields is an array of {name, label, masked} — surface the
+            // human-readable labels so the operator knows what they'll be asked
+            // for before pressing 'y'.
+            if let Some(fields) = value.get("secret_fields").and_then(|v| v.as_array()) {
+                let labels: Vec<String> = fields.iter().filter_map(|f| {
+                    f.get("label").and_then(|l| l.as_str()).map(String::from)
+                        .or_else(|| f.get("name").and_then(|n| n.as_str()).map(String::from))
+                }).collect();
+                if !labels.is_empty() {
+                    lines.push(format!("  secrets required: {}", labels.join(", ")));
+                }
+            }
+            lines.push("  🔒 values go to the encrypted vault — the LLM never sees them".to_string());
         }
         _ => {
             if let Some(summary) = field("summary") {
@@ -2101,6 +2135,18 @@ fn approval_gate_input(
 ) -> GateInput {
     let (required_confirm_phrase, acknowledged_capabilities) =
         approval_gate_requirements(client, entries, &id);
+    // CredentialPrompt approvals need the operator to enter secret values at
+    // approval time. Detect that here so the modal opens directly into the
+    // secret-entry phase instead of showing a generic confirm-phrase prompt
+    // that fails with a cryptic backend error on submit.
+    let secret_fields = if action == GateAction::Approve
+        && is_credential_prompt_entry(entries, &id)
+    {
+        fetch_credential_prompt_secret_fields(client, &id)
+    } else {
+        Vec::new()
+    };
+    let secret_phase = !secret_fields.is_empty();
     GateInput {
         action,
         id,
@@ -2111,7 +2157,39 @@ fn approval_gate_input(
         motivation_required,
         required_confirm_phrase,
         acknowledged_capabilities,
+        secret_fields,
+        secret_values: Vec::new(),
+        secret_phase,
     }
+}
+
+/// Whether the timeline entry for `request_id` is a `credential_prompt` approval.
+fn is_credential_prompt_entry(entries: &[SessionTimelineEntry], request_id: &str) -> bool {
+    entries.iter().any(|e| {
+        e.event_type == "approval.pending"
+            && approval_id_for(e).as_deref() == Some(request_id)
+            && payload_field_str(e, "action").as_deref() == Some("credential_prompt")
+    })
+}
+
+/// Fetch the secret-field spec for a CredentialPrompt approval via `approvals.inspect`.
+/// Returns an empty vec on any failure — the operator can still fall back to the
+/// CLI `gateway approvals approve <id> --secret KEY=VALUE` flow.
+fn fetch_credential_prompt_secret_fields(
+    client: &RoomClient,
+    request_id: &str,
+) -> Vec<autonoetic_types::agent::SecretFieldSpec> {
+    rpc(
+        client,
+        "approvals.inspect",
+        serde_json::json!({ "request_id": request_id }),
+    )
+    .ok()
+    .and_then(|v| {
+        v.get("secret_fields")
+            .and_then(|s| serde_json::from_value(s.clone()).ok())
+    })
+    .unwrap_or_default()
 }
 
 fn gate_commit_validation_error(gi: &GateInput) -> Option<String> {
@@ -2148,6 +2226,23 @@ fn gate_input_label(gi: &GateInput) -> String {
             }
         }
         GateAction::Reject => "REJECT — motivation (required)".to_string(),
+    }
+}
+
+/// Return the input buffer for rendering, masking it with asterisks when the
+/// gate is in the CredentialPrompt secret-entry phase and the current field is
+/// declared `masked`. Non-secret phases and unmasked fields render verbatim.
+fn rendered_input_buffer(gi: &GateInput) -> String {
+    if gi.secret_phase {
+        let idx = gi.secret_values.len();
+        let masked = gi.secret_fields.get(idx).map(|f| f.masked).unwrap_or(true);
+        if masked {
+            "*".repeat(gi.buffer.chars().count())
+        } else {
+            gi.buffer.clone()
+        }
+    } else {
+        gi.buffer.clone()
     }
 }
 
@@ -3391,6 +3486,47 @@ pub fn run(
                     // Text-capture mode takes over all input while open.
                     if let Some(gi) = input.as_mut() {
                         if key.code == KeyCode::Enter {
+                            // CredentialPrompt secret-entry phase (Phase 1): each Enter
+                            // stores the current field's value and advances. After the
+                            // last field we either fall through to the confirm-phrase
+                            // phase (Phase 2) or submit immediately.
+                            if gi.secret_phase {
+                                if gi.buffer.trim().is_empty() {
+                                    status = Some(
+                                        "✗ secret value must not be empty — type it and press Enter"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
+                                gi.secret_values.push(gi.buffer.clone());
+                                gi.buffer.clear();
+                                if gi.secret_values.len() >= gi.secret_fields.len() {
+                                    // All secrets collected → exit Phase 1.
+                                    gi.secret_phase = false;
+                                    if gi.required_confirm_phrase.is_some() {
+                                        // Phase 2: confirm phrase (existing rendering below).
+                                        status = None;
+                                        continue;
+                                    }
+                                    // No confirm phrase → submit now via the shared path.
+                                    let gi = input.take().unwrap();
+                                    match resolve_gate(client, gi, None) {
+                                        Ok(pending) => {
+                                            pending_gate = Some(pending);
+                                            status = Some(
+                                                "⏳ submitting credential…".to_string(),
+                                            );
+                                        }
+                                        Err((msg, gi)) => {
+                                            status = Some(msg);
+                                            input = Some(gi);
+                                        }
+                                    }
+                                } else {
+                                    status = None;
+                                }
+                                continue;
+                            }
                             // The synthetic "Give more details" option switches the input
                             // into free-text follow-up mode without submitting.
                             let details = gi
@@ -3650,6 +3786,9 @@ pub fn run(
                                         motivation_required: false,
                                         required_confirm_phrase: None,
                                         acknowledged_capabilities: Vec::new(),
+                                        secret_fields: Vec::new(),
+                                        secret_values: Vec::new(),
+                                        secret_phase: false,
                                     });
                                     status = None;
                                     continue;
@@ -4108,6 +4247,9 @@ pub fn run(
                                     motivation_required: false,
                                     required_confirm_phrase: None,
                                     acknowledged_capabilities: Vec::new(),
+                                    secret_fields: Vec::new(),
+                                    secret_values: Vec::new(),
+                                    secret_phase: false,
                                 });
                                 status = None;
                             }
@@ -4361,6 +4503,9 @@ pub fn run(
                                     motivation_required: false,
                                     required_confirm_phrase: None,
                                     acknowledged_capabilities: Vec::new(),
+                                    secret_fields: Vec::new(),
+                                    secret_values: Vec::new(),
+                                    secret_phase: false,
                                 });
                                 status = None;
                             } else {
@@ -6000,6 +6145,18 @@ fn approval_approve_params(gi: &GateInput) -> serde_json::Value {
     }
     if !gi.acknowledged_capabilities.is_empty() {
         params["acknowledged_capabilities"] = serde_json::json!(gi.acknowledged_capabilities);
+    }
+    // CredentialPrompt approvals: the secret values collected in Phase 1 are
+    // submitted alongside the approval. The gateway stores them in the vault
+    // and upserts the credential — they never reach the agent transcript.
+    if !gi.secret_fields.is_empty() {
+        let secrets: Vec<[String; 2]> = gi
+            .secret_fields
+            .iter()
+            .zip(gi.secret_values.iter())
+            .map(|(f, v)| [f.name.clone(), v.clone()])
+            .collect();
+        params["secrets"] = serde_json::json!(secrets);
     }
     params
 }
@@ -8346,6 +8503,12 @@ fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> 
                     )
                 );
             }
+            Some("credential_prompt") => {
+                // `service` is not in the timeline payload for CredentialPrompt
+                // (it arrives via approvals.inspect, rendered in the modal body).
+                // Use a service-agnostic title; the body shows service + fields.
+                return " ⚠ CREDENTIAL SETUP — enter secret ".to_string();
+            }
             _ => {}
         }
         if entry.event_type == "escalation.pending" {
@@ -8401,6 +8564,66 @@ fn gate_modal_input_panel_lines(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let wrap_w = width.saturating_sub(2).max(20);
 
+    // CredentialPrompt secret-entry phase: dedicated panel that makes the
+    // vault-boundary guarantee explicit before the operator types anything.
+    if gi.secret_phase {
+        lines.push(Line::from(Span::styled(
+            "🔒 Enter the requested secret below.",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for assurance in [
+            "Values go directly into the encrypted vault —",
+            "the agent (LLM) never sees them.",
+        ] {
+            for wrapped in render::wrap_display_lines(assurance, wrap_w) {
+                lines.push(Line::from(Span::styled(
+                    wrapped,
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        lines.push(Line::raw(""));
+
+        let idx = gi.secret_values.len();
+        let total = gi.secret_fields.len();
+        if let Some(field) = gi.secret_fields.get(idx) {
+            let mask_label = if field.masked { "masked" } else { "visible" };
+            let label_line = format!(
+                "{} (field {} of {}, {}):",
+                field.label, idx + 1, total, mask_label
+            );
+            lines.push(Line::from(Span::styled(
+                label_line,
+                Style::default().fg(Color::Cyan),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{}▏", rendered_input_buffer(gi)),
+            Style::default().fg(Color::White),
+        )));
+
+        if let Some(err) = status.filter(|s| s.starts_with('✗')) {
+            lines.push(Line::from(Span::styled(
+                err.to_string(),
+                Style::default().fg(Color::Red),
+            )));
+        }
+
+        let is_last = idx + 1 >= total;
+        let hint = if is_last {
+            "Enter submit · Esc cancel".to_string()
+        } else {
+            "Enter next field · Esc cancel".to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    }
+
     if let Some(ref phrase) = gi.required_confirm_phrase {
         lines.push(Line::from(Span::styled(
             "Type this phrase exactly (also records your §O motivation):",
@@ -8440,7 +8663,7 @@ fn gate_modal_input_panel_lines(
     };
     lines.push(Line::from(vec![
         Span::styled(format!("{input_label}: "), Style::default().fg(Color::Cyan)),
-        Span::styled(format!("{}▏", gi.buffer), Style::default().fg(Color::White)),
+        Span::styled(format!("{}▏", rendered_input_buffer(gi)), Style::default().fg(Color::White)),
     ]));
 
     if let Some(err) = status.filter(|s| s.starts_with('✗')) {
@@ -9518,6 +9741,9 @@ mod tests {
             motivation_required: false,
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
+            secret_fields: Vec::new(),
+            secret_values: Vec::new(),
+            secret_phase: false,
         };
         let params = approval_approve_params(&gi);
         assert_eq!(
@@ -9548,6 +9774,9 @@ mod tests {
             motivation_required: false,
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
+            secret_fields: Vec::new(),
+            secret_values: Vec::new(),
+            secret_phase: false,
         };
         assert!(gate_commit_validation_error(&gi).is_some());
         let mut ok = gi;
@@ -9567,6 +9796,9 @@ mod tests {
             motivation_required: true,
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
+            secret_fields: Vec::new(),
+            secret_values: Vec::new(),
+            secret_phase: false,
         };
         assert!(gate_commit_validation_error(&gi).is_some());
         let mut ok = gi;
@@ -9588,6 +9820,9 @@ mod tests {
             motivation_required: false,
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
+            secret_fields: Vec::new(),
+            secret_values: Vec::new(),
+            secret_phase: false,
         };
         let err = answer_params(&gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
@@ -9609,6 +9844,9 @@ mod tests {
             motivation_required: false,
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
+            secret_fields: Vec::new(),
+            secret_values: Vec::new(),
+            secret_phase: false,
         };
 
         // A typed number selects the matching option — even when free-text is
