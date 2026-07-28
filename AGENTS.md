@@ -15,6 +15,19 @@ RUST_LOG=autonoetic=debug cargo test           # Debug logging during tests
 
 No linter or formatter is configured. There is no `cargo clippy` or `rustfmt` CI gate — run `cargo build` to verify.
 
+**Linux toolchain prerequisite:** the repo's `.cargo/config.toml` links with
+mold (`-fuse-ld=mold`, scoped to `x86_64-unknown-linux-gnu`). Install it once:
+
+```bash
+sudo apt install mold     # Ubuntu 24.04; works with the default GCC driver
+```
+
+macOS/Windows checkouts are unaffected (the rustflag is Linux-scoped). The
+workspace `Cargo.toml` also sets `debug = "line-tables-only"` for dev/test —
+backtraces keep file:line resolution; use a debugger build with full
+debuginfo (`CARGO_PROFILE_DEV_DEBUG=2 cargo build`) only when you need
+variable inspection.
+
 ## Sentinel Baseline Guard
 
 PRs that touch both `sentinel/checks/` and `sentinel/baseline/` are rejected by CI unless a `[baseline-update]` prefix appears in the PR title or a commit message. Check locally:
