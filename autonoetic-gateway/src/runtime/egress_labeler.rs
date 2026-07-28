@@ -386,6 +386,11 @@ impl EgressLabeler {
                 }
             }
             if !parent_envelope_ids.is_empty() {
+                // `prior_labels` is a HashMap — iteration order is
+                // nondeterministic. Sort so the lineage persisted into
+                // provenance / the `egress.envelope_labeled` event is stable
+                // and reproducible across runs (RFC §9.1 traceability).
+                parent_envelope_ids.sort();
                 resolution.label = resolution.label.restrict(&taint_label);
                 resolution.taint_applied = true;
             }
