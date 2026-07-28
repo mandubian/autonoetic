@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use autonoetic_types::causal_chain::{default_enforced_rules, CausalEventRecord};
 use autonoetic_types::egress::{
-    matches_simple_glob, source_pattern_matches, EgressClass, EgressConfig, EgressLabel,
-    EgressRule, EgressSessionPolicy, Provenance, Sink,
+    label_display_name, matches_simple_glob, source_pattern_matches, EgressClass, EgressConfig,
+    EgressLabel, EgressRule, EgressSessionPolicy, Provenance, Sink,
 };
 use autonoetic_types::id_format::short_random_id;
 
@@ -942,6 +942,165 @@ fn sink_str(s: Sink) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Taint-following routing (RFC §5.3)
+// ---------------------------------------------------------------------------
+//
+// Once a tool batch is labeled, the *next* completion must run on a provider
+// cleared for that batch's taint — deterministically, without operator
+// per-turn preset flipping and without an LLM deciding (a discretion leak).
+// The rule: intersect the labels of the envelopes added since the last
+// completion (the "batch"); a preset is eligible iff its `egress_class` sink is
+// in that intersection. Routing (and the failover chain) then pick among
+// eligible candidates only. The helpers here are the pure core; the lifecycle
+// wires them into the completion path.
+
+/// The [`Sink`] a preset's completions land in (RFC §5.1): its `egress_class`
+/// mapped to a sink, defaulting to [`Sink::RemoteModel`] when unclassified
+/// (fail-closed).
+pub fn preset_sink(egress_class: Option<EgressClass>) -> Sink {
+    egress_class.unwrap_or(EgressClass::Remote).as_sink()
+}
+
+/// Whether a preset may receive a completion carrying `batch` taint (RFC §5.3):
+/// the preset's sink must be permitted by the batch's allowed-sink set. An
+/// `unrestricted` batch admits every preset; a `local_only` batch admits only
+/// `local`-classified presets.
+pub fn preset_batch_eligible(batch: &EgressLabel, egress_class: Option<EgressClass>) -> bool {
+    batch.allows(preset_sink(egress_class))
+}
+
+/// One preset considered for taint-following routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetCandidate {
+    pub name: String,
+    pub egress_class: Option<EgressClass>,
+}
+
+/// The routing decision for one completion's batch taint (RFC §5.3 + §9.1).
+///
+/// `eligible` is the audit set (every configured preset cleared for the batch);
+/// `reroute_to` names the preset the primary should switch to when the primary
+/// itself is ineligible (prefer `local`, then stable by name), or `None` when
+/// the primary is already eligible or nothing is eligible. `primary_eligible`
+/// and `batch` complete the `egress.provider_selected` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressRoutingPlan {
+    pub batch: EgressLabel,
+    pub primary_eligible: bool,
+    pub eligible: Vec<String>,
+    pub reroute_to: Option<PresetCandidate>,
+}
+
+impl EgressRoutingPlan {
+    /// No eligible preset exists for a tainted batch — the turn must refuse
+    /// with `egress_no_eligible_provider` (RFC §5.3) rather than ship taint to
+    /// an ineligible provider.
+    pub fn no_eligible_provider(&self) -> bool {
+        !self.primary_eligible && self.reroute_to.is_none()
+    }
+}
+
+/// Plan taint-following routing for one completion (RFC §5.3), a pure function
+/// of (batch, primary class, configured presets).
+///
+/// - An unrestricted batch is a fast no-op: primary eligible, no reroute.
+/// - Otherwise the primary is eligible iff its own sink is cleared; when it is
+///   not, an eligible preset is chosen to reroute to — **preferring `local`
+///   presets**, then stable-sorted by name for determinism.
+/// - `eligible` lists every cleared preset for the audit event, regardless of
+///   whether a reroute happened.
+///
+/// Selection never widens: it only ever picks a preset whose sink the batch
+/// already permits, so a rerouted completion cannot leak (RFC §2.2 fail-closed).
+pub fn plan_taint_following_route(
+    batch: &EgressLabel,
+    primary_class: Option<EgressClass>,
+    presets: &[PresetCandidate],
+) -> EgressRoutingPlan {
+    // Fast path: an unrestricted batch admits everything — no filtering needed.
+    if batch.is_unrestricted() {
+        return EgressRoutingPlan {
+            batch: batch.clone(),
+            primary_eligible: true,
+            eligible: Vec::new(),
+            reroute_to: None,
+        };
+    }
+
+    let primary_eligible = preset_batch_eligible(batch, primary_class);
+
+    // Every configured preset cleared for the batch, for the audit set.
+    let mut eligible_candidates: Vec<&PresetCandidate> = presets
+        .iter()
+        .filter(|c| preset_batch_eligible(batch, c.egress_class))
+        .collect();
+    // Deterministic order: local presets first (the usual target for a tainted
+    // batch), then by name.
+    eligible_candidates.sort_by(|a, b| {
+        let a_local = preset_sink(a.egress_class) == Sink::LocalModel;
+        let b_local = preset_sink(b.egress_class) == Sink::LocalModel;
+        b_local.cmp(&a_local).then_with(|| a.name.cmp(&b.name))
+    });
+    let eligible: Vec<String> = eligible_candidates.iter().map(|c| c.name.clone()).collect();
+
+    // Reroute only when the primary itself can't take the batch. Pick the first
+    // eligible candidate in the deterministic order above.
+    let reroute_to = if primary_eligible {
+        None
+    } else {
+        eligible_candidates.first().map(|c| (*c).clone())
+    };
+
+    EgressRoutingPlan {
+        batch: batch.clone(),
+        primary_eligible,
+        eligible,
+        reroute_to,
+    }
+}
+
+/// Emit `egress.provider_selected` (RFC §9.1) — the per-completion routing
+/// audit that makes "why did turn N run on this provider?" answerable from the
+/// chain alone. Content-free: batch label, eligible set, chosen preset, whether
+/// a reroute happened, and any fallback presets skipped as ineligible.
+///
+/// `chosen_preset` is `None` when the turn refused with
+/// `egress_no_eligible_provider`. Only meaningful for tainted batches — the
+/// lifecycle skips emission entirely for the unrestricted (clean) case.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_provider_selected(
+    store: &Arc<GatewayStore>,
+    session_id: &str,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    plan: &EgressRoutingPlan,
+    chosen_preset: Option<&str>,
+    fallback_skipped: &[String],
+    rerouted: bool,
+) {
+    let payload = serde_json::json!({
+        "batch_label": serde_json::to_value(&plan.batch).unwrap_or(serde_json::Value::Null),
+        "batch_label_name": label_display_name(&plan.batch),
+        "primary_eligible": plan.primary_eligible,
+        "eligible_presets": plan.eligible,
+        "chosen_preset": chosen_preset,
+        "rerouted": rerouted,
+        "fallback_skipped": fallback_skipped,
+        "no_eligible_provider": chosen_preset.is_none(),
+    });
+    emit_egress_event(
+        store,
+        "egress.provider_selected",
+        chosen_preset.unwrap_or("none"),
+        Some(payload),
+        session_id,
+        agent_id,
+        turn_id,
+        "egress_provider_selected",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use autonoetic_types::egress::{
@@ -1668,5 +1827,143 @@ mod tests {
         // No handle match (tc_empty not in args), no verbatim match (empty
         // snippet) → unrestricted → None.
         assert!(out.is_none());
+    }
+
+    // ── Taint-following routing (RFC §5.3) ────────────────────────────────
+
+    fn cand(name: &str, class: Option<EgressClass>) -> PresetCandidate {
+        PresetCandidate {
+            name: name.to_string(),
+            egress_class: class,
+        }
+    }
+
+    #[test]
+    fn preset_sink_defaults_remote_fail_closed() {
+        assert_eq!(preset_sink(None), Sink::RemoteModel);
+        assert_eq!(preset_sink(Some(EgressClass::Remote)), Sink::RemoteModel);
+        assert_eq!(preset_sink(Some(EgressClass::Local)), Sink::LocalModel);
+    }
+
+    #[test]
+    fn eligibility_local_only_batch_admits_only_local() {
+        let batch = EgressLabel::local_only();
+        assert!(preset_batch_eligible(&batch, Some(EgressClass::Local)));
+        assert!(!preset_batch_eligible(&batch, Some(EgressClass::Remote)));
+        // Unclassified defaults remote → excluded by a local_only batch.
+        assert!(!preset_batch_eligible(&batch, None));
+    }
+
+    #[test]
+    fn unrestricted_batch_is_a_fast_noop() {
+        let plan = plan_taint_following_route(
+            &EgressLabel::unrestricted(),
+            Some(EgressClass::Remote),
+            &[cand("local", Some(EgressClass::Local))],
+        );
+        assert!(plan.primary_eligible);
+        assert!(plan.reroute_to.is_none());
+        assert!(!plan.no_eligible_provider());
+        // Fast path does not bother enumerating the eligible set.
+        assert!(plan.eligible.is_empty());
+    }
+
+    #[test]
+    fn clean_batch_keeps_remote_primary() {
+        // A `no_remote_model` batch still excludes remote, but an unrestricted
+        // batch (the clean code turn) keeps the remote primary.
+        let plan = plan_taint_following_route(
+            &EgressLabel::unrestricted(),
+            Some(EgressClass::Remote),
+            &[
+                cand("sonnet", Some(EgressClass::Remote)),
+                cand("local", Some(EgressClass::Local)),
+            ],
+        );
+        assert!(plan.primary_eligible);
+        assert!(plan.reroute_to.is_none());
+    }
+
+    #[test]
+    fn tainted_batch_reroutes_remote_primary_to_local() {
+        // The email turn: local_only batch, remote primary → reroute to the
+        // local preset; the remote preset is not eligible.
+        let plan = plan_taint_following_route(
+            &EgressLabel::local_only(),
+            Some(EgressClass::Remote),
+            &[
+                cand("sonnet", Some(EgressClass::Remote)),
+                cand("ollama", Some(EgressClass::Local)),
+            ],
+        );
+        assert!(!plan.primary_eligible);
+        assert_eq!(plan.eligible, vec!["ollama".to_string()]);
+        assert_eq!(plan.reroute_to.as_ref().map(|c| c.name.as_str()), Some("ollama"));
+        assert!(!plan.no_eligible_provider());
+    }
+
+    #[test]
+    fn tainted_batch_local_primary_stays_no_reroute() {
+        let plan = plan_taint_following_route(
+            &EgressLabel::local_only(),
+            Some(EgressClass::Local),
+            &[cand("ollama", Some(EgressClass::Local))],
+        );
+        assert!(plan.primary_eligible);
+        assert!(plan.reroute_to.is_none());
+    }
+
+    #[test]
+    fn tainted_batch_no_local_preset_refuses() {
+        // local_only batch, remote primary, no local preset configured → no
+        // eligible provider → the turn must refuse (egress_no_eligible_provider).
+        let plan = plan_taint_following_route(
+            &EgressLabel::local_only(),
+            Some(EgressClass::Remote),
+            &[cand("sonnet", Some(EgressClass::Remote))],
+        );
+        assert!(!plan.primary_eligible);
+        assert!(plan.eligible.is_empty());
+        assert!(plan.reroute_to.is_none());
+        assert!(plan.no_eligible_provider());
+    }
+
+    #[test]
+    fn reroute_prefers_local_then_stable_by_name() {
+        // Two local presets eligible → prefer local (both are), then the
+        // alphabetically-first name, deterministically.
+        let plan = plan_taint_following_route(
+            &EgressLabel::local_only(),
+            Some(EgressClass::Remote),
+            &[
+                cand("zeta-local", Some(EgressClass::Local)),
+                cand("alpha-local", Some(EgressClass::Local)),
+            ],
+        );
+        assert_eq!(
+            plan.reroute_to.as_ref().map(|c| c.name.as_str()),
+            Some("alpha-local")
+        );
+        assert_eq!(
+            plan.eligible,
+            vec!["alpha-local".to_string(), "zeta-local".to_string()]
+        );
+    }
+
+    #[test]
+    fn no_remote_model_batch_admits_local_and_network_not_remote() {
+        // A `no_remote_model` batch (business-confidential but federatable-ish)
+        // excludes a remote preset but admits a local one.
+        let batch = EgressLabel::no_remote_model();
+        let plan = plan_taint_following_route(
+            &batch,
+            Some(EgressClass::Remote),
+            &[
+                cand("sonnet", Some(EgressClass::Remote)),
+                cand("ollama", Some(EgressClass::Local)),
+            ],
+        );
+        assert!(!plan.primary_eligible);
+        assert_eq!(plan.reroute_to.as_ref().map(|c| c.name.as_str()), Some("ollama"));
     }
 }
