@@ -63,6 +63,7 @@ fn constitution_digest_init(config: &GatewayConfig) -> anyhow::Result<()> {
 
 fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
     let cp = SessionCheckpoint {
+        egress_labels: Default::default(),
         history: vec![
             Message::system("system".to_string()),
             Message::user("hello".to_string()),

@@ -292,6 +292,7 @@ fn test_session_snapshot_fork() {
 
     // Save a checkpoint (simulating an active session that was hibernated)
     let cp = SessionCheckpoint {
+        egress_labels: Default::default(),
         history: history.clone(),
         turn_counter: 2,
         session_state: Default::default(),

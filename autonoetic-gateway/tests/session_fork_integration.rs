@@ -24,6 +24,7 @@ fn test_checkpoint(
     turn_counter: u64,
 ) -> SessionCheckpoint {
     SessionCheckpoint {
+        egress_labels: Default::default(),
         history,
         turn_counter,
         session_state: Default::default(),

@@ -197,6 +197,7 @@ fn build_hibernation_checkpoint(
     let now = chrono::Utc::now().to_rfc3339();
 
     Ok(SessionCheckpoint {
+        egress_labels: Default::default(),
         history: vec![
             Message::system("system".to_string()),
             Message::user("initial task".to_string()),

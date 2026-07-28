@@ -1139,6 +1139,11 @@ impl AgentExecutor {
             .unwrap_or((0, 0, 0.0));
 
         SessionCheckpoint {
+            // Persist the accumulated egress label sidecar so a resumed or
+            // forked session withholds the same labeled content this live
+            // session would (RFC data-envelopes §3.4). Clone is empty for
+            // unconfigured deployments.
+            egress_labels: self.egress_labels.clone(),
             history: history.to_vec(),
             turn_counter: self.turn_counter,
             loop_guard_state: self.guard.snapshot(),
@@ -3912,7 +3917,7 @@ impl AgentExecutor {
                     },
                     Some(pending_tool_state),
                 );
-                cp.assistant_message = Some(assistant_msg);
+                cp.assistant_message = Some(Box::new(assistant_msg));
                 cp.pending_action = pending_action;
                 cp.suspended_at = Some(chrono::Utc::now().to_rfc3339());
 
@@ -4121,7 +4126,7 @@ impl AgentExecutor {
                     yield_reason,
                     Some(pending_tool_state),
                 );
-                cp.assistant_message = Some(assistant_msg);
+                cp.assistant_message = Some(Box::new(assistant_msg));
 
                 if let Some(config) = self.config.as_ref() {
                     if let Err(e) = save_checkpoint(config, &cp) {

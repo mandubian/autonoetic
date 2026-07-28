@@ -40,6 +40,7 @@ fn make_checkpoint(
     yield_reason: YieldReason,
 ) -> SessionCheckpoint {
     SessionCheckpoint {
+        egress_labels: Default::default(),
         history: vec![
             Message::system("You are a test agent"),
             Message::user("Hello, test"),

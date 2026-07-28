@@ -64,6 +64,7 @@ fn make_approval(store: &GatewayStore, request_id: &str, session_id: &str) {
 
 fn bound_checkpoint(session_id: &str, turn: u64, approval_id: &str) -> SessionCheckpoint {
     SessionCheckpoint {
+        egress_labels: Default::default(),
         history: vec![Message::user("hello")],
         turn_counter: turn,
         loop_guard_state: LoopGuard::default(),
