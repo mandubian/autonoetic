@@ -26,8 +26,9 @@ jobs:
 
       # bubblewrap is required by the sandbox integration tests and the
       # #[ignore]'d promotion-gate e2e (real offline-sandbox runs).
-      - name: Install bubblewrap
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      # mold is required by .cargo/config.toml's `-fuse-ld=mold` rustflag (#920).
+      - name: Install bubblewrap and mold
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap mold
 
       # Full suite incl. the integration tests in tests/. Single-threaded for
       # state isolation (the integration tests use serial_test / shared temp

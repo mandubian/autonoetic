@@ -1,2 +1,10 @@
 [alias]
 xtask = "run -p xtask --"
+
+# Faster linking on Linux via mold (#919, #920). Scoped to
+# x86_64-unknown-linux-gnu so macOS/Windows checkouts are unaffected; on Linux
+# this requires `mold` on PATH (Ubuntu 24.04: `sudo apt install mold`) — see
+# AGENTS.md "Build & Test". Works with the default GCC driver (GCC 12+), no
+# clang needed.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
