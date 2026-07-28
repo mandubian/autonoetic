@@ -17,10 +17,20 @@ env:
 jobs:
   full-suite:
     runs-on: ubuntu-latest
+    # Shard the full suite across two runners (#924). nextest's --partition
+    # splits the test list deterministically; each runner executes its half
+    # serially (profile.ci), preserving the historical --test-threads=1
+    # semantics while halving wall-clock. Cross-runner interference is not
+    # possible (separate machines).
+    strategy:
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@cargo-nextest
 
       - uses: Swatinem/rust-cache@v2
 
@@ -30,14 +40,16 @@ jobs:
       - name: Install bubblewrap and mold
         run: sudo apt-get update && sudo apt-get install -y bubblewrap mold
 
-      # Full suite incl. the integration tests in tests/. Single-threaded for
-      # state isolation (the integration tests use serial_test / shared temp
-      # state). This covers everything the per-PR `unit` job skips.
+      # Full suite incl. the integration tests in tests/. Serial per runner
+      # (profile.ci) for state isolation (the integration tests use
+      # serial_test / shared temp state); the two shards cover everything the
+      # per-PR `unit` job skips.
       - name: Integration suite
-        run: cargo test --workspace -- --test-threads=1
+        run: cargo nextest run --workspace --profile ci --partition count:${{ matrix.shard }}/2
 
       # Heavy #[ignore]'d e2e: full-stack chat (spawns gateway + LLM stub) and
       # bubblewrap sandbox runs. Run last so a drift here doesn't mask the
-      # integration results above.
+      # integration results above. Not partitioned — small count, and the
+      # serial ordering is load-bearing for some of them.
       - name: Ignored e2e
-        run: cargo test --workspace -- --ignored --test-threads=1
+        run: cargo nextest run --workspace --profile ci --run-ignored ignored-only

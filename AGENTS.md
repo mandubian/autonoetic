@@ -15,6 +15,17 @@ RUST_LOG=autonoetic=debug cargo test           # Debug logging during tests
 
 No linter or formatter is configured. There is no `cargo clippy` or `rustfmt` CI gate — run `cargo build` to verify.
 
+**Test runner:** CI uses [cargo-nextest](https://nexte.st) (`cargo install cargo-nextest --locked`).
+Each test runs in its own process; `.config/nextest.toml` defines two profiles:
+
+```bash
+cargo nextest run -p autonoetic-gateway                       # local default: parallel
+cargo nextest run -p autonoetic-gateway --profile ci          # serial (CI semantics)
+cargo nextest run -E 'test(egress)'                           # filter by name/binary
+```
+
+If a suite flakes under the local parallel default but passes with `--profile ci`, it relies on cross-process serialization (ports, fixed paths) — file it against #924.
+
 **Linux toolchain prerequisite:** the repo's `.cargo/config.toml` links with
 mold (`-fuse-ld=mold`, scoped to `x86_64-unknown-linux-gnu`). Install it once:
 
