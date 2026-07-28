@@ -4,14 +4,13 @@
 //! lever; the enforcement (no new session, in-flight survives, read stays
 //! open) is covered in `phase2_promotion_stability_integration`.
 
-mod support;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcRouter};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::AgentAliasRecord;
 use autonoetic_types::principal::PrincipalKind;
 use std::sync::{Arc, OnceLock};
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 struct SharedEnv {
     _ws: TestWorkspace,

@@ -10,7 +10,6 @@
 //! carry the pinned vs. current version+digest, then that the pin is updated
 //! so a second turn does not repeat the notice.
 
-mod support;
 
 use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, Message, Role, StopReason, TokenUsage,

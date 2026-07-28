@@ -11,7 +11,6 @@
 //! Delivery itself is a queued `agent_message_deliveries` row plus a pending
 //! notification; the lifecycle drains that queue at the receiver's next wake.
 
-mod support;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -91,7 +90,7 @@ fn finish_session(store: &GatewayStore, session_id: &str, agent_id: &str) -> any
 }
 
 struct Harness {
-    _workspace: support::TestWorkspace,
+    _workspace: crate::support::TestWorkspace,
     config: autonoetic_types::config::GatewayConfig,
     agents_dir: std::path::PathBuf,
     gateway_dir: std::path::PathBuf,
@@ -102,7 +101,7 @@ struct Harness {
 impl Harness {
     /// Installs `sender-agent` (with `sender_patterns`) and `receiver-agent`.
     fn new(sender_patterns: &str) -> anyhow::Result<Self> {
-        let workspace = support::TestWorkspace::new()?;
+        let workspace = crate::support::TestWorkspace::new()?;
         let config = workspace.gateway_config();
         let agents_dir = workspace.agents_dir.clone();
         let gateway_dir = agents_dir.join(".gateway");

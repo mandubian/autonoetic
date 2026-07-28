@@ -1,12 +1,13 @@
 //! `session.timeline.list` JSON-RPC (#391) — the canonical Session Room timeline
 //! served over the gateway API so channels are clients, not direct store readers.
 
+
 mod support;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcRouter};
 use autonoetic_gateway::scheduler::gateway_store::{GatewayStore, LiveDigestEventRecord};
 use std::sync::{Arc, OnceLock};
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 struct SharedEnv {
     _ws: TestWorkspace,

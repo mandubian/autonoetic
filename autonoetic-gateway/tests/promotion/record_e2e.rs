@@ -6,7 +6,6 @@
 //! 3. Auditor audits content → calls promotion.record(pass=true)
 //! 4. Builder creates an `AgentBundle` artifact and activates it via `agent.revision.create` + `agent.revision.promote`
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
@@ -260,7 +259,7 @@ async fn test_promotion_record_full_pass_flow() {
     let eval_policy = PolicyEngine::new(eval_manifest.clone());
     let registry = default_registry();
 
-    let eval_args = support::promotion_trace::build_promotion_record_args(
+    let eval_args = crate::support::promotion_trace::build_promotion_record_args(
         gw_store.as_ref(),
         &artifact_id,
         "sealed_evaluator",
@@ -290,7 +289,7 @@ async fn test_promotion_record_full_pass_flow() {
     let audit_manifest = auditor_manifest();
     let audit_policy = PolicyEngine::new(audit_manifest.clone());
 
-    let audit_args = support::promotion_trace::build_promotion_record_args(
+    let audit_args = crate::support::promotion_trace::build_promotion_record_args(
         gw_store.as_ref(),
         &artifact_id,
         "auditor",
@@ -360,7 +359,7 @@ async fn test_promotion_record_full_pass_flow() {
         .and_then(|v| v.as_str())
         .expect("revision_id in response");
 
-    let (smoke_wf, smoke_task) = support::promotion_trace::seed_smoke_test_task(
+    let (smoke_wf, smoke_task) = crate::support::promotion_trace::seed_smoke_test_task(
         &config,
         gw_store.as_ref(),
         "promotion.test.agent",
@@ -447,7 +446,7 @@ async fn test_promotion_record_with_artifact_ref() {
     let eval_policy = PolicyEngine::new(eval_manifest.clone());
     let registry = default_registry();
 
-    let mut eval_args = support::promotion_trace::build_promotion_record_args(
+    let mut eval_args = crate::support::promotion_trace::build_promotion_record_args(
         gw_store.as_ref(),
         &artifact_id,
         "sealed_evaluator",
@@ -487,7 +486,7 @@ async fn test_promotion_record_with_artifact_ref() {
     let audit_manifest = auditor_manifest();
     let audit_policy = PolicyEngine::new(audit_manifest.clone());
 
-    let audit_args = support::promotion_trace::build_promotion_record_args(
+    let audit_args = crate::support::promotion_trace::build_promotion_record_args(
         gw_store.as_ref(),
         &artifact_id,
         "auditor",
@@ -707,7 +706,7 @@ script_entry: main.py
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
     let gw_store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
-    let args = support::promotion_trace::build_promotion_record_args(
+    let args = crate::support::promotion_trace::build_promotion_record_args(
         gw_store.as_ref(),
         &bundle.artifact_id,
         "sealed_evaluator",

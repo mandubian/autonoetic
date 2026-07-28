@@ -1,8 +1,9 @@
 //! Integration test for multi-agent session trace reconstruction.
 
+
 mod support;
 
-use support::{
+use crate::support::{
     read_causal_entries, seed_agent_revision, spawn_gateway_server_with_store, EnvGuard,
     JsonRpcClient, OpenAiStub, TestWorkspace,
 };

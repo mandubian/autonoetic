@@ -6,15 +6,14 @@
 //! addressable recipient, and a reaped one is not — plus the invariant that
 //! parking must never leave a session advertised but unreachable.
 
-mod support;
 
 use std::sync::Arc;
 
 use autonoetic_gateway::scheduler::gateway_store::{GatewayStore, SessionResidency};
 use autonoetic_types::agent_revision::SessionAgentBinding;
 
-fn store() -> anyhow::Result<(support::TestWorkspace, Arc<GatewayStore>)> {
-    let workspace = support::TestWorkspace::new()?;
+fn store() -> anyhow::Result<(crate::support::TestWorkspace, Arc<GatewayStore>)> {
+    let workspace = crate::support::TestWorkspace::new()?;
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
     Ok((workspace, Arc::new(GatewayStore::open(&gateway_dir)?)))

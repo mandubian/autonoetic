@@ -1,6 +1,5 @@
 //! Integration tests for `autonoetic_gateway::runtime::session_export`.
 
-mod support;
 
 use autonoetic_gateway::runtime::session_export::{
     export_session, render_export, ExportFormat, ExportOptions,
@@ -11,7 +10,7 @@ use autonoetic_gateway::scheduler::gateway_store::{
 use autonoetic_types::principal::Principal;
 use autonoetic_types::session_outcome::{Completion, OperatorThumb};
 use autonoetic_types::session_timeline::{Altitude, SessionRole};
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 fn seed_outcome(store: &GatewayStore, root: &str) {
     store

@@ -1,5 +1,6 @@
 //! Phase 2B: User chat while workflow children run — planner receives `event.ingest` on root session.
 
+
 mod support;
 
 use autonoetic_gateway::scheduler::workflow_store::{
@@ -7,7 +8,7 @@ use autonoetic_gateway::scheduler::workflow_store::{
 };
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
-use support::{
+use crate::support::{
     seed_agent_revision, spawn_gateway_server_with_store, EnvGuard, JsonRpcClient, OpenAiStub,
     TestWorkspace,
 };

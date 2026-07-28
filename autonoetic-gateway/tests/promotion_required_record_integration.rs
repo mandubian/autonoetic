@@ -1,10 +1,11 @@
+
 mod support;
 
 use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
 use autonoetic_types::promotion::PromotionRole;
-use support::{seed_agent_revision, EnvGuard, TestWorkspace};
+use crate::support::{seed_agent_revision, EnvGuard, TestWorkspace};
 
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 
@@ -107,7 +108,7 @@ async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Resul
     let gateway_dir = workspace.agents_dir.join(".gateway");
     let gw_store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
     let store = PromotionStore::new(&gateway_dir)?;
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &store,
         gw_store.as_ref(),
         artifact_id,

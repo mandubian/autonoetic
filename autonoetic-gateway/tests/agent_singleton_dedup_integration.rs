@@ -1,5 +1,7 @@
 //! Singleton agent dedup integration tests (RFC phase 1).
 
+mod support;
+
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;

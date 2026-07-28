@@ -14,7 +14,7 @@ Promotion and gate actions are bounded so that repeated mechanical rejection can
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `P-2.29` | `promotion_attempts_exhausted` | `runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt` | `promotion_attempt_exhaustion_integration.rs` | `promotion_governor.max_promotion_attempts_per_revision` |
+| `P-2.29` | `promotion_attempts_exhausted` | `runtime/promotion_governor.rs::check_attempt_exhaustion + runtime/tools/agent_revision.rs::record_attempt` | `promotion/attempt_exhaustion.rs` | `promotion_governor.max_promotion_attempts_per_revision` |
 
 ### P-5 — Deterministic coercion and response validation
 

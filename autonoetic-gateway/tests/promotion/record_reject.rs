@@ -1,6 +1,5 @@
 //! `agent.install` has been removed; these tests ensure calls fail fast.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;

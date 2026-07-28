@@ -6,7 +6,6 @@
 //!   3. Operator approves the escalation via `approve_request`.
 //!   4. Session resumes from checkpoint with operator guidance injected as system message.
 
-mod support;
 
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
@@ -15,7 +14,7 @@ use autonoetic_gateway::scheduler::{approve_request, load_approval_requests};
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
 use autonoetic_types::background::ScheduledAction;
 use std::sync::{Arc, Mutex};
-use support::{EnvGuard, OpenAiStub};
+use crate::support::{EnvGuard, OpenAiStub};
 
 const LLM_BASE_URL_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_ENV: &str = "AUTONOETIC_LLM_API_KEY";
@@ -132,14 +131,14 @@ llm_config:
 You are a test agent for escalation flow.
 "#,
     )?;
-    support::seed_agent_revision(store, config, "escalation-test-agent", &agent_dir)?;
+    crate::support::seed_agent_revision(store, config, "escalation-test-agent", &agent_dir)?;
     Ok(())
 }
 
 #[serial_test::serial]
 #[tokio::test]
 async fn test_session_escalate_creates_approval_and_suspends() -> anyhow::Result<()> {
-    let workspace = support::TestWorkspace::new()?;
+    let workspace = crate::support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
@@ -219,7 +218,7 @@ async fn test_session_escalate_creates_approval_and_suspends() -> anyhow::Result
 #[serial_test::serial]
 #[tokio::test]
 async fn test_session_escalate_non_human_no_approval() -> anyhow::Result<()> {
-    let workspace = support::TestWorkspace::new()?;
+    let workspace = crate::support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
@@ -278,7 +277,7 @@ async fn test_session_escalate_non_human_no_approval() -> anyhow::Result<()> {
 #[serial_test::serial]
 #[tokio::test]
 async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
-    let workspace = support::TestWorkspace::new()?;
+    let workspace = crate::support::TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
     std::fs::create_dir_all(&gateway_dir)?;
@@ -336,7 +335,7 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
 #[serial_test::serial]
 #[tokio::test]
 async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()> {
-    let workspace = support::TestWorkspace::new()?;
+    let workspace = crate::support::TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.approval_dwell_multiplier = 0.0;
     let gateway_dir = workspace.agents_dir.join(".gateway");

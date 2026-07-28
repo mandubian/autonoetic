@@ -3,7 +3,6 @@
 //! `agent.install` is no longer registered; install calls must fail with unavailable-tool errors
 //! even when promotion evidence is inconsistent.
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
@@ -36,7 +35,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
         .unwrap();
     let promotion_store = PromotionStore::new(&gateway_dir).unwrap();
     let gw_store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &promotion_store,
         &gw_store,
         &bundle.artifact_id,
@@ -46,7 +45,7 @@ fn build_test_artifact(base_dir: &Path, files: &[(&str, &str)]) -> (String, Path
         session_id,
         None,
     );
-    support::promotion_trace::seed_promotion_store_execution_role(
+    crate::support::promotion_trace::seed_promotion_store_execution_role(
         &promotion_store,
         &gw_store,
         &bundle.artifact_id,
@@ -186,7 +185,7 @@ async fn test_promotion_evaluator_fail_rejected() {
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
     );
     let fail_trace_id = "trace-eval-fail-001";
-    support::promotion_trace::seed_execution_trace(
+    crate::support::promotion_trace::seed_execution_trace(
         &gw_store,
         "session-eval-fail",
         fail_trace_id,
