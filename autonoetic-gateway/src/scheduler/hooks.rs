@@ -1363,24 +1363,33 @@ mod tests {
 
         executor.dispatch_async(ctx);
 
-        tokio::time::timeout(Duration::from_secs(3), async {
+        // Poll the authoritative *store* row for the terminal state, not the
+        // handler's `attempts` counter. The counter reaches 3 the instant the
+        // 3rd request lands, but the executor records the "delivered" row only
+        // *after* that HTTP call returns and is processed — waiting on the
+        // counter and then asserting on the row races the store write (the flake
+        // this replaces). The row reaching "delivered" is the real completion
+        // signal.
+        let delivery = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if attempts.load(Ordering::SeqCst) >= 3 {
-                    break;
+                if let Ok(Some(d)) =
+                    store.get_hook_delivery(&delivery_id, "session.closed", "http.callback")
+                {
+                    if d.status == "delivered" {
+                        return d;
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("delivery should retry three times");
+        .expect("delivery should reach 'delivered' within the timeout");
 
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
-        let delivery = store
-            .get_hook_delivery(&delivery_id, "session.closed", "http.callback")
-            .unwrap()
-            .expect("delivery row");
         assert_eq!(delivery.status, "delivered");
         assert_eq!(delivery.attempt_count, 3);
+        // By the time the row is "delivered" the 3rd attempt has necessarily
+        // landed, so the handler counter is a stable 3.
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
 
         handle.abort();
     }
