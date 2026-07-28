@@ -136,6 +136,11 @@ fn enforce_remote_target_for_web(
         host,
         Some(request_url),
         DeclarationRequirement::Required,
+        // The web tools enforce the NetworkAccess capability themselves via
+        // `host_allowed`, which routes denials into GateService approval
+        // minting (ask-the-operator). Hard-enforcing the capability here
+        // would bypass that flow with a hard error (#933).
+        network_policy::CapabilityHostCheck::DeferToCaller,
     )
     .map(|_| ())
     .map_err(network_policy_violation_to_anyhow)

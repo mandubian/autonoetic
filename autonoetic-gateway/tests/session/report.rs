@@ -1,5 +1,6 @@
 //! Integration: structured live/session reports are written beside `digest.md`.
 
+use autonoetic_gateway::constitution_digest::initialize_constitution;
 use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, Message, StopReason, TokenUsage, ToolCall,
 };
@@ -104,6 +105,16 @@ fn test_manifest() -> AgentManifest {
 
 #[tokio::test]
 async fn session_report_writes_live_and_final_files() -> anyhow::Result<()> {
+    // The reply path reads the constitution version for the state-attestation
+    // tail (P-6.23); initialize before the digest is touched. A config-mismatch
+    // error only means a neighbor test initialized first — that runtime
+    // satisfies the read; anything else must surface here, not at the digest.
+    if let Err(e) = initialize_constitution(&autonoetic_types::config::GatewayConfig::default()) {
+        anyhow::ensure!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize and no neighbor initialized it either: {e}"
+        );
+    }
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
     let agent_dir = agents_dir.join("report.tester");

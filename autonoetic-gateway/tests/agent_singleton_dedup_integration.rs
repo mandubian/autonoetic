@@ -80,7 +80,6 @@ metadata:
       name: "singleton.test"
       description: "singleton test agent"
       singleton: true
-      resident_idle_ttl_secs: None,
 ---
 # Singleton test agent
 "#,
