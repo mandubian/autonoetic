@@ -608,10 +608,11 @@ fn apply_egress_session_policies_v73(conn: &mut Connection) -> Result<()> {
 
 /// v74 — cross-agent egress taint (RFC data-envelopes §5.5). Records a
 /// session's accumulated taint (intersection of everything it touched) so that
-/// when its return value or an `agent_message` crosses to another session, the
-/// recipient can label the transferred content and withhold it from a sink the
-/// label excludes — closing the `LocalAgent` hole. Keyed by session id; written
-/// at session finalize, read when a sibling/parent surfaces the content.
+/// when its content crosses to another session, the recipient can label the
+/// transferred content and withhold it from a sink the label excludes —
+/// closing the `LocalAgent` hole. Keyed by session id; written at session
+/// finalize. **Consumed by spawn-return (`workflow_wait`) in slice 4a;** the
+/// `agent_message` payload path reads it in slice 4b.
 fn apply_session_egress_taint_v74(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

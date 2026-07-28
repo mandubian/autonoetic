@@ -1033,18 +1033,52 @@ fn child_session_taint_from_result(
     store: &crate::scheduler::gateway_store::GatewayStore,
     own_session_id: Option<&str>,
 ) -> Option<autonoetic_types::egress::EgressLabel> {
-    let parsed: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    use autonoetic_types::egress::EgressLabel;
+    // Fail closed (RFC §2.2): a `workflow_wait` result is gateway-built JSON, so
+    // an unparseable one is anomalous and we cannot tell whether it surfaces a
+    // tainted child. Rather than risk shipping a child's content to a remote
+    // sink, treat it conservatively as `local_only`.
+    let parsed: serde_json::Value = match serde_json::from_str(result_json) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target: "egress",
+                error = %e,
+                "workflow_wait result did not parse as JSON — failing closed to \
+                 local_only for cross-agent taint (RFC §5.5)"
+            );
+            return Some(EgressLabel::local_only());
+        }
+    };
     let mut ids: Vec<String> = Vec::new();
     collect_session_ids(&parsed, &mut ids);
-    let mut acc = autonoetic_types::egress::EgressLabel::unrestricted();
+    ids.sort();
+    ids.dedup();
+    let mut acc = EgressLabel::unrestricted();
     let mut any = false;
     for id in ids {
         if Some(id.as_str()) == own_session_id {
             continue;
         }
-        if let Ok(Some(taint)) = store.get_session_egress_taint(&id) {
-            acc = acc.restrict(&taint);
-            any = true;
+        match store.get_session_egress_taint(&id) {
+            Ok(Some(taint)) => {
+                acc = acc.restrict(&taint);
+                any = true;
+            }
+            Ok(None) => { /* clean child — nothing to inherit */ }
+            Err(e) => {
+                // A lookup error must not silently drop a possibly-restrictive
+                // taint (that would fail open). Treat this child as `local_only`.
+                tracing::warn!(
+                    target: "egress",
+                    error = %e,
+                    session_id = %id,
+                    "session egress taint lookup failed — failing closed to \
+                     local_only (RFC §5.5)"
+                );
+                acc = acc.restrict(&EgressLabel::local_only());
+                any = true;
+            }
         }
     }
     (any && !acc.is_unrestricted()).then_some(acc)
@@ -2596,6 +2630,20 @@ mod tests {
         assert_eq!(
             child_session_taint_from_result(&self_ref, &store, Some("child-mail")),
             None
+        );
+    }
+
+    #[test]
+    fn child_taint_from_result_fails_closed_on_unparseable() {
+        // RFC §2.2 fail-closed: a workflow_wait result that isn't valid JSON is
+        // anomalous (gateway-built JSON should always parse). Rather than drop a
+        // possibly-tainted child summary (fail-open leak), conservatively label
+        // it local_only.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap();
+        assert_eq!(
+            child_session_taint_from_result("not json {", &store, None),
+            Some(autonoetic_types::egress::EgressLabel::local_only())
         );
     }
 }

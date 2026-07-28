@@ -3,10 +3,14 @@
 //! A session's **accumulated taint** is the intersection of the labels of
 //! everything it touched (see `egress_labeler::session_accumulated_taint`). It
 //! is recorded here, keyed by session id, at session finalize. When that
-//! session's return value (spawn) or an `agent_message` payload crosses to
-//! another session, the recipient reads this taint and labels the transferred
-//! content, so a tainted child can't hand content to a remote-pinned sibling —
-//! closing the `LocalAgent` hole.
+//! session's content crosses to another session, the recipient reads this taint
+//! and labels the transferred content, so a tainted child can't hand content to
+//! a remote-pinned sibling — closing the `LocalAgent` hole.
+//!
+//! **Consumed so far (slice 4a):** spawn-return — `workflow_wait` intersects a
+//! surfaced child's taint into the parent's tool-result label. The
+//! `agent_message` payload path (sender→recipient) reads this table in slice 4b
+//! and is not yet wired.
 //!
 //! Only *restrictive* taint is stored: an `unrestricted` session touched
 //! nothing private, so there is nothing to carry (absence ⇒ unrestricted).
