@@ -279,14 +279,43 @@ pub(crate) fn truncate_band_text(messages: &[Message], max_summary_tokens: usize
     if joined.len() <= budget_chars {
         return joined;
     }
-    let head = budget_chars / 2;
-    let tail = budget_chars.saturating_sub(head);
+    // Snap the head/tail cut points to UTF-8 char boundaries. Band content is
+    // arbitrary user/tool text (email, code, CJK, emoji), so a raw byte slice
+    // `&joined[..head]` panics whenever the cut lands mid-character — this must
+    // truncate safely, never crash compression.
+    let head = floor_char_boundary(&joined, budget_chars / 2);
+    let tail_bytes = budget_chars.saturating_sub(budget_chars / 2);
+    let tail_start = ceil_char_boundary(&joined, joined.len().saturating_sub(tail_bytes));
     format!(
         "{}\n…[truncated {} chars]…\n{}",
         &joined[..head],
         joined.len().saturating_sub(budget_chars),
-        &joined[joined.len().saturating_sub(tail)..]
+        &joined[tail_start..]
     )
+}
+
+/// Largest byte index `<= i` that is a UTF-8 char boundary of `s`.
+fn floor_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut b = i;
+    while b > 0 && !s.is_char_boundary(b) {
+        b -= 1;
+    }
+    b
+}
+
+/// Smallest byte index `>= i` that is a UTF-8 char boundary of `s`.
+fn ceil_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let mut b = i;
+    while b < s.len() && !s.is_char_boundary(b) {
+        b += 1;
+    }
+    b
 }
 
 /// Mint a labeled synthesized context block (compressed or truncated) and
@@ -608,6 +637,35 @@ pub fn persist_compressed_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_band_text_handles_multibyte_utf8_without_panicking() {
+        // Regression: band content is arbitrary user/tool text. A byte-index
+        // slice (`&joined[..head]`) panics when the cut lands mid-character;
+        // this must snap to a char boundary and truncate safely.
+        for content in [
+            "€".repeat(200),  // 3-byte chars → odd byte offsets land mid-char
+            "🔒".repeat(200), // 4-byte chars (emoji) — the mail-content case
+            "café ☕ ".repeat(80),
+            "日本語のテキスト".repeat(40),
+        ] {
+            let msgs = vec![Message {
+                id: None,
+                role: Role::User,
+                content: content.clone(),
+                tool_calls: vec![],
+                tool_call_id: None,
+                reasoning_content: None,
+                reasoning_details: None,
+            }];
+            // Small token budget forces truncation with a cut inside a
+            // multi-byte character under the old byte-slice logic.
+            let out = truncate_band_text(&msgs, 20);
+            assert!(out.contains("truncated"), "should have truncated: {out}");
+            // The result is valid UTF-8 by construction (String) — the point is
+            // simply that this returned instead of panicking.
+        }
+    }
 
     #[test]
     fn test_split_compressible_messages_empty() {

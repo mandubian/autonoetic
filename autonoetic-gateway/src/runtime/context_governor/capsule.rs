@@ -672,7 +672,11 @@ impl super::ReductionStrategy for CapsuleStrategy {
         // content, skip extract_delta and rely on truncated tainted blocks
         // (+ kept recent turns) for reduction.
         let mut injection_msg: Option<crate::llm::Message> = None;
-        let mut compressible_count = band_blocks.len() as u64;
+        // Count tainted *messages* truncated (one block may cover many), not
+        // bands — `meta.messages_summarized` and downstream audit read this.
+        // The clean band adds `capsule_input.len()` below.
+        let mut compressible_count =
+            tainted_bands.iter().map(|b| b.messages.len() as u64).sum::<u64>();
         if !clean_msgs.is_empty() || !label_plane_active {
             let capsule_input: &[crate::llm::Message] = if label_plane_active {
                 &clean_msgs
