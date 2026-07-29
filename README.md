@@ -52,7 +52,7 @@ both sides, is the whole design.
 
 ```mermaid
 flowchart TB
-    law["Constitution — signed, versioned<br/>rules bind the agent · rights bind the gateway · obligations bind authority"]
+    law["Constitution — signed, versioned<br/>rules bind the actor · rights bind the gateway · obligations bind authority"]
 
     actor["Actor<br/>AI agent · human · script<br/>a low-privilege reasoner"]
 
