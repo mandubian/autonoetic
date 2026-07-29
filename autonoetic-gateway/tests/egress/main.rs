@@ -12,6 +12,7 @@ mod chokepoint_canary;
 mod compression_eligibility;
 mod floor_and_taint;
 mod mixed_session_e2e;
+mod phase4_sandbox;
 mod routing;
 mod source_rules;
 mod stored_content;

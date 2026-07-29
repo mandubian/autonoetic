@@ -945,7 +945,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
-        _turn_id: Option<&str>,
+        turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         run_context: Option<&NativeToolRunContext>,
@@ -1304,6 +1304,21 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             .map(|d| d.approval_mode)
             .unwrap_or(RemoteAccessApprovalMode::Required);
 
+        let session_taint = crate::runtime::egress_labeler::resolve_session_egress_taint(
+            run_context,
+            gateway_store.as_deref(),
+            session_id,
+        )?;
+        let network_sink_excluded = session_taint
+            .as_ref()
+            .map(|t| !t.allows(autonoetic_types::egress::Sink::Network))
+            .unwrap_or(false);
+        let manifest_grants_share_net = manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::NetworkAccess { hosts } if !hosts.is_empty())
+        });
+        let requires_network_gate = remote_analysis.requires_approval
+            || (network_sink_excluded && manifest_grants_share_net);
+
         if matches!(remote_approval_mode, RemoteAccessApprovalMode::Preapproved)
             && !agent_has_network_access
             && remote_analysis.requires_approval
@@ -1324,6 +1339,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             && agent_has_network_access
             && remote_analysis.requires_approval
             && !approval_validated_for_command
+            && !network_sink_excluded
         {
             tracing::info!(
                 target: "sandbox_exec",
@@ -1335,7 +1351,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         }
 
         let mut safe_inspection_bypass = false;
-        if remote_analysis.requires_approval
+        if requires_network_gate
             && !approval_validated_for_command
             && crate::runtime::remote_access::is_safe_inspection_command(&effective_command)
         {
@@ -1378,17 +1394,18 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             agent_id = %manifest.agent.id,
             session_id = %session_id.unwrap_or(""),
             approval_ref_validated = approval_validated_for_command,
-            will_require_approval = remote_analysis.requires_approval && !approval_validated_for_command,
+            will_require_approval = requires_network_gate && !approval_validated_for_command,
             pattern_count = remote_analysis.detected_patterns.len(),
             dep_package_count = dep_packages.as_ref().map(|p| p.len()).unwrap_or(0),
             summary = %remote_analysis.summary,
             "Remote access scan for sandbox.exec (imports, URLs, IPs, network commands, dependencies). If will_require_approval=true, execution stops until operator approves and caller retries with approval_ref."
         );
-        if remote_analysis.requires_approval && !approval_validated_for_command {
+        if requires_network_gate && !approval_validated_for_command {
             tracing::warn!(
                 target: "sandbox",
                 patterns = ?remote_analysis.detected_patterns,
-                "Code requires remote access - operator approval required"
+                network_sink_excluded = network_sink_excluded,
+                "Code or session egress taint requires network gate — operator approval required"
             );
 
             let detected_patterns = remote_analysis.detected_patterns.clone();
@@ -1398,6 +1415,36 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 &detected_patterns,
                 normalized_targets.clone(),
             );
+
+            if matches!(
+                coverage,
+                crate::runtime::remote_access::NetworkCoverage::Unresolved
+            ) && network_sink_excluded
+            {
+                if let Some(store) = &gateway_store {
+                    let label = session_taint
+                        .clone()
+                        .unwrap_or_else(autonoetic_types::egress::EgressLabel::local_only);
+                    crate::runtime::egress_labeler::emit_surface_boundary_refused(
+                        store,
+                        session_id.unwrap_or(""),
+                        &manifest.agent.id,
+                        turn_id,
+                        "sandbox",
+                        &label,
+                        &[],
+                        "session egress taint excludes Network and remote targets are Unresolved (RFC §7)",
+                    );
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "egress_boundary_refused",
+                    "surface": "sandbox",
+                    "message": "sandbox.exec refused: session egress taint excludes Network and network targets could not be resolved to concrete hosts",
+                    "repair_hint": "Declassify the restricted content, clear session taint, or use a command with concrete network targets.",
+                })
+                .to_string());
+            }
 
             // Pre-check: exec cache for concrete targets (sets pre_validated for GateService bypass)
             let mut pre_validated = false;
@@ -2122,7 +2169,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         let mut overrides =
             crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
 
-        if approval_validated_for_command && !safe_inspection_bypass {
+        if network_sink_excluded && !approval_validated_for_command && !safe_inspection_bypass {
+            overrides.share_net = false;
+        } else if approval_validated_for_command && !safe_inspection_bypass {
             overrides.share_net = true;
         }
 
