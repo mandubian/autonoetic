@@ -1372,12 +1372,13 @@ mod tests {
         // signal.
         let delivery = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Ok(Some(d)) =
-                    store.get_hook_delivery(&delivery_id, "session.closed", "http.callback")
-                {
-                    if d.status == "delivered" {
-                        return d;
-                    }
+                match store.get_hook_delivery(&delivery_id, "session.closed", "http.callback") {
+                    Ok(Some(d)) if d.status == "delivered" => return d,
+                    // No row yet, or not yet terminal — keep polling.
+                    Ok(_) => {}
+                    // A store/SQL error is a real bug; fail fast with it rather
+                    // than let it masquerade as a generic delivery timeout.
+                    Err(e) => panic!("get_hook_delivery failed: {e}"),
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
