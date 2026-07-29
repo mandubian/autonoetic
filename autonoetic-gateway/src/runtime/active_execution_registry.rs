@@ -44,6 +44,12 @@ pub struct NativeToolRunContext {
     /// `GatewayExecutionService.register_wake_hint` and read by
     /// `agent_list` to check whether the guardrail is active.
     pub wake_hints_map: Option<Arc<Mutex<std::collections::HashMap<String, crate::execution::WakeHintState>>>>,
+    /// The sending session's accumulated egress taint at tool-call time (RFC
+    /// data-envelopes §5.5). Threaded from the executor's label sidecar so a
+    /// tool that hands content to another session — `agent_message` — can stamp
+    /// the payload with what the sender touched, closing the `LocalAgent` hole.
+    /// `None` ⇒ the sender touched nothing restrictive (unrestricted payload).
+    pub egress_taint: Option<autonoetic_types::egress::EgressLabel>,
 }
 
 #[derive(Clone)]

@@ -1485,7 +1485,7 @@ important signals (progress reports, divergence findings, status updates from sp
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AgentMessageArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -1678,6 +1678,10 @@ important signals (progress reports, divergence findings, status updates from sp
             target_pattern: target_pattern.clone(),
             message: args.message.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            // Stamp the payload with the sender's accumulated egress taint
+            // (RFC §5.5): the recipient labels the ingested message with it, so
+            // a tainted sender can't hand content to a remote-pinned sibling.
+            egress_label: run_context.and_then(|rc| rc.egress_taint.clone()),
         };
 
         store.save_agent_message(&record)?;

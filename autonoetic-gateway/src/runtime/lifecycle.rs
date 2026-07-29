@@ -2103,7 +2103,23 @@ impl AgentExecutor {
                         "[Direct Message from Agent '{}' (Session: {})]\n{}",
                         msg.sender_agent_id, msg.sender_session_id, msg.message
                     );
-                    history.push(Message::user(text.clone()));
+                    // Cross-agent taint apply (RFC §5.5, slice 4b): if the sender
+                    // stamped the payload with a restrictive taint, label this
+                    // ingested message so the chokepoint withholds it from a sink
+                    // the taint excludes — a tainted sibling's content can't reach
+                    // a remote-pinned recipient. Mint a stable msg id (§3.4) as
+                    // the label's join key.
+                    let mut user_msg = Message::user(text.clone());
+                    if let Some(label) = msg
+                        .egress_label
+                        .as_ref()
+                        .filter(|l| !l.is_unrestricted())
+                    {
+                        let mid = autonoetic_types::id_format::short_random_id("msg_");
+                        user_msg.id = Some(mid.clone());
+                        self.egress_labels.insert(mid, label.clone());
+                    }
+                    history.push(user_msg);
 
                     let _ = tracer.log_event(
                         "agent_message",
@@ -4111,6 +4127,15 @@ impl AgentExecutor {
                     )),
                     wake_hint: None,
                     wake_hints_map: None,
+                    // The sender's accumulated taint (RFC §5.5) — `agent_message`
+                    // stamps its payload with this so a remote-pinned recipient
+                    // withholds tainted content (closes the `LocalAgent` hole).
+                    egress_taint: {
+                        let t = crate::runtime::egress_labeler::session_accumulated_taint(
+                            &self.egress_labels,
+                        );
+                        (!t.is_unrestricted()).then_some(t)
+                    },
                 }
             });
             let mut processor = ToolCallProcessor::new(
@@ -4957,6 +4982,8 @@ impl AgentExecutor {
             target_pattern: format!("session:{}", root_session_id),
             message,
             created_at: now.clone(),
+            // Gateway-authored Sentinel notice — content-free, unrestricted.
+            egress_label: None,
         };
         if let Err(e) = store.save_agent_message(&record) {
             tracing::warn!(target: "autonoetic::trajectory", error = %e, "Failed to save divergence planner message");

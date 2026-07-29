@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 74;
+const SCHEMA_VERSION_LATEST: i64 = 75;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -559,6 +559,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_residency_v72(conn)?;
     apply_egress_session_policies_v73(conn)?;
     apply_session_egress_taint_v74(conn)?;
+    apply_agent_message_egress_taint_v75(conn)?;
 
     Ok(())
 }
@@ -635,6 +636,40 @@ fn apply_session_egress_taint_v74(conn: &mut Connection) -> Result<()> {
     conn.execute(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
         params![74_i64, "session_egress_taint", chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// v75 — cross-agent egress taint on `agent_message` payloads (RFC
+/// data-envelopes §5.5, slice 4b). A *live* sender's taint isn't yet in
+/// `session_egress_taint` (that is written at finalize), so the sender's
+/// accumulated taint at send time is stored per-message here; the recipient
+/// reads it when it ingests the `[Direct Message from Agent …]` block and
+/// labels that message so it is withheld from a sink the taint excludes.
+/// Nullable column — pre-existing / clean messages carry no taint.
+fn apply_agent_message_egress_taint_v75(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 75 {
+        return Ok(());
+    }
+
+    // `agent_messages` predates this column; add it nullable so existing rows
+    // (and clean messages) simply have no taint.
+    conn.execute_batch(
+        "ALTER TABLE agent_messages ADD COLUMN egress_label_json TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            75_i64,
+            "agent_message_egress_taint",
+            chrono::Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
