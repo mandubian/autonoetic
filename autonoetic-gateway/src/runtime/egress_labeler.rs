@@ -1171,6 +1171,29 @@ pub fn session_network_declassified(
         .unwrap_or(false)
 }
 
+/// Persist restrictive in-memory session taint when filing a network approval
+/// so `apply_decision` can materialize declassification before session finalize.
+pub fn snapshot_session_egress_taint_for_approval(
+    store: &GatewayStore,
+    session_id: &str,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+) -> anyhow::Result<()> {
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    let taint = if let Some(t) = run_context.and_then(|c| c.egress_taint.clone()) {
+        t
+    } else if let Some(row) = store.get_session_egress_taint(session_id)? {
+        row
+    } else {
+        return Ok(());
+    };
+    if !taint.is_unrestricted() {
+        store.set_session_egress_taint(session_id, &taint)?;
+    }
+    Ok(())
+}
+
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation
 /// block so the summary's band membership + parent lineage is queryable
 /// (RFC §5.7 rule 2 + §9.1).

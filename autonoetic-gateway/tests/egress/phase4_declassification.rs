@@ -163,6 +163,7 @@ fn apply_decision_materializes_grant_and_emits_declassified() -> anyhow::Result<
     Ok(())
 }
 
+
 #[test]
 fn delete_session_grants_clears_declassification_rows() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;

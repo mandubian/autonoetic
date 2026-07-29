@@ -80,17 +80,28 @@ fn grant_active(expires_at: Option<&str>, revoked_at: Option<&str>, now: &str) -
     }
     if let Some(exp) = expires_at {
         if !exp.is_empty() {
-            if let (Ok(exp_dt), Ok(now_dt)) = (
-                chrono::DateTime::parse_from_rfc3339(exp),
-                chrono::DateTime::parse_from_rfc3339(now),
-            ) {
-                if exp_dt < now_dt {
-                    return false;
-                }
+            let exp_dt = match chrono::DateTime::parse_from_rfc3339(exp) {
+                Ok(dt) => dt,
+                Err(_) => return false, // malformed expiry ⇒ fail-closed
+            };
+            let now_dt = match chrono::DateTime::parse_from_rfc3339(now) {
+                Ok(dt) => dt,
+                Err(_) => return false,
+            };
+            if exp_dt < now_dt {
+                return false;
             }
         }
     }
     true
+}
+
+/// Whether `query_session_id` belongs to `root_session_id` (exact or `root/child`).
+fn session_under_root_session(query_session_id: &str, root_session_id: &str) -> bool {
+    query_session_id == root_session_id
+        || query_session_id
+            .strip_prefix(root_session_id)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn scope_matches(
@@ -100,7 +111,7 @@ fn scope_matches(
     root_session_id: &str,
 ) -> bool {
     match grant_scope {
-        GrantScope::RootSession => query_session_id.starts_with(root_session_id),
+        GrantScope::RootSession => session_under_root_session(query_session_id, root_session_id),
         GrantScope::Session => grant_session_id == query_session_id,
     }
 }
@@ -250,5 +261,110 @@ impl super::GatewayStore {
     pub fn delete_egress_declassification_grants(&self, root_session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         delete_grants_for_root(&conn, root_session_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autonoetic_types::background::GrantScope;
+    use rusqlite::Connection;
+
+    fn open_test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE egress_declassification_grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_session_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_value TEXT NOT NULL,
+                allowed_sink TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                granted_by TEXT NOT NULL,
+                granted_at TEXT NOT NULL,
+                source_approval_id TEXT,
+                expires_at TEXT,
+                revoked_at TEXT,
+                revoked_reason TEXT,
+                UNIQUE(root_session_id, session_id, agent_id, scope, target_kind, target_value, allowed_sink)
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn malformed_expires_at_is_fail_closed() {
+        let conn = open_test_conn();
+        let target = EgressDeclassificationTarget::SourcePattern("session:root".into());
+        insert_grant(
+            &conn,
+            "root",
+            "root/sess",
+            "agent",
+            &target,
+            Sink::Network,
+            &GrantScope::RootSession,
+            "op",
+            "2026-01-01T00:00:00Z",
+            None,
+            Some("not-rfc3339"),
+        )
+        .unwrap();
+        assert!(
+            !declassification_allows(
+                &conn,
+                &target,
+                Sink::Network,
+                "root/sess",
+                "root",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn root_scope_does_not_match_prefix_collision() {
+        let conn = open_test_conn();
+        let target = EgressDeclassificationTarget::SourcePattern("session:root".into());
+        insert_grant(
+            &conn,
+            "root",
+            "root/sess",
+            "agent",
+            &target,
+            Sink::Network,
+            &GrantScope::RootSession,
+            "op",
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !declassification_allows(
+                &conn,
+                &target,
+                Sink::Network,
+                "root2/sess",
+                "root",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap()
+        );
+        assert!(
+            declassification_allows(
+                &conn,
+                &target,
+                Sink::Network,
+                "root/sess",
+                "root",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap()
+        );
     }
 }

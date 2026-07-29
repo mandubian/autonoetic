@@ -1277,6 +1277,28 @@ impl GateService {
 
         self.store.create_approval(&mut approval_req)?;
 
+        if matches!(
+            action,
+            ScheduledAction::SandboxExec { .. }
+                | ScheduledAction::WebFetch { .. }
+                | ScheduledAction::WebSearch { .. }
+                | ScheduledAction::WebCall { .. }
+        ) {
+            if let Err(e) = crate::runtime::egress_labeler::snapshot_session_egress_taint_for_approval(
+                self.store.as_ref(),
+                sid,
+                req.run_context,
+            ) {
+                tracing::warn!(
+                    target: "egress",
+                    error = %e,
+                    session_id = %sid,
+                    request_id = %request_id,
+                    "failed to snapshot session egress taint at approval creation"
+                );
+            }
+        }
+
         Ok(request_id)
     }
 
