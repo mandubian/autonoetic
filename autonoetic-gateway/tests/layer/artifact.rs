@@ -5,7 +5,6 @@
 //! - Run sandbox.exec with layered artifact → verify layer mounted correctly
 //! - Artifacts without layers still work identically
 
-mod support;
 
 use autonoetic_gateway::artifact_store::ArtifactStore;
 use autonoetic_gateway::layer_store::{LayerLimits, LayerStore};

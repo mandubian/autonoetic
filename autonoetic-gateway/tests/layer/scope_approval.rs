@@ -6,7 +6,6 @@
 //! - sandbox.exec proceeds when the agent has NetworkAccess capability
 //! - A LayerMount approval_ref unblocks execution
 
-mod support;
 
 use autonoetic_gateway::layer_store::{LayerLimits, LayerStore};
 use autonoetic_gateway::policy::PolicyEngine;
@@ -21,7 +20,7 @@ use autonoetic_types::runtime_lock::{
 };
 use std::sync::Arc;
 use tempfile::tempdir;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 /// Build a minimal manifest without NetworkAccess capability.
 fn test_manifest_no_network() -> AgentManifest {

@@ -1,11 +1,10 @@
 //! Integration tests for credential management.
 //!
 //! Run with:
-//!   cargo test -p autonoetic-gateway --test credential_integration -- --nocapture
+//!   cargo test -p autonoetic-gateway --test credential -- --nocapture
 //!
 //! Vault persistence requires `AUTONOETIC_VAULT_KEY` or `AUTONOETIC_VAULT_KEY_PATH` (see `vault.rs`).
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -17,7 +16,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
     AgentManifest {

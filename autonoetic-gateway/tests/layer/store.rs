@@ -9,7 +9,6 @@
 //! - Size limit exceeded returns error
 //! - Digest verification on extract (tampered archive fails)
 
-mod support;
 
 use autonoetic_gateway::layer_store::{LayerLimits, LayerStore};
 use std::fs::{self, File};
