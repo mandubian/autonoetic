@@ -39,6 +39,9 @@ pub struct CompressionResult {
     pub metadata: CompressionMetadata,
     /// Whether compression was actually applied.
     pub compressed: bool,
+    /// Msg-ids of synthesized `[COMPRESSED CONTEXT]` / `[TRUNCATED CONTEXT]`
+    /// blocks whose labels were written into the session sidecar (RFC §5.7).
+    pub synthesized_message_ids: Vec<String>,
 }
 
 /// Resolve the LLM config for compression from gateway config and optional agent override.
@@ -238,7 +241,81 @@ fn build_summarization_prompt(compressible: &[Message], max_summary_tokens: usiz
     )
 }
 
+fn noop_result(
+    history: Vec<Message>,
+    existing_metadata: Option<&CompressionMetadata>,
+) -> CompressionResult {
+    CompressionResult {
+        history: history.clone(),
+        original_history: history,
+        metadata: existing_metadata.cloned().unwrap_or_default(),
+        compressed: false,
+        synthesized_message_ids: vec![],
+    }
+}
+
+/// Deterministic token-budget truncation for a band that cannot be summarized
+/// on an eligible preset (RFC §5.7 rule 2 fallback). Keeps a short head/tail
+/// of the band's text so local turns retain some context without shipping
+/// content to a remote compression LLM.
+pub(crate) fn truncate_band_text(messages: &[Message], max_summary_tokens: usize) -> String {
+    let budget_chars = max_summary_tokens.saturating_mul(4).max(64);
+    let mut parts: Vec<String> = Vec::new();
+    for msg in messages {
+        if msg.content.starts_with("[COMPRESSED CONTEXT")
+            || msg.content.starts_with("[TRUNCATED CONTEXT")
+        {
+            continue;
+        }
+        let role = match msg.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::Tool => "Tool Result",
+            Role::System => continue,
+        };
+        parts.push(format!("[{role}]: {}", msg.content));
+    }
+    let joined = parts.join("\n");
+    if joined.len() <= budget_chars {
+        return joined;
+    }
+    let head = budget_chars / 2;
+    let tail = budget_chars.saturating_sub(head);
+    format!(
+        "{}\n…[truncated {} chars]…\n{}",
+        &joined[..head],
+        joined.len().saturating_sub(budget_chars),
+        &joined[joined.len().saturating_sub(tail)..]
+    )
+}
+
+/// Mint a labeled synthesized context block (compressed or truncated) and
+/// record its label in the session sidecar (RFC §5.7 rule 2 + §3.4).
+pub(crate) fn mint_band_block(
+    marker: &str,
+    turn_number: u64,
+    body: &str,
+    band: &crate::runtime::egress_labeler::LabelBand,
+    egress_labels: &mut std::collections::HashMap<
+        String,
+        autonoetic_types::egress::EgressLabel,
+    >,
+) -> (Message, String) {
+    let (label, _provenance) = crate::runtime::egress_labeler::synthesized_band_label(band);
+    let id = autonoetic_types::id_format::short_random_id("msg_");
+    let mut msg = Message::user(format!("[{marker} - Turn {turn_number}]\n{body}"));
+    msg.id = Some(id.clone());
+    egress_labels.insert(id.clone(), label);
+    (msg, id)
+}
+
 /// Compress the conversation history by summarizing old turns.
+///
+/// When `egress_labels` is non-empty, compressible history is partitioned by
+/// label band (RFC §5.7 rule 2): each band is summarized on an eligible
+/// preset or token-budget-truncated in place — never merged into one mixed
+/// summary. Synthesized blocks receive new `msg_<id>`s whose labels are
+/// written into `egress_labels`.
 ///
 /// Returns the original history unchanged if compression is not needed
 /// (threshold not exceeded, not enough messages to compress, etc.).
@@ -252,26 +329,19 @@ pub async fn compress_context(
     session_id: &str,
     turn_number: u64,
     existing_metadata: Option<&CompressionMetadata>,
-    egress_labels: &std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+    egress_labels: &mut std::collections::HashMap<
+        String,
+        autonoetic_types::egress::EgressLabel,
+    >,
 ) -> anyhow::Result<CompressionResult> {
     if !gateway_cfg.enabled {
-        return Ok(CompressionResult {
-            history: history.clone(),
-            original_history: history,
-            metadata: existing_metadata.cloned().unwrap_or_default(),
-            compressed: false,
-        });
+        return Ok(noop_result(history, existing_metadata));
     }
 
     if let Some(meta) = existing_metadata {
         let min_gap = gateway_cfg.min_turns_between_compression;
         if turn_number.saturating_sub(meta.last_compression_turn) < min_gap {
-            return Ok(CompressionResult {
-                history: history.clone(),
-                original_history: history,
-                metadata: existing_metadata.cloned().unwrap_or_default(),
-                compressed: false,
-            });
+            return Ok(noop_result(history, existing_metadata));
         }
     }
 
@@ -288,23 +358,13 @@ pub async fn compress_context(
     let threshold_tokens = (effective_limit as f64 * threshold_pct / 100.0) as usize;
 
     if conv_tokens < threshold_tokens {
-        return Ok(CompressionResult {
-            history: history.clone(),
-            original_history: history,
-            metadata: existing_metadata.cloned().unwrap_or_default(),
-            compressed: false,
-        });
+        return Ok(noop_result(history, existing_metadata));
     }
 
     let (compressible, kept) = split_compressible_messages(&history, recent_turns_to_keep);
 
     if compressible.is_empty() {
-        return Ok(CompressionResult {
-            history: history.clone(),
-            original_history: history,
-            metadata: existing_metadata.cloned().unwrap_or_default(),
-            compressed: false,
-        });
+        return Ok(noop_result(history, existing_metadata));
     }
 
     let llm_config = match resolve_compression_llm_config(gateway_cfg, agent_cfg, presets) {
@@ -314,136 +374,195 @@ pub async fn compress_context(
                 target: "autonoetic::compression",
                 "Context compression enabled but no compression LLM configured"
             );
-            return Ok(CompressionResult {
-                history: history.clone(),
-                original_history: history,
-                metadata: existing_metadata.cloned().unwrap_or_default(),
-                compressed: false,
-            });
+            return Ok(noop_result(history, existing_metadata));
         }
     };
 
-    // Egress compression-eligibility gate (RFC §5.7 rule 1): refuse to
-    // summarize a tainted band on a preset that isn't cleared for it. The
-    // compressible band is already computed above; check it against the
-    // resolved preset's class before building the driver. On refusal, return
-    // the no-op result (the caller falls back to token-budget truncation).
-    if !egress_labels.is_empty() {
-        let preset_class = llm_config
-            .egress_class
-            .unwrap_or(autonoetic_types::egress::EgressClass::Remote);
-        let elig = crate::runtime::egress_labeler::compression_preset_eligible(
-            &compressible,
-            egress_labels,
-            preset_class,
-        );
-        if !elig.is_eligible() {
-            let crate::runtime::egress_labeler::CompressionEligibility::Ineligible {
-                reason, ..
-            } = elig
-            else {
-                unreachable!("checked is_eligible above")
+    let preset_class = llm_config
+        .egress_class
+        .unwrap_or(autonoetic_types::egress::EgressClass::Remote);
+
+    // Per-label-band compression (RFC §5.7 rule 2). Empty sidecar → single
+    // unlabeled band (legacy path — unconfigured deployments pay nothing).
+    // Non-empty → partition so a mixed session never collapses into one
+    // over-tainted summary.
+    let label_plane_active = !egress_labels.is_empty();
+    let bands = if label_plane_active {
+        crate::runtime::egress_labeler::partition_by_label(compressible, egress_labels)
+    } else {
+        vec![crate::runtime::egress_labeler::LabelBand {
+            label: autonoetic_types::egress::EgressLabel::unrestricted(),
+            messages: compressible
+                .iter()
+                .filter(|m| !matches!(m.role, Role::System))
+                .cloned()
+                .collect(),
+            source_ids: vec![],
+        }]
+    };
+
+    if bands.is_empty() {
+        return Ok(noop_result(history, existing_metadata));
+    }
+
+    // Build the driver lazily — only needed for eligible bands. Driver build
+    // failure forces truncation for every eligible band (no remote leak).
+    let driver = match build_driver(llm_config.clone(), http_client.clone()) {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::warn!(
+                target: "autonoetic::compression",
+                error = %e,
+                "Failed to build compression LLM driver — eligible bands will truncate"
+            );
+            None
+        }
+    };
+
+    let mut band_blocks: Vec<Message> = Vec::new();
+    let mut synthesized_message_ids: Vec<String> = Vec::new();
+    let mut messages_summarized: u64 = 0;
+    // Track whether any band produced a usable block. For the unlabeled
+    // legacy path, an LLM failure still returns uncompressed (prior
+    // behavior); for the label plane, ineligible/failed bands truncate.
+    let mut any_block = false;
+
+    for band in &bands {
+        if band.messages.is_empty() {
+            continue;
+        }
+        messages_summarized += band.messages.len() as u64;
+
+        let elig = if label_plane_active {
+            crate::runtime::egress_labeler::compression_preset_eligible(
+                &band.messages,
+                egress_labels,
+                preset_class,
+            )
+        } else {
+            crate::runtime::egress_labeler::CompressionEligibility::Eligible
+        };
+
+        let body_result: Option<(String, String)> = if elig.is_eligible() {
+            if let Some(ref driver) = driver {
+                let prompt = build_summarization_prompt(&band.messages, max_summary_tokens);
+                let req = CompletionRequest {
+                    model: llm_config.model.clone(),
+                    messages: vec![
+                        Message::system("You are a concise summarizer. Output only the summary."),
+                        Message::user(&prompt),
+                    ],
+                    tools: vec![],
+                    max_tokens: Some(max_summary_tokens as u32),
+                    temperature: Some(0.1),
+                    metadata: Some(HashMap::from([(
+                        "compression".to_string(),
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "turn": turn_number,
+                            "original_tokens": conv_tokens,
+                            "band_label": autonoetic_types::egress::label_display_name(&band.label),
+                        }),
+                    )])),
+                    thinking: None,
+                    prompt_cache_key: None,
+                    system_cache_prefix_bytes: None,
+                };
+                match driver.complete(&req).await {
+                    Ok(resp) if !resp.text.trim().is_empty() => {
+                        Some(("COMPRESSED CONTEXT".into(), resp.text))
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            target: "autonoetic::compression",
+                            "Compression LLM returned empty summary for band"
+                        );
+                        if label_plane_active {
+                            Some((
+                                "TRUNCATED CONTEXT".into(),
+                                truncate_band_text(&band.messages, max_summary_tokens),
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "autonoetic::compression",
+                            error = %e,
+                            "Compression LLM call failed for band"
+                        );
+                        if label_plane_active {
+                            Some((
+                                "TRUNCATED CONTEXT".into(),
+                                truncate_band_text(&band.messages, max_summary_tokens),
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                }
+            } else if label_plane_active {
+                Some((
+                    "TRUNCATED CONTEXT".into(),
+                    truncate_band_text(&band.messages, max_summary_tokens),
+                ))
+            } else {
+                None
+            }
+        } else {
+            let reason = match &elig {
+                crate::runtime::egress_labeler::CompressionEligibility::Ineligible {
+                    reason,
+                    ..
+                } => reason.clone(),
+                crate::runtime::egress_labeler::CompressionEligibility::Eligible => {
+                    unreachable!("checked is_eligible above")
+                }
             };
             tracing::warn!(
                 target: "autonoetic::compression::egress",
                 session_id = %session_id,
                 turn = turn_number,
-                "compression eligibility gate refused — returning uncompressed (RFC §5.7)"
+                band = %autonoetic_types::egress::label_display_name(&band.label),
+                "compression eligibility gate refused band — truncating (RFC §5.7 rule 2)"
             );
             tracing::debug!(target: "autonoetic::compression::egress", reason = %reason);
-            return Ok(CompressionResult {
-                history: history.clone(),
-                original_history: history,
-                metadata: existing_metadata.cloned().unwrap_or_default(),
-                compressed: false,
-            });
+            Some((
+                "TRUNCATED CONTEXT".into(),
+                truncate_band_text(&band.messages, max_summary_tokens),
+            ))
+        };
+
+        let Some((marker, body)) = body_result else {
+            // Legacy unlabeled path: LLM failure → abort entire compression.
+            return Ok(noop_result(history, existing_metadata));
+        };
+
+        if label_plane_active {
+            let (block, id) = mint_band_block(&marker, turn_number, &body, band, egress_labels);
+            synthesized_message_ids.push(id);
+            band_blocks.push(block);
+        } else {
+            band_blocks.push(Message::user(format!(
+                "[{marker} - Turn {turn_number}]\n{body}"
+            )));
         }
+        any_block = true;
     }
 
-    let driver = match build_driver(llm_config.clone(), http_client.clone()) {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(
-                target: "autonoetic::compression",
-                error = %e,
-                "Failed to build compression LLM driver"
-            );
-            return Ok(CompressionResult {
-                history: history.clone(),
-                original_history: history,
-                metadata: existing_metadata.cloned().unwrap_or_default(),
-                compressed: false,
-            });
-        }
-    };
-
-    let prompt = build_summarization_prompt(compressible, max_summary_tokens);
-    let req = CompletionRequest {
-        model: llm_config.model.clone(),
-        messages: vec![
-            Message::system("You are a concise summarizer. Output only the summary."),
-            Message::user(&prompt),
-        ],
-        tools: vec![],
-        max_tokens: Some(max_summary_tokens as u32),
-        temperature: Some(0.1),
-        metadata: Some(HashMap::from([(
-            "compression".to_string(),
-            serde_json::json!({
-                "session_id": session_id,
-                "turn": turn_number,
-                "original_tokens": conv_tokens,
-            }),
-        )])),
-        thinking: None,
-        prompt_cache_key: None,
-        system_cache_prefix_bytes: None,
-    };
-
-    let summary_text = match driver.complete(&req).await {
-        Ok(resp) => resp.text,
-        Err(e) => {
-            tracing::warn!(
-                target: "autonoetic::compression",
-                error = %e,
-                "Compression LLM call failed, skipping compression"
-            );
-            return Ok(CompressionResult {
-                history: history.clone(),
-                original_history: history,
-                metadata: existing_metadata.cloned().unwrap_or_default(),
-                compressed: false,
-            });
-        }
-    };
-
-    if summary_text.trim().is_empty() {
-        tracing::warn!(
-            target: "autonoetic::compression",
-            "Compression LLM returned empty summary, skipping compression"
-        );
-        return Ok(CompressionResult {
-            history: history.clone(),
-            original_history: history,
-            metadata: existing_metadata.cloned().unwrap_or_default(),
-            compressed: false,
-        });
+    if !any_block {
+        return Ok(noop_result(history, existing_metadata));
     }
 
     let mut new_history: Vec<Message> = Vec::new();
-
     let system_messages: Vec<_> = history
         .iter()
         .filter(|m| matches!(m.role, Role::System))
         .cloned()
         .collect();
     new_history.extend(system_messages);
-
-    new_history.push(Message::user(&format!(
-        "[COMPRESSED CONTEXT - Turn {}]\n{}",
-        turn_number, summary_text
-    )));
-
+    new_history.extend(band_blocks);
     new_history.extend(
         kept.iter()
             .filter(|m| !matches!(m.role, Role::System))
@@ -452,7 +571,7 @@ pub async fn compress_context(
 
     let metadata = CompressionMetadata {
         last_compression_turn: turn_number,
-        messages_summarized: compressible.len() as u64,
+        messages_summarized,
         compressed_context_handle: None,
         compression_count: existing_metadata
             .map(|m| m.compression_count + 1)
@@ -464,6 +583,7 @@ pub async fn compress_context(
         original_history: history,
         metadata,
         compressed: true,
+        synthesized_message_ids,
     })
 }
 
@@ -610,6 +730,7 @@ mod tests {
             original_history: history.clone(),
             metadata: CompressionMetadata::default(),
             compressed: false,
+            synthesized_message_ids: vec![],
         };
         assert!(!result.compressed);
     }
@@ -813,6 +934,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let presets = std::collections::HashMap::new();
         let client = reqwest::Client::new();
+        let mut empty_labels = std::collections::HashMap::new();
         let result = rt
             .block_on(compress_context(
                 history.clone(),
@@ -824,7 +946,7 @@ mod tests {
                 "sess",
                 12,
                 Some(&metadata),
-                &std::collections::HashMap::new(),
+                &mut empty_labels,
             ))
             .unwrap();
         assert!(!result.compressed);
@@ -840,7 +962,7 @@ mod tests {
                 "sess",
                 16,
                 Some(&metadata),
-                &std::collections::HashMap::new(),
+                &mut empty_labels,
             ))
             .unwrap();
         assert!(!result.compressed);
@@ -856,7 +978,7 @@ mod tests {
                 "sess",
                 20,
                 Some(&metadata),
-                &std::collections::HashMap::new(),
+                &mut empty_labels,
             ))
             .unwrap();
         assert!(!result.compressed);

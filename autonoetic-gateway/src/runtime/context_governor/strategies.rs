@@ -29,9 +29,10 @@ pub struct GovernorContext {
     pub plan_anchor: Option<PlanFrameSummary>,
     /// Egress label map for the session (RFC §5.7), keyed by the message's
     /// egress key (`tool_call_id` for tool results, else `msg_<id>`).
-    /// Used by the capsule strategy's compression-eligibility gate: a
-    /// `local_only`-tainted compressible band must not be summarized on a
-    /// remote compression preset (a leak even with per-envelope filtering).
+    /// Threaded into the governor so CapsuleStrategy can partition by label
+    /// band, refuse remote summarization of tainted bands, and mint labeled
+    /// `[TRUNCATED CONTEXT]` blocks. Lifecycle copies this map back onto the
+    /// executor after `govern()` so synthesized labels survive the round-trip.
     /// Empty for unconfigured deployments — the gate is then a no-op.
     pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
 }

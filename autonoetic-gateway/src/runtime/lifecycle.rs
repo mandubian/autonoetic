@@ -2542,6 +2542,8 @@ impl AgentExecutor {
                             presets: self.config.as_ref().map(|c| c.llm_presets.clone())
                                 .unwrap_or_default(),
                             gateway_dir: self.gateway_dir.clone(),
+                            gateway_store: self.gateway_store.clone(),
+                            agent_id: Some(self.manifest.agent.id.clone()),
                         })
                     } else {
                         ContextGovernor::new(&GovernorConfig {
@@ -2549,6 +2551,8 @@ impl AgentExecutor {
                             presets: self.config.as_ref().map(|c| c.llm_presets.clone())
                                 .unwrap_or_default(),
                             gateway_dir: self.gateway_dir.clone(),
+                            gateway_store: self.gateway_store.clone(),
+                            agent_id: Some(self.manifest.agent.id.clone()),
                         })
                     };
                     match governor.govern(&mut ctx).await {
@@ -2652,6 +2656,10 @@ impl AgentExecutor {
                     }
                     *history = ctx.history;
                     tools = ctx.tools;
+                    // Round-trip synthesized compression-block labels from the
+                    // governor (RFC §5.7 rule 2) so the next completion's
+                    // chokepoint / routing see them.
+                    self.egress_labels = ctx.egress_labels;
                 } else {
                     tracing::debug!(
                         target: "autonoetic::context_governor",

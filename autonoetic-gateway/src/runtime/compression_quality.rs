@@ -179,6 +179,9 @@ pub async fn run_quality_validation(
 
     let presets = HashMap::new();
     let http_client = reqwest::Client::new();
+    // Offline quality harness — no egress labels in scope; the eligibility
+    // gate is a no-op (empty map → always eligible).
+    let mut empty_labels = std::collections::HashMap::new();
     let result = compress_context(
         history.clone(),
         Some(128_000),
@@ -189,9 +192,7 @@ pub async fn run_quality_validation(
         &session.id,
         session.turns.len() as u64,
         None,
-        // Offline quality harness — no egress labels in scope; the eligibility
-        // gate is a no-op (empty map → always eligible).
-        &std::collections::HashMap::new(),
+        &mut empty_labels,
     )
     .await;
 
