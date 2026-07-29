@@ -944,6 +944,154 @@ fn sink_str(s: Sink) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Per-label-band compression (RFC §5.7 rule 2)
+// ---------------------------------------------------------------------------
+
+/// One label band of compressible history (RFC §5.7 rule 2).
+///
+/// Clean and tainted messages compress in **separate** bands so a mixed
+/// session never collapses into a single over-tainted summary. `label` is the
+/// band's exact label (also the intersection of its members when partitioned
+/// by equality); `source_ids` are the egress keys whose provenance the
+/// synthesized summary records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelBand {
+    pub label: EgressLabel,
+    pub messages: Vec<crate::llm::Message>,
+    /// Egress sidecar keys (`tool_call_id` / `msg_<id>`) of labeled members.
+    pub source_ids: Vec<String>,
+}
+
+/// Partition compressible messages into per-label bands (RFC §5.7 rule 2).
+///
+/// Each non-system message joins the band matching its sidecar label
+/// ([`message_egress_key`]); unlabeled / keyless messages join the
+/// `unrestricted` band. System messages are skipped — callers re-attach them
+/// outside the band loop. Bands are ordered unrestricted-first, then by
+/// [`label_display_name`] for stable summary placement.
+pub fn partition_by_label(
+    band: &[crate::llm::Message],
+    labels: &std::collections::HashMap<String, EgressLabel>,
+) -> Vec<LabelBand> {
+    let mut bands: Vec<LabelBand> = Vec::new();
+    for msg in band {
+        if msg.role == crate::llm::Role::System {
+            continue;
+        }
+        let (source_id, label) = match message_egress_key(msg) {
+            Some(key) => {
+                let label = labels
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(EgressLabel::unrestricted);
+                (Some(key.to_string()), label)
+            }
+            None => (None, EgressLabel::unrestricted()),
+        };
+        if let Some(existing) = bands.iter_mut().find(|b| b.label == label) {
+            existing.messages.push(msg.clone());
+            if let Some(id) = source_id {
+                existing.source_ids.push(id);
+            }
+        } else {
+            bands.push(LabelBand {
+                label,
+                messages: vec![msg.clone()],
+                source_ids: source_id.into_iter().collect(),
+            });
+        }
+    }
+    bands.sort_by(|a, b| {
+        match (a.label.is_unrestricted(), b.label.is_unrestricted()) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => label_display_name(&a.label).cmp(&label_display_name(&b.label)),
+        }
+    });
+    bands
+}
+
+/// Build the egress label + provenance for a synthesized compression /
+/// truncation block (RFC §5.7 rule 2 + §9.1). Label is the band's
+/// intersection (already computed by [`partition_by_label`]); provenance
+/// records the source envelope ids so the summary's lineage is queryable.
+pub fn synthesized_band_label(band: &LabelBand) -> (EgressLabel, Provenance) {
+    let provenance = Provenance {
+        tool: Some("context.compress".to_string()),
+        args_digest: None,
+        matched_rules: vec![],
+        parent_envelope_ids: band.source_ids.clone(),
+    };
+    (band.label.clone(), provenance)
+}
+
+/// Emit `egress.boundary_refused` (RFC §9.1) when a compression band is
+/// ineligible for the resolved preset — the durable counterpart of the
+/// tracing log so "why wasn't this band summarized remotely?" is answerable
+/// from the causal chain. Content-free: band label, preset class, source ids.
+pub fn emit_boundary_refused(
+    store: &Arc<GatewayStore>,
+    session_id: &str,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    band_label: &EgressLabel,
+    preset_class: EgressClass,
+    source_ids: &[String],
+    reason: &str,
+) {
+    let payload = serde_json::json!({
+        "band_label": serde_json::to_value(band_label).unwrap_or(serde_json::Value::Null),
+        "band_label_name": label_display_name(band_label),
+        "preset_class": format!("{preset_class:?}").to_ascii_lowercase(),
+        "source_ids": source_ids,
+        "reason": reason,
+        "fallback": "token_budget_truncation",
+    });
+    emit_egress_event(
+        store,
+        "egress.boundary_refused",
+        &label_display_name(band_label),
+        Some(payload),
+        session_id,
+        agent_id,
+        turn_id,
+        "egress_boundary_refused",
+    );
+}
+
+/// Emit `egress.envelope_labeled` for a synthesized compression/truncation
+/// block so the summary's band membership + parent lineage is queryable
+/// (RFC §5.7 rule 2 + §9.1).
+pub fn emit_synthesized_envelope_labeled(
+    store: &Arc<GatewayStore>,
+    session_id: &str,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    envelope_id: &str,
+    label: &EgressLabel,
+    provenance: &Provenance,
+) {
+    let payload = serde_json::json!({
+        "envelope_id": envelope_id,
+        "label": serde_json::to_value(label).unwrap_or(serde_json::Value::Null),
+        "label_name": label_display_name(label),
+        "provenance": serde_json::to_value(provenance).unwrap_or(serde_json::Value::Null),
+        "synthesized": true,
+        "kind": "compressed_context",
+    });
+    emit_egress_event(
+        store,
+        "egress.envelope_labeled",
+        envelope_id,
+        Some(payload),
+        session_id,
+        agent_id,
+        turn_id,
+        "egress_envelope_labeled",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Taint-following routing (RFC §5.3)
 // ---------------------------------------------------------------------------
 //
@@ -1558,6 +1706,46 @@ mod tests {
         let band = vec![tool_msg("tc_public", "ok"), tool_msg("tc_secret", "secret")];
         let elig = compression_preset_eligible(&band, &labels, EgressClass::Remote);
         assert!(!elig.is_eligible());
+    }
+
+    #[test]
+    fn partition_by_label_splits_clean_and_tainted() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("tc_public".to_string(), EgressLabel::unrestricted());
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let band = vec![
+            user_msg("clean work"),
+            tool_msg("tc_public", "ok"),
+            tool_msg("tc_secret", "CANARY"),
+        ];
+        let bands = partition_by_label(&band, &labels);
+        assert_eq!(bands.len(), 2, "mixed history must yield two bands");
+        assert!(bands[0].label.is_unrestricted(), "unrestricted band first");
+        assert_eq!(bands[0].messages.len(), 2); // user + public tool
+        assert_eq!(bands[1].label, EgressLabel::local_only());
+        assert_eq!(bands[1].messages.len(), 1);
+        assert_eq!(bands[1].source_ids, vec!["tc_secret".to_string()]);
+        // Per-band eligibility: clean may go remote; tainted must not.
+        assert!(compression_preset_eligible(&bands[0].messages, &labels, EgressClass::Remote)
+            .is_eligible());
+        assert!(!compression_preset_eligible(&bands[1].messages, &labels, EgressClass::Remote)
+            .is_eligible());
+    }
+
+    #[test]
+    fn synthesized_band_label_records_parent_ids() {
+        let band = LabelBand {
+            label: EgressLabel::local_only(),
+            messages: vec![tool_msg("tc_secret", "x")],
+            source_ids: vec!["tc_secret".into(), "msg_summary".into()],
+        };
+        let (label, prov) = synthesized_band_label(&band);
+        assert_eq!(label, EgressLabel::local_only());
+        assert_eq!(prov.tool.as_deref(), Some("context.compress"));
+        assert_eq!(
+            prov.parent_envelope_ids,
+            vec!["tc_secret".to_string(), "msg_summary".to_string()]
+        );
     }
 
     #[test]

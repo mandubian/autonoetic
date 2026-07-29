@@ -26,6 +26,11 @@ pub struct GovernorConfig {
     pub http_client: reqwest::Client,
     pub presets: HashMap<String, LlmPreset>,
     pub gateway_dir: Option<PathBuf>,
+    /// Optional store for durable egress events (`egress.boundary_refused`,
+    /// synthesized `egress.envelope_labeled`) from the capsule strategy.
+    pub gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    /// Agent id attributed on those egress events (`None` → `"unknown"`).
+    pub agent_id: Option<String>,
 }
 
 /// The context governor — runs a pluggable strategy pipeline.
@@ -46,6 +51,12 @@ impl ContextGovernor {
         );
         if let Some(ref dir) = config.gateway_dir {
             capsule = capsule.with_gateway_dir(dir.clone());
+        }
+        if let Some(ref store) = config.gateway_store {
+            capsule = capsule.with_gateway_store(store.clone());
+        }
+        if let Some(ref agent_id) = config.agent_id {
+            capsule = capsule.with_agent_id(agent_id.clone());
         }
         let strategies: Vec<Box<dyn ReductionStrategy>> = vec![
             Box::new(trimming::TrimHistoryStrategy),

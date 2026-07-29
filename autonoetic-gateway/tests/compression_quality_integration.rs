@@ -127,6 +127,7 @@ async fn test_compression_structural_validation_with_real_llm() {
     };
 
     let presets = HashMap::new();
+    let mut empty_labels = std::collections::HashMap::new();
     let result = compress_context(
         history.clone(),
         Some(128_000),
@@ -137,7 +138,7 @@ async fn test_compression_structural_validation_with_real_llm() {
         &session.id,
         session.turns.len() as u64,
         None,
-        &std::collections::HashMap::new(),
+        &mut empty_labels,
     )
     .await;
 
@@ -207,6 +208,7 @@ async fn test_compression_summary_quality_with_real_llm() {
     };
 
     let presets = HashMap::new();
+    let mut empty_labels = std::collections::HashMap::new();
     let result = compress_context(
         history.clone(),
         Some(128_000),
@@ -217,7 +219,7 @@ async fn test_compression_summary_quality_with_real_llm() {
         &session.id,
         session.turns.len() as u64,
         None,
-        &std::collections::HashMap::new(),
+        &mut empty_labels,
     )
     .await;
 
