@@ -64,6 +64,27 @@ pub(super) fn fetch_undelivered_messages(
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
         let egress_label_json: Option<String> = row.get(6)?;
+        // Fail closed (RFC §2.2): a *present but malformed* taint must not
+        // silently degrade to `None` (unrestricted) — that would under-label a
+        // cross-agent payload and let tainted content be ingested as safe.
+        // Corruption / partial write / manual edit ⇒ conservatively `local_only`
+        // and warn, rather than default to the unsafe label.
+        let egress_label = match egress_label_json {
+            None => None,
+            Some(j) => match serde_json::from_str(&j) {
+                Ok(label) => Some(label),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "egress",
+                        error = %e,
+                        message_id = %row.get::<_, String>(0).unwrap_or_default(),
+                        "agent_message egress_label_json is malformed — failing \
+                         closed to local_only (RFC §5.5)"
+                    );
+                    Some(autonoetic_types::egress::EgressLabel::local_only())
+                }
+            },
+        };
         Ok(AgentMessageRecord {
             message_id: row.get(0)?,
             sender_session_id: row.get(1)?,
@@ -71,8 +92,7 @@ pub(super) fn fetch_undelivered_messages(
             target_pattern: row.get(3)?,
             message: row.get(4)?,
             created_at: row.get(5)?,
-            egress_label: egress_label_json
-                .and_then(|j| serde_json::from_str(&j).ok()),
+            egress_label,
         })
     })?;
 
