@@ -486,6 +486,51 @@ impl NamedEgressLabel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Declassification grants (RFC §8 / #909)
+// ---------------------------------------------------------------------------
+
+/// Content target for an operator-approved egress widening grant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum EgressDeclassificationTarget {
+    EnvelopeId(String),
+    SourcePattern(String),
+    MemoryId(String),
+}
+
+impl EgressDeclassificationTarget {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::EnvelopeId(_) => "envelope_id",
+            Self::SourcePattern(_) => "source_pattern",
+            Self::MemoryId(_) => "memory_id",
+        }
+    }
+
+    pub fn value(&self) -> &str {
+        match self {
+            Self::EnvelopeId(v) | Self::SourcePattern(v) | Self::MemoryId(v) => v.as_str(),
+        }
+    }
+}
+
+/// Materialized operator grant widening a specific content target to a sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressDeclassificationGrant {
+    pub id: i64,
+    pub root_session_id: String,
+    pub session_id: String,
+    pub agent_id: String,
+    pub target: EgressDeclassificationTarget,
+    pub allowed_sink: Sink,
+    pub scope: crate::background::GrantScope,
+    pub granted_by: String,
+    pub granted_at: String,
+    pub source_approval_id: Option<String>,
+    pub expires_at: Option<String>,
+}
+
 /// Session-scoped egress policy (RFC §5.4) — the operator's per-root-session
 /// additions to the operator-global [`EgressConfig`].
 ///

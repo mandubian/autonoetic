@@ -1094,6 +1094,9 @@ pub fn emit_surface_boundary_refused(
 ///
 /// Prefers the in-memory taint on [`NativeToolRunContext`]; falls back to the
 /// durable `session_egress_taint` row. Errors if the store read fails.
+///
+/// Prefer [`require_boundary_session_taint`] at network/federation surfaces —
+/// this helper's `Ok(None)` is ambiguous (no session vs no store vs no row).
 pub fn resolve_session_egress_taint(
     run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     store: Option<&GatewayStore>,
@@ -1109,6 +1112,86 @@ pub fn resolve_session_egress_taint(
         return Ok(None);
     };
     store.get_session_egress_taint(sid).map_err(Into::into)
+}
+
+/// Fail-closed taint for sandbox / web / hooks / MCP / OFP boundaries.
+///
+/// **Unknown ⇒ refuse:** missing `session_id`, missing store, or store read
+/// failure are errors. A successful store miss (no taint row) is
+/// [`EgressLabel::unrestricted`] — the Phase 3 default — never silent
+/// fail-open when we couldn't check.
+pub fn require_boundary_session_taint(
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    store: Option<&GatewayStore>,
+    session_id: Option<&str>,
+) -> anyhow::Result<EgressLabel> {
+    if let Some(taint) = run_context.and_then(|c| c.egress_taint.clone()) {
+        return Ok(taint);
+    }
+    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
+        anyhow::bail!("egress_boundary_unknown_taint: missing session_id");
+    };
+    let Some(store) = store else {
+        anyhow::bail!("egress_boundary_unknown_taint: GatewayStore required to confirm session taint");
+    };
+    match store.get_session_egress_taint(sid)? {
+        Some(taint) => Ok(taint),
+        None => Ok(EgressLabel::unrestricted()),
+    }
+}
+
+/// Session-scoped declassification target for widening to [`Sink::Network`].
+///
+/// Used when operator approval enables network egress for a tainted session
+/// (sandbox `share_net`, web tools, hooks). Pattern is bound (`session:<root>`),
+/// never a bare `*`.
+pub fn session_network_declass_target(
+    root_session_id: &str,
+) -> autonoetic_types::egress::EgressDeclassificationTarget {
+    autonoetic_types::egress::EgressDeclassificationTarget::SourcePattern(format!(
+        "session:{root_session_id}"
+    ))
+}
+
+/// Whether an active (non-revoked, non-expired) declassification grant allows
+/// `Sink::Network` for this session. Lookup is always at use time — no cache.
+pub fn session_network_declassified(
+    store: &GatewayStore,
+    session_id: &str,
+    root_session_id: &str,
+) -> bool {
+    let target = session_network_declass_target(root_session_id);
+    store
+        .egress_declassification_allows(
+            &target,
+            Sink::Network,
+            session_id,
+            root_session_id,
+        )
+        .unwrap_or(false)
+}
+
+/// Persist restrictive in-memory session taint when filing a network approval
+/// so `apply_decision` can materialize declassification before session finalize.
+pub fn snapshot_session_egress_taint_for_approval(
+    store: &GatewayStore,
+    session_id: &str,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+) -> anyhow::Result<()> {
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    let taint = if let Some(t) = run_context.and_then(|c| c.egress_taint.clone()) {
+        t
+    } else if let Some(row) = store.get_session_egress_taint(session_id)? {
+        row
+    } else {
+        return Ok(());
+    };
+    if !taint.is_unrestricted() {
+        store.set_session_egress_taint(session_id, &taint)?;
+    }
+    Ok(())
 }
 
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation
@@ -1329,6 +1412,51 @@ pub fn emit_relabel(
         None,
         "operator or sweep reclassified stored content egress label",
     );
+}
+
+/// Emit `egress.declassified` when an operator grant widens a content target
+/// to a sink (RFC §8 / #909). Content-free metadata only.
+pub fn emit_declassified(
+    store: &GatewayStore,
+    session_id: &str,
+    agent_id: &str,
+    target: &autonoetic_types::egress::EgressDeclassificationTarget,
+    allowed_sink: autonoetic_types::egress::Sink,
+    scope: autonoetic_types::background::GrantScope,
+    source_approval_id: Option<&str>,
+    reason: &str,
+) {
+    let payload = serde_json::json!({
+        "target": target,
+        "allowed_sink": serde_json::to_value(allowed_sink).unwrap_or(serde_json::Value::Null),
+        "scope": scope.as_str(),
+        "source_approval_id": source_approval_id,
+        "reason": reason,
+    });
+    let event = autonoetic_types::causal_chain::CausalEventRecord {
+        event_id: format!("egress-declassified-{}", uuid::Uuid::new_v4()),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        event_seq: 0,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        category: "egress".to_string(),
+        action: "egress.declassified".to_string(),
+        status: "active".to_string(),
+        enforced_rules: default_enforced_rules(),
+        target: Some(target.value().to_string()),
+        payload: Some(payload.to_string()),
+        payload_ref: None,
+        evidence_ref: None,
+        reason: Some("operator-approved egress declassification grant materialized".to_string()),
+    };
+    if let Err(e) = store.create_causal_event(&event) {
+        tracing::warn!(
+            target: "egress_labeler",
+            error = %e,
+            "failed to emit egress.declassified causal event"
+        );
+    }
 }
 
 /// Emit `egress.provider_selected` (RFC §9.1) — the per-completion routing

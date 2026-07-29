@@ -245,13 +245,27 @@ pub fn persist_decision_journal_entries(
             })
             .unwrap_or_else(autonoetic_types::egress::EgressLabel::unrestricted);
         if !evidence_label.allows(autonoetic_types::egress::Sink::RemoteModel) {
-            return Err(anyhow::anyhow!(
-                "promote_to_skill refused: evidence '{}' has egress label that \
-                 excludes RemoteModel ({:?}); declassify before graduating into \
-                 a skill (mechanical gate, RFC data-envelopes §6)",
-                entry.target,
-                evidence_label
-            ));
+            let memory_target = autonoetic_types::egress::EgressDeclassificationTarget::MemoryId(
+                entry.target.clone(),
+            );
+            let root = crate::runtime::content_store::root_session_id(session_id);
+            let declassified = store
+                .egress_declassification_allows(
+                    &memory_target,
+                    autonoetic_types::egress::Sink::RemoteModel,
+                    session_id,
+                    root,
+                )
+                .unwrap_or(false);
+            if !declassified {
+                return Err(anyhow::anyhow!(
+                    "promote_to_skill refused: evidence '{}' has egress label that \
+                     excludes RemoteModel ({:?}); declassify before graduating into \
+                     a skill (mechanical gate, RFC data-envelopes §6)",
+                    entry.target,
+                    evidence_label
+                ));
+            }
         }
 
         let content = serde_json::json!({

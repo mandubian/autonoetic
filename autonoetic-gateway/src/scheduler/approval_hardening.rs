@@ -40,6 +40,7 @@ pub fn classify_approval_risk(action: &ScheduledAction) -> ApprovalRisk {
         ScheduledAction::WriteFile { .. } => ApprovalRisk::Standard,
         ScheduledAction::WikiProposal { .. } => ApprovalRisk::Standard,
         ScheduledAction::PlanFrame { .. } => ApprovalRisk::Standard,
+        ScheduledAction::EgressDeclassify { .. } => ApprovalRisk::High,
     }
 }
 

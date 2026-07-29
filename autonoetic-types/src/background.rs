@@ -349,6 +349,16 @@ pub enum ScheduledAction {
         #[serde(default)]
         envelope: Vec<super::capability::Capability>,
     },
+    /// Approval subject only: operator widens egress for a specific content
+    /// target × sink (RFC §8). On approval, materializes an
+    /// `egress_declassification_grants` row — never executed by the scheduler.
+    EgressDeclassify {
+        target: super::egress::EgressDeclassificationTarget,
+        allowed_sink: super::egress::Sink,
+        reason: String,
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
 }
 
 impl ScheduledAction {
@@ -366,6 +376,7 @@ impl ScheduledAction {
                 | Self::RevisionPromote { .. }
                 | Self::WikiProposal { .. }
                 | Self::PlanFrame { .. }
+                | Self::EgressDeclassify { .. }
         )
     }
 
@@ -389,7 +400,8 @@ impl ScheduledAction {
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
             | Self::WikiProposal { .. }
-            | Self::PlanFrame { .. } => true,
+            | Self::PlanFrame { .. }
+            | Self::EgressDeclassify { .. } => true,
         }
     }
 
@@ -428,6 +440,7 @@ impl ScheduledAction {
             Self::RevisionPromote { .. } => "revision_promote",
             Self::WikiProposal { .. } => "wiki_propose",
             Self::PlanFrame { .. } => "plan_frame",
+            Self::EgressDeclassify { .. } => "egress_declassify",
         }
     }
 
@@ -447,7 +460,8 @@ impl ScheduledAction {
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
             | Self::WikiProposal { .. }
-            | Self::PlanFrame { .. } => None,
+            | Self::PlanFrame { .. }
+            | Self::EgressDeclassify { .. } => None,
         }
     }
 
@@ -471,7 +485,8 @@ impl ScheduledAction {
             | Self::LayerMount { .. }
             | Self::RevisionPromote { .. }
             | Self::WikiProposal { .. }
-            | Self::PlanFrame { .. } => {}
+            | Self::PlanFrame { .. }
+            | Self::EgressDeclassify { .. } => {}
         }
         self
     }

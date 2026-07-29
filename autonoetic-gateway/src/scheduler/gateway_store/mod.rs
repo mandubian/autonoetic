@@ -10,6 +10,7 @@ pub mod constitutional_proposals;
 mod credentials;
 pub mod egress_policy;
 pub use egress_policy::StoredEgressSessionPolicy;
+mod egress_declassification;
 mod escalations;
 mod evaluations;
 mod fork_lineage;

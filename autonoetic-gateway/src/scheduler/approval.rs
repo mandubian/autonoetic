@@ -318,6 +318,68 @@ pub fn apply_decision(
         }
     }
 
+    // ── 1e. SandboxExec under Network-excluding taint = declassification ─
+    // Enabling share_net for local_only (etc.) is a label widen (RFC §8).
+    // Materialize a session-scoped Network grant + egress.declassified so the
+    // sandbox path cannot widen via host approval alone (#909 slice 2).
+    if decision.status == ApprovalStatus::Approved {
+        if matches!(decision.action, ScheduledAction::SandboxExec { .. }) {
+            if let Some(root_sid) = &decision.root_session_id {
+                let taint = store
+                    .get_session_egress_taint(&decision.session_id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| store.get_session_egress_taint(root_sid).ok().flatten());
+                let network_excluded = taint
+                    .as_ref()
+                    .map(|t| !t.allows(autonoetic_types::egress::Sink::Network))
+                    .unwrap_or(false);
+                if network_excluded {
+                    let target =
+                        crate::runtime::egress_labeler::session_network_declass_target(root_sid);
+                    let scope = options
+                        .grant_scope
+                        .clone()
+                        .unwrap_or(GrantScope::RootSession);
+                    let expires_at = options.grant_expires_at.as_deref();
+                    match store.insert_egress_declassification_grant(
+                        root_sid,
+                        &decision.session_id,
+                        &decision.agent_id,
+                        &target,
+                        autonoetic_types::egress::Sink::Network,
+                        &scope,
+                        &decision.decided_by,
+                        &decision.decided_at,
+                        Some(&decision.request_id),
+                        expires_at,
+                    ) {
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "approval",
+                                request_id = %decision.request_id,
+                                error = %e,
+                                "Failed to insert Network declassification grant for tainted SandboxExec"
+                            );
+                        }
+                        Ok(()) => {
+                            crate::runtime::egress_labeler::emit_declassified(
+                                store,
+                                &decision.session_id,
+                                &decision.agent_id,
+                                &target,
+                                autonoetic_types::egress::Sink::Network,
+                                scope,
+                                Some(&decision.request_id),
+                                "sandbox share_net under session egress taint (RFC §8)",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ── 1b. PlanFrame side-effects ─────────────────────────────────────
     if let ScheduledAction::PlanFrame {
         plan_id,
@@ -398,6 +460,74 @@ pub fn apply_decision(
                     error = %e,
                     "plan.approved timeline emit failed"
                 );
+            }
+        }
+    }
+
+    // ── 1d. Egress declassification grant materialization (RFC §8) ───
+    if let ScheduledAction::EgressDeclassify {
+        target,
+        allowed_sink,
+        reason,
+        ..
+    } = &decision.action
+    {
+        if decision.status == ApprovalStatus::Approved {
+            if let Some(root_sid) = &decision.root_session_id {
+                let scope = options
+                    .grant_scope
+                    .clone()
+                    .unwrap_or(GrantScope::RootSession);
+                let computed_expiry = if options.grant_expires_at.is_none()
+                    && config.default_grant_ttl_secs > 0
+                {
+                    let ttl_secs =
+                        i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
+                    let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now());
+                    let t = base + chrono::Duration::seconds(ttl_secs);
+                    Some(t.to_rfc3339())
+                } else {
+                    None
+                };
+                let expires_at = options
+                    .grant_expires_at
+                    .as_deref()
+                    .or(computed_expiry.as_deref());
+                match store.insert_egress_declassification_grant(
+                    root_sid,
+                    &decision.session_id,
+                    &decision.agent_id,
+                    target,
+                    *allowed_sink,
+                    &scope,
+                    &decision.decided_by,
+                    &decision.decided_at,
+                    Some(&decision.request_id),
+                    expires_at,
+                ) {
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "approval",
+                            request_id = %decision.request_id,
+                            error = %e,
+                            "Failed to insert egress declassification grant"
+                        );
+                    }
+                    Ok(()) => {
+                        crate::runtime::egress_labeler::emit_declassified(
+                            store,
+                            &decision.session_id,
+                            &decision.agent_id,
+                            target,
+                            *allowed_sink,
+                            scope,
+                            Some(&decision.request_id),
+                            reason,
+                        );
+                    }
+                }
             }
         }
     }
