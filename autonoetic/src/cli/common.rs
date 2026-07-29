@@ -488,7 +488,8 @@ pub enum GatewayCommands {
     },
     /// Egress (data localization) audit for a session — per-turn provider,
     /// withheld envelopes with indications, labeling provenance, assertion
-    /// violations (RFC data-envelopes §9.3).
+    /// violations, boundary refusals (sandbox/web/hooks/mcp/ofp/compression),
+    /// and declassifications (RFC data-envelopes §9.3).
     EgressAudit {
         /// Session id to audit.
         session_id: String,
