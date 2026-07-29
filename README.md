@@ -43,6 +43,58 @@ agent need in order to know itself, act on its own, cooperate with others, and
 still be fully accountable — and can that be engineered rather than merely
 hoped for.
 
+## Autonoetic at a glance
+
+An actor proposes; the gateway — bound by the same constitution as the actor —
+validates it, runs it in a sandbox, records everything, and hands back a
+verified self-model each turn. That one correction loop, under a law that binds
+both sides, is the whole design.
+
+```mermaid
+flowchart TB
+    law["Constitution — signed, versioned<br/>rules bind the actor · rights bind the gateway · obligations bind authority"]
+
+    actor["Actor<br/>AI agent · human · script<br/>a low-privilege reasoner"]
+
+    subgraph gw["Gateway — the Lawful Executor · sole high privilege"]
+      direction TB
+      validate["Validate each intent against the<br/>constitution and typed capabilities"]
+      execute["Execute in a sandbox<br/>bubblewrap · docker · microvm · wasm"]
+      validate --> execute
+    end
+
+    subgraph found["Durable foundation"]
+      direction TB
+      chain["Immutable causal chain<br/>hash-chained record + data lineage"]
+      bounds["Boundaries<br/>secrets never reach the model ·<br/>egress labels keep data where allowed"]
+      evo["Evolution<br/>agents build, evaluate, promote<br/>each other behind audited gates"]
+    end
+
+    peer["Federated peer<br/>another gateway"]
+
+    actor -->|"proposes a typed intent"| validate
+    execute --> chain
+    execute -.->|"secrets stripped · egress-filtered"| bounds
+    chain -->|"verified self-model, every turn:<br/>past · present · rights · budget · identity"| actor
+    evo -.->|"proposes new and upgraded agents"| gw
+    law -.->|binds| actor
+    law -.->|binds| gw
+    gw <-.->|"verify shared law, not reputation"| peer
+
+    classDef con fill:#fde68a,stroke:#92400e,color:#111827;
+    classDef act fill:#bfdbfe,stroke:#1e3a8a,color:#111827;
+    classDef fnd fill:#bbf7d0,stroke:#166534,color:#111827;
+    class law con
+    class actor act
+    class chain,bounds,evo fnd
+```
+
+For the full picture — self-contained, no build step, light/dark aware — open the
+[governance architecture](docs/diagrams/architecture-map.html),
+[technical infrastructure](docs/diagrams/technical-map.html),
+[runtime dynamics](docs/diagrams/runtime-dynamics.html), and
+[federation & data model](docs/diagrams/federation-data-model.html) maps.
+
 > New here? [**Why this exists**](#why-this-exists) lays out the three problems
 > that shape everything below; [**Autonoetic for beginners**](docs/autonoetic-concepts-for-beginners.md)
 > builds the same ideas from first principles.
