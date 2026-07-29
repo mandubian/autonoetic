@@ -1,7 +1,6 @@
 //! `session.timeline.list` JSON-RPC (#391) — the canonical Session Room timeline
 //! served over the gateway API so channels are clients, not direct store readers.
 
-
 mod support;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcRouter};

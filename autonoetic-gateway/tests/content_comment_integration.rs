@@ -2,6 +2,7 @@
 //! file, recorded on the timeline and delivered to the owning agent at its next
 //! turn (#521). See `docs/design/operator-live-comments.md`.
 
+
 mod support;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcRouter};
@@ -10,7 +11,7 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent_revision::SessionAgentBinding;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 struct Env {
     _ws: TestWorkspace,

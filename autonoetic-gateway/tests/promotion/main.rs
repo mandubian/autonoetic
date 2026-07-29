@@ -16,4 +16,7 @@ mod record_e2e;
 mod record_evaluator_fail;
 mod record_findings_validation;
 mod record_reject;
+mod phase2_stability;
+mod reassignment_gate;
+mod required_record;
 mod trace_evidence;

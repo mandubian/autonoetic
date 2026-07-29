@@ -1,4 +1,5 @@
 //! Integration tests for loopback channels and memory execution loops.
+
 mod support;
 
 use support::agents::install_content_agent;

@@ -1,4 +1,5 @@
 //! End-to-end integration test for live JSON-RPC ingress.
+
 mod support;
 
 use support::agents::install_outbound_reply_agent;

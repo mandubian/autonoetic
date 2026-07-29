@@ -2,12 +2,13 @@
 //! conversations bind to a room over the gateway API so channels are clients,
 //! not direct store readers (#390).
 
+
 mod support;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcRouter};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use std::sync::{Arc, OnceLock};
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 struct SharedEnv {
     _ws: TestWorkspace,
