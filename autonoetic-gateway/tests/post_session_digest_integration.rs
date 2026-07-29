@@ -144,6 +144,7 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         approval_request_id: None,
         arguments: None,
         result: None,
+    egress_label: None,
     };
     store.create_execution_trace(&trace)?;
 

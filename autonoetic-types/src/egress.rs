@@ -436,6 +436,13 @@ pub struct EgressConfig {
     /// simply off; `prompt_once` (RFC §4.4) is deferred and not honored yet.
     #[serde(default = "EgressConfig::default_unclassified_mode")]
     pub unclassified_source_mode: UnclassifiedSourceMode,
+
+    /// How to treat **legacy unlabeled** stored content (memories / traces
+    /// written before Phase 3). RFC §6.7: product default `unrestricted`;
+    /// fail-closed deployments set `no_remote_model` until an operator sweep
+    /// reclassifies. Never silently invent a wider label than configured.
+    #[serde(default = "EgressConfig::default_legacy_unlabeled")]
+    pub legacy_unlabeled: NamedEgressLabel,
 }
 
 impl EgressConfig {
@@ -447,6 +454,11 @@ impl EgressConfig {
     /// Default for [`EgressConfig::unclassified_source_mode`] — `unrestricted`.
     pub fn default_unclassified_mode() -> UnclassifiedSourceMode {
         UnclassifiedSourceMode::Unrestricted
+    }
+
+    /// Default for [`EgressConfig::legacy_unlabeled`] — `unrestricted` (RFC §6.7).
+    pub fn default_legacy_unlabeled() -> NamedEgressLabel {
+        NamedEgressLabel::Unrestricted
     }
 }
 

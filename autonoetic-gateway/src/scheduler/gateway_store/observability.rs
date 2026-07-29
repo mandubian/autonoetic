@@ -1,8 +1,50 @@
 use super::{GatewayStore, LiveDigestEventRecord, LIVE_DIGEST_BUFFER_CAPACITY};
 use anyhow::Result;
 use autonoetic_types::config::RetentionConfig;
+use autonoetic_types::egress::EgressLabel;
 use rusqlite::params;
 use std::collections::BTreeMap;
+
+fn decode_egress_label_json(raw: Option<String>) -> rusqlite::Result<Option<EgressLabel>> {
+    match raw {
+        Some(s) if !s.is_empty() => serde_json::from_str(&s).map(Some).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                19,
+                rusqlite::types::Type::Text,
+                e.to_string().into(),
+            )
+        }),
+        _ => Ok(None),
+    }
+}
+
+fn execution_trace_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<autonoetic_types::causal_chain::ExecutionTraceRecord> {
+    let egress_raw: Option<String> = row.get(19).ok().flatten();
+    Ok(autonoetic_types::causal_chain::ExecutionTraceRecord {
+        trace_id: row.get(0)?,
+        event_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        session_id: row.get(3)?,
+        turn_id: row.get(4)?,
+        timestamp: row.get(5)?,
+        tool_name: row.get(6)?,
+        command: row.get(7)?,
+        exit_code: row.get(8)?,
+        stdout: row.get(9)?,
+        stderr: row.get(10)?,
+        duration_ms: row.get(11)?,
+        success: row.get(12)?,
+        error_type: row.get(13)?,
+        error_summary: row.get(14)?,
+        approval_required: row.get(15)?,
+        approval_request_id: row.get(16)?,
+        arguments: row.get(17)?,
+        result: row.get(18)?,
+        egress_label: decode_egress_label_json(egress_raw)?,
+    })
+}
 
 fn looks_like_fts_syntax(query: &str) -> bool {
     query.chars().any(|c| {
@@ -726,32 +768,12 @@ impl GatewayStore {
             "SELECT trace_id, event_id, agent_id, session_id, turn_id, timestamp,
                 tool_name, command, exit_code, stdout, stderr, duration_ms,
                 success, error_type, error_summary, approval_required,
-                approval_request_id, arguments, result
+                approval_request_id, arguments, result, egress_label_json
              FROM execution_traces WHERE trace_id = ?1",
         )?;
         let mut rows = stmt.query(params![trace_id])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(autonoetic_types::causal_chain::ExecutionTraceRecord {
-                trace_id: row.get(0)?,
-                event_id: row.get(1)?,
-                agent_id: row.get(2)?,
-                session_id: row.get(3)?,
-                turn_id: row.get(4)?,
-                timestamp: row.get(5)?,
-                tool_name: row.get(6)?,
-                command: row.get(7)?,
-                exit_code: row.get(8)?,
-                stdout: row.get(9)?,
-                stderr: row.get(10)?,
-                duration_ms: row.get(11)?,
-                success: row.get(12)?,
-                error_type: row.get(13)?,
-                error_summary: row.get(14)?,
-                approval_required: row.get(15)?,
-                approval_request_id: row.get(16)?,
-                arguments: row.get(17)?,
-                result: row.get(18)?,
-            }))
+            Ok(Some(execution_trace_from_row(row)?))
         } else {
             Ok(None)
         }
@@ -761,13 +783,18 @@ impl GatewayStore {
         &self,
         trace: &autonoetic_types::causal_chain::ExecutionTraceRecord,
     ) -> Result<()> {
+        let egress_label_json = match &trace.egress_label {
+            Some(label) => Some(serde_json::to_string(label)?),
+            None => None,
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO execution_traces (
                 trace_id, event_id, agent_id, session_id, turn_id, timestamp,
                 tool_name, command, exit_code, stdout, stderr, duration_ms,
-                success, error_type, error_summary, approval_required, approval_request_id, arguments, result
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                success, error_type, error_summary, approval_required, approval_request_id,
+                arguments, result, egress_label_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &trace.trace_id,
                 trace.event_id.as_deref(),
@@ -788,6 +815,7 @@ impl GatewayStore {
                 trace.approval_request_id.as_deref(),
                 trace.arguments.as_deref(),
                 trace.result.as_deref(),
+                egress_label_json,
             ],
         )?;
         Ok(())
@@ -873,27 +901,7 @@ impl GatewayStore {
         params_with_limit.push(rusqlite::types::Value::Integer(limit));
 
         let rows = stmt.query_map(rusqlite::params_from_iter(params_with_limit), |row| {
-            Ok(autonoetic_types::causal_chain::ExecutionTraceRecord {
-                trace_id: row.get(0)?,
-                event_id: row.get(1)?,
-                agent_id: row.get(2)?,
-                session_id: row.get(3)?,
-                turn_id: row.get(4)?,
-                timestamp: row.get(5)?,
-                tool_name: row.get(6)?,
-                command: row.get(7)?,
-                exit_code: row.get(8)?,
-                stdout: row.get(9)?,
-                stderr: row.get(10)?,
-                duration_ms: row.get(11)?,
-                success: row.get(12)?,
-                error_type: row.get(13)?,
-                error_summary: row.get(14)?,
-                approval_required: row.get(15)?,
-                approval_request_id: row.get(16)?,
-                arguments: row.get(17)?,
-                result: row.get(18)?,
-            })
+            execution_trace_from_row(row)
         })?;
 
         let mut results = Vec::new();
@@ -901,6 +909,81 @@ impl GatewayStore {
             results.push(r?);
         }
         Ok(results)
+    }
+
+    /// Bulk-set `egress_label_json` on memories matching optional filters.
+    /// Returns the number of rows updated.
+    pub fn memory_relabel(
+        &self,
+        new_label: &autonoetic_types::egress::EgressLabel,
+        scope: Option<&str>,
+        only_unlabeled: bool,
+    ) -> Result<u64> {
+        let label_json = serde_json::to_string(new_label)?;
+        let conn = self.conn.lock().unwrap();
+        let n = match (scope, only_unlabeled) {
+            (Some(s), true) => conn.execute(
+                "UPDATE memories SET egress_label_json = ?1, updated_at = ?2
+                 WHERE scope = ?3 AND (egress_label_json IS NULL OR egress_label_json = '')",
+                params![label_json, chrono::Utc::now().to_rfc3339(), s],
+            )?,
+            (Some(s), false) => conn.execute(
+                "UPDATE memories SET egress_label_json = ?1, updated_at = ?2 WHERE scope = ?3",
+                params![label_json, chrono::Utc::now().to_rfc3339(), s],
+            )?,
+            (None, true) => conn.execute(
+                "UPDATE memories SET egress_label_json = ?1, updated_at = ?2
+                 WHERE egress_label_json IS NULL OR egress_label_json = ''",
+                params![label_json, chrono::Utc::now().to_rfc3339()],
+            )?,
+            (None, false) => conn.execute(
+                "UPDATE memories SET egress_label_json = ?1, updated_at = ?2",
+                params![label_json, chrono::Utc::now().to_rfc3339()],
+            )?,
+        };
+        Ok(n as u64)
+    }
+
+    /// Bulk-set `egress_label_json` on execution_traces. Returns rows updated.
+    pub fn execution_trace_relabel(
+        &self,
+        new_label: &autonoetic_types::egress::EgressLabel,
+        session_id: Option<&str>,
+        only_unlabeled: bool,
+    ) -> Result<u64> {
+        let label_json = serde_json::to_string(new_label)?;
+        let conn = self.conn.lock().unwrap();
+        let n = match (session_id, only_unlabeled) {
+            (Some(sid), true) => conn.execute(
+                "UPDATE execution_traces SET egress_label_json = ?1
+                 WHERE (session_id = ?2 OR session_id LIKE ?3 ESCAPE '\\')
+                   AND (egress_label_json IS NULL OR egress_label_json = '')",
+                params![
+                    label_json,
+                    sid,
+                    format!("{}/%", super::escape_sqlite_like_fragment(sid))
+                ],
+            )?,
+            (Some(sid), false) => conn.execute(
+                "UPDATE execution_traces SET egress_label_json = ?1
+                 WHERE session_id = ?2 OR session_id LIKE ?3 ESCAPE '\\'",
+                params![
+                    label_json,
+                    sid,
+                    format!("{}/%", super::escape_sqlite_like_fragment(sid))
+                ],
+            )?,
+            (None, true) => conn.execute(
+                "UPDATE execution_traces SET egress_label_json = ?1
+                 WHERE egress_label_json IS NULL OR egress_label_json = ''",
+                params![label_json],
+            )?,
+            (None, false) => conn.execute(
+                "UPDATE execution_traces SET egress_label_json = ?1",
+                params![label_json],
+            )?,
+        };
+        Ok(n as u64)
     }
 
     pub fn upsert_session_transcript(

@@ -1,15 +1,40 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::egress_stored::{
+    filter_or_indicate_for_sink, query_sink_or_remote, resolve_stored_label, FilteredStoredContent,
+};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::disclosure::ViewerClass;
+use autonoetic_types::egress::{EgressConfig, IndicationVerbosity, Sink};
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(ExecutionSearchTool));
+}
+
+fn filter_opt_field(
+    value: Option<&str>,
+    label: &autonoetic_types::egress::EgressLabel,
+    sink: Sink,
+    kind: &str,
+) -> Option<String> {
+    let Some(raw) = value else {
+        return None;
+    };
+    match filter_or_indicate_for_sink(
+        raw,
+        label,
+        sink,
+        Some(kind),
+        IndicationVerbosity::Descriptive,
+    ) {
+        FilteredStoredContent::Allowed(c) => Some(c),
+        FilteredStoredContent::Withheld { indication } => Some(indication),
+    }
 }
 
 pub struct ExecutionSearchTool;
@@ -74,9 +99,9 @@ impl NativeTool for ExecutionSearchTool {
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -106,6 +131,8 @@ impl NativeTool for ExecutionSearchTool {
         let limit = args.limit.unwrap_or(10).min(100) as i64;
 
         let viewer = ViewerClass::Agent;
+        let cfg: EgressConfig = config.map(|c| c.egress.clone()).unwrap_or_default();
+        let sink = query_sink_or_remote(run_context.and_then(|rc| rc.egress_query_sink));
 
         let traces = store.search_execution_traces(
             args.tool_name.as_deref(),
@@ -119,7 +146,15 @@ impl NativeTool for ExecutionSearchTool {
 
         let items: Vec<serde_json::Value> = traces
             .into_iter()
-            .map(|t| t.to_json_for_viewer(viewer))
+            .map(|mut t| {
+                let label = resolve_stored_label(t.egress_label.as_ref(), &cfg);
+                t.command = filter_opt_field(t.command.as_deref(), &label, sink, "execution_search.command");
+                t.stdout = filter_opt_field(t.stdout.as_deref(), &label, sink, "execution_search.stdout");
+                t.stderr = filter_opt_field(t.stderr.as_deref(), &label, sink, "execution_search.stderr");
+                t.result = filter_opt_field(t.result.as_deref(), &label, sink, "execution_search.result");
+                t.egress_label = Some(label);
+                t.to_json_for_viewer(viewer)
+            })
             .collect();
 
         serde_json::to_string(&serde_json::json!({

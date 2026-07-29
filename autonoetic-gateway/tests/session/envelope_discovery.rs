@@ -32,6 +32,7 @@ fn discover_observed_hosts_extracts_urls_from_traces() -> anyhow::Result<()> {
         approval_request_id: None,
         arguments: Some(r#"{"url":"https://api.open-meteo.com/v1/forecast"}"#.to_string()),
         result: None,
+    egress_label: None,
     })?;
 
     let hosts = store.discover_observed_hosts(root)?;

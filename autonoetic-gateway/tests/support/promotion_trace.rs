@@ -32,6 +32,7 @@ pub fn execution_trace(
         approval_request_id: None,
         arguments: None,
         result: None,
+        egress_label: None,
     }
 }
 

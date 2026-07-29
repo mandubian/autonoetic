@@ -502,6 +502,17 @@ impl<'a> ToolCallProcessor<'a> {
                         approval_ref.as_deref(),
                         Some(&tc.id),
                     )?;
+                    // Egress: label at the commit boundary *before* the durable
+                    // execution trace so the trace inherits the tool-result
+                    // label (RFC §6 / #908). Best-effort; labeling never blocks.
+                    self.label_result_egress(
+                        &egress_labeler,
+                        tc,
+                        canonical_tool,
+                        &res,
+                        agent_dir,
+                        gateway_dir,
+                    );
                     if !output.cache_hit {
                         self.record_execution_trace(
                             tc,
@@ -514,23 +525,6 @@ impl<'a> ToolCallProcessor<'a> {
                     self.record_operator_activity(tc, &res, Some(event_id));
                     self.log_memory_tool_event(tracer, &tc.name, &res);
                     had_any_success = true;
-                    // Egress: label this tool result at the commit boundary
-                    // (RFC §4). Best-effort; labeling never blocks a tool
-                    // result. The label is computed from (tool, args) via the
-                    // operator source rules; for exec-shaped tools the command
-                    // *and its dependency sources* (the artifact bundle, the
-                    // workspace scripts it names) are statically matched against
-                    // labeled paths — which is what keeps §5.6 step 3 safe when
-                    // the script, not a structured tool, does the reading.
-                    // Argument taint (RFC §4.1 path 3) intersects the labels of
-                    // any prior labeled results referenced in the arguments —
-                    // by handle (tool_call_id) or by bounded verbatim content
-                    // match. The label feeds the chokepoint (#905): the executor
-                    // attaches the accumulated map to the next completion
-                    // request's metadata, and the wrapping
-                    // EgressChokepointDriver substitutes an indication for any
-                    // tool result whose label excludes the target sink.
-                    self.label_result_egress(&egress_labeler, tc, canonical_tool, &res, agent_dir, gateway_dir);
                     res
                 }
                 Err(e) => {
@@ -664,6 +658,12 @@ impl<'a> ToolCallProcessor<'a> {
             approval_request_id,
             arguments: Some(tc.arguments.clone()),
             result: Some(result_json.to_string()),
+            // Phase 3 (#908): stamp the durable trace with the tool-result
+            // label just assigned for this call id (if any).
+            egress_label: self
+                .egress_results
+                .get(&tc.id)
+                .map(|r| r.label.clone()),
         };
         store.create_execution_trace(&trace)?;
         Ok(Some(trace.trace_id))

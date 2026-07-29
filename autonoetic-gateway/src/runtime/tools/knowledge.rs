@@ -1,14 +1,81 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::egress_stored::{
+    filter_or_indicate_for_sink, query_sink_or_remote, resolve_stored_label, FilteredStoredContent,
+};
 use crate::runtime::tools::{
     block_on_memory, tier2_memory_for_native_tool, NativeTool, NativeToolRegistry,
 };
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::egress::{EgressConfig, EgressLabel, IndicationVerbosity, Sink};
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Arc;
+
+/// Resolve the egress label to stamp on a knowledge.store write (RFC §6).
+/// Prefer in-memory `run_context.egress_taint`; else read durable session
+/// taint. Fail closed when a session-bound write cannot see store taint.
+fn resolve_memory_store_label(
+    run_context: Option<&NativeToolRunContext>,
+    gateway_store: Option<&Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    session_id: Option<&str>,
+) -> anyhow::Result<EgressLabel> {
+    if let Some(rc) = run_context {
+        return Ok(rc
+            .egress_taint
+            .clone()
+            .unwrap_or_else(EgressLabel::unrestricted));
+    }
+    let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(EgressLabel::unrestricted());
+    };
+    let store = gateway_store.ok_or_else(|| {
+        anyhow::anyhow!(
+            "knowledge.store requires gateway_store to resolve session egress taint \
+             for session-bound writes (fail-closed)"
+        )
+    })?;
+    match store.get_session_egress_taint(sid) {
+        Ok(Some(label)) => Ok(label),
+        Ok(None) => Ok(EgressLabel::unrestricted()),
+        Err(e) => Err(anyhow::anyhow!(
+            "knowledge.store failed to read session_egress_taint for '{sid}': {e} (fail-closed)"
+        )),
+    }
+}
+
+fn egress_cfg(config: Option<&autonoetic_types::config::GatewayConfig>) -> EgressConfig {
+    config
+        .map(|c| c.egress.clone())
+        .unwrap_or_default()
+}
+
+fn query_sink(run_context: Option<&NativeToolRunContext>) -> Sink {
+    query_sink_or_remote(run_context.and_then(|rc| rc.egress_query_sink))
+}
+
+fn filter_memory_content(
+    content: &str,
+    stored_label: Option<&EgressLabel>,
+    cfg: &EgressConfig,
+    sink: Sink,
+    kind: &str,
+) -> (String, bool, EgressLabel) {
+    let label = resolve_stored_label(stored_label, cfg);
+    match filter_or_indicate_for_sink(
+        content,
+        &label,
+        sink,
+        Some(kind),
+        IndicationVerbosity::Descriptive,
+    ) {
+        FilteredStoredContent::Allowed(c) => (c, false, label),
+        FilteredStoredContent::Withheld { indication } => (indication, true, label),
+    }
+}
 
 /// Maps tool-facing retention labels to optional `expires_at` (RFC 3339 UTC).
 fn knowledge_retention_expires_at(retention: &str) -> anyhow::Result<Option<String>> {
@@ -132,7 +199,7 @@ impl NativeTool for KnowledgeStoreTool {
         turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -274,6 +341,11 @@ impl NativeTool for KnowledgeStoreTool {
         memory.tags = args.tags.clone();
         memory.expires_at = expires_at.clone();
         memory.visibility = visibility;
+        memory.egress_label = Some(resolve_memory_store_label(
+            run_context,
+            gateway_store.as_ref(),
+            session_id,
+        )?);
 
         if let Some(sid) = session_id {
             let store = gateway_store.as_ref().ok_or_else(|| {
@@ -299,6 +371,7 @@ impl NativeTool for KnowledgeStoreTool {
             "expires_at": memory.expires_at,
             "retention": args.retention,
             "visibility": memory.visibility,
+            "egress_label": memory.egress_label,
         }))
         .map_err(Into::into)
     }
@@ -342,9 +415,9 @@ impl NativeTool for KnowledgeRecallTool {
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -366,16 +439,27 @@ impl NativeTool for KnowledgeRecallTool {
             session_id,
         )?;
         let memory = block_on_memory(mem.recall(&args.id))?;
+        let cfg = egress_cfg(config);
+        let sink = query_sink(run_context);
+        let (content, withheld, label) = filter_memory_content(
+            &memory.content,
+            memory.egress_label.as_ref(),
+            &cfg,
+            sink,
+            "knowledge.recall",
+        );
 
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "id": memory.memory_id,
-            "content": memory.content,
+            "content": content,
             "scope": memory.scope,
             "writer": memory.writer_agent_id,
             "created_at": memory.created_at,
             "confidence": memory.confidence,
             "expires_at": memory.expires_at,
+            "egress_label": label,
+            "egress_withheld": withheld,
         }))
         .map_err(Into::into)
     }
@@ -422,9 +506,9 @@ impl NativeTool for KnowledgeSearchTool {
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -473,18 +557,29 @@ impl NativeTool for KnowledgeSearchTool {
             ))?
         };
 
+        let cfg = egress_cfg(config);
+        let sink = query_sink(run_context);
         let items: Vec<serde_json::Value> = results
             .iter()
             .map(|m| {
+                let (content, withheld, label) = filter_memory_content(
+                    &m.content,
+                    m.egress_label.as_ref(),
+                    &cfg,
+                    sink,
+                    "knowledge.search",
+                );
                 serde_json::json!({
                     "id": m.memory_id,
-                    "content": m.content,
+                    "content": content,
                     "scope": m.scope,
                     "tags": m.tags,
                     "writer": m.writer_agent_id,
                     "created_at": m.created_at,
                     "confidence": m.confidence,
                     "expires_at": m.expires_at,
+                    "egress_label": label,
+                    "egress_withheld": withheld,
                 })
             })
             .collect();
@@ -562,9 +657,9 @@ impl NativeTool for DigestQueryTool {
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -612,18 +707,29 @@ impl NativeTool for DigestQueryTool {
             args.limit as usize,
         ))?;
 
+        let cfg = egress_cfg(config);
+        let sink = query_sink(run_context);
         let items: Vec<serde_json::Value> = results
             .iter()
             .map(|m| {
+                let (content, withheld, label) = filter_memory_content(
+                    &m.content,
+                    m.egress_label.as_ref(),
+                    &cfg,
+                    sink,
+                    "digest.query",
+                );
                 serde_json::json!({
                     "id": m.memory_id,
-                    "content": m.content,
+                    "content": content,
                     "scope": m.scope,
                     "tags": m.tags,
                     "writer": m.writer_agent_id,
                     "created_at": m.created_at,
                     "confidence": m.confidence,
                     "expires_at": m.expires_at,
+                    "egress_label": label,
+                    "egress_withheld": withheld,
                 })
             })
             .collect();

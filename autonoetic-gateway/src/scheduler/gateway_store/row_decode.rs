@@ -1,3 +1,4 @@
+use autonoetic_types::egress::EgressLabel;
 use autonoetic_types::memory::MemoryObject;
 use rusqlite;
 
@@ -6,6 +7,19 @@ pub(crate) fn memory_object_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Resul
     let tags_str: Option<String> = row.get(11)?;
     let lineage_str: Option<String> = row.get(12)?;
     let visibility_str: String = row.get(13)?;
+    // Column 19 added in v76. NULL → None (legacy unlabeled); callers honor
+    // `egress.legacy_unlabeled` via `egress_stored::resolve_stored_label`.
+    let egress_label_json: Option<String> = row.get(19).ok().flatten();
+    let egress_label = match egress_label_json {
+        Some(s) if !s.is_empty() => Some(serde_json::from_str::<EgressLabel>(&s).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                19,
+                rusqlite::types::Type::Text,
+                e.to_string().into(),
+            )
+        })?),
+        _ => None,
+    };
 
     Ok(MemoryObject {
         memory_id: row.get(0)?,
@@ -39,5 +53,6 @@ pub(crate) fn memory_object_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Resul
         binding_session_id: row.get(16)?,
         alias_ref: row.get(17)?,
         quarantine_reason: row.get(18)?,
+        egress_label,
     })
 }

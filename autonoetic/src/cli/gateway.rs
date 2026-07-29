@@ -3200,6 +3200,101 @@ pub async fn handle_gateway_egress_audit(
     Ok(())
 }
 
+/// `gateway memory relabel` — bulk update memories + traces and emit
+/// `egress.relabel` (RFC §6.7 / #908).
+pub async fn handle_gateway_memory(
+    config_path: &Path,
+    command: &crate::cli::common::GatewayMemoryCommands,
+) -> anyhow::Result<()> {
+    use autonoetic_types::egress::{EgressLabel, NamedEgressLabel};
+
+    match command {
+        crate::cli::common::GatewayMemoryCommands::Relabel {
+            label,
+            scope,
+            session,
+            only_unlabeled,
+            memories_only,
+            traces_only,
+            json,
+        } => {
+            let named = match label.trim().to_ascii_lowercase().as_str() {
+                "unrestricted" => NamedEgressLabel::Unrestricted,
+                "local_only" => NamedEgressLabel::LocalOnly,
+                "no_remote_model" => NamedEgressLabel::NoRemoteModel,
+                other => {
+                    anyhow::bail!(
+                        "unknown label '{other}'; expected unrestricted | local_only | no_remote_model"
+                    );
+                }
+            };
+            let new_label: EgressLabel = named.to_label();
+            let config = autonoetic_gateway::config::load_config(config_path)?;
+            let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+            let store =
+                autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+            let store = std::sync::Arc::new(store);
+
+            let mut memories_updated = 0u64;
+            let mut traces_updated = 0u64;
+            if !traces_only {
+                memories_updated =
+                    store.memory_relabel(&new_label, scope.as_deref(), *only_unlabeled)?;
+                if memories_updated > 0 {
+                    autonoetic_gateway::runtime::egress_labeler::emit_relabel(
+                        &store,
+                        session.as_deref().unwrap_or("operator"),
+                        "operator",
+                        "memories",
+                        memories_updated,
+                        &new_label,
+                        scope.as_deref(),
+                    );
+                }
+            }
+            if !memories_only {
+                traces_updated = store.execution_trace_relabel(
+                    &new_label,
+                    session.as_deref(),
+                    *only_unlabeled,
+                )?;
+                if traces_updated > 0 {
+                    autonoetic_gateway::runtime::egress_labeler::emit_relabel(
+                        &store,
+                        session.as_deref().unwrap_or("operator"),
+                        "operator",
+                        "execution_traces",
+                        traces_updated,
+                        &new_label,
+                        scope.as_deref(),
+                    );
+                }
+            }
+
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "label": named,
+                        "memories_updated": memories_updated,
+                        "traces_updated": traces_updated,
+                        "scope": scope,
+                        "session": session,
+                        "only_unlabeled": only_unlabeled,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Relabeled to {:?}: {memories_updated} memories, {traces_updated} traces",
+                    named
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 /// One row in the per-turn audit report.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EgressAuditRow {

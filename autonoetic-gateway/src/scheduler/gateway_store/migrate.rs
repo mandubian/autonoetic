@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 75;
+const SCHEMA_VERSION_LATEST: i64 = 76;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -560,6 +560,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_egress_session_policies_v73(conn)?;
     apply_session_egress_taint_v74(conn)?;
     apply_agent_message_egress_taint_v75(conn)?;
+    apply_stored_content_egress_labels_v76(conn)?;
 
     Ok(())
 }
@@ -668,6 +669,35 @@ fn apply_agent_message_egress_taint_v75(conn: &mut Connection) -> Result<()> {
         params![
             75_i64,
             "agent_message_egress_taint",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// v76 — Phase 3 (#908) stored-content egress labels (RFC §6): nullable
+/// `egress_label_json` on `memories` and `execution_traces`. NULL = legacy
+/// unlabeled → resolved via `egress.legacy_unlabeled` at read time.
+fn apply_stored_content_egress_labels_v76(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 76 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE memories ADD COLUMN egress_label_json TEXT;
+         ALTER TABLE execution_traces ADD COLUMN egress_label_json TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            76_i64,
+            "stored_content_egress_labels",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

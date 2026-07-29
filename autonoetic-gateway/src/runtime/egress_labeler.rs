@@ -1255,6 +1255,36 @@ pub fn plan_taint_following_route(
 /// `egress_no_eligible_provider`. Only meaningful for tainted batches — the
 /// lifecycle skips emission entirely for the unrestricted (clean) case.
 #[allow(clippy::too_many_arguments)]
+/// Emit `egress.relabel` for an operator (or sweep) reclassification of stored
+/// content (RFC §6.7 / #908). Content-free metadata only.
+pub fn emit_relabel(
+    store: &Arc<GatewayStore>,
+    session_id: &str,
+    agent_id: &str,
+    kind: &str,
+    count: u64,
+    new_label: &EgressLabel,
+    scope: Option<&str>,
+) {
+    let payload = serde_json::json!({
+        "kind": kind,
+        "count": count,
+        "new_label": serde_json::to_value(new_label).unwrap_or(serde_json::Value::Null),
+        "new_label_name": label_display_name(new_label),
+        "scope": scope,
+    });
+    emit_egress_event(
+        store,
+        "egress.relabel",
+        kind,
+        Some(payload),
+        session_id,
+        agent_id,
+        None,
+        "operator or sweep reclassified stored content egress label",
+    );
+}
+
 pub fn emit_provider_selected(
     store: &Arc<GatewayStore>,
     session_id: &str,
