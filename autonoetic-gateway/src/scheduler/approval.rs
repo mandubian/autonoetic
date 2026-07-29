@@ -353,13 +353,13 @@ pub fn apply_decision(
                             "sandbox share_net under session egress taint (RFC §8)"
                         }
                         ScheduledAction::WebFetch { .. } => {
-                            "web.fetch network egress under session egress taint (RFC §8)"
+                            "web_fetch network egress under session egress taint (RFC §8)"
                         }
                         ScheduledAction::WebSearch { .. } => {
-                            "web.search network egress under session egress taint (RFC §8)"
+                            "web_search network egress under session egress taint (RFC §8)"
                         }
                         ScheduledAction::WebCall { .. } => {
-                            "web.call network egress under session egress taint (RFC §8)"
+                            "web_call network egress under session egress taint (RFC §8)"
                         }
                         _ => "network egress under session egress taint (RFC §8)",
                     };

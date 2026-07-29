@@ -35,6 +35,11 @@ fn parse_mode(s: &str) -> anyhow::Result<CapsuleMode> {
     }
 }
 
+fn parse_destination_sink(s: &str) -> anyhow::Result<autonoetic_types::egress::Sink> {
+    serde_json::from_value(serde_json::Value::String(s.to_string()))
+        .map_err(|e| anyhow::anyhow!("unknown destination_sink '{s}': {e}"))
+}
+
 // --- Export ---------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -56,6 +61,12 @@ struct CapsuleExportArgs {
     /// Required when `mode == "headless"`.
     #[serde(default)]
     root_session_id: Option<String>,
+    /// Egress sink the capsule is destined for (`local_agent`, `federated_agent`, …).
+    #[serde(default)]
+    destination_sink: Option<String>,
+    /// Trust domain for provenance and sink inference (`local`, `partner`, `foreign`).
+    #[serde(default)]
+    trust_domain: Option<String>,
 }
 
 fn default_mode_string() -> String {
@@ -93,7 +104,15 @@ impl NativeTool for CapsuleExportTool {
                     "revision": { "type": ["string", "null"] },
                     "include_memory": { "type": ["boolean", "null"] },
                     "sign": { "type": ["boolean", "null"] },
-                    "output": { "type": ["string", "null"] }
+                    "output": { "type": ["string", "null"] },
+                    "destination_sink": {
+                        "type": ["string", "null"],
+                        "description": "Declared egress destination sink (snake_case Sink name). Inferred from trust_domain when omitted."
+                    },
+                    "trust_domain": {
+                        "type": ["string", "null"],
+                        "description": "Trust domain for provenance and destination-sink inference (local | partner | foreign)."
+                    }
                 },
                 "required": ["agent_id"],
                 "additionalProperties": false
@@ -153,6 +172,11 @@ impl NativeTool for CapsuleExportTool {
         })?;
 
         let mode = parse_mode(&args.mode)?;
+        let destination_sink = args
+            .destination_sink
+            .as_deref()
+            .map(parse_destination_sink)
+            .transpose()?;
         let outcome = export(
             ExportRequest {
                 agent_id: args.agent_id,
@@ -163,6 +187,8 @@ impl NativeTool for CapsuleExportTool {
                 output_path: args.output,
                 session_id: args.session_id,
                 root_session_id: args.root_session_id,
+                destination_sink,
+                trust_domain: args.trust_domain,
             },
             ExportContext {
                 gateway_dir,

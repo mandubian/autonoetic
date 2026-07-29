@@ -23,7 +23,10 @@ pub mod export;
 pub mod import;
 pub mod verify;
 
-pub use export::{export, ExportContext, ExportOutcome, ExportRequest};
+pub use export::{
+    export, infer_capsule_destination_sink, resolve_capsule_destination_sink, ExportContext,
+    ExportOutcome, ExportRequest,
+};
 pub use import::{import, ImportContext, ImportOutcome, ImportRequest, MemoryConflictPolicy};
 
 /// Canonical relative paths inside the capsule archive.

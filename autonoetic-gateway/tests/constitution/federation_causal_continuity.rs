@@ -158,6 +158,8 @@ async fn round_trip_peer_refs_and_chain_attestation_tamper_rejection() {
             message: "hello federation continuity".to_string(),
             sender: Some(source_agent_id),
             peer_event_ref: Some(outbound_ref.clone()),
+            egress_label: None,
+            withheld_indication: None,
         }),
     };
     write_framed_message(&mut writer, &agent_msg).await.unwrap();

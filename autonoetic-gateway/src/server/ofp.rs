@@ -838,14 +838,44 @@ async fn handle_inbound_connection(
                 message,
                 sender,
                 peer_event_ref,
+                egress_label,
+                withheld_indication: _,
             }) => {
                 let session_id = uuid::Uuid::new_v4().to_string();
+                let inbound_label = crate::runtime::egress_labeler::parse_ofp_inbound_egress_label(
+                    egress_label.as_ref(),
+                );
+                if let Some(ref store) = gateway_store {
+                    if let Err(e) = store.set_session_egress_taint(&session_id, &inbound_label) {
+                        tracing::warn!(
+                            target: "egress",
+                            error = %e,
+                            session_id = %session_id,
+                            "failed to seed OFP inbound session egress taint before spawn"
+                        );
+                    }
+                }
+                let spawn_metadata = if inbound_label.is_unrestricted() {
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "ofp_inbound_egress_label": inbound_label,
+                    }))
+                };
                 let mut resp = match sender.as_deref() {
                     Some(sender_agent)
                         if registry.peer_hosts_agent(&peer_node_id, sender_agent).await =>
                     {
                         match router
-                            .spawn_agent_once(&agent, &message, &session_id, None, true, None, None)
+                            .spawn_agent_once(
+                                &agent,
+                                &message,
+                                &session_id,
+                                None,
+                                true,
+                                None,
+                                spawn_metadata.as_ref(),
+                            )
                             .await
                         {
                             Ok(result) => {

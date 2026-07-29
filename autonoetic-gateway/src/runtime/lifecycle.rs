@@ -147,6 +147,8 @@ pub struct AgentExecutor {
     /// sink. Empty for unconfigured deployments — the chokepoint is then a
     /// zero-cost pass-through.
     pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+    /// Initial taint for the first user turn (OFP inbound `agent_message`, RFC §7).
+    pub initial_ingest_egress_label: Option<autonoetic_types::egress::EgressLabel>,
     /// Taint of the tool batch produced since the last completion (RFC §5.3):
     /// the intersection of the labels of the results the previous turn added.
     /// Drives taint-following routing for the *next* completion — a tainted
@@ -450,6 +452,7 @@ impl AgentExecutor {
             session_started: false,
             turn_counter: 0,
             egress_labels: std::collections::HashMap::new(),
+            initial_ingest_egress_label: None,
             pending_batch_taint: autonoetic_types::egress::EgressLabel::unrestricted(),
             config: None,
             session_budget: None,
@@ -571,6 +574,15 @@ impl AgentExecutor {
 
     pub fn with_initial_user_message(mut self, message: impl Into<String>) -> Self {
         self.initial_user_message = message.into();
+        self
+    }
+
+    /// Seed the first user message with an ingress egress label (OFP federation).
+    pub fn with_initial_ingest_egress_label(
+        mut self,
+        label: autonoetic_types::egress::EgressLabel,
+    ) -> Self {
+        self.initial_ingest_egress_label = Some(label);
         self
     }
 
@@ -1722,6 +1734,22 @@ impl AgentExecutor {
         self.llm_usage_last_run.clear();
         let session_id = self.ensure_session_id();
         let turn_id = self.next_turn_id();
+
+        // OFP inbound federation: label the spawned session's first user turn
+        // with the peer-supplied egress label (fail-closed default applied at
+        // the wire handler). Mirrors local `agent_message` ingest (RFC §5.5).
+        if let Some(label) = self.initial_ingest_egress_label.take() {
+            if !label.is_unrestricted() {
+                for msg in history.iter_mut() {
+                    if msg.role == crate::llm::Role::User && msg.id.is_none() {
+                        let mid = autonoetic_types::id_format::short_random_id("msg_");
+                        msg.id = Some(mid.clone());
+                        self.egress_labels.insert(mid, label.clone());
+                        break;
+                    }
+                }
+            }
+        }
 
         // Session-level turn limits (issue #854).
         //

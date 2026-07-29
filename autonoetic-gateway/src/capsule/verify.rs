@@ -154,6 +154,8 @@ mod tests {
                 origin_node_id: "n".to_string(),
                 gateway_version: "v".to_string(),
                 trust_domain: "local".to_string(),
+                destination_sink: None,
+                memory_withheld_count: 0,
                 parent_capsule_id: None,
             },
             requires_agents: vec![],

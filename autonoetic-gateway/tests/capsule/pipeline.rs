@@ -119,6 +119,8 @@ fn export_then_import_creates_revision_with_capsule_import_source_kind() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -219,6 +221,8 @@ fn import_dry_run_does_not_persist_revision() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -284,6 +288,8 @@ fn tampered_archive_fails_verify_signature() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -363,6 +369,8 @@ fn import_refuses_archive_exceeding_size_cap() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -412,6 +420,8 @@ fn second_import_is_dedup_noop_for_existing_revision() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         autonoetic_gateway::capsule::ExportContext {
             gateway_dir: &f.gateway_dir,

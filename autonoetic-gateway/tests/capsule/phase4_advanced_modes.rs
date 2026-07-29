@@ -156,6 +156,8 @@ fn memory_export_then_import_roundtrip_with_conflict_policy() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -294,6 +296,8 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
             output_path: Some(archive.clone()),
             session_id: Some("sess-1".to_string()),
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -371,6 +375,8 @@ fn headless_mode_bundles_and_recreates_scheduled_jobs() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: Some("root-1".to_string()),
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -432,6 +438,8 @@ fn platform_mismatch_refused_when_trust_domain_not_local() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -549,6 +557,8 @@ fn import_refuses_memory_entry_with_mismatched_owner() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -687,6 +697,8 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
             output_path: Some(archive),
             session_id: Some("x-session".to_string()),
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,
@@ -716,6 +728,8 @@ fn import_refuses_traversal_in_memory_content_handle() {
             output_path: Some(archive.clone()),
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         },
         ExportContext {
             gateway_dir: &f.gateway_dir,

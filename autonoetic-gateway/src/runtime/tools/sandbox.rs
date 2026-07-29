@@ -1328,8 +1328,9 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     "ok": false,
                     "error_type": "egress_boundary_refused",
                     "surface": "sandbox",
+                    "tool": "sandbox_exec",
                     "message": format!(
-                        "sandbox.exec refused: cannot establish session egress taint ({e})"
+                        "sandbox_exec refused: cannot establish session egress taint ({e})"
                     ),
                     "repair_hint": "Ensure the tool runs with a session id and GatewayStore so taint can be confirmed.",
                 })
@@ -1480,7 +1481,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     "ok": false,
                     "error_type": "egress_boundary_refused",
                     "surface": "sandbox",
-                    "message": "sandbox.exec refused: session egress taint excludes Network and network targets could not be resolved to concrete hosts",
+                    "tool": "sandbox_exec",
+                    "message": "sandbox_exec refused: session egress taint excludes Network and network targets could not be resolved to concrete hosts",
                     "repair_hint": "Operator-declassify Sink::Network for this session (egress.declassified), or use a command with concrete network targets.",
                 })
                 .to_string());

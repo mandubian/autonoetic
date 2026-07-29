@@ -59,6 +59,8 @@ pub fn handle_export(
         output_path: output.map(|p| p.to_path_buf()),
         session_id: session_id.map(|s| s.to_string()),
         root_session_id: root_session_id.map(|s| s.to_string()),
+        destination_sink: None,
+        trust_domain: None,
     };
     let outcome = capsule::export(
         req,
