@@ -2,8 +2,9 @@ mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode};
 use autonoetic_types::capability::Capability;
+use support::manifest_builder::TestManifest;
 
 fn make_manifest(has_network: bool) -> AgentManifest {
     let mut caps = vec![Capability::CodeExecution {
@@ -20,15 +21,6 @@ fn make_manifest(has_network: bool) -> AgentManifest {
         });
     }
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "test-coder".to_string(),
             name: "Test Coder".to_string(),
@@ -36,28 +28,10 @@ fn make_manifest(has_network: bool) -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
         capabilities: caps,
-        background: None,
-        middleware: None,
         execution_mode: ExecutionMode::Reasoning,
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        agentskills_import: None,
-        io: None,
-        disclosure: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-            egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn exec_sandbox(manifest: &AgentManifest, command: &str) -> serde_json::Value {

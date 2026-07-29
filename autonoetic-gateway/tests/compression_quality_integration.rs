@@ -10,12 +10,11 @@
 //!
 //! If these are not set, all tests are skipped.
 
-use autonoetic_gateway::llm::{build_driver, CompletionRequest, Message};
-use autonoetic_gateway::runtime::compression::{compress_context, CompressionMetadata};
+use autonoetic_gateway::llm::Message;
+use autonoetic_gateway::runtime::compression::compress_context;
 use autonoetic_gateway::runtime::compression_quality::{
-    validate_compressed_history, GoldenSession, GoldenToolCall, GoldenTurn, StructuralValidation,
+    validate_compressed_history, GoldenSession, GoldenToolCall, GoldenTurn,
 };
-use autonoetic_types::agent::CompressionConfig;
 use autonoetic_types::config::{ContextCompressionConfig, LlmPreset};
 use std::collections::HashMap;
 

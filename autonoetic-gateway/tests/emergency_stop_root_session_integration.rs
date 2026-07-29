@@ -1,5 +1,4 @@
 //! Phase 2C: `root_session.emergency_stop` durable halt + checkpoint.
-use autonoetic_types::config::GatewayConfig;
 
 mod support;
 

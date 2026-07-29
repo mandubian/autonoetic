@@ -2,7 +2,7 @@ mod support;
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
-use support::{seed_agent_revision, EnvGuard, OpenAiStub, TestWorkspace};
+use support::{seed_agent_revision, EnvGuard, OpenAiStub};
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";

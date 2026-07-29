@@ -23,7 +23,7 @@ use autonoetic_gateway::runtime::content_store;
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::{EntryStatus, PublishedSessionReportRecord};
 use autonoetic_types::config::GatewayConfig;
@@ -31,18 +31,10 @@ use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
@@ -51,27 +43,8 @@ fn manifest_with(agent_id: &str, caps: Vec<Capability>) -> AgentManifest {
             resident_idle_ttl_secs: None,
         },
         capabilities: caps,
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn setup_gateway(base: &Path) -> (std::path::PathBuf, Arc<GatewayStore>) {
@@ -215,15 +188,6 @@ impl LlmDriver for EndTurnDriver {
 
 fn ri_0_7_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "ri07.tester".to_string(),
             name: "ri07.tester".to_string(),
@@ -231,9 +195,6 @@ fn ri_0_7_manifest() -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        capabilities: vec![],
-        llm_overrides: None,
-        llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
@@ -248,24 +209,8 @@ fn ri_0_7_manifest() -> AgentManifest {
             thinking: None,
             egress_class: None,
         }),
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 #[tokio::test]

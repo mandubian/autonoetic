@@ -6,13 +6,12 @@
 //! 3. Auditor audits content → calls promotion.record(pass=true)
 //! 4. Builder creates an `AgentBundle` artifact and activates it via `agent.revision.create` + `agent.revision.promote`
 
-
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::artifact::{ArtifactKind, ArtifactRefRecord, ArtifactRefScopeType};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
@@ -20,6 +19,7 @@ use autonoetic_types::promotion::PromotionRole;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 fn build_agent_bundle_artifact(base_dir: &Path, main_py: &str) -> (String, std::path::PathBuf) {
     let gateway_dir = base_dir.join(".gateway");
@@ -92,15 +92,6 @@ layers: []
 
 fn builder_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "specialized_builder.default".to_string(),
             name: "specialized_builder.default".to_string(),
@@ -117,41 +108,12 @@ fn builder_manifest() -> AgentManifest {
                 patterns: vec!["*".to_string()],
             },
         ],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn evaluator_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "sealed_evaluator.default".to_string(),
             name: "sealed_evaluator.default".to_string(),
@@ -162,41 +124,12 @@ fn evaluator_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["sandbox.".to_string(), "content.".to_string()],
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn auditor_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "auditor.default".to_string(),
             name: "auditor.default".to_string(),
@@ -207,28 +140,8 @@ fn auditor_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 /// Full promotion flow through revision create + promote (no `agent.install`).
@@ -540,15 +453,6 @@ async fn test_promotion_record_with_artifact_ref() {
 
     // --- promotion_query via artifact_ref ---
     let query_manifest = AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "reader.default".to_string(),
             name: "reader".to_string(),
@@ -559,27 +463,8 @@ async fn test_promotion_record_with_artifact_ref() {
         capabilities: vec![Capability::ReadAccess {
             scopes: vec!["*".to_string()],
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        };
+    ..TestManifest::new().build()
+};
     let query_policy = PolicyEngine::new(query_manifest.clone());
 
     let query_args = serde_json::json!({

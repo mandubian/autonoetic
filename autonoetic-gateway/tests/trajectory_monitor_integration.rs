@@ -6,7 +6,6 @@
 //! validates that the monitor's TickResult produces the expected
 //! causal-action slugs for each TrajectoryHealth level.
 
-use std::collections::HashMap;
 
 use autonoetic_gateway::runtime::guard::LoopGuard;
 use autonoetic_gateway::runtime::trajectory_health::{

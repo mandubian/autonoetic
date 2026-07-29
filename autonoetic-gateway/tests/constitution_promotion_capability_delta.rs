@@ -21,7 +21,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::scheduler::{approve_request_with_options, ApproveOptions};
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
@@ -33,6 +33,7 @@ use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::principal::PrincipalKind;
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 const AGENT_ID: &str = "test-agent";
 const OUTGOING_REVISION: &str = "rev_outgoing";
@@ -40,15 +41,6 @@ const INCOMING_REVISION: &str = "rev_incoming";
 
 fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: AGENT_ID.to_string(),
             name: AGENT_ID.to_string(),
@@ -57,27 +49,8 @@ fn manifest_with_capabilities(caps: Vec<Capability>) -> AgentManifest {
             resident_idle_ttl_secs: None,
         },
         capabilities: caps,
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 struct PromoteHarness {

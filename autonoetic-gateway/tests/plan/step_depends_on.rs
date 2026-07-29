@@ -5,9 +5,8 @@
 //! 2. StepStatus tracking via planframe_amend (step_status field)
 //! 3. unsatisfied_dependencies logic (the core check used by agent_spawn enforcement)
 
-
 use autonoetic_gateway::runtime::tools::default_registry;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration, ScriptInputMode};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::plan_frame::{
@@ -15,18 +14,10 @@ use autonoetic_types::plan_frame::{
 };
 use serde_json::json;
 use tempfile::{tempdir, TempDir};
+use crate::support::manifest_builder::TestManifest;
 
 fn plan_frame_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
@@ -49,27 +40,8 @@ fn plan_frame_manifest() -> AgentManifest {
                 patterns: vec!["*".to_string(), "planframe.approve".to_string()],
             },
         ],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        execution_mode: ExecutionMode::default(),
-        script_entry: None,
-        script_input_mode: ScriptInputMode::default(),
-        gateway_url: None,
-        gateway_token: None,
-        middleware: None,
-        agentskills_import: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn make_config(dir: &std::path::Path) -> GatewayConfig {

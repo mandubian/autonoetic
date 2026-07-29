@@ -1,5 +1,4 @@
 //! Integration tests for Disclosure Policy reply filtering.
-use autonoetic_types::config::GatewayConfig;
 
 mod support;
 

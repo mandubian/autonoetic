@@ -20,7 +20,6 @@
 //!   4. Per-session budget exhaustion does NOT arm the breaker (the
 //!      `root_budget_exhausted` flag stays false), so no root cascade fires.
 
-
 use std::sync::Arc;
 
 use autonoetic_gateway::execution::GatewayExecutionService;
@@ -36,11 +35,12 @@ use autonoetic_gateway::scheduler::workflow_store::{
     ensure_workflow_for_root_session, list_task_runs_for_workflow, load_workflow_run,
     save_task_run, save_workflow_run,
 };
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::config::{RootSessionBudgetConfig, SessionBudgetConfig};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
 use crate::support::TestWorkspace;
+use crate::support::manifest_builder::TestManifest;
 
 // --------------------------------------------------------------------------
 // shared helpers
@@ -67,15 +67,6 @@ impl LlmDriver for NoOpDriver {
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
@@ -83,9 +74,6 @@ fn test_manifest() -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        capabilities: vec![],
-        llm_overrides: None,
-        llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
@@ -100,24 +88,8 @@ fn test_manifest() -> AgentManifest {
             thinking: None,
             egress_class: None,
         }),
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 /// Build a workflow for `root_session` with two in-flight (Running) descendant

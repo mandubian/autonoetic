@@ -12,12 +12,13 @@ use autonoetic_gateway::llm::{
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::background::{GrantScope, GrantTarget};
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::sync::Arc;
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 fn ensure_constitution() {
     let _ = initialize_constitution(&GatewayConfig::default());
@@ -41,15 +42,6 @@ impl LlmDriver for EndTurnDriver {
 
 fn manifest_with(agent_id: &str) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
@@ -57,9 +49,6 @@ fn manifest_with(agent_id: &str) -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        capabilities: vec![],
-        llm_overrides: None,
-        llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
@@ -74,24 +63,8 @@ fn manifest_with(agent_id: &str) -> AgentManifest {
             thinking: None,
             egress_class: None,
         }),
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn seed_root_grant(store: &GatewayStore, root_sid: &str, host: &str) {

@@ -234,7 +234,7 @@ async fn test_knowledge_persistence() {
     let gateway_dir = workspace.path().join(".gateway");
     std::fs::create_dir_all(&gateway_dir).unwrap();
 
-    use autonoetic_gateway::runtime::memory::{SqliteMemoryStore, Tier2Memory};
+    use autonoetic_gateway::runtime::memory::{Tier2Memory};
 
     // Create Tier2Memory (knowledge store)
     let memory = Tier2Memory::open_sqlite(&gateway_dir, "test-agent").unwrap();
