@@ -16,6 +16,7 @@ use autonoetic_types::capsule::{
     CapsuleManifest, CapsuleMode, CapsuleProvenance, CAPSULE_FORMAT_VERSION,
 };
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::egress::Sink;
 use autonoetic_types::redaction::{redact_embedded_secrets, redact_json_value};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,12 @@ pub struct ExportRequest {
     /// Required for `Headless` mode: the root session whose scheduled
     /// jobs should be bundled. Ignored for other modes.
     pub root_session_id: Option<String>,
+    /// Egress sink the capsule is destined for (RFC §7). When unset, inferred
+    /// from [`Self::trust_domain`] via [`infer_capsule_destination_sink`].
+    pub destination_sink: Option<Sink>,
+    /// Trust domain for provenance and destination-sink inference (`local`,
+    /// `partner`, `foreign`, …). Defaults to `"local"`.
+    pub trust_domain: Option<String>,
 }
 
 impl ExportRequest {
@@ -59,8 +66,36 @@ impl ExportRequest {
             output_path: None,
             session_id: None,
             root_session_id: None,
+            destination_sink: None,
+            trust_domain: None,
         }
     }
+}
+
+/// Infer the egress destination sink for a capsule from its trust domain.
+pub fn infer_capsule_destination_sink(trust_domain: &str) -> Sink {
+    match trust_domain.trim().to_ascii_lowercase().as_str() {
+        "local" => Sink::LocalAgent,
+        "partner" => Sink::FederatedAgent,
+        _ => Sink::RemoteModel,
+    }
+}
+
+/// Resolve the effective destination sink for memory filtering.
+pub fn resolve_capsule_destination_sink(
+    explicit: Option<Sink>,
+    trust_domain: Option<&str>,
+) -> Sink {
+    explicit.unwrap_or_else(|| {
+        infer_capsule_destination_sink(trust_domain.unwrap_or("local"))
+    })
+}
+
+fn sink_wire_name(sink: Sink) -> String {
+    serde_json::to_value(sink)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "remote_model".to_string())
 }
 
 /// Result of a successful export.
@@ -74,6 +109,9 @@ pub struct ExportOutcome {
     pub size_bytes: u64,
     pub manifest_digest: String,
     pub redactions: Vec<String>,
+    /// Memory entries withheld because their egress label excluded the destination sink.
+    pub memory_withheld_count: u64,
+    pub destination_sink: String,
 }
 
 /// Inputs required to run the export pipeline. Carries handles, not raw
@@ -103,15 +141,29 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
 
     let included_skills = collect_skill_names(&revision_dir);
 
-    let memory_snapshot = if req.include_memory.unwrap_or(cfg.include_memory_by_default) {
-        Some(stage_memory_snapshot(
-            staging_path,
-            &revision.agent_id,
-            ctx.gateway_store.as_ref(),
-        )?)
-    } else {
-        None
-    };
+    let trust_domain = req
+        .trust_domain
+        .as_deref()
+        .unwrap_or("local")
+        .to_string();
+    let destination_sink = resolve_capsule_destination_sink(
+        req.destination_sink,
+        Some(trust_domain.as_str()),
+    );
+    let destination_sink_name = sink_wire_name(destination_sink);
+
+    let (memory_snapshot, memory_withheld_count) =
+        if req.include_memory.unwrap_or(cfg.include_memory_by_default) {
+            stage_memory_snapshot(
+                staging_path,
+                &revision.agent_id,
+                ctx.gateway_store.as_ref(),
+                destination_sink,
+                &ctx.gateway_config.egress,
+            )?
+        } else {
+            (None, 0)
+        };
 
     let checkpoint_handle = if req.mode == CapsuleMode::Replay {
         let session_id = req.session_id.as_deref().ok_or_else(|| {
@@ -197,7 +249,9 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
         provenance: CapsuleProvenance {
             origin_node_id: ctx.gateway_config.node_id.clone(),
             gateway_version: env!("CARGO_PKG_VERSION").to_string(),
-            trust_domain: "local".to_string(),
+            trust_domain: trust_domain.clone(),
+            destination_sink: Some(destination_sink_name.clone()),
+            memory_withheld_count,
             parent_capsule_id: None,
         },
         requires_agents: vec![],
@@ -246,6 +300,8 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
         &manifest.mode,
         size_bytes,
         signed,
+        &destination_sink_name,
+        memory_withheld_count,
     )?;
 
     Ok(ExportOutcome {
@@ -257,6 +313,8 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
         size_bytes,
         manifest_digest,
         redactions,
+        memory_withheld_count,
+        destination_sink: destination_sink_name,
     })
 }
 
@@ -392,15 +450,25 @@ fn stage_memory_snapshot(
     staging: &Path,
     agent_id: &str,
     store: &GatewayStore,
-) -> Result<autonoetic_types::capsule::CapsuleMemorySnapshot> {
-    // Enumerate memories owned by this agent (any scope), then run each
-    // one through the redaction pipeline. The receiving gateway may
-    // re-key these (see [`crate::capsule::import`]).
+    destination_sink: Sink,
+    egress_cfg: &autonoetic_types::egress::EgressConfig,
+) -> Result<(Option<autonoetic_types::capsule::CapsuleMemorySnapshot>, u64)> {
+    // Enumerate memories owned by this agent (any scope), include only those
+    // whose egress label permits the capsule's declared destination sink.
     let ids = store.memory_list_ids_owned_by(agent_id)?;
-    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(ids.len());
+    let mut entries: Vec<serde_json::Value> = Vec::new();
     let mut scopes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut withheld_count = 0u64;
     for id in &ids {
         if let Some(obj) = store.memory_get_unrestricted(id)? {
+            let label = crate::runtime::egress_stored::resolve_stored_label(
+                obj.egress_label.as_ref(),
+                egress_cfg,
+            );
+            if !crate::runtime::egress_stored::stored_allows_sink(&label, destination_sink) {
+                withheld_count += 1;
+                continue;
+            }
             scopes.insert(obj.scope.clone());
             let serialised = serde_json::to_value(&obj)?;
             entries.push(redact_json_value(&serialised));
@@ -412,12 +480,16 @@ fn stage_memory_snapshot(
     });
     let serialised = serde_json::to_vec_pretty(&snapshot_json)?;
     archive::write_entry(staging, crate::capsule::paths::MEMORY_SNAPSHOT_PATH, &serialised)?;
-    Ok(autonoetic_types::capsule::CapsuleMemorySnapshot {
-        entry_count: entries.len() as u64,
-        scopes: scopes.into_iter().collect(),
-        content_handle: crate::capsule::paths::MEMORY_SNAPSHOT_PATH.to_string(),
-        redacted: true,
-    })
+    Ok((
+        Some(autonoetic_types::capsule::CapsuleMemorySnapshot {
+            entry_count: entries.len() as u64,
+            scopes: scopes.into_iter().collect(),
+            content_handle: crate::capsule::paths::MEMORY_SNAPSHOT_PATH.to_string(),
+            redacted: true,
+            withheld_count,
+        }),
+        withheld_count,
+    ))
 }
 
 /// Content-derived capsule ID: SHA-256 over (revision_id, mode).
@@ -487,6 +559,8 @@ fn emit_export_event(
     mode: &CapsuleMode,
     size_bytes: u64,
     signed: bool,
+    destination_sink: &str,
+    memory_withheld_count: u64,
 ) -> Result<()> {
     let payload = serde_json::json!({
         "capsule_id": capsule_id,
@@ -494,6 +568,8 @@ fn emit_export_event(
         "mode": mode_str(*mode),
         "size_bytes": size_bytes,
         "signed": signed,
+        "destination_sink": destination_sink,
+        "memory_withheld_count": memory_withheld_count,
     });
     let event = autonoetic_types::causal_chain::CausalEventRecord {
         event_id: uuid::Uuid::new_v4().to_string(),
@@ -551,6 +627,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No runtime.lock present → nothing to positively flag as runtime-pip.
         assert!(require_locked_dependencies_for_hermetic(dir.path(), CapsuleMode::Hermetic).is_ok());
+    }
+
+    #[test]
+    fn infer_capsule_destination_sink_maps_trust_domains() {
+        use autonoetic_types::egress::Sink;
+        assert_eq!(
+            infer_capsule_destination_sink("local"),
+            Sink::LocalAgent
+        );
+        assert_eq!(
+            infer_capsule_destination_sink("partner"),
+            Sink::FederatedAgent
+        );
+        assert_eq!(
+            infer_capsule_destination_sink("foreign"),
+            Sink::RemoteModel
+        );
+    }
+
+    #[test]
+    fn resolve_capsule_destination_sink_prefers_explicit() {
+        use autonoetic_types::egress::Sink;
+        assert_eq!(
+            resolve_capsule_destination_sink(Some(Sink::Network), Some("local")),
+            Sink::Network
+        );
     }
 
     #[test]

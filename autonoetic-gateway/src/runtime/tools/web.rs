@@ -979,7 +979,7 @@ impl NativeTool for WebSearchTool {
 
             if host_allowed(&engine_host) {
                 if let Some(refusal) = web_network_egress_refusal(
-                    "web.search",
+                    "web_search",
                     _gateway_store.as_ref(),
                     _run_context,
                     _session_id,
@@ -1565,7 +1565,7 @@ fn execute_web_fetch_http(
         }
 
         if let Some(refusal) = web_network_egress_refusal(
-            "web.fetch",
+            "web_fetch",
             gateway_store.as_ref(),
             run_context,
             session_id,
@@ -1829,7 +1829,7 @@ impl NativeTool for WebFetchTool {
         let max_chars = args.max_chars.unwrap_or(20_000).clamp(512, 200_000);
 
         if let Some(refusal) = web_network_egress_refusal(
-            "web.fetch",
+            "web_fetch",
             _gateway_store.as_ref(),
             _run_context,
             _session_id,
@@ -2233,7 +2233,7 @@ impl NativeTool for WebCallTool {
         }
 
         if let Some(refusal) = web_network_egress_refusal(
-            "web.call",
+            "web_call",
             _gateway_store.as_ref(),
             _run_context,
             _session_id,

@@ -142,8 +142,9 @@ pub(crate) fn canonical_tool_name(name: &str) -> &str {
     match name {
         "spawn" => "agent_spawn",
         "message" => "agent_message",
-        "search" => "web_search",
-        "fetch" => "web_fetch",
+        "search" | "web.search" => "web_search",
+        "fetch" | "web.fetch" => "web_fetch",
+        "call" | "web.call" => "web_call",
         "sandbox.exec" => "sandbox_exec",
         "artifact.exec" => "artifact_exec",
         "artifact.prepare" => "artifact_prepare",
@@ -2060,6 +2061,9 @@ mod tests {
             "web_search"
         );
         assert_eq!(canonical_tool_name("fetch"), "web_fetch");
+        assert_eq!(canonical_tool_name("web.fetch"), "web_fetch");
+        assert_eq!(canonical_tool_name("web.search"), "web_search");
+        assert_eq!(canonical_tool_name("web.call"), "web_call");
         assert_eq!(canonical_tool_name("sandbox.exec"), "sandbox_exec");
         assert_eq!(canonical_tool_name("artifact.exec"), "artifact_exec");
         assert_eq!(canonical_tool_name("artifact.prepare"), "artifact_prepare");

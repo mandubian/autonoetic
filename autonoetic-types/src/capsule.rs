@@ -99,6 +99,10 @@ pub struct CapsuleMemorySnapshot {
     pub content_handle: String,
     /// Whether the redaction pipeline was applied before export.
     pub redacted: bool,
+    /// Memory entries owned by the agent but withheld because their egress
+    /// label excluded the capsule's declared destination sink (RFC §7).
+    #[serde(default)]
+    pub withheld_count: u64,
 }
 
 /// Provenance record — where this capsule came from.
@@ -110,6 +114,13 @@ pub struct CapsuleProvenance {
     pub gateway_version: String,
     /// Trust domain claim: `"local"`, `"partner"`, or `"foreign"`.
     pub trust_domain: String,
+    /// Declared egress destination sink for memory filtering at export (RFC §7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_sink: Option<String>,
+    /// Memory entries withheld during export because their label excluded
+    /// [`destination_sink`](Self::destination_sink).
+    #[serde(default)]
+    pub memory_withheld_count: u64,
     /// If this capsule was produced by re-exporting an imported capsule,
     /// the original capsule's ID. Enables provenance chains across hops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +264,8 @@ fn default_provenance() -> CapsuleProvenance {
         origin_node_id: String::new(),
         gateway_version: String::new(),
         trust_domain: "local".to_string(),
+        destination_sink: None,
+        memory_withheld_count: 0,
         parent_capsule_id: None,
     }
 }
@@ -321,6 +334,7 @@ mod tests {
                 scopes: vec!["memory".to_string()],
                 content_handle: "memory/memory_snapshot.json".to_string(),
                 redacted: true,
+                withheld_count: 0,
             }),
             checkpoint_handle: if mode.needs_checkpoint() {
                 Some("checkpoint/checkpoint.json".to_string())
@@ -337,6 +351,8 @@ mod tests {
                 origin_node_id: "node-A".to_string(),
                 gateway_version: "0.4.0".to_string(),
                 trust_domain: "local".to_string(),
+                destination_sink: None,
+                memory_withheld_count: 0,
                 parent_capsule_id: None,
             },
             requires_agents: vec!["lead".to_string()],
