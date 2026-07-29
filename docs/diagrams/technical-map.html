@@ -322,8 +322,7 @@
           model, remote model, another agent, a federated peer, network, persistence, the user). Labels only
           ever <strong>narrow</strong> (a meet-lattice; taint is monotonic). Named shorthands:
           <span class="mono">unrestricted</span>, <span class="mono">no_remote_model</span>,
-          <span class="mono">local_only</span>. Gateway-assigned, never LLM-inferred — unclassified ⇒ remote
-          (fail-closed).</p>
+          <span class="mono">local_only</span>. Labels are gateway-assigned metadata, never LLM-inferred.</p>
       </div>
       <div class="box tone-served">
         <span class="kicker-chip">Chokepoint</span>
@@ -337,7 +336,9 @@
         <h3>Taint follows the request</h3>
         <p>Before a completion the batch's labels intersect; the gateway picks a provider whose class the
           result label allows, <strong>reroutes</strong> to an eligible preset, or <strong>refuses</strong> if
-          none qualifies — rather than downgrade. Recorded as <span class="mono">egress.provider_selected</span>.</p>
+          none qualifies — rather than downgrade. A provider with no declared egress class is treated as
+          <strong>remote</strong> (fail-closed), so restricted content is never sent to an unclassified
+          endpoint. Recorded as <span class="mono">egress.provider_selected</span>.</p>
       </div>
       <div class="box tone-served">
         <span class="kicker-chip">At rest</span>
