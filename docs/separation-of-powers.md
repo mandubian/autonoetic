@@ -279,6 +279,29 @@ Because the plane is gateway-only, a compromised or adversarial agent cannot
 launder tainted content to a remote sink by relabeling it — the same reason
 secrets never enter agent state.
 
+### Phase 4 boundary gates (#909)
+
+Beyond the LLM chokepoint, the gateway refuses non-LLM egress when session
+taint excludes the required sink. Widening is **only** via operator
+declassification (`egress.declassified`) — never LLM judgment.
+
+| Surface | What the gateway refuses |
+|---------|--------------------------|
+| `sandbox` | Enabling `share_net` under taint without declassification |
+| `web` | Native web tools (`web_fetch`, `web_search`, `web_call`) |
+| `hooks` | Hook HTTP callbacks |
+| `mcp` | Remote MCP `tools/call` (session + argument taint) |
+| `ofp` | Federated `AgentMessage` send; inbound unlabeled content fail-closed |
+| `compression` | Remote summarization of tainted context bands |
+
+Each refusal emits `egress.boundary_refused` (content-free: surface, label,
+envelope ids, reason). Operators audit with `gateway egress audit <session>`.
+
+For standing personal data sources, use the **data-owner compartment**:
+a resident agent owns the source, stays `local_only`, and answers siblings
+via `agent_message`. See
+[`docs/egress-data-owner-compartment.md`](egress-data-owner-compartment.md).
+
 ---
 
 ## The Vocabulary of Proposals

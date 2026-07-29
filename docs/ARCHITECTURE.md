@@ -354,6 +354,22 @@ must never reach a remote model."
   `provider_selected` / `boundary_refused` / `declassified`); "what left my
   machine at turn N, and why did it run on this provider?" is answerable from
   the causal chain alone (`gateway egress audit <session>`).
+- **Phase 4 boundary surfaces (#909).** Non-LLM egress paths gate on session
+  taint before bytes leave. Each refusal emits `egress.boundary_refused` with
+  a `surface` tag; operator widening emits `egress.declassified`:
+
+  | Surface | Gate |
+  |---------|------|
+  | `sandbox` | `share_net` requires declassification when taint excludes `Network`; `Unresolved` targets hard-refuse |
+  | `web` | `web_fetch` / `web_search` / `web_call` before outbound HTTP |
+  | `hooks` | `http.callback` deliveries |
+  | `mcp` | Remote SSE `tools/call` — session gate + argument-carried taint |
+  | `ofp` | Outbound `AgentMessage` withhold; inbound missing label fail-closed |
+  | `compression` | Tainted bands never summarize on remote presets |
+
+  The **data-owner compartment** pattern (resident agent + `local_only` +
+  `agent_message` replies) is documented in
+  [`docs/egress-data-owner-compartment.md`](egress-data-owner-compartment.md).
 
 ---
 
