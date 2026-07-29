@@ -1309,6 +1309,7 @@ pub fn network_egress_boundary_refusal_json(
     Some(payload.to_string())
 }
 
+
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation
 /// block so the summary's band membership + parent lineage is queryable
 /// (RFC §5.7 rule 2 + §9.1).
