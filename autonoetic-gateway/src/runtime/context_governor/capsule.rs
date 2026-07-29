@@ -384,10 +384,15 @@ fn bootstrap_capsule_from_compressed_markers(
 ///    (`prior`). This is the incremental path: `extract_delta` then only sees
 ///    the newly-compressible turns against the accumulated state, instead of
 ///    re-summarizing the whole history into an empty shell every time.
-/// 2. **Legacy bootstrap** from a `[COMPRESSED CONTEXT` marker in the live
-///    history — kept so old sessions / fresh histories (no prior capsule yet)
-///    still recover their compressed context.
-/// 3. **Fresh empty shell** for the very first compression of a session.
+/// 2. **Legacy bootstrap** from an **unrestricted** `[COMPRESSED CONTEXT`
+///    marker in the live history — kept so old sessions / fresh histories (no
+///    prior capsule yet) still recover their compressed context. A
+///    restrictively-labeled marker (e.g. an agent-forged block holding
+///    `local_only` content, §4.5) is **skipped**: the capsule injection is
+///    emitted `unrestricted`, so it must never be seeded from tainted content
+///    (RFC §2.1 / §5.5). The gateway's own clean-band blocks are unrestricted
+///    and still qualify.
+/// 3. **Fresh empty shell** when no prior capsule and no eligible marker.
 ///
 /// `reused` is `true` on path 1 so the caller can record provenance
 /// (`previous_version_handle`) before `apply_delta` mutates the capsule.
