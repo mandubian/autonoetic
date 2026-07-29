@@ -318,12 +318,18 @@ pub fn apply_decision(
         }
     }
 
-    // ── 1e. SandboxExec under Network-excluding taint = declassification ─
-    // Enabling share_net for local_only (etc.) is a label widen (RFC §8).
-    // Materialize a session-scoped Network grant + egress.declassified so the
-    // sandbox path cannot widen via host approval alone (#909 slice 2).
+    // ── 1e. Network egress under taint = declassification (RFC §8) ─────
+    // Sandbox share_net and gateway web tools widen to Sink::Network — materialize
+    // a session-scoped grant + egress.declassified (#909 slices 2 / 2b).
     if decision.status == ApprovalStatus::Approved {
-        if matches!(decision.action, ScheduledAction::SandboxExec { .. }) {
+        let network_action = matches!(
+            decision.action,
+            ScheduledAction::SandboxExec { .. }
+                | ScheduledAction::WebFetch { .. }
+                | ScheduledAction::WebSearch { .. }
+                | ScheduledAction::WebCall { .. }
+        );
+        if network_action {
             if let Some(root_sid) = &decision.root_session_id {
                 let taint = store
                     .get_session_egress_taint(&decision.session_id)
@@ -342,6 +348,21 @@ pub fn apply_decision(
                         .clone()
                         .unwrap_or(GrantScope::RootSession);
                     let expires_at = options.grant_expires_at.as_deref();
+                    let declass_reason = match &decision.action {
+                        ScheduledAction::SandboxExec { .. } => {
+                            "sandbox share_net under session egress taint (RFC §8)"
+                        }
+                        ScheduledAction::WebFetch { .. } => {
+                            "web.fetch network egress under session egress taint (RFC §8)"
+                        }
+                        ScheduledAction::WebSearch { .. } => {
+                            "web.search network egress under session egress taint (RFC §8)"
+                        }
+                        ScheduledAction::WebCall { .. } => {
+                            "web.call network egress under session egress taint (RFC §8)"
+                        }
+                        _ => "network egress under session egress taint (RFC §8)",
+                    };
                     match store.insert_egress_declassification_grant(
                         root_sid,
                         &decision.session_id,
@@ -359,7 +380,7 @@ pub fn apply_decision(
                                 target: "approval",
                                 request_id = %decision.request_id,
                                 error = %e,
-                                "Failed to insert Network declassification grant for tainted SandboxExec"
+                                "Failed to insert Network declassification grant for tainted network action"
                             );
                         }
                         Ok(()) => {
@@ -371,7 +392,7 @@ pub fn apply_decision(
                                 autonoetic_types::egress::Sink::Network,
                                 scope,
                                 Some(&decision.request_id),
-                                "sandbox share_net under session egress taint (RFC §8)",
+                                declass_reason,
                             );
                         }
                     }

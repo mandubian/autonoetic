@@ -187,6 +187,27 @@ fn session_grants_allow_host(
     store.session_grants_cover_targets(root_sid, &[host.to_string()])
 }
 
+/// Session-taint network egress gate (#909 slice 2b). Returns a JSON refusal when
+/// taint excludes [`Sink::Network`] without an active declassification grant.
+fn web_network_egress_refusal(
+    tool_name: &str,
+    gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+    run_context: Option<&NativeToolRunContext>,
+    session_id: Option<&str>,
+    agent_id: &str,
+    turn_id: Option<&str>,
+) -> Option<String> {
+    crate::runtime::egress_labeler::network_egress_boundary_refusal_json(
+        "web",
+        tool_name,
+        run_context,
+        gateway_store,
+        session_id,
+        agent_id,
+        turn_id,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Per-host probe budget for the read-style web tools (#857)
 //
@@ -957,6 +978,16 @@ impl NativeTool for WebSearchTool {
             enforce_remote_target_for_web(manifest, agent_dir, &engine_host, engine_url)?;
 
             if host_allowed(&engine_host) {
+                if let Some(refusal) = web_network_egress_refusal(
+                    "web.search",
+                    _gateway_store.as_ref(),
+                    _run_context,
+                    _session_id,
+                    &manifest.agent.id,
+                    _turn_id,
+                ) {
+                    return Ok(Some(refusal));
+                }
                 return Ok(None);
             }
 
@@ -1533,6 +1564,17 @@ fn execute_web_fetch_http(
             WebFetchHostGate::Allowed => {}
         }
 
+        if let Some(refusal) = web_network_egress_refusal(
+            "web.fetch",
+            gateway_store.as_ref(),
+            run_context,
+            session_id,
+            &manifest.agent.id,
+            None,
+        ) {
+            return Ok(WebFetchHttpOutcome::NeedsApproval(refusal));
+        }
+
         let fetch_url = current_url.clone();
         let hop = block_on_http({
             let client = client.clone();
@@ -2061,7 +2103,7 @@ impl NativeTool for WebCallTool {
             || approval_validated;
 
         if !host_allowed {
-            let Some(store) = _gateway_store else {
+            let Some(ref store) = _gateway_store else {
                 return Err(anyhow::Error::from(tagged::Tagged::permission(
                     anyhow::anyhow!(
                         "Permission Denied: NetworkAccess does not allow host '{}'",
@@ -2093,7 +2135,7 @@ impl NativeTool for WebCallTool {
             };
             let reason = format!("web.call to {} requires approval", host);
 
-            let gate = crate::runtime::human_gate::GateService::new(store);
+            let gate = crate::runtime::human_gate::GateService::new(store.clone());
             let gate_result = gate.check(
                 crate::runtime::human_gate::GateRequest {
                     kind: crate::runtime::human_gate::GateKind::Approval {
@@ -2177,6 +2219,17 @@ impl NativeTool for WebCallTool {
                     );
                 }
             }
+        }
+
+        if let Some(refusal) = web_network_egress_refusal(
+            "web.call",
+            _gateway_store.as_ref(),
+            _run_context,
+            _session_id,
+            &manifest.agent.id,
+            _turn_id,
+        ) {
+            return Ok(refusal);
         }
 
         let method = args

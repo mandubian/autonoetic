@@ -480,6 +480,28 @@ impl HookExecutor {
         let callback_url = required_string_param(hook, "url")?;
         let secret_env = required_string_param(hook, "secret_env")?;
         let parsed_url = validate_callback_url(&callback_url, &hook.callback_allowlist)?;
+        let hook_session_id = ctx
+            .session_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ctx.root_session_id.as_str());
+        let hook_agent_id = ctx.agent_id.as_deref().unwrap_or("gateway");
+        if let Some(refusal) =
+            crate::runtime::egress_labeler::network_egress_boundary_refusal_json(
+                "hooks",
+                "http.callback",
+                None,
+                store.as_ref(),
+                Some(hook_session_id),
+                hook_agent_id,
+                None,
+            )
+        {
+            anyhow::bail!(
+                "http.callback refused by egress boundary gate: {}",
+                refusal
+            );
+        }
         // Resolve the hostname *before* connecting and reject if any returned
         // address is internal. This catches the common case of a hostname
         // pointing at RFC-1918/loopback space without requiring a custom
