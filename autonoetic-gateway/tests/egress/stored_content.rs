@@ -337,6 +337,7 @@ fn memory_relabel_updates_and_is_auditable() -> anyhow::Result<()> {
         n,
         &EgressLabel::local_only(),
         Some("lessons"),
+        None,
     );
     let events = store.search_causal_events(Some("operator"), None, 20)?;
     assert!(

@@ -190,12 +190,16 @@ fn resolve_digest_llm_for_session(
             }
         }
     }
-    // Otherwise pick the first local preset in config.
-    if let Some((name, preset)) = config
+    // Otherwise pick the first local preset in config (sorted for determinism).
+    let mut local_names: Vec<&String> = config
         .llm_presets
         .iter()
-        .find(|(_, p)| preset_is_local(p))
-    {
+        .filter(|(_, p)| preset_is_local(p))
+        .map(|(name, _)| name)
+        .collect();
+    local_names.sort();
+    if let Some(name) = local_names.first() {
+        let preset = &config.llm_presets[*name];
         tracing::info!(
             target: "post_session_digest",
             preset = %name,

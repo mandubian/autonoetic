@@ -16,10 +16,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Parse optional `egress_label:` from YAML frontmatter (RFC §6 wiki surface).
-fn wiki_frontmatter_egress_label(content: &str) -> Option<EgressLabel> {
+///
+/// Returns `Ok(None)` when the key is absent (legacy default applies at filter
+/// time). Returns `Err` when the key is present but the value is unrecognized —
+/// fail-closed rather than silently widening to `legacy_unlabeled`.
+fn wiki_frontmatter_egress_label(content: &str) -> anyhow::Result<Option<EgressLabel>> {
     let t = content.trim_start();
     if !t.starts_with("---") {
-        return None;
+        return Ok(None);
     }
     let mut lines = t.lines();
     let _ = lines.next();
@@ -34,15 +38,26 @@ fn wiki_frontmatter_egress_label(content: &str) -> Option<EgressLabel> {
         else {
             continue;
         };
-        let raw = rest.trim().trim_matches('"').trim_matches('\'');
-        return match raw {
-            "unrestricted" => Some(NamedEgressLabel::Unrestricted.to_label()),
-            "local_only" => Some(NamedEgressLabel::LocalOnly.to_label()),
-            "no_remote_model" => Some(NamedEgressLabel::NoRemoteModel.to_label()),
-            _ => None,
-        };
+        let raw = rest
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        if raw.is_empty() {
+            anyhow::bail!("wiki page frontmatter: egress_label is present but empty");
+        }
+        let named: NamedEgressLabel = serde_json::from_str(&format!("\"{raw}\""))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "wiki page frontmatter: unrecognized egress_label '{raw}' \
+                     (expected unrestricted | local_only | no_remote_model)"
+                )
+            })?;
+        return Ok(Some(named.to_label()));
     }
-    None
+    Ok(None)
 }
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
@@ -239,7 +254,7 @@ impl NativeTool for WikiGetTool {
             .map(|c| c.egress.clone())
             .unwrap_or_default();
         let sink = query_sink_or_remote(run_context.and_then(|rc| rc.egress_query_sink));
-        let stored = wiki_frontmatter_egress_label(&result.content);
+        let stored = wiki_frontmatter_egress_label(&result.content)?;
         let label = resolve_stored_label(stored.as_ref(), &cfg);
         match filter_or_indicate_for_sink(
             &result.content,

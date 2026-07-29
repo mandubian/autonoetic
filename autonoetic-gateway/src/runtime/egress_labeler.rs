@@ -1264,14 +1264,16 @@ pub fn emit_relabel(
     kind: &str,
     count: u64,
     new_label: &EgressLabel,
-    scope: Option<&str>,
+    memory_scope: Option<&str>,
+    trace_session: Option<&str>,
 ) {
     let payload = serde_json::json!({
         "kind": kind,
         "count": count,
         "new_label": serde_json::to_value(new_label).unwrap_or(serde_json::Value::Null),
         "new_label_name": label_display_name(new_label),
-        "scope": scope,
+        "memory_scope": memory_scope,
+        "trace_session": trace_session,
     });
     emit_egress_event(
         store,

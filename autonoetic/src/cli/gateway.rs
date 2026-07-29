@@ -3218,6 +3218,9 @@ pub async fn handle_gateway_memory(
             traces_only,
             json,
         } => {
+            if *memories_only && *traces_only {
+                anyhow::bail!("--memories-only and --traces-only are mutually exclusive");
+            }
             let named = match label.trim().to_ascii_lowercase().as_str() {
                 "unrestricted" => NamedEgressLabel::Unrestricted,
                 "local_only" => NamedEgressLabel::LocalOnly,
@@ -3249,6 +3252,7 @@ pub async fn handle_gateway_memory(
                         memories_updated,
                         &new_label,
                         scope.as_deref(),
+                        None,
                     );
                 }
             }
@@ -3266,7 +3270,8 @@ pub async fn handle_gateway_memory(
                         "execution_traces",
                         traces_updated,
                         &new_label,
-                        scope.as_deref(),
+                        None,
+                        session.as_deref(),
                     );
                 }
             }
