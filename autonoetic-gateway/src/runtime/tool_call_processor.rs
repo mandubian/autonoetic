@@ -770,6 +770,25 @@ impl<'a> ToolCallProcessor<'a> {
                     ),
                 ));
             }
+            if self.mcp_runtime.tool_requires_network_egress_gate(tool_name) {
+                if let Some(refusal) =
+                    crate::runtime::egress_labeler::mcp_remote_egress_refusal_json(
+                        tool_name,
+                        &sanitized_args,
+                        self.run_context.as_ref(),
+                        self.gateway_store.as_ref(),
+                        self.session_id.as_deref(),
+                        &self.manifest.agent.id,
+                        self.turn_id.as_deref(),
+                        &self.egress_results,
+                    )
+                {
+                    return Ok(ToolCallOutput {
+                        result: refusal,
+                        cache_hit: false,
+                    });
+                }
+            }
             let r = self.mcp_runtime
                 .call_tool(tool_name, &sanitized_args)
                 .await?;

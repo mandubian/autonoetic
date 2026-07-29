@@ -14,6 +14,7 @@ pub struct McpToolRuntime {
     clients: HashMap<String, McpClient>,
     tools_by_name: HashMap<String, McpTool>,
     tool_server: HashMap<String, String>,
+    servers_by_name: HashMap<String, McpServer>,
 }
 
 impl McpToolRuntime {
@@ -34,6 +35,7 @@ impl McpToolRuntime {
             clients: HashMap::new(),
             tools_by_name: HashMap::new(),
             tool_server: HashMap::new(),
+            servers_by_name: HashMap::new(),
         }
     }
 
@@ -43,6 +45,15 @@ impl McpToolRuntime {
 
     pub fn has_tool(&self, tool_name: &str) -> bool {
         self.tools_by_name.contains_key(tool_name)
+    }
+
+    /// True when the tool's server is classified `remote` (SSE or explicit).
+    pub fn tool_requires_network_egress_gate(&self, tool_name: &str) -> bool {
+        self.tool_server
+            .get(tool_name)
+            .and_then(|server| self.servers_by_name.get(server))
+            .map(|s| s.requires_network_egress_gate())
+            .unwrap_or(false)
     }
 
     pub fn tool_definitions(&self) -> anyhow::Result<Vec<ToolDefinition>> {
@@ -101,9 +112,11 @@ impl McpToolRuntime {
         let mut clients = HashMap::new();
         let mut tools_by_name = HashMap::new();
         let mut tool_server = HashMap::new();
+        let mut servers_by_name = HashMap::new();
 
         for server in servers {
             let server_name = server.name.clone();
+            servers_by_name.insert(server_name.clone(), server.clone());
             let mut client = McpClient::connect(&server).await?;
             let tools = client.list_tools().await?;
             for tool in tools {
@@ -120,6 +133,7 @@ impl McpToolRuntime {
             clients,
             tools_by_name,
             tool_server,
+            servers_by_name,
         })
     }
 }

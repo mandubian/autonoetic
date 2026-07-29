@@ -370,30 +370,11 @@ impl EgressLabeler {
         // to prior labeled envelopes. Two deterministic signals:
         // 1. Handle reference — prior tool_call_id appears in the args JSON.
         // 2. Verbatim content — prior result content snippet appears in args.
-        let mut parent_envelope_ids: Vec<String> = Vec::new();
-        if !prior_labels.is_empty() {
-            let mut taint_label = EgressLabel::unrestricted();
-            for (prior_tcid, prior) in prior_labels {
-                let handle_match = req.arguments_json.contains(prior_tcid.as_str());
-                let verbatim_match = prior
-                    .content_snippet
-                    .as_deref()
-                    .map(|snip| !snip.is_empty() && req.arguments_json.contains(snip))
-                    .unwrap_or(false);
-                if handle_match || verbatim_match {
-                    taint_label = taint_label.restrict(&prior.label);
-                    parent_envelope_ids.push(prior_tcid.clone());
-                }
-            }
-            if !parent_envelope_ids.is_empty() {
-                // `prior_labels` is a HashMap — iteration order is
-                // nondeterministic. Sort so the lineage persisted into
-                // provenance / the `egress.envelope_labeled` event is stable
-                // and reproducible across runs (RFC §9.1 traceability).
-                parent_envelope_ids.sort();
-                resolution.label = resolution.label.restrict(&taint_label);
-                resolution.taint_applied = true;
-            }
+        let (taint_label, mut parent_envelope_ids) =
+            argument_taint_from_prior(req.arguments_json, prior_labels);
+        if !parent_envelope_ids.is_empty() {
+            resolution.label = resolution.label.restrict(&taint_label);
+            resolution.taint_applied = true;
         }
 
         // If the resolved label is unrestricted, there's nothing to audit —
@@ -1309,6 +1290,89 @@ pub fn network_egress_boundary_refusal_json(
     Some(payload.to_string())
 }
 
+/// Intersect argument-carried taint from prior labeled results in this turn.
+pub fn argument_taint_from_prior(
+    arguments_json: &str,
+    prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
+) -> (EgressLabel, Vec<String>) {
+    let mut taint_label = EgressLabel::unrestricted();
+    let mut parent_envelope_ids: Vec<String> = Vec::new();
+    if prior_labels.is_empty() {
+        return (taint_label, parent_envelope_ids);
+    }
+    for (prior_tcid, prior) in prior_labels {
+        let handle_match = arguments_json.contains(prior_tcid.as_str());
+        let verbatim_match = prior
+            .content_snippet
+            .as_deref()
+            .map(|snip| !snip.is_empty() && arguments_json.contains(snip))
+            .unwrap_or(false);
+        if handle_match || verbatim_match {
+            taint_label = taint_label.restrict(&prior.label);
+            parent_envelope_ids.push(prior_tcid.clone());
+        }
+    }
+    parent_envelope_ids.sort();
+    (taint_label, parent_envelope_ids)
+}
+
+/// Fail-closed MCP egress gate for remote servers: session taint × argument
+/// intersection must allow [`Sink::Network`]. Emits `egress.boundary_refused`
+/// with `surface: "mcp"` on refuse.
+pub fn mcp_remote_egress_refusal_json(
+    tool_name: &str,
+    arguments_json: &str,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    gateway_store: Option<&Arc<GatewayStore>>,
+    session_id: Option<&str>,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
+) -> Option<String> {
+    if let Some(refusal) = network_egress_boundary_refusal_json(
+        "mcp",
+        tool_name,
+        run_context,
+        gateway_store,
+        session_id,
+        agent_id,
+        turn_id,
+    ) {
+        return Some(refusal);
+    }
+
+    let store = gateway_store?;
+    let session_taint =
+        require_boundary_session_taint(run_context, Some(store.as_ref()), session_id).ok()?;
+    let (arg_taint, parent_envelope_ids) = argument_taint_from_prior(arguments_json, prior_labels);
+    let combined = session_taint.restrict(&arg_taint);
+    if combined.allows(Sink::Network) {
+        return None;
+    }
+
+    emit_surface_boundary_refused(
+        store,
+        session_id.unwrap_or(""),
+        agent_id,
+        turn_id,
+        "mcp",
+        &combined,
+        &parent_envelope_ids,
+        "MCP remote tools/call refused: session/argument egress labels exclude Network (RFC §7)",
+    );
+    let payload = serde_json::json!({
+        "ok": false,
+        "error_type": "egress_boundary_refused",
+        "surface": "mcp",
+        "tool": tool_name,
+        "message": format!(
+            "{tool_name} refused: session/argument egress labels exclude Network for remote MCP"
+        ),
+        "parent_envelope_ids": parent_envelope_ids,
+        "repair_hint": "Declassify Sink::Network for this session, remove restricted content from arguments, or use a local MCP server.",
+    });
+    Some(payload.to_string())
+}
 
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation
 /// block so the summary's band membership + parent lineage is queryable
