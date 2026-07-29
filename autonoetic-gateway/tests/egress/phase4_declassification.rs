@@ -169,6 +169,7 @@ fn apply_decision_materializes_grant_and_emits_declassified() -> anyhow::Result<
     Ok(())
 }
 
+
 #[test]
 fn approval_snapshot_persists_in_memory_taint_before_finalize() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
