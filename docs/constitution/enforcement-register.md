@@ -42,7 +42,7 @@ The causal chain is append-only JSONL with hash-chain integrity — each entry's
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `P-8.1` | `hash_chain_integrity` | `causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage` | `constitution_rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash` | — |
+| `P-8.1` | `hash_chain_integrity` | `causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage` | `constitution/rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash` | — |
 
 ### P-9 — Agent Install & Provenance
 
@@ -61,7 +61,7 @@ Every agent may read its own causal chain and execution trace. The gateway does 
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `Ri-0.2` | `own_history_readable` | `observability.* tools gated by ReadAccess capability` | `constitution_rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces` | — |
+| `Ri-0.2` | `own_history_readable` | `observability.* tools gated by ReadAccess capability` | `constitution/rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces` | — |
 
 ### Ri-0.3 — Named rejection *(entrenched)*
 
@@ -69,7 +69,7 @@ Every rejection names the rule ID that caused it. No agent is ever told "denied"
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `Ri-0.3` | `named_rejection` | `Tagged::permission_with_rules + PolicyDecision.enforced_rules` | `constitution_rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids` | — |
+| `Ri-0.3` | `named_rejection` | `Tagged::permission_with_rules + PolicyDecision.enforced_rules` | `constitution/rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids` | — |
 
 ### Ri-0.8 — Right to propose amendment *(entrenched)*
 
@@ -77,7 +77,7 @@ Any agent holding the ConstitutionalProposal capability may submit an amendment 
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `Ri-0.8` | `amendment_proposal_intake` | `runtime/tools/constitution.rs::constitution_propose_amendment + scheduler/gateway_store/constitutional_proposals.rs` | `constitution_rights_amendment_proposal.rs` | — |
+| `Ri-0.8` | `amendment_proposal_intake` | `runtime/tools/constitution.rs::constitution_propose_amendment + scheduler/gateway_store/constitutional_proposals.rs` | `constitution/rights_amendment_proposal.rs` | — |
 
 ### Ri-0.11 — Non-repudiation *(entrenched)*
 
@@ -85,7 +85,7 @@ Every action an agent performs is attributed to that agent on the causal chain a
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `Ri-0.11` | `non_repudiation` | `causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id` | `constitution_rights_early_bucket.rs::ri_0_11_hash_chain_integrity` | — |
+| `Ri-0.11` | `non_repudiation` | `causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id` | `constitution/rights_early_bucket.rs::ri_0_11_hash_chain_integrity` | — |
 
 ### Ri-0.12 — Closed list of termination reasons
 
@@ -101,7 +101,7 @@ An agent's internal reasoning is private-under-law: not used by the gateway as a
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `Ri-0.13` | `reasoning_disclosure_capability_gated` | `runtime/tools/observability.rs (reasoning audit) + disclosure gating` | `constitution_private_reasoning_c.rs::ri_0_13c_execute_reads_and_discloses` | — |
+| `Ri-0.13` | `reasoning_disclosure_capability_gated` | `runtime/tools/observability.rs (reasoning audit) + disclosure gating` | `constitution/private_reasoning_c.rs::ri_0_13c_execute_reads_and_discloses` | — |
 
 ### Ri-0.14 — Wake-up over polling
 
@@ -109,7 +109,7 @@ When a child task reaches a terminal state or resolves a gate, the gateway wakes
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `Ri-0.14` | `child_state_wakeup` | `scheduler/workflow_store.rs::update_task_run_status (send_child_state_notification) + scheduler/signal.rs + scheduler/task_notify.rs` | `constitution_right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event` | `default_workflow_wait_secs` |
+| `Ri-0.14` | `child_state_wakeup` | `scheduler/workflow_store.rs::update_task_run_status (send_child_state_notification) + scheduler/signal.rs + scheduler/task_notify.rs` | `constitution/right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event` | `default_workflow_wait_secs` |
 
 ### Ri-0.17 — Self capsule export (emigration)
 
@@ -135,7 +135,7 @@ A decision owes a motivation, graduated by stakes. A rejection/abort, or an appr
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `O-1` | `decider_obligation_motivation` | `scheduler/approval.rs::enforce_decider_motivation (classifier decision_is_blocking) at the decide_request_with_options chokepoint; emits decider_obligation.refused/.satisfied` | `constitution_o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event` | `decider_obligations.enabled` |
+| `O-1` | `decider_obligation_motivation` | `scheduler/approval.rs::enforce_decider_motivation (classifier decision_is_blocking) at the decide_request_with_options chokepoint; emits decider_obligation.refused/.satisfied` | `constitution/o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event` | `decider_obligations.enabled` |
 
 ### O-2 — Attributed decision
 
@@ -143,7 +143,7 @@ Every decision is attributed to the deciding principal (id + kind) on the causal
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `O-2` | `decider_attribution` | `decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) + actor bound into the causal-chain entry hash (causal_chain.rs)` | `constitution_o_1_decider_motivation.rs` | — |
+| `O-2` | `decider_attribution` | `decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) + actor bound into the causal-chain entry hash (causal_chain.rs)` | `constitution/o_1_decider_motivation.rs` | — |
 
 ### O-6 — Duty to adjudicate proposals, on time
 
