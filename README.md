@@ -89,11 +89,12 @@ flowchart TB
     class chain,bounds,evo fnd
 ```
 
-For the full picture — self-contained, no build step, light/dark aware — open the
-[governance architecture](docs/diagrams/architecture-map.html),
-[technical infrastructure](docs/diagrams/technical-map.html),
-[runtime dynamics](docs/diagrams/runtime-dynamics.html), and
-[federation & data model](docs/diagrams/federation-data-model.html) maps.
+For the full picture, open the live **[visual maps](https://mandubian.github.io/autonoetic/)** (rendered
+in your browser, light/dark aware):
+[governance architecture](https://mandubian.github.io/autonoetic/diagrams/architecture-map.html),
+[technical infrastructure](https://mandubian.github.io/autonoetic/diagrams/technical-map.html),
+[runtime dynamics](https://mandubian.github.io/autonoetic/diagrams/runtime-dynamics.html), and
+[federation & data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html).
 
 > New here? [**Why this exists**](#why-this-exists) lays out the three problems
 > that shape everything below; [**Autonoetic for beginners**](docs/autonoetic-concepts-for-beginners.md)
