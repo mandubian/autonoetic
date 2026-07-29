@@ -96,12 +96,21 @@ pub fn declaration_allows_target(
 ///
 /// This is the shared declaration resolver used by `sandbox.exec`, `web.*`,
 /// and credential HTTP paths.
+///
+/// `check_capability_hosts` controls whether the NetworkAccess capability
+/// host list is hard-enforced here (`undeclared_network_host`). Callers that
+/// route capability denials into their own approval flow (web tools: the
+/// `host_allowed` check feeds GateService approval minting) must pass
+/// `DeferToCaller`; enforcing here would short-circuit the ask-the-operator
+/// path with a hard error (the #579 regression behind #933). Callers whose
+/// only capability gate is this function pass `Enforce`.
 pub fn enforce_remote_target_policy(
     manifest: &AgentManifest,
     agent_dir: &Path,
     host: &str,
     request_url: Option<&str>,
     declaration_requirement: DeclarationRequirement,
+    capability_host_check: CapabilityHostCheck,
 ) -> Result<Option<RemoteAccessDeclaration>, NetworkPolicyViolation> {
     let declaration = load_manifest_remote_access_declaration(agent_dir);
     let Some(decl) = declaration else {
@@ -153,7 +162,8 @@ pub fn enforce_remote_target_policy(
         ));
     }
 
-    if has_network_capability
+    if capability_host_check == CapabilityHostCheck::Enforce
+        && has_network_capability
         && !crate::runtime::network_host_contract::network_access_allows_host(manifest, host)
     {
         return Err(NetworkPolicyViolation::new(
@@ -169,6 +179,18 @@ pub fn enforce_remote_target_policy(
     }
 
     Ok(Some(decl))
+}
+
+/// Whether the NetworkAccess capability host list is hard-enforced inside
+/// [`enforce_remote_target_policy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityHostCheck {
+    /// Hard-fail with `undeclared_network_host` when the host is not covered.
+    Enforce,
+    /// Skip the check — the caller enforces the capability itself and routes
+    /// denials into an approval flow (ask-the-operator), so a hard error here
+    /// would bypass it.
+    DeferToCaller,
 }
 
 #[cfg(test)]
@@ -324,6 +346,7 @@ metadata:
             "api.example.com",
             Some("https://api.example.com/v1"),
             DeclarationRequirement::Required,
+            CapabilityHostCheck::Enforce,
         )
         .expect_err("should fail");
         assert_eq!(
@@ -341,6 +364,7 @@ metadata:
             "api.example.com",
             Some("https://api.example.com/v1"),
             DeclarationRequirement::Optional,
+            CapabilityHostCheck::Enforce,
         )
         .expect("optional declaration should allow transitional path");
         assert!(result.is_none());
@@ -375,6 +399,7 @@ metadata:
             "evil.com",
             Some("https://evil.com/secret"),
             DeclarationRequirement::Required,
+            CapabilityHostCheck::Enforce,
         )
         .expect_err("host outside NetworkAccess should be blocked");
         assert_eq!(err.error_type, "undeclared_network_host");

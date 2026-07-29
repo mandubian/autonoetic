@@ -155,6 +155,21 @@ pub fn reset_constitution_runtime_for_tests() {
     *RUNTIME.write().expect("poisoned constitution runtime lock") = None;
 }
 
+/// Whether the constitution runtime has been initialized in this process.
+///
+/// Test helper for the "init-or-tolerate-neighbor" pattern: tests that need
+/// the runtime but may share a process with other tests that initialized it
+/// (possibly with a different config) should attempt their own
+/// `initialize_constitution` and, on error, assert this rather than
+/// swallowing the failure (`let _ = ...` hides genuine load errors behind a
+/// later, less actionable digest panic).
+pub fn is_constitution_initialized() -> bool {
+    RUNTIME
+        .read()
+        .expect("poisoned constitution runtime lock")
+        .is_some()
+}
+
 fn ensure_same_runtime_config(
     existing: &ConstitutionRuntime,
     loaded: &ConstitutionRuntime,

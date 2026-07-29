@@ -392,7 +392,30 @@ impl NativeTool for CredentialRequestTool {
                 &url_host,
                 Some(&args.url),
                 DeclarationRequirement::Required,
+                crate::runtime::network_policy::CapabilityHostCheck::Enforce,
             ) {
+                // Declaration-layer violations fail shut with the specific
+                // error_type — the cross-tool parity pin requires declaration
+                // failures to be consistent across sandbox, web, and
+                // credential paths, and those paths fail shut. This includes
+                // `remote_preapproval_requires_network_capability`: a manifest
+                // inconsistency, which an operator approval must not be able
+                // to override at runtime. Capability-layer violations fall
+                // through to the approval flow below (ask-the-operator).
+                if matches!(
+                    violation.error_type,
+                    "missing_remote_access_declaration"
+                        | "undeclared_remote_target"
+                        | "remote_preapproval_requires_network_capability"
+                ) {
+                    return Ok(json!({
+                        "ok": false,
+                        "error_type": violation.error_type,
+                        "message": violation.message,
+                        "repair_hint": violation.repair_hint,
+                    })
+                    .to_string());
+                }
                 let action = ScheduledAction::CredentialRequest {
                     credential_id: args.credential_id.clone(),
                     url: args.url.clone(),
@@ -1643,6 +1666,7 @@ impl NativeTool for CredentialSetupTool {
                                 &url_host,
                                 Some(&url),
                                 DeclarationRequirement::Required,
+                                crate::runtime::network_policy::CapabilityHostCheck::Enforce,
                             )
                             .err()
                             .map(|v| v.error_type.to_string())
@@ -1957,6 +1981,7 @@ impl NativeTool for CredentialSetupTool {
                             &host,
                             Some(url),
                             DeclarationRequirement::Required,
+                            crate::runtime::network_policy::CapabilityHostCheck::Enforce,
                         )
                         .err()
                         .map(|v| v.error_type.to_string())

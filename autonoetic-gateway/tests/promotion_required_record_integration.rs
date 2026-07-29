@@ -1,6 +1,7 @@
 
 mod support;
 
+use autonoetic_gateway::constitution_digest::initialize_constitution;
 use autonoetic_gateway::runtime::promotion_store::PromotionStore;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::GatewayExecutionService;
@@ -8,6 +9,19 @@ use autonoetic_types::promotion::PromotionRole;
 use crate::support::{seed_agent_revision, EnvGuard, TestWorkspace};
 
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// The reply path reads the constitution version for the state-attestation
+/// tail (P-6.23); initialize with the default config. A config-mismatch error
+/// only means a neighbor test initialized first — that runtime satisfies the
+/// read; anything else must surface here, not at the digest.
+fn ensure_constitution() {
+    if let Err(e) = initialize_constitution(&autonoetic_types::config::GatewayConfig::default()) {
+        assert!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize and no neighbor initialized it either: {e}"
+        );
+    }
+}
 
 fn install_deterministic_reply_agent(
     agent_dir: &std::path::Path,
@@ -53,6 +67,7 @@ Always return deterministic output.
 
 #[tokio::test]
 async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<()> {
+    ensure_constitution();
     let workspace = TestWorkspace::new()?;
     let _api_key = EnvGuard::set(OPENAI_API_KEY_ENV, "test-key");
     let agent_id = "sealed_evaluator.default";
@@ -98,6 +113,7 @@ async fn test_required_promotion_record_fails_when_missing() -> anyhow::Result<(
 
 #[tokio::test]
 async fn test_required_promotion_record_succeeds_when_present() -> anyhow::Result<()> {
+    ensure_constitution();
     let workspace = TestWorkspace::new()?;
     let _api_key = EnvGuard::set(OPENAI_API_KEY_ENV, "test-key");
     let agent_id = "sealed_evaluator.default";

@@ -302,8 +302,11 @@ fn test_workflow_wait_missing_task_returns_immediately_in_blocking_mode() {
         parsed.get("message").and_then(|v| v.as_str()),
         Some("One or more tasks were not found. Verify task_ids and workflow_id.")
     );
+    // Wall-clock bound: catches a regression to blocking for the full 30s
+    // timeout, while tolerating scheduler noise when the whole binary runs
+    // with high thread parallelism (the 2s form flaked at ~96 threads).
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
+        elapsed < std::time::Duration::from_secs(10),
         "blocking workflow.wait should fail fast for missing tasks"
     );
 }
@@ -2004,9 +2007,9 @@ fn test_skill_normalize_sole_url_requires_network_access() {
         serde_json::from_str(&result).expect("skill_normalize result should decode");
     assert_eq!(parsed.get("ok"), Some(&serde_json::json!(false)));
     let err = parsed
-        .get("error")
+        .get("message")
         .and_then(|v| v.as_str())
-        .expect("error string");
+        .expect("error message");
     assert!(
         err.contains("NetworkAccess"),
         "expected policy hint, got: {err}"

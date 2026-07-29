@@ -7,6 +7,7 @@
 //!   4. Session resumes from checkpoint with operator guidance injected as system message.
 
 
+use autonoetic_gateway::constitution_digest::initialize_constitution;
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -335,6 +336,16 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
 #[serial_test::serial]
 #[tokio::test]
 async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()> {
+    // The reply path reads the constitution version for the state-attestation
+    // tail (P-6.23); initialize before the digest is touched. A config-mismatch
+    // error only means a neighbor test initialized first — that runtime
+    // satisfies the read; anything else must surface here, not at the digest.
+    if let Err(e) = initialize_constitution(&autonoetic_types::config::GatewayConfig::default()) {
+        anyhow::ensure!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize and no neighbor initialized it either: {e}"
+        );
+    }
     let workspace = crate::support::TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.approval_dwell_multiplier = 0.0;

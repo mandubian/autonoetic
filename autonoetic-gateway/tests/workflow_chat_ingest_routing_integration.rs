@@ -49,9 +49,29 @@ llm_config:
     Ok(())
 }
 
+// This test drives a live JSON-RPC ingress that runs a full planner turn
+// (router → executor → reqwest/hyper LLM stub call). In debug builds the
+// combined future depth overflows the default 2 MiB test-thread stack; it
+// passes under --release and at RUST_MIN_STACK=4 MiB. `#[tokio::test]`
+// doesn't expose `thread_stack_size`, so — same pattern as
+// gateway_ingress_integration (#836) — the runtime runs on an OS thread
+// with an 8 MiB stack. Debug-only stack depth, not a production bug.
 #[serial_test::serial]
-#[tokio::test]
-async fn test_chat_ingest_from_child_session_routes_to_planner_root_while_tasks_run(
+#[test]
+fn test_chat_ingest_from_child_session_routes_to_planner_root_while_tasks_run(
+) -> anyhow::Result<()> {
+    let child = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(chat_ingest_from_child_session_routes_to_planner_root_while_tasks_run_impl())
+        })?;
+    child.join().expect("test thread panicked")
+}
+
+async fn chat_ingest_from_child_session_routes_to_planner_root_while_tasks_run_impl(
 ) -> anyhow::Result<()> {
     let stub = OpenAiStub::spawn(|_, _body_json| async move {
         serde_json::json!({
