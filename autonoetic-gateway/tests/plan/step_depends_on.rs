@@ -5,7 +5,6 @@
 //! 2. StepStatus tracking via planframe_amend (step_status field)
 //! 3. unsatisfied_dependencies logic (the core check used by agent_spawn enforcement)
 
-mod support;
 
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration, ScriptInputMode};

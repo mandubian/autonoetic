@@ -24,6 +24,8 @@
 //! it, so the bounded run happens in a **child process** and the parent turns a
 //! non-zero exit into a normal test failure with an actionable message.
 
+mod support;
+
 /// Stack the dispatch path must fit inside. Deliberately below the 2 MiB libtest
 /// default so this guard trips *before* unrelated router tests start aborting.
 ///
@@ -64,7 +66,6 @@ fn dispatch_fits_within_the_stack_budget() {
     );
 }
 
-mod support;
 
 /// The bounded run. `#[ignore]` because it is only meaningful when the parent
 /// invokes it by name in its own process; the thread is spawned with an explicit

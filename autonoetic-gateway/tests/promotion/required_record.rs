@@ -1,5 +1,4 @@
 
-mod support;
 
 use autonoetic_gateway::constitution_digest::initialize_constitution;
 use autonoetic_gateway::runtime::promotion_store::PromotionStore;

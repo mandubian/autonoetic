@@ -7,7 +7,6 @@
 //! 4. Cache hit on second run → approval reuse works
 //! 5. artifact_exec tool is registered and gated by ArtifactExecution
 
-mod support;
 
 use autonoetic_gateway::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,

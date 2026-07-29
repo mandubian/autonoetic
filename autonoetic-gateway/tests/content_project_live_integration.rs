@@ -1,6 +1,7 @@
 //! `content.project_live` JSON-RPC — materialize live session drafts into a real
 //! directory the operator can open in an external editor (#524, Tier 1).
 
+
 mod support;
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcRouter};
@@ -8,7 +9,7 @@ use autonoetic_gateway::runtime::content_store::ContentStore;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 struct Env {
     _ws: TestWorkspace,

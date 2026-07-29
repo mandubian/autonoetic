@@ -20,7 +20,6 @@
 //!   4. Per-session budget exhaustion does NOT arm the breaker (the
 //!      `root_budget_exhausted` flag stays false), so no root cascade fires.
 
-mod support;
 
 use std::sync::Arc;
 
@@ -41,7 +40,7 @@ use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDe
 use autonoetic_types::config::{RootSessionBudgetConfig, SessionBudgetConfig};
 use autonoetic_types::workflow::{TaskRun, TaskRunStatus, WorkflowRunStatus};
 use chrono::Utc;
-use support::TestWorkspace;
+use crate::support::TestWorkspace;
 
 // --------------------------------------------------------------------------
 // shared helpers

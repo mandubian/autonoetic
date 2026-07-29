@@ -13,7 +13,6 @@
 //!   * requires a smoke test for a shape-changing replacement of an executable
 //!     agent, the way it would for a brand-new agent (#657).
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
