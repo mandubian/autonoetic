@@ -29,13 +29,18 @@ impl GatewayStore {
 
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        // None → SQL NULL (legacy unlabeled); Some → JSON label object.
+        let egress_label_json = match &memory.egress_label {
+            Some(label) => Some(serde_json::to_string(label)?),
+            None => None,
+        };
         tx.execute(
             "INSERT OR REPLACE INTO memories (
                 memory_id, scope, owner_agent_id, writer_agent_id, source_type, source_ref,
                 created_at, updated_at, content, content_hash, confidence, tags, lineage,
                 visibility, expires_at, revision_id, binding_session_id, alias_ref,
-                quarantine_reason
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                quarantine_reason, egress_label_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &memory.memory_id,
                 &memory.scope,
@@ -56,6 +61,7 @@ impl GatewayStore {
                 &memory.binding_session_id,
                 &memory.alias_ref,
                 &memory.quarantine_reason,
+                egress_label_json,
             ],
         )?;
         tx.execute(

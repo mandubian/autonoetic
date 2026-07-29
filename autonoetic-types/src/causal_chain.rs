@@ -126,6 +126,10 @@ pub struct ExecutionTraceRecord {
     pub approval_request_id: Option<String>,
     pub arguments: Option<String>,
     pub result: Option<String>,
+    /// Where stdout/stderr/result may flow (RFC data-envelopes §6). `None` =
+    /// legacy unlabeled row; the gateway applies `egress.legacy_unlabeled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_label: Option<crate::egress::EgressLabel>,
 }
 
 impl ExecutionTraceRecord {
@@ -162,6 +166,7 @@ impl ExecutionTraceRecord {
                 approval_request_id: self.approval_request_id.clone(),
                 arguments: None,
                 result: None,
+                egress_label: self.egress_label.clone(),
             },
         }
     }
@@ -318,6 +323,7 @@ mod redaction_tests {
             result: Some(
                 r#"{"api_key":"verysecret","ok":true,"items":["a","b"]}"#.into(),
             ),
+            egress_label: None,
         }
     }
 

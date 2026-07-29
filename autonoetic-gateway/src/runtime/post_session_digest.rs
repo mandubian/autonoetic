@@ -129,6 +129,13 @@ fn strip_markdown_frontmatter(raw: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
+fn preset_is_local(p: &LlmPreset) -> bool {
+    matches!(
+        p.egress_class,
+        Some(autonoetic_types::egress::EgressClass::Local)
+    )
+}
+
 fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig> {
     let d = &config.digest_agent;
     if let Some(preset_name) = d.llm_preset.as_ref() {
@@ -161,6 +168,50 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         thinking: None,
         egress_class: None,
     })
+}
+
+/// When session taint excludes RemoteModel, force a local digest preset
+/// (RFC §6 / #908). Errors clearly if none is configured.
+fn resolve_digest_llm_for_session(
+    config: &GatewayConfig,
+    session_taint: Option<&autonoetic_types::egress::EgressLabel>,
+) -> anyhow::Result<LlmConfig> {
+    let needs_local = session_taint
+        .map(|t| !t.allows(autonoetic_types::egress::Sink::RemoteModel))
+        .unwrap_or(false);
+    if !needs_local {
+        return resolve_digest_llm_config(config);
+    }
+    // Prefer configured digest preset if it is already local.
+    if let Some(name) = config.digest_agent.llm_preset.as_ref() {
+        if let Some(preset) = config.llm_presets.get(name) {
+            if preset_is_local(preset) {
+                return Ok(llm_preset_to_config(preset));
+            }
+        }
+    }
+    // Otherwise pick the first local preset in config (sorted for determinism).
+    let mut local_names: Vec<&String> = config
+        .llm_presets
+        .iter()
+        .filter(|(_, p)| preset_is_local(p))
+        .map(|(name, _)| name)
+        .collect();
+    local_names.sort();
+    if let Some(name) = local_names.first() {
+        let preset = &config.llm_presets[*name];
+        tracing::info!(
+            target: "post_session_digest",
+            preset = %name,
+            "session taint excludes RemoteModel; using local digest preset"
+        );
+        return Ok(llm_preset_to_config(preset));
+    }
+    Err(anyhow::anyhow!(
+        "post_session_digest: session egress taint excludes RemoteModel but no \
+         llm_presets entry with egress_class: local is configured — refusing digest \
+         rather than shipping tainted content to a remote model"
+    ))
 }
 
 fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
@@ -239,6 +290,7 @@ async fn apply_digest_output(
     session_id: &str,
     source_agent_id: &str,
     output: &DigestLlmOutput,
+    session_taint: Option<&autonoetic_types::egress::EgressLabel>,
 ) -> anyhow::Result<()> {
     let base = base_session_id(session_id);
     let cs = ContentStore::new(gateway_dir)?;
@@ -283,6 +335,12 @@ async fn apply_digest_output(
         obj.tags = tags;
         obj.confidence = m.confidence;
         obj.visibility = MemoryVisibility::Global;
+        // Digest memories inherit the session's accumulated taint (RFC §6).
+        obj.egress_label = Some(
+            session_taint
+                .cloned()
+                .unwrap_or_else(autonoetic_types::egress::EgressLabel::unrestricted),
+        );
         memory_store.upsert(&obj).await?;
     }
     Ok(())
@@ -295,8 +353,14 @@ async fn run_post_session_digest_inner(
     source_agent_id: &str,
     digest_llm: &LlmConfig,
     driver: &dyn LlmDriver,
+    egress_cfg: &autonoetic_types::egress::EgressConfig,
 ) -> anyhow::Result<()> {
     let base = base_session_id(session_id);
+    let session_taint = store.get_session_egress_taint(session_id)?;
+    let digest_sink = digest_llm
+        .egress_class
+        .unwrap_or(autonoetic_types::egress::EgressClass::Remote)
+        .as_sink();
     let digest_path = gateway_dir.join("sessions").join(base).join("digest.md");
     let live_digest = match std::fs::read_to_string(&digest_path) {
         Ok(s) => s,
@@ -323,7 +387,11 @@ async fn run_post_session_digest_inner(
         } else {
             failure_count += 1;
         }
-        let summary = if ok {
+        let label = crate::runtime::egress_stored::resolve_stored_label(
+            t.egress_label.as_ref(),
+            egress_cfg,
+        );
+        let raw_summary = if ok {
             t.result
                 .as_deref()
                 .or(t.stdout.as_deref())
@@ -333,6 +401,18 @@ async fn run_post_session_digest_inner(
                 .as_deref()
                 .or(t.stderr.as_deref())
                 .unwrap_or("(failure)")
+        };
+        let summary = match crate::runtime::egress_stored::filter_or_indicate_for_sink(
+            raw_summary,
+            &label,
+            digest_sink,
+            Some("post_session_digest.trace"),
+            autonoetic_types::egress::IndicationVerbosity::Descriptive,
+        ) {
+            crate::runtime::egress_stored::FilteredStoredContent::Allowed(c) => c,
+            crate::runtime::egress_stored::FilteredStoredContent::Withheld { indication } => {
+                indication
+            }
         };
         let status = if ok { "ok" } else { "error" };
         let kind = if ok {
@@ -444,6 +524,7 @@ async fn run_post_session_digest_inner(
         session_id,
         source_agent_id,
         &output,
+        session_taint.as_ref(),
     )
     .await?;
     Ok(())
@@ -478,7 +559,18 @@ pub async fn maybe_run_post_session_digest(
     if source_agent_id == DIGEST_AGENT_ID {
         return;
     }
-    let llm_cfg = match resolve_digest_llm_config(config) {
+    let session_taint = match store.get_session_egress_taint(session_id) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(
+                target: "post_session_digest",
+                error = %e,
+                "failed to read session egress taint; skipping digest (fail-closed)"
+            );
+            return;
+        }
+    };
+    let llm_cfg = match resolve_digest_llm_for_session(config, session_taint.as_ref()) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(
@@ -507,6 +599,7 @@ pub async fn maybe_run_post_session_digest(
         source_agent_id,
         &llm_cfg,
         driver.as_ref(),
+        &config.egress,
     )
     .await
     {
@@ -535,6 +628,7 @@ pub async fn run_post_session_digest_with_driver(
         source_agent_id,
         digest_llm,
         driver,
+        &autonoetic_types::egress::EgressConfig::default(),
     )
     .await
 }

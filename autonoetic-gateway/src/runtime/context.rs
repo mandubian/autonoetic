@@ -179,12 +179,23 @@ fn is_error_lesson_scope(scope: &str) -> bool {
 /// recency, unchanged from before task-matched recall.
 ///
 /// Returns `None` if no memories are found or the store is unavailable.
-pub(crate) fn build_memory_context_snippet(
+pub fn build_memory_context_snippet(
     store: &crate::scheduler::gateway_store::GatewayStore,
     agent_id: &str,
     max_memories: usize,
     task_text: Option<&str>,
+    query_sink: Option<autonoetic_types::egress::Sink>,
+    egress_cfg: Option<&autonoetic_types::egress::EgressConfig>,
 ) -> Option<String> {
+    use crate::runtime::egress_stored::{
+        filter_or_indicate_for_sink, query_sink_or_remote, resolve_stored_label,
+        FilteredStoredContent,
+    };
+    use autonoetic_types::egress::IndicationVerbosity;
+
+    let sink = query_sink_or_remote(query_sink);
+    let default_cfg = autonoetic_types::egress::EgressConfig::default();
+    let cfg = egress_cfg.unwrap_or(&default_cfg);
     let agent_tag = format!("agent:{agent_id}");
 
     // `search_memories_by_tags` ORs its tags, so the two-tag queries below
@@ -266,7 +277,18 @@ pub(crate) fn build_memory_context_snippet(
 
     let mut parts = vec!["---\n\nPrior Knowledge (from past sessions)\n".to_string()];
     for mem in &selected {
-        let truncated: String = mem.content.chars().take(500).collect();
+        let label = resolve_stored_label(mem.egress_label.as_ref(), cfg);
+        let content = match filter_or_indicate_for_sink(
+            &mem.content,
+            &label,
+            sink,
+            Some("memory.priming"),
+            IndicationVerbosity::Descriptive,
+        ) {
+            FilteredStoredContent::Allowed(c) => c,
+            FilteredStoredContent::Withheld { indication } => indication,
+        };
+        let truncated: String = content.chars().take(500).collect();
         let session_ref = mem
             .tags
             .iter()
@@ -580,7 +602,24 @@ impl AgentExecutor {
         let task_text = task_matched
             .then_some(self.initial_user_message.as_str())
             .filter(|t| !t.trim().is_empty());
-        build_memory_context_snippet(store, agent_id, limit, task_text)
+        // Fail closed to RemoteModel unless the session is already local-tainted
+        // (in which case LocalModel priming is allowed).
+        let query_sink = {
+            let t = crate::runtime::egress_labeler::session_accumulated_taint(&self.egress_labels);
+            if t.allows(autonoetic_types::egress::Sink::RemoteModel) {
+                None
+            } else {
+                Some(autonoetic_types::egress::Sink::LocalModel)
+            }
+        };
+        build_memory_context_snippet(
+            store,
+            agent_id,
+            limit,
+            task_text,
+            query_sink,
+            Some(&config.egress),
+        )
     }
 
     /// Compose, sign, and render the R++1 state-attestation tail for the
@@ -1333,6 +1372,8 @@ mod injected_recall_tests {
             agent_id,
             1,
             Some("fetch weather data from api"),
+            None,
+            None,
         )
         .expect("expected snippet");
 
@@ -1367,6 +1408,8 @@ mod injected_recall_tests {
             agent_id,
             1,
             Some("fetch weather data from api"),
+            None,
+            None,
         )
         .expect("expected snippet");
 
@@ -1407,7 +1450,14 @@ mod injected_recall_tests {
         );
 
         let snippet =
-            build_memory_context_snippet(&store, "coder.default", 5, Some("api retries"))
+            build_memory_context_snippet(
+            &store,
+            "coder.default",
+            5,
+            Some("api retries"),
+            None,
+            None,
+        )
                 .expect("expected snippet");
         assert!(snippet.contains("own lesson"), "own memory expected: {snippet}");
         assert!(
@@ -1441,7 +1491,14 @@ mod injected_recall_tests {
             "2026-06-01T00:00:00Z",
         );
 
-        let snippet = build_memory_context_snippet(&store, agent_id, 2, None)
+        let snippet = build_memory_context_snippet(
+            &store,
+            agent_id,
+            2,
+            None,
+            None,
+            None,
+        )
             .expect("expected snippet");
 
         let lines: Vec<&str> = snippet.lines().filter(|l| l.starts_with("- ")).collect();

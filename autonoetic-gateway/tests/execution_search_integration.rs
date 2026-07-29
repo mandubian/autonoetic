@@ -72,6 +72,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         approval_request_id: None,
         arguments: Some(r#"{"command": "rustc src/main.rs"}"#.to_string()),
         result: Some(r#"{"ok": false, "exit_code": 1, "stderr": "error[E0308]: ..."}"#.to_string()),
+        egress_label: None,
     };
     store.create_execution_trace(&fail_trace)?;
 
@@ -96,6 +97,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         approval_request_id: None,
         arguments: Some(r#"{"command": "cargo test"}"#.to_string()),
         result: Some(r#"{"ok": true, "exit_code": 0}"#.to_string()),
+        egress_label: None,
     };
     store.create_execution_trace(&success_trace)?;
 
@@ -216,6 +218,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         approval_request_id: None,
         arguments: None,
         result: None,
+        egress_label: None,
     })?;
 
     store.create_execution_trace(&ExecutionTraceRecord {
@@ -238,6 +241,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         approval_request_id: None,
         arguments: None,
         result: None,
+        egress_label: None,
     })?;
 
     let registry = autonoetic_gateway::runtime::tools::default_registry();

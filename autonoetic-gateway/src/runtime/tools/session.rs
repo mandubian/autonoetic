@@ -463,7 +463,7 @@ impl NativeTool for SessionSummarizeTool {
         _turn_id: Option<&str>,
         _config: Option<&GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -599,11 +599,34 @@ impl NativeTool for SessionSummarizeTool {
             .map_err(|e| anyhow::anyhow!("Failed to parse transcript: {}", e))?;
 
         let excerpt = crate::runtime::history_persist::extract_searchable_excerpt(&messages);
-        let summary = if excerpt.len() > args.max_length {
+        let mut summary = if excerpt.len() > args.max_length {
             format!("{}...", &excerpt[..args.max_length])
         } else {
             excerpt
         };
+        // RFC §6: if the peeked session carries taint that excludes the
+        // caller's query sink, withhold the transcript excerpt.
+        let sink = crate::runtime::egress_stored::query_sink_or_remote(
+            run_context.and_then(|rc| rc.egress_query_sink),
+        );
+        if let Ok(Some(taint)) = store.get_session_egress_taint(&transcript_record.session_id) {
+            if !taint.allows(sink) {
+                match crate::runtime::egress_stored::filter_or_indicate_for_sink(
+                    &summary,
+                    &taint,
+                    sink,
+                    Some("session_peek"),
+                    autonoetic_types::egress::IndicationVerbosity::Descriptive,
+                ) {
+                    crate::runtime::egress_stored::FilteredStoredContent::Withheld {
+                        indication,
+                    } => summary = indication,
+                    crate::runtime::egress_stored::FilteredStoredContent::Allowed(s) => {
+                        summary = s;
+                    }
+                }
+            }
+        }
 
         let turn_count = messages.len();
         let user_turns = messages

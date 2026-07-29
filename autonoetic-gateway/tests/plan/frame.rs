@@ -1378,6 +1378,7 @@ fn curl_trace(session_id: &str, command: &str) -> autonoetic_types::causal_chain
         approval_request_id: None,
         arguments: Some(format!(r#"{{"command":"{command}"}}"#)),
         result: None,
+        egress_label: None,
     }
 }
 

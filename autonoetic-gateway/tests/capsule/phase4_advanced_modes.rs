@@ -139,6 +139,7 @@ fn memory_export_then_import_roundtrip_with_conflict_policy() {
             binding_session_id: None,
             alias_ref: None,
             quarantine_reason: None,
+            egress_label: None,
         };
         f.store.memory_upsert(&obj).unwrap();
     }
@@ -527,6 +528,7 @@ fn import_refuses_memory_entry_with_mismatched_owner() {
             binding_session_id: None,
             alias_ref: None,
             quarantine_reason: None,
+            egress_label: None,
         };
         f.store.memory_upsert(&obj).unwrap();
     }

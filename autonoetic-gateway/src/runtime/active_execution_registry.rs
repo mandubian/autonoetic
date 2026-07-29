@@ -50,6 +50,10 @@ pub struct NativeToolRunContext {
     /// the payload with what the sender touched, closing the `LocalAgent` hole.
     /// `None` ⇒ the sender touched nothing restrictive (unrestricted payload).
     pub egress_taint: Option<autonoetic_types::egress::EgressLabel>,
+    /// Target sink for stored-content recall/search filters (RFC §6). `None`
+    /// is treated as [`Sink::RemoteModel`] (fail-closed) by
+    /// [`crate::runtime::egress_stored::query_sink_or_remote`].
+    pub egress_query_sink: Option<autonoetic_types::egress::Sink>,
 }
 
 #[derive(Clone)]

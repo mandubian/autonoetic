@@ -496,6 +496,11 @@ pub enum GatewayCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Bulk-relabel stored memories and execution traces (egress Phase 3 / #908).
+    Memory {
+        #[command(subcommand)]
+        command: GatewayMemoryCommands,
+    },
     /// Manage system agents (declared in config, auto-scheduled on startup).
     SystemAgents {
         #[command(subcommand)]
@@ -606,6 +611,35 @@ pub enum GatewayConstitutionProposalCommands {
         /// Optional reason.
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GatewayMemoryCommands {
+    /// Bulk-update egress labels on memories and execution traces; emits
+    /// `egress.relabel` causal events (RFC data-envelopes §6.7).
+    Relabel {
+        /// Named label: unrestricted | local_only | no_remote_model
+        #[arg(long, value_name = "LABEL")]
+        label: String,
+        /// Optional memory scope filter.
+        #[arg(long)]
+        scope: Option<String>,
+        /// Optional session id filter for execution_traces (branch match).
+        #[arg(long)]
+        session: Option<String>,
+        /// Only rows whose egress_label_json is NULL/empty.
+        #[arg(long)]
+        only_unlabeled: bool,
+        /// Skip updating execution_traces.
+        #[arg(long)]
+        memories_only: bool,
+        /// Skip updating memories.
+        #[arg(long)]
+        traces_only: bool,
+        /// Emit machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
     },
 }
 

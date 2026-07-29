@@ -5640,6 +5640,7 @@ mod approval_execution_context_tests {
             wake_hints_map: None,
             wake_hint: None,
             egress_taint: None,
+            egress_query_sink: None,
         };
         let (root, wf, task) =
             approval_execution_context(Some(&rc), Some(rc.session_id.as_str()));
