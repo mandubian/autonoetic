@@ -313,6 +313,42 @@
       </div>
     </div>
 
+    <div class="subhead">Egress — where content is allowed to flow (data-envelopes)</div>
+    <div class="grid2">
+      <div class="box tone-served">
+        <span class="kicker-chip">Lattice</span>
+        <h3>The egress label</h3>
+        <p>Content carries an <span class="mono">EgressLabel</span> — the set of sinks it may reach (local
+          model, remote model, another agent, a federated peer, network, persistence, the user). Labels only
+          ever <strong>narrow</strong> (a meet-lattice; taint is monotonic). Named shorthands:
+          <span class="mono">unrestricted</span>, <span class="mono">no_remote_model</span>,
+          <span class="mono">local_only</span>. Gateway-assigned, never LLM-inferred — unclassified ⇒ remote
+          (fail-closed).</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">Chokepoint</span>
+        <h3>Withheld at the model boundary</h3>
+        <p>A policy driver wraps every LLM call. For each message / tool result it looks up the label; if the
+          target sink is excluded it <strong>substitutes an indication</strong> — never the bytes — and asserts
+          the surviving content is echoed verbatim. The one place content leaves for a model.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">Routing</span>
+        <h3>Taint follows the request</h3>
+        <p>Before a completion the batch's labels intersect; the gateway picks a provider whose class the
+          result label allows, <strong>reroutes</strong> to an eligible preset, or <strong>refuses</strong> if
+          none qualifies — rather than downgrade. Recorded as <span class="mono">egress.provider_selected</span>.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">At rest</span>
+        <h3>Labels persist with the content</h3>
+        <p>Memories, execution traces, and digests store an <span class="mono">egress_label_json</span>; recall,
+          search, and the post-session digest filter by target sink, so <span class="mono">local_only</span>
+          content can't re-enter a remote turn across sessions. Legacy-unlabeled rows resolve via a configured
+          default (fail-closed option: <span class="mono">no_remote_model</span>).</p>
+      </div>
+    </div>
+
     <div class="subhead">Credentials — the vault the agent never reads</div>
     <div class="grid2">
       <div class="box tone-served">

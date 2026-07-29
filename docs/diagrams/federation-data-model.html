@@ -297,9 +297,11 @@
     <div class="sheet-head">
       <div class="eyebrow">§ B — Entity-Relationship</div>
       <h2>The gateway database</h2>
-      <p class="dek">One SQLite file (<span class="mono">gateway.db</span>, schema v71) holds all
-        transactional state — roughly thirty tables. Most relationships are logical joins on shared
-        columns, not declared foreign keys. Four <strong>spine columns</strong> carry the whole model.</p>
+      <p class="dek">One SQLite file (<span class="mono">gateway.db</span>, schema v76) holds all
+        transactional state — thirty-odd tables. Most relationships are logical joins on shared
+        columns, not declared foreign keys. Four <strong>spine columns</strong> carry the whole model.
+        A newer <strong>egress label plane</strong> (v73–v76, data-envelopes track) threads an
+        <span class="mono">egress_label_json</span> through the durable stores and keys taint by session.</p>
     </div>
 
     <div class="subhead">The spine — four columns thread every cluster</div>
@@ -400,13 +402,13 @@
       <div class="ercard aud">
         <h3>Execution &amp; Audit</h3>
         <div class="erow"><code>causal_events</code> <span class="pk">PK event_id</span><span class="rel">the correlation table · append-only</span></div>
-        <div class="erow"><code>execution_traces</code> <span class="pk">PK trace_id</span><span class="rel">→ <b>causal_events</b> (event_id), approvals</span></div>
+        <div class="erow"><code>execution_traces</code> <span class="pk">PK trace_id</span><span class="rel">→ <b>causal_events</b> (event_id), approvals; carries <b>egress_label_json</b> (v76)</span></div>
         <div class="erow"><code>active_executions</code> <span class="rel">→ emergency_stops (stop_id)</span></div>
         <div class="erow"><code>emergency_stops</code> · <code>live_digest_events</code> <span class="rel">→ root_session</span></div>
       </div>
       <div class="ercard mem">
         <h3>Memory &amp; Artifacts</h3>
-        <div class="erow"><code>memories</code> <span class="pk">PK memory_id</span><span class="rel">→ agent_revisions, binding_session</span></div>
+        <div class="erow"><code>memories</code> <span class="pk">PK memory_id</span><span class="rel">→ agent_revisions, binding_session; carries <b>egress_label_json</b> (v76)</span></div>
         <div class="erow"><code>memory_tags</code> <span class="pk">PK (memory_id, tag)</span><span class="rel">→ memories · pure tag index</span></div>
         <div class="erow"><code>artifact_refs</code> <span class="pk">PK ref_id</span><span class="rel">(scope_type, scope_id) → artifact_digest</span></div>
       </div>
@@ -428,6 +430,13 @@
         <div class="erow"><code>session_fork_lineage</code> <span class="pk">PK forked_session_id</span><span class="rel">source_session_id, fork_turn, branch_message_sha256</span></div>
         <div class="erow"><code>session_spawn_lineage</code> <span class="pk">PK child_session_id</span><span class="rel">parent_session_id, root_session, spawned_at_turn</span></div>
       </div>
+      <div class="ercard gov">
+        <h3>Egress · data-envelopes</h3>
+        <div class="erow"><code>egress_session_policies</code> <span class="pk">PK session_id</span><span class="rel">operator egress policy bound to a session (v73)</span></div>
+        <div class="erow"><code>session_egress_taint</code> <span class="pk">PK session_id</span><span class="rel">the session's accumulated (intersected) egress label (v74)</span></div>
+        <div class="erow"><code>agent_messages</code> <span class="rel">+ <b>egress_label_json</b> — carries taint across agents (v75)</span></div>
+        <div class="erow"><code>memories</code> · <code>execution_traces</code> <span class="rel">+ <b>egress_label_json</b> — where stored content may flow (v76)</span></div>
+      </div>
     </div>
 
     <p class="para" style="margin-top:18px;">Two properties worth noting across the model. Several tables
@@ -447,7 +456,8 @@
       <li><code>autonoetic-gateway/src/server/router.rs</code> (client handshake)</li>
       <li><code>autonoetic-gateway/src/server/registry.rs</code> (PeerRegistry)</li>
       <li>constitution 2026.07.19 §10 · P-10.6 · P-10.9</li>
-      <li><code>autonoetic-gateway/src/scheduler/gateway_store/migrate.rs</code> (schema v71)</li>
+      <li><code>autonoetic-gateway/src/scheduler/gateway_store/migrate.rs</code> (schema v76)</li>
+      <li><code>docs/rfc/data-envelopes-egress-localization.md</code> (egress label plane, v73–v76)</li>
       <li>the <code>gateway_store/*.rs</code> per-table modules</li>
       <li><code>docs/ARCHITECTURE.md</code> § Unified Gateway Database</li>
     </ul>

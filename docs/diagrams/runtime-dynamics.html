@@ -415,6 +415,29 @@
       </div>
     </div>
 
+    <div class="subhead">Egress — the per-turn label flow (data-envelopes)</div>
+    <div class="grid3">
+      <div class="box tone-served">
+        <h3>1 · Taint accumulates</h3>
+        <p>As the turn's context is assembled, each input's <span class="mono">EgressLabel</span> is
+          intersected into the batch — a monotonic narrowing. A tool result read from a
+          <span class="mono">local_only</span> source taints the batch <span class="mono">local_only</span>;
+          it never widens back.</p>
+      </div>
+      <div class="box tone-served">
+        <h3>2 · Provider chosen to fit</h3>
+        <p>The gateway selects a model whose class the batch label allows — <strong>rerouting</strong> to an
+          eligible local preset, or <strong>refusing</strong> the turn if none qualifies, rather than sending
+          restricted content to a remote model. Emitted as <span class="mono">egress.provider_selected</span>.</p>
+      </div>
+      <div class="box tone-served">
+        <h3>3 · Chokepoint withholds</h3>
+        <p>The wrapping policy driver makes the last check: any message or tool result whose label excludes
+          the target sink is replaced by an <strong>indication</strong> before the request leaves —
+          <span class="mono">egress.boundary_refused</span> when it must withhold.</p>
+      </div>
+    </div>
+
     <div class="subhead">Why this is the whole point — the five capacities it delivers</div>
     <div class="att-map">
       <div class="cap"><div class="c-h">Past</div><div class="c-b">read own chain, checkpoints, forks</div></div>
