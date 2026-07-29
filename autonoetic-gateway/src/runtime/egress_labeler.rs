@@ -1167,6 +1167,8 @@ pub fn network_egress_boundary_refusal_json(
     agent_id: &str,
     turn_id: Option<&str>,
 ) -> Option<String> {
+    let tool_name =
+        crate::runtime::tool_call_processor::canonical_tool_name(tool_name);
     let Some(store) = gateway_store else {
         let payload = serde_json::json!({
             "ok": false,
@@ -1329,6 +1331,8 @@ pub fn mcp_remote_egress_refusal_json(
     turn_id: Option<&str>,
     prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
 ) -> Option<String> {
+    let tool_name =
+        crate::runtime::tool_call_processor::canonical_tool_name(tool_name);
     if let Some(refusal) = network_egress_boundary_refusal_json(
         "mcp",
         tool_name,

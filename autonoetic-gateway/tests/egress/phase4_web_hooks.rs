@@ -51,7 +51,7 @@ fn web_network_egress_refused_under_local_only_taint() -> anyhow::Result<()> {
 
     let refusal = network_egress_boundary_refusal_json(
         "web",
-        "web.fetch",
+        "web_fetch",
         Some(&ctx),
         Some(&store),
         Some(session_id),
@@ -62,6 +62,7 @@ fn web_network_egress_refused_under_local_only_taint() -> anyhow::Result<()> {
     let payload: serde_json::Value = serde_json::from_str(&refusal)?;
     assert_eq!(payload["error_type"], "egress_boundary_refused");
     assert_eq!(payload["surface"], "web");
+    assert_eq!(payload["tool"], "web_fetch");
 
     let events = store.search_causal_events(Some(session_id), None, 10)?;
     assert!(
@@ -94,7 +95,7 @@ fn web_network_egress_allowed_with_declassification_grant() -> anyhow::Result<()
 
     let refusal = network_egress_boundary_refusal_json(
         "web",
-        "web.fetch",
+        "web_fetch",
         Some(&ctx),
         Some(&store),
         Some(session_id),
@@ -193,17 +194,17 @@ fn web_search_network_egress_refused_under_local_only_taint() -> anyhow::Result<
 
     let refusal = network_egress_boundary_refusal_json(
         "web",
-        "web.search",
+        "web_search",
         Some(&ctx),
         Some(&store),
         Some(session_id),
         "researcher.default",
         None,
     )
-    .expect("expected web.search refusal without declassification grant");
+    .expect("expected web_search refusal without declassification grant");
     let payload: serde_json::Value = serde_json::from_str(&refusal)?;
     assert_eq!(payload["surface"], "web");
-    assert_eq!(payload["tool"], "web.search");
+    assert_eq!(payload["tool"], "web_search");
     Ok(())
 }
 
@@ -216,16 +217,16 @@ fn web_call_network_egress_refused_under_local_only_taint() -> anyhow::Result<()
 
     let refusal = network_egress_boundary_refusal_json(
         "web",
-        "web.call",
+        "web_call",
         Some(&ctx),
         Some(&store),
         Some(session_id),
         "researcher.default",
         None,
     )
-    .expect("expected web.call refusal without declassification grant");
+    .expect("expected web_call refusal without declassification grant");
     let payload: serde_json::Value = serde_json::from_str(&refusal)?;
-    assert_eq!(payload["tool"], "web.call");
+    assert_eq!(payload["tool"], "web_call");
     Ok(())
 }
 
