@@ -8191,6 +8191,28 @@ fn format_scheduled_action_detail_lines(action: &ScheduledAction) -> Vec<String>
             }
             v
         }
+        ScheduledAction::EgressDeclassify {
+            target,
+            allowed_sink,
+            reason,
+            payload,
+        } => {
+            let mut v = vec![
+                "type: egress_declassify".to_string(),
+                format!("  target: {}", clamp_chat_field(&serde_json::to_string(target).unwrap_or_default())),
+                format!("  allowed_sink: {:?}", allowed_sink),
+                format!("  reason: {}", clamp_chat_field(reason)),
+            ];
+            if let Some(p) = payload {
+                if let Ok(s) = serde_json::to_string_pretty(p) {
+                    v.push("  payload:".to_string());
+                    for ln in s.lines() {
+                        v.push(format!("    {}", clamp_chat_field(ln)));
+                    }
+                }
+            }
+            v
+        }
     }
 }
 
@@ -8546,6 +8568,7 @@ fn action_summary(action: &autonoetic_types::background::ScheduledAction) -> &'s
         autonoetic_types::background::ScheduledAction::ProfileShare { .. } => "profile.share",
         autonoetic_types::background::ScheduledAction::LayerMount { .. } => "layer.mount",
         autonoetic_types::background::ScheduledAction::PlanFrame { .. } => "plan.frame",
+        autonoetic_types::background::ScheduledAction::EgressDeclassify { .. } => "egress.declassify",
         _ => "other",
     }
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 76;
+const SCHEMA_VERSION_LATEST: i64 = 77;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -561,6 +561,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_session_egress_taint_v74(conn)?;
     apply_agent_message_egress_taint_v75(conn)?;
     apply_stored_content_egress_labels_v76(conn)?;
+    apply_egress_declassification_grants_v77(conn)?;
 
     Ok(())
 }
@@ -698,6 +699,50 @@ fn apply_stored_content_egress_labels_v76(conn: &mut Connection) -> Result<()> {
         params![
             76_i64,
             "stored_content_egress_labels",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
+/// v77 — Phase 4 (#909) operator declassification grants (RFC §8).
+fn apply_egress_declassification_grants_v77(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 77 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE egress_declassification_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            root_session_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target_value TEXT NOT NULL,
+            allowed_sink TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'root_session',
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            source_approval_id TEXT,
+            expires_at TEXT,
+            revoked_at TEXT,
+            revoked_reason TEXT,
+            UNIQUE(root_session_id, session_id, agent_id, scope, target_kind, target_value, allowed_sink)
+        );
+        CREATE INDEX idx_egress_declass_root_target
+            ON egress_declassification_grants(root_session_id, target_kind, target_value);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            77_i64,
+            "egress_declassification_grants",
             chrono::Utc::now().to_rfc3339()
         ],
     )?;

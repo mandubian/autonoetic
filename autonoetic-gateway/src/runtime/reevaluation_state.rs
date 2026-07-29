@@ -159,6 +159,9 @@ pub fn execute_scheduled_action(
         ScheduledAction::PlanFrame { .. } => anyhow::bail!(
             "PlanFrame is not directly executable; it is approved through the standard approval system"
         ),
+        ScheduledAction::EgressDeclassify { .. } => anyhow::bail!(
+            "EgressDeclassify is not directly executable; egress grants are materialized on operator approval"
+        ),
     }
 }
 

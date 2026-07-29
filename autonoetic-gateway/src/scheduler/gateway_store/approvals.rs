@@ -1111,6 +1111,7 @@ impl GatewayStore {
             "DELETE FROM session_approval_grants WHERE root_session_id = ?1",
             params![root_session_id],
         )?;
+        super::egress_declassification::delete_grants_for_root(&conn, root_session_id)?;
         Ok(())
     }
 

@@ -11,16 +11,18 @@ Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Depends on me
 - Curator mechanical refuse for `local_only` `promote_to_skill` (no declassification grant path yet).
 - `gateway memory relabel` + `egress.relabel` audit events.
 - Cross-agent taint on `agent_message` / spawn-return (#907) + session residency (#902).
-- **`egress.boundary_refused`** exists but is compression-only (`context_governor/capsule.rs`); no `surface` field.
-- **No** OFP label metadata, MCP `egress_class`, sandbox taint escalation, capsule label filtering, or declassification grants.
+- **`egress.boundary_refused`** exists (compression); Phase 4 adds `surface` early via `emit_surface_boundary_refused` (shared prep / slice 1), not as a late follow-up.
+- **No** OFP label metadata, MCP `egress_class`, gateway-native web/hook network gates, capsule label filtering (until their slices land).
 
 ### Locked RFC decisions (do not re-litigate)
 
 - Widening labels is **only** via operator declassification (§8) — never LLM judgment.
 - Declassification reuses the approval-grant shape; content-scoped, expiring, revocable; `egress.declassified` audit.
-- Every refuse on OFP/MCP/sandbox emits `egress.boundary_refused` with `surface` + envelope ids + label.
+- Every refuse on OFP/MCP/sandbox/web/hooks emits `egress.boundary_refused` with `surface` + envelope ids + label.
 - OFP `CapsuleOffer` wire path stays unwired until label metadata exists.
 - Sandbox: no egress proxy — document residual gap; taint + `Unresolved` = hard refuse.
+- **Inbound federated content is fail-closed:** missing/unparseable inbound `egress_label` is treated as `FederatedAgent`-tainted (never `unrestricted`). Outbound wire field remains optional for backward-compat with old peers.
+- **Network sink is gateway-wide:** any surface that can send session-derived bytes to the network (sandbox `share_net`, native web tools, hook HTTP deliveries, remote MCP, OFP) must gate on session taint × `Sink::Network`.
 
 ---
 
@@ -29,29 +31,33 @@ Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Depends on me
 | Slice | Scope | Blast radius | Depends |
 |---|---|---|---|
 | **0. Plan doc** | `docs/plan-egress-phase4-909.md` | docs | — |
-| **1. Declassification vertical** | grant type + store + approval flow + `egress.declassified`; curator exception | scheduler/approval + types | 0 |
-| **2. Sandbox composition** | session-taint `share_net` escalation; `Unresolved`+taint hard refuse; sandbox `boundary_refused` | `runtime/tools/sandbox.rs` | 0 |
+| **1. Declassification vertical** | grant type + store + `ScheduledAction::EgressDeclassify` + `egress.declassified`; curator exception; land `emit_surface_boundary_refused` / `surface` payload | scheduler/approval + types + `egress_labeler` | 0 |
+| **2. Sandbox composition** | session-taint `share_net` via **declassification** (not plain approval alone); `Unresolved`+taint hard refuse; sandbox `boundary_refused` | `runtime/tools/sandbox.rs` | **1** |
+| **2b. Gateway network tools** | taint gate on `web_fetch` / `web_search` / `web_call` / `web_redirect` + hook HTTP deliveries | `runtime/tools/web*.rs`, `scheduler/hooks.rs` | **1** |
 | **3. MCP egress** | registry `egress_class`; argument intersection; remote SSE refuse | `autonoetic-mcp/`, `tool_call_processor` | 1 |
-| **4. OFP federation** | `AgentMessage` label metadata; outbound withhold; inbound `FederatedAgent` refuse | `autonoetic-ofp/`, `server/router.rs`, `server/ofp.rs` | 1 |
+| **4. OFP federation** | `AgentMessage` label metadata; outbound withhold; **inbound fail-closed ingest as session taint** | `autonoetic-ofp/`, `server/router.rs`, `server/ofp.rs` | 1 |
 | **5. Capsule export filtering** | destination sink on export; label-filtered memory snapshot | `capsule/export.rs` | 1 |
-| **6. `boundary_refused` unification** | `surface` field; wire all surface callers; audit CLI | `egress_labeler.rs`, CLI | 2–5 |
-| **7. Compartment polish** | data-owner example + docs cross-link (`provider_constraint` optional) | docs + types | 1, 4 |
-| **8. Acceptance e2e** | federated refuse, remote MCP refuse, tainted `share_net`, capsule filter, declassify audit | `tests/egress/` | 1–7 |
+| **6. Boundary audit polish** | compression caller `surface: "compression"`; `gateway egress audit` renders all surfaces | CLI + remaining callers | 2–5, 2b |
+| **7. Compartment polish** | data-owner example + docs cross-link; Phase 4 visual-map / ARCHITECTURE / SoP egress follow-up | docs + types | 1, 4 |
+| **8. Acceptance e2e** | federated refuse, remote MCP refuse, tainted `share_net`, web/hook refuse, capsule filter, declassify audit | `tests/egress/` | 1–7 |
 
-**Recommended order:** 0 → 1 → 2 → 3 → 4 → 5 → 6 → 8 (slice 7 can parallel 5–6).
+**Recommended order:** 0 → 1 → 2 → 2b → 3 → 4 → 5 → 6 → 8 (slice 7 can parallel 5–6).
 
-Rationale: declassification is the lawful widening path needed by curator, inline routing, and boundary refuses. Sandbox is the highest local exfil backstop. MCP and OFP are independent wire changes. Capsules need destination sink. Unify events once call sites exist. Acceptance last.
+Rationale: declassification is the lawful widening path. Sandbox and gateway-native network tools are the highest local exfil backstops and both depend on grants + `egress.declassified`. MCP and OFP are independent wire changes. Capsules need destination sink. Slice 6 is audit/CLI polish — the `surface` field lands with slice 1. Acceptance last.
 
 ```mermaid
 flowchart LR
   taint[Session taint] --> sandbox[Sandbox share_net gate]
+  taint --> web[Web tools + hooks]
   taint --> mcp[MCP arg intersection]
   taint --> ofp[OFP AgentMessage labels]
   declass[Declassification grant] --> widen[Lawful widen]
   widen --> sandbox
+  widen --> web
   widen --> mcp
   widen --> ofp
   sandbox --> refused[egress.boundary_refused]
+  web --> refused
   mcp --> refused
   ofp --> refused
 ```
@@ -63,25 +69,28 @@ flowchart LR
 **Session taint resolution** (reuse Phase 2/3 pattern):
 
 ```rust
-fn resolve_session_taint(
+fn resolve_session_egress_taint(
     run_context: Option<&NativeToolRunContext>,
     store: Option<&GatewayStore>,
     session_id: Option<&str>,
 ) -> anyhow::Result<Option<EgressLabel>>;
 ```
 
-- Prefer `run_context.egress_taint`; fall back to `store.get_session_egress_taint(session_id)`; error if store read fails on a live session with expected taint row.
+- Prefer `run_context.egress_taint`; fall back to `store.get_session_egress_taint(session_id)`; error if store read fails.
 
-**`emit_boundary_refused` extension** (`runtime/egress_labeler.rs`):
+**Boundary rule (fail-closed):** at sandbox / web / hooks / MCP / OFP call sites, **unknown ⇒ refuse**. Callers must not treat `Err` or an ambiguous `Ok(None)` (session live but no store / can't establish label) as "no taint." Prefer a boundary helper that returns `Result<EgressLabel>` and refuses unless a definitive label is established (`Ok(None)` from a successful store miss = unrestricted only when the store was queried).
 
-- Add `surface: &str` (`"sandbox"` | `"mcp"` | `"ofp"` | `"compression"`) to payload per RFC §9.1.
-- Keep compression caller passing `surface: "compression"` for backward-compatible audit queries.
+**`surface` on `boundary_refused` (lands with slice 1, not slice 6):**
 
-**Declassification grant** (slice 1):
+- `emit_surface_boundary_refused(..., surface: &str, ...)` with `"sandbox"` | `"mcp"` | `"ofp"` | `"web"` | `"hooks"` | `"compression"`.
+- Compression caller updated to pass `surface: "compression"` when convenient; slice 6 finishes any stragglers + audit CLI.
 
-- New table `egress_declassification_grants` (v77): target kind (`envelope_id` | `source_pattern` | `memory_id`), target value, allowed `Sink`, scope (`RootSession` | `Session`), expiry, revoked_at.
-- Approval action variant `ScheduledAction::EgressDeclassify { ... }` or dedicated gate kind.
-- Lookup helper: `store.egress_declassification_allows(target, sink, session_id)`.
+**Declassification grant** (slice 1 — locked shape):
+
+- Action: **`ScheduledAction::EgressDeclassify`** (not a separate gate kind).
+- Table `egress_declassification_grants` (v77): target kind (`envelope_id` | `source_pattern` | `memory_id`), target value, allowed `Sink`, scope (`RootSession` | `Session`), expiry, revoked_at.
+- Lookup **`egress_declassification_allows` checks revocation + expiry at use time** (no grant cache that can outlive revoke).
+- `source_pattern` must not be a silent blanket widen: either bound patterns (no bare `*`) or require the operator to see match count before approve (same spirit as memory relabel `--dry-run` / #948).
 - `emit_declassified` → `egress.declassified` causal event.
 
 ---
@@ -90,19 +99,22 @@ fn resolve_session_taint(
 
 **Schema / types**
 
-- `EgressDeclassificationGrant` in `autonoetic-types`.
+- `EgressDeclassificationGrant` / `EgressDeclassificationTarget` in `autonoetic-types`.
 - Migration **v77**: `egress_declassification_grants` + indexes on `(root_session_id, target_kind, target_value)`.
+- `ScheduledAction::EgressDeclassify { target, allowed_sink, reason, payload }`.
 
 **Approval**
 
-- Operator approves via existing gate/approval machinery; grant materialized on approve.
-- Revocation via `gateway grants revoke` pattern or dedicated subcommand.
-- Flood cap: reuse `max_pending_approvals_per_root` shape for declassify *requests*.
+- Operator approves via existing gate/approval machinery; grant materialized on approve; emit `egress.declassified`.
+- Revocation via `gateway grants revoke` pattern or dedicated subcommand; emergency stop / `delete_session_grants` clears declass rows.
+- Flood cap: reuse `max_pending_approvals_per_root` for declassify *requests*.
 
 **Consumers**
 
 - `curator_journal.rs`: allow `promote_to_skill` when evidence has active declassification to `RemoteModel`.
-- Future: inline routing declassify choice (lifecycle.rs) — wire when grant API exists.
+- Future: inline routing declassify choice (lifecycle) — wire when grant API exists.
+
+**Also in this slice:** `emit_surface_boundary_refused` + `surface` payload (shared prep for 2–5 / 2b).
 
 **PR title:** `feat(egress): declassification grants + egress.declassified (#909 slice 1)`
 
@@ -110,24 +122,41 @@ fn resolve_session_taint(
 
 ## Slice 2 — Sandbox composition
 
-**Escalation** (`runtime/tools/sandbox.rs` ~L1323–L2127):
+**Depends on slice 1.** Enabling `share_net` for a session whose taint excludes `Sink::Network` is a **label widening** — it must go through declassification, not a plain host-grant approval alone.
 
-- Resolve session taint; if it excludes `Sink::Network`:
+**Escalation** (`sandbox_exec` / network-gate path in `runtime/tools/sandbox.rs`):
+
+- Resolve session taint with the boundary fail-closed rule.
+- If taint excludes `Sink::Network`:
   - Do **not** auto-approve via `RemoteAccessApprovalMode::Preapproved`.
-  - Treat any exec that would set `share_net = true` as requiring operator approval even when manifest `NetworkAccess` passes.
+  - Do **not** treat exec-cache hits as sufficient to enable `share_net`.
+  - Operator path: approve via machinery that **materializes a declassification grant for `Sink::Network`** (session-scoped target, e.g. `source_pattern: "session:<root>"`) and emits `egress.declassified`. A bare `SandboxExec` host approval without that grant must not set `share_net = true`.
+  - `safe_inspection_bypass` must keep `share_net = false` under taint (already required).
 - `NetworkCoverage::Unresolved` + taint excludes `Network` → hard refuse (no approval offer); emit `egress.boundary_refused` with `surface: "sandbox"`.
 
-**Tests:** tainted session + preapproved agent still gates; `Unresolved` + taint refuses; `boundary_refused` in causal chain.
+**Tests:** tainted session + preapproved agent still gates; approval without declass grant does not enable `share_net`; Unresolved + taint refuses; `egress.declassified` on lawful widen; `boundary_refused` in causal chain.
 
-**PR title:** `feat(egress): session-taint share_net escalation + Unresolved refuse (#909 slice 2)`
+**PR title:** `feat(egress): session-taint share_net via declassification (#909 slice 2)`
+
+---
+
+## Slice 2b — Gateway network tools (native web + hooks)
+
+**In scope (not optional):** Network is a sink. Closing only sandbox `share_net` leaves exfil through gateway-owned HTTP.
+
+- Gate `web_fetch` / `web_search` / `web_call` / `web_redirect` (`runtime/tools/web*.rs`): if session taint excludes `Sink::Network`, refuse (or require active declassification to `Network`) before any outbound request; emit `egress.boundary_refused` with `surface: "web"`.
+- Gate hook HTTP deliveries (`scheduler/hooks.rs`): same rule when the delivery body/URL is session-derived; `surface: "hooks"`.
+- Widening uses the same slice-1 declassification grants + `egress.declassified`.
+
+**PR title:** `feat(egress): taint gate on web tools + hook deliveries (#909 slice 2b)`
 
 ---
 
 ## Slice 3 — MCP egress
 
-- `McpServer.egress_class: local | remote` in registry JSON + `autonoetic-mcp/src/types.rs`.
-- Before `tools/call` on remote (SSE) server: intersect argument envelope labels; refuse if args exclude `Sink::Network`.
-- `egress.boundary_refused` with `surface: "mcp"`.
+- `McpServer.egress_class: local | remote` in registry JSON + `autonoetic-mcp` types.
+- Before `tools/call` on remote (SSE) server: intersect argument envelope labels; refuse if args exclude `Sink::Network` (or required sink); emit `egress.boundary_refused` with `surface: "mcp"`.
+- Boundary fail-closed taint resolution.
 
 **PR title:** `feat(egress): MCP egress_class + argument intersection (#909 slice 3)`
 
@@ -135,47 +164,51 @@ fn resolve_session_taint(
 
 ## Slice 4 — OFP federation
 
-- Extend `WireRequest::AgentMessage` with `egress_label` + optional `withheld_indication` fields (wire compat: optional, default unrestricted).
-- Outbound (`server/router.rs`): refuse or substitute indications before `write_framed_message` when label excludes `FederatedAgent`.
-- Inbound (`server/ofp.rs`): validate incoming label before spawning agent handler.
+- Extend `WireRequest::AgentMessage` with `egress_label` + optional `withheld_indication`.
+  - **Outbound:** field is optional for wire backward-compat with old peers (omit ⇒ peer may not understand labels; we still withhold locally when our label excludes `FederatedAgent`).
+  - **Inbound (fail-closed):** missing or unparseable `egress_label` ⇒ treat content as **`FederatedAgent`-tainted** (or stricter remote-restricted / `no_remote_model`), **never** `unrestricted`. This closes the "launder through an unlabeled peer" path.
+- **Inbound ingest:** set the received label as the spawned session's **initial taint**, mirroring Phase 2/3 `agent_message` ingest — not a mere validate-and-drop check.
+- Outbound (`server/router` OFP path): refuse or substitute indications before framed write when label excludes `FederatedAgent`; `surface: "ofp"`.
 - Do **not** wire `CapsuleOffer` transfer.
 
-**PR title:** `feat(egress): OFP AgentMessage label metadata + FederatedAgent refuse (#909 slice 4)`
+**PR title:** `feat(egress): OFP AgentMessage labels + inbound fail-closed taint (#909 slice 4)`
 
 ---
 
 ## Slice 5 — Capsule export filtering
 
 - `ExportRequest.destination_sink` (or infer from `trust_domain`).
-- `stage_memory_snapshot`: include memory only when `label.allows(destination_sink)`; count withheld.
+- Memory snapshot staging: include memory only when `label.allows(destination_sink)`; count withheld.
 - Provenance records withheld count.
 
 **PR title:** `feat(egress): capsule export label filtering by destination (#909 slice 5)`
 
 ---
 
-## Slice 6 — `boundary_refused` unification
+## Slice 6 — Boundary audit polish
 
-- Extend `emit_boundary_refused` signature + payload `surface`.
-- Update compression caller to pass `surface: "compression"`.
-- `gateway egress audit` renders sandbox/mcp/ofp refusals.
+`surface` already exists from slice 1. This slice finishes:
 
-**PR title:** `feat(egress): boundary_refused surface field + audit (#909 slice 6)`
+- Compression caller passes `surface: "compression"` if not already.
+- `gateway egress audit` renders sandbox / web / hooks / mcp / ofp / compression refusals.
+
+**PR title:** `feat(egress): boundary_refused audit CLI + remaining surfaces (#909 slice 6)`
 
 ---
 
-## Slice 7 — Compartment polish
+## Slice 7 — Compartment polish + docs follow-up
 
 - Document data-owner pattern: resident agent + `local_only` + `agent_message` replies.
 - Optional: `provider_constraint` on `EgressSessionPolicy`.
+- Update Phase 4 egress visual maps + `ARCHITECTURE.md` / `separation-of-powers.md` egress sections for new surfaces (`egress.declassified`, web/hooks/ofp/mcp/sandbox `boundary_refused`).
 
-**PR title:** `docs(egress): data-owner compartment pattern (#909 slice 7)`
+**PR title:** `docs(egress): data-owner compartment + Phase 4 surface maps (#909 slice 7)`
 
 ---
 
 ## Slice 8 — Acceptance
 
-- `tests/egress/phase4_boundaries.rs`: sandbox refuse, MCP refuse (mock), OFP refuse (mock), declassify grant lifecycle, capsule filter smoke.
+- `tests/egress/phase4_boundaries.rs` (or modules in the egress domain binary): sandbox refuse, web/hook refuse, MCP refuse (mock), OFP inbound fail-closed + outbound refuse (mock), declassify grant lifecycle, capsule filter smoke.
 
 **PR title:** `test(egress): phase 4 boundary acceptance (#909 slice 8)`
 
@@ -183,8 +216,8 @@ fn resolve_session_taint(
 
 ## Immediate next step
 
-1. Branch `pascal/egress-phase4-909` from `origin/main`.
-2. Land **Slice 0** plan doc + comment on #909.
-3. Implement **Slice 1** (declassification) then **Slice 2** (sandbox) in follow-up commits/PRs.
+1. Align landed slice-2 sandbox code with declassification semantics (grant + `egress.declassified`; boundary fail-closed).
+2. Land / PR **slice 1 + sandbox declass fix**, then **slice 2b** (web + hooks).
+3. Continue 3 → 4 → 5 → 6 → 8.
 
 No constitution / enforcement-register changes in Phase 4 (clause remains Phase 5 #910).

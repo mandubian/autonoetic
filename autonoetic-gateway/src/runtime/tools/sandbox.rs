@@ -1304,15 +1304,58 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             .map(|d| d.approval_mode)
             .unwrap_or(RemoteAccessApprovalMode::Required);
 
-        let session_taint = crate::runtime::egress_labeler::resolve_session_egress_taint(
+        // Boundary fail-closed: unknown taint ⇒ refuse (never treat as unrestricted).
+        let session_taint = match crate::runtime::egress_labeler::require_boundary_session_taint(
             run_context,
             gateway_store.as_deref(),
             session_id,
-        )?;
-        let network_sink_excluded = session_taint
-            .as_ref()
-            .map(|t| !t.allows(autonoetic_types::egress::Sink::Network))
-            .unwrap_or(false);
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(store) = &gateway_store {
+                    crate::runtime::egress_labeler::emit_surface_boundary_refused(
+                        store,
+                        session_id.unwrap_or(""),
+                        &manifest.agent.id,
+                        turn_id,
+                        "sandbox",
+                        &autonoetic_types::egress::EgressLabel::empty(),
+                        &[],
+                        &format!("session egress taint unresolved: {e}"),
+                    );
+                }
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "egress_boundary_refused",
+                    "surface": "sandbox",
+                    "message": format!(
+                        "sandbox.exec refused: cannot establish session egress taint ({e})"
+                    ),
+                    "repair_hint": "Ensure the tool runs with a session id and GatewayStore so taint can be confirmed.",
+                })
+                .to_string());
+            }
+        };
+        let network_sink_excluded =
+            !session_taint.allows(autonoetic_types::egress::Sink::Network);
+        let root_for_declass = run_context
+            .map(|c| c.root_session_id.as_str())
+            .or_else(|| session_id.and_then(|s| s.split('/').next()))
+            .unwrap_or("");
+        let network_declassified = if network_sink_excluded {
+            gateway_store
+                .as_ref()
+                .map(|store| {
+                    crate::runtime::egress_labeler::session_network_declassified(
+                        store.as_ref(),
+                        session_id.unwrap_or(""),
+                        root_for_declass,
+                    )
+                })
+                .unwrap_or(false)
+        } else {
+            true
+        };
         let manifest_grants_share_net = manifest.capabilities.iter().any(|c| {
             matches!(c, Capability::NetworkAccess { hosts } if !hosts.is_empty())
         });
@@ -1422,16 +1465,13 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             ) && network_sink_excluded
             {
                 if let Some(store) = &gateway_store {
-                    let label = session_taint
-                        .clone()
-                        .unwrap_or_else(autonoetic_types::egress::EgressLabel::local_only);
                     crate::runtime::egress_labeler::emit_surface_boundary_refused(
                         store,
                         session_id.unwrap_or(""),
                         &manifest.agent.id,
                         turn_id,
                         "sandbox",
-                        &label,
+                        &session_taint,
                         &[],
                         "session egress taint excludes Network and remote targets are Unresolved (RFC §7)",
                     );
@@ -1441,7 +1481,7 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     "error_type": "egress_boundary_refused",
                     "surface": "sandbox",
                     "message": "sandbox.exec refused: session egress taint excludes Network and network targets could not be resolved to concrete hosts",
-                    "repair_hint": "Declassify the restricted content, clear session taint, or use a command with concrete network targets.",
+                    "repair_hint": "Operator-declassify Sink::Network for this session (egress.declassified), or use a command with concrete network targets.",
                 })
                 .to_string());
             }
@@ -2169,9 +2209,13 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         let mut overrides =
             crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
 
-        if network_sink_excluded && !approval_validated_for_command && !safe_inspection_bypass {
+        // Widening to Network under session taint requires an active
+        // declassification grant (`egress.declassified`) — not host approval alone.
+        // Safe-inspection never gets share_net. Exec-cache hits without a grant
+        // also keep the network off.
+        if safe_inspection_bypass || (network_sink_excluded && !network_declassified) {
             overrides.share_net = false;
-        } else if approval_validated_for_command && !safe_inspection_bypass {
+        } else if approval_validated_for_command {
             overrides.share_net = true;
         }
 
