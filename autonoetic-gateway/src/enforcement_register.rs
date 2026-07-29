@@ -420,7 +420,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             rule_id: "P-8.1",
             check_id: "hash_chain_integrity",
             code: "causal_chain.rs::compute_entry_hash (SHA-256 over actor_id + prev_hash + fields) + append-only linkage",
-            test: "constitution_rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash",
+            test: "constitution/rights_early_bucket.rs::ri_0_11_tampered_actor_id_leaves_stale_hash",
             config: None,
         },
         // ── Ri-0.2 (binds gateway, entrenched — correction core) ──
@@ -429,7 +429,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             rule_id: "Ri-0.2",
             check_id: "own_history_readable",
             code: "observability.* tools gated by ReadAccess capability",
-            test: "constitution_rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces",
+            test: "constitution/rights_early_bucket.rs::ri_0_2_agent_with_read_access_can_search_own_traces",
             config: None,
         },
         // ── Ri-0.3 (binds gateway, entrenched — correction core) ──
@@ -438,7 +438,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             rule_id: "Ri-0.3",
             check_id: "named_rejection",
             code: "Tagged::permission_with_rules + PolicyDecision.enforced_rules",
-            test: "constitution_rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids",
+            test: "constitution/rights_late_bucket.rs::ri_0_3_capability_rejection_carries_rule_ids",
             config: None,
         },
         // ── Ri-0.8 (binds gateway, entrenched — correction core) ──
@@ -448,7 +448,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             check_id: "amendment_proposal_intake",
             code: "runtime/tools/constitution.rs::constitution_propose_amendment \
                    + scheduler/gateway_store/constitutional_proposals.rs",
-            test: "constitution_rights_amendment_proposal.rs",
+            test: "constitution/rights_amendment_proposal.rs",
             config: None,
         },
         // ── Ri-0.11 (binds gateway, entrenched — correction core) ──
@@ -457,7 +457,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             rule_id: "Ri-0.11",
             check_id: "non_repudiation",
             code: "causal chain hash integrity + agent_id on every event; compute_entry_hash binds actor_id",
-            test: "constitution_rights_early_bucket.rs::ri_0_11_hash_chain_integrity",
+            test: "constitution/rights_early_bucket.rs::ri_0_11_hash_chain_integrity",
             config: None,
         },
         // ── Ri-0.12 (binds gateway — closed list of termination reasons) ──
@@ -481,7 +481,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             rule_id: "Ri-0.13",
             check_id: "reasoning_disclosure_capability_gated",
             code: "runtime/tools/observability.rs (reasoning audit) + disclosure gating",
-            test: "constitution_private_reasoning_c.rs::ri_0_13c_execute_reads_and_discloses",
+            test: "constitution/private_reasoning_c.rs::ri_0_13c_execute_reads_and_discloses",
             config: None,
         },
         // ── Ri-0.14 (binds gateway) ──
@@ -491,7 +491,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             check_id: "child_state_wakeup",
             code: "scheduler/workflow_store.rs::update_task_run_status (send_child_state_notification) \
                    + scheduler/signal.rs + scheduler/task_notify.rs",
-            test: "constitution_right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event",
+            test: "constitution/right_ri_0_14.rs::child_waiting_transition_emits_typed_parent_wakeup_event",
             config: Some("default_workflow_wait_secs"),
         },
         // ── Ri-0.17 (binds gateway) ──
@@ -511,7 +511,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             check_id: "decider_obligation_motivation",
             code: "scheduler/approval.rs::enforce_decider_motivation (classifier decision_is_blocking) \
                    at the decide_request_with_options chokepoint; emits decider_obligation.refused/.satisfied",
-            test: "constitution_o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event",
+            test: "constitution/o_1_decider_motivation.rs + scheduler::approval::tests::decider_obligation_emits_tagged_o1_event",
             config: Some("decider_obligations.enabled"),
         },
         // ── O-2 (binds decider) ──
@@ -521,7 +521,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             check_id: "decider_attribution",
             code: "decided_by + decided_by_kind on the approval (principal::decider_principal_kind, #361) \
                    + actor bound into the causal-chain entry hash (causal_chain.rs)",
-            test: "constitution_o_1_decider_motivation.rs",
+            test: "constitution/o_1_decider_motivation.rs",
             config: None,
         },
         // ── Ri-0.18 (binds gateway — capability-free intake + loud flood cap) ──

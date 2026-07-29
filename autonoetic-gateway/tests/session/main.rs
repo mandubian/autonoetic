@@ -18,3 +18,5 @@ mod grant_close_preservation;
 mod inference;
 mod report;
 mod residency;
+mod trace;
+mod timeline_jsonrpc;
