@@ -11,5 +11,6 @@
 mod chokepoint_canary;
 mod compression_eligibility;
 mod floor_and_taint;
+mod mixed_session_e2e;
 mod routing;
 mod source_rules;
