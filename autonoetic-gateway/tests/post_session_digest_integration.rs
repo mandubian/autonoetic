@@ -1,5 +1,7 @@
 //! Post-session digest: narrative in content store + Tier-2 memories (mock LLM).
 
+mod support;
+
 use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, StopReason, TokenUsage,
 };
@@ -9,24 +11,16 @@ use autonoetic_gateway::runtime::post_session_digest::{
 };
 use autonoetic_gateway::runtime::tools::knowledge::DigestQueryTool;
 use autonoetic_gateway::runtime::tools::NativeTool;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::causal_chain::ExecutionTraceRecord;
 use autonoetic_types::memory::{MemoryObject, MemorySourceType, MemoryVisibility};
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 fn reader_manifest(agent_id: &str) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
@@ -35,8 +29,6 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ReadAccess { scopes: vec![] }],
-        llm_overrides: None,
-        llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
@@ -51,25 +43,8 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             thinking: None,
             egress_class: None,
         }),
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 struct FixedJsonDigestDriver;

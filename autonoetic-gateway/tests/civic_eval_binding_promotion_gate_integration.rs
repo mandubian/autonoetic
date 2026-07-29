@@ -22,7 +22,7 @@ mod support;
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::artifact::ArtifactKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{CivicEvalBindingConfig, GatewayConfig};
@@ -32,6 +32,7 @@ use autonoetic_gateway::runtime::civic_evals::CIVIC_EVAL_SUITE_ID;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 const AGENT_ID: &str = "civic.binding.test";
 
@@ -110,15 +111,6 @@ layers: []
 
 fn proposer_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "specialized_builder.default".to_string(),
             name: "specialized_builder.default".to_string(),
@@ -129,40 +121,12 @@ fn proposer_manifest() -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-        excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn gate_manifest(id: &str, allowed: Vec<&str>) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: id.to_string(),
             name: id.to_string(),
@@ -173,27 +137,8 @@ fn gate_manifest(id: &str, allowed: Vec<&str>) -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: allowed.into_iter().map(String::from).collect(),
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-        excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 struct Fixture {

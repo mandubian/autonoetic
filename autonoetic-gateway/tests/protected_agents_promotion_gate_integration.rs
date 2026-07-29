@@ -17,7 +17,7 @@ mod support;
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::agent_revision::{
     AgentAliasRecord, AgentRevisionRecord, AgentRevisionStatus,
 };
@@ -27,6 +27,7 @@ use autonoetic_types::evaluation::{EvalRunRecord, EvalRunStatus};
 use autonoetic_types::principal::PrincipalKind;
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 const AGENT_ID: &str = "agent-factory.default";
 const OTHER_AGENT_ID: &str = "coder.default";
@@ -35,15 +36,6 @@ const INCOMING_REVISION: &str = "rev_incoming";
 
 fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
@@ -54,27 +46,8 @@ fn manifest_with_revision_cap(agent_id: &str) -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn skill_md(agent_id: &str) -> String {

@@ -9,11 +9,13 @@
 //! roster loop that triggered LoopGuard degradation in
 //! `~/.autonoetic/agents/.gateway/sessions/latest/digest.md`.
 
+mod support;
+
 use autonoetic_gateway::execution::WakeHintState;
 use autonoetic_gateway::runtime::active_execution_registry::ActiveExecutionRegistry;
 use autonoetic_gateway::runtime::active_execution_registry::NativeToolRunContext;
 use autonoetic_gateway::runtime::tools::default_registry;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration, ScriptInputMode};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use serde_json::json;
@@ -21,18 +23,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 fn make_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "planner.collaborative".to_string(),
             name: "Collaborative Planner".to_string(),
@@ -49,27 +43,8 @@ fn make_manifest() -> AgentManifest {
                 allowed: vec!["agent.".to_string()],
             },
         ],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        execution_mode: ExecutionMode::default(),
-        script_entry: None,
-        script_input_mode: ScriptInputMode::default(),
-        gateway_url: None,
-        gateway_token: None,
-        middleware: None,
-        agentskills_import: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn make_run_context(root_session_id: &str, wake_hint: Option<WakeHintState>) -> NativeToolRunContext {

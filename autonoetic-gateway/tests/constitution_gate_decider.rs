@@ -5,6 +5,8 @@
 //! (P-2.21), and that an agent may not decide a gate created by itself or a
 //! descendant session (R-10.7).
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,6 +22,7 @@ use autonoetic_types::background::{
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 fn runtime_declaration() -> RuntimeDeclaration {
     RuntimeDeclaration {
@@ -34,7 +37,6 @@ fn runtime_declaration() -> RuntimeDeclaration {
 
 fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
         runtime: runtime_declaration(),
         agent: AgentIdentity {
             id: agent_id.to_string(),
@@ -44,27 +46,8 @@ fn agent_manifest(agent_id: &str, capabilities: Vec<Capability>) -> AgentManifes
             resident_idle_ttl_secs: None,
         },
         capabilities,
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn write_agent_dir(agents_dir: &PathBuf, agent_id: &str, capabilities: &[Capability]) {

@@ -4,19 +4,21 @@
 //! `agent-factory.default`), derived by the gateway from the calling session's
 //! spawn lineage — never from LLM-supplied arguments.
 
+mod support;
+
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::agent_revision::AgentRevisionCreateFromIntentTool;
 use autonoetic_gateway::runtime::tools::NativeTool;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, ScriptInputMode};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode};
 use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
 use autonoetic_types::capability::Capability;
 use serial_test::serial;
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 fn builder_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
         runtime: autonoetic_gateway::runtime::install_contract::default_runtime_declaration(),
         agent: AgentIdentity {
             id: "specialized_builder.default".to_string(),
@@ -28,27 +30,9 @@ fn builder_manifest() -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
         }],
-        llm_preset: None,
-        llm_overrides: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
         execution_mode: ExecutionMode::Reasoning,
-        script_entry: None,
-        script_input_mode: ScriptInputMode::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-        excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn seed_artifact(

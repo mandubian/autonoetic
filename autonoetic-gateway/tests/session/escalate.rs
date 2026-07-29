@@ -6,16 +6,16 @@
 //!   3. Operator approves the escalation via `approve_request`.
 //!   4. Session resumes from checkpoint with operator guidance injected as system message.
 
-
 use autonoetic_gateway::constitution_digest::initialize_constitution;
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::{approve_request, load_approval_requests};
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::background::ScheduledAction;
 use std::sync::{Arc, Mutex};
 use crate::support::{EnvGuard, OpenAiStub};
+use crate::support::manifest_builder::TestManifest;
 
 const LLM_BASE_URL_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_ENV: &str = "AUTONOETIC_LLM_API_KEY";
@@ -60,15 +60,6 @@ fn make_escalation_stub_responses() -> Vec<serde_json::Value> {
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "escalation-test-agent".to_string(),
             name: "Escalation Test Agent".to_string(),
@@ -76,28 +67,9 @@ fn test_manifest() -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        capabilities: vec![],
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
         execution_mode: autonoetic_types::agent::ExecutionMode::Reasoning,
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn seed_test_agent(

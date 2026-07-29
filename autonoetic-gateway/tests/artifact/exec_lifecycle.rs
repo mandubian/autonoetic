@@ -7,7 +7,6 @@
 //! 4. Cache hit on second run → approval reuse works
 //! 5. artifact_exec tool is registered and gated by ArtifactExecution
 
-
 use autonoetic_gateway::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
@@ -15,21 +14,13 @@ use autonoetic_gateway::runtime::remote_access::{
     classify_network_coverage, NetworkCoverage, RemoteAccessAnalyzer,
 };
 use autonoetic_gateway::runtime::tools::default_registry;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use autonoetic_types::capability::Capability;
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 fn manifest_with_artifact_execution(agent_id: &str) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
@@ -43,40 +34,12 @@ fn manifest_with_artifact_execution(agent_id: &str) -> AgentManifest {
                 hosts: vec!["*".to_string()],
             },
         ],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn manifest_without_network() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "executor.default".to_string(),
             name: "Executor".to_string(),
@@ -85,27 +48,8 @@ fn manifest_without_network() -> AgentManifest {
             resident_idle_ttl_secs: None,
         },
         capabilities: vec![Capability::ArtifactExecution],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 const WEATHER_ARTIFACT_CODE: &str = r#"
@@ -315,15 +259,6 @@ fn test_artifact_exec_tool_registered_and_gated() {
     );
 
     let manifest_no_exec = AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "researcher.default".to_string(),
             name: "Researcher".to_string(),
@@ -334,27 +269,8 @@ fn test_artifact_exec_tool_registered_and_gated() {
         capabilities: vec![Capability::NetworkAccess {
             hosts: vec!["*".to_string()],
         }],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        };
+    ..TestManifest::new().build()
+};
     let defs = registry.available_definitions(&manifest_no_exec);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
@@ -403,15 +319,6 @@ fn test_artifact_exec_definition_exposes_input_parameter() {
 
 fn unit_test_runner_gate_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "acme.custom_unit_test_runner".to_string(),
             name: "Custom Unit Test Runner".to_string(),
@@ -431,27 +338,8 @@ fn unit_test_runner_gate_manifest() -> AgentManifest {
                 scopes: vec!["self.*".to_string()],
             },
         ],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 #[test]
@@ -478,15 +366,6 @@ fn test_artifact_exec_available_for_promotion_gate_runner_without_evaluation() {
 fn test_artifact_exec_not_available_for_static_evaluator() {
     let registry = default_registry();
     let manifest = AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "static_evaluator.default".to_string(),
             name: "Static Evaluator".to_string(),
@@ -502,27 +381,8 @@ fn test_artifact_exec_not_available_for_static_evaluator() {
                 scopes: vec!["self.*".to_string()],
             },
         ],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        };
+    ..TestManifest::new().build()
+};
     let defs = registry.available_definitions(&manifest);
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(
