@@ -114,6 +114,31 @@ impl TestManifest {
         self
     }
 
+    pub fn limits(mut self, limits: ResourceLimits) -> Self {
+        self.manifest.limits = Some(limits);
+        self
+    }
+
+    pub fn background(mut self, background: BackgroundPolicy) -> Self {
+        self.manifest.background = Some(background);
+        self
+    }
+
+    pub fn disclosure(mut self, disclosure: DisclosurePolicy) -> Self {
+        self.manifest.disclosure = Some(disclosure);
+        self
+    }
+
+    pub fn middleware(mut self, middleware: Middleware) -> Self {
+        self.manifest.middleware = Some(middleware);
+        self
+    }
+
+    pub fn compression(mut self, compression: CompressionConfig) -> Self {
+        self.manifest.compression = Some(compression);
+        self
+    }
+
     pub fn build(self) -> AgentManifest {
         self.manifest
     }

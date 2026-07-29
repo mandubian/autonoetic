@@ -6,11 +6,12 @@ use autonoetic_gateway::llm::{
 };
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::tools::default_registry;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::session_outcome::SessionCloseOutcome;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 struct AnnotateThenStopDriver {
     calls: AtomicUsize,
@@ -50,15 +51,6 @@ impl LlmDriver for AnnotateThenStopDriver {
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "report.tester".to_string(),
             name: "report.tester".to_string(),
@@ -66,9 +58,6 @@ fn test_manifest() -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        capabilities: vec![],
-        llm_overrides: None,
-        llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o-mini".to_string(),
@@ -83,24 +72,8 @@ fn test_manifest() -> AgentManifest {
             thinking: None,
             egress_class: None,
         }),
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 #[tokio::test]

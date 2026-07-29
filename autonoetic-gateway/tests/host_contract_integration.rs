@@ -1,19 +1,21 @@
 //! Gateway-owned host contract — install rejection + NULL grandfathering.
 
+mod support;
+
 use autonoetic_gateway::runtime::tools::agent_revision::AgentRevisionCreateFromIntentTool;
 use autonoetic_gateway::runtime::tools::NativeTool;
 use autonoetic_gateway::policy::PolicyEngine;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, ScriptInputMode};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode};
 use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::agent_revision::AgentRevisionRecord;
 use serial_test::serial;
 use std::sync::Arc;
 use tempfile::tempdir;
+use support::manifest_builder::TestManifest;
 
 fn builder_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
         runtime: autonoetic_gateway::runtime::install_contract::default_runtime_declaration(),
         agent: AgentIdentity {
             id: "specialized-builder.test".to_string(),
@@ -25,27 +27,9 @@ fn builder_manifest() -> AgentManifest {
         capabilities: vec![Capability::AgentRevision {
             patterns: vec!["*".to_string()],
         }],
-        llm_preset: None,
-        llm_overrides: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
         execution_mode: ExecutionMode::Reasoning,
-        script_entry: None,
-        script_input_mode: ScriptInputMode::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn seed_weather_artifact(

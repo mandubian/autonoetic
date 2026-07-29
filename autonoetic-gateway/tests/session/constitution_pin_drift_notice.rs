@@ -10,16 +10,16 @@
 //! carry the pinned vs. current version+digest, then that the pin is updated
 //! so a second turn does not repeat the notice.
 
-
 use autonoetic_gateway::llm::{
     CompletionRequest, CompletionResponse, LlmDriver, Message, Role, StopReason, TokenUsage,
 };
 use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use autonoetic_gateway::runtime::tools::default_registry;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 #[derive(Default)]
 struct CaptureSystemPromptDriver {
@@ -61,15 +61,6 @@ impl LlmDriver for CaptureSystemPromptDriver {
 
 fn manifest(agent_id: &str) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: agent_id.to_string(),
             name: agent_id.to_string(),
@@ -77,28 +68,8 @@ fn manifest(agent_id: &str) -> AgentManifest {
             singleton: false,
             resident_idle_ttl_secs: None,
         },
-        capabilities: vec![],
-        llm_overrides: None,
-        llm_preset: None,
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-        excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-        open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 /// Seeds an agent dir and returns the freshly initialized constitution's

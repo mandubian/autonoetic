@@ -11,18 +11,10 @@ use autonoetic_types::capability::Capability;
 use autonoetic_types::config::{GatewayConfig, LlmPreset};
 use std::collections::HashMap;
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 fn test_manifest() -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "coder.default".to_string(),
             name: "Coder".to_string(),
@@ -33,27 +25,10 @@ fn test_manifest() -> AgentManifest {
         capabilities: vec![Capability::SandboxFunctions {
             allowed: vec!["content.".to_string()],
         }],
-        llm_overrides: None,
         llm_preset: Some("sonnet".to_string()),
-        llm_config: None,
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
         execution_mode: ExecutionMode::Reasoning,
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: Default::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn test_config() -> GatewayConfig {

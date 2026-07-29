@@ -1,7 +1,6 @@
 use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::lifecycle::AgentExecutor;
 use autonoetic_gateway::runtime::parser::SkillParser;
-use autonoetic_types::config::GatewayConfig;
 use std::path::Path;
 use std::sync::Arc;
 mod support;

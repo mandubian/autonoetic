@@ -6,7 +6,6 @@ use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::scheduler::reap_orphaned_sessions;
 use autonoetic_gateway::GatewayExecutionService;
 use autonoetic_types::causal_chain::SessionTranscriptRecord;
-use autonoetic_types::config::GatewayConfig;
 use support::TestWorkspace;
 
 fn make_transcript(

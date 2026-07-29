@@ -10,13 +10,14 @@ use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
 use autonoetic_gateway::runtime::mcp::McpToolRuntime;
 use autonoetic_gateway::runtime::session_tracer::SessionTracer;
 use autonoetic_gateway::runtime::tools::{NativeTool, NativeToolRegistry};
-use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentIdentity, AgentManifest, LlmConfig};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::SessionBudgetConfig;
 use autonoetic_types::disclosure::DisclosurePolicy;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
+use crate::support::manifest_builder::TestManifest;
 
 struct NoOpDriver;
 
@@ -39,15 +40,6 @@ impl LlmDriver for NoOpDriver {
 
 fn manifest_with_capabilities(capabilities: Vec<Capability>) -> AgentManifest {
     AgentManifest {
-        version: "1.0".to_string(),
-        runtime: RuntimeDeclaration {
-            engine: "autonoetic".to_string(),
-            gateway_version: "0.1.0".to_string(),
-            sdk_version: "0.1.0".to_string(),
-            runtime_type: "stateful".to_string(),
-            sandbox: "bubblewrap".to_string(),
-            runtime_lock: "runtime.lock".to_string(),
-        },
         agent: AgentIdentity {
             id: "test-agent".to_string(),
             name: "test-agent".to_string(),
@@ -56,8 +48,6 @@ fn manifest_with_capabilities(capabilities: Vec<Capability>) -> AgentManifest {
             resident_idle_ttl_secs: None,
         },
         capabilities,
-        llm_overrides: None,
-        llm_preset: None,
         llm_config: Some(LlmConfig {
             provider: "openai".to_string(),
             model: "gpt-4o".to_string(),
@@ -72,24 +62,8 @@ fn manifest_with_capabilities(capabilities: Vec<Capability>) -> AgentManifest {
             thinking: None,
             egress_class: None,
         }),
-        limits: None,
-        background: None,
-        disclosure: None,
-        io: None,
-        middleware: None,
-        execution_mode: Default::default(),
-        script_entry: None,
-        script_input_mode: Default::default(),
-        gateway_url: None,
-        gateway_token: None,
-        allowed_tool_tiers: vec![],
-            excluded_tools: vec![],
-        agentskills_import: None,
-        compression: None,
-            open_web: false,
-        sandbox_network: autonoetic_types::agent::SandboxNetworkPolicy::default(),
-        egress: None,
-        }
+        ..TestManifest::new().build()
+    }
 }
 
 fn empty_executor() -> (AgentExecutor, tempfile::TempDir) {
@@ -502,4 +476,3 @@ fn critical_sentinel_emits_operator_activity_not_user_interaction() {
         .collect();
     assert!(sentinel.is_empty(), "D.7a: Critical must not push a DivergenceSentinel UserInteraction");
 }
-
