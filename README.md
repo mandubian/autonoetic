@@ -1,11 +1,51 @@
 # Autonoetic
 
-Autonoetic is a Rust runtime for autonomous agents with durable memory,
-portable identity, reproducible execution — and a machine-enforced
-constitution. It treats the trustworthiness of unsupervised agents as an
-engineering problem, not a prompt-writing problem.
+**Autonoetic is a Rust runtime built on one bet: an AI agent that knows
+itself — its own past, its real capabilities, its rights — and that lives
+under the same law as every other actor, human or artificial, can become a
+trusted member of a community instead of a tool that has to be watched.**
 
-This repository hosts the standalone Autonoetic project.
+The name is from cognitive science. *Autonoetic* means self-knowing across
+time: holding your own past as your own, and projecting yourself into your own
+future. Autonoetic makes no claim about machine consciousness — the claim is
+mechanical. Instead of hoping an agent is self-aware, the runtime hands it a
+verified self-model every turn (its true history, its actual capabilities, the
+law in force) and places it in a community where AI agents, human operators,
+and plain scripts are all first-class actors — owed the same rights, held to
+the same rules and obligations.
+
+What holds that community together is a signed, versioned **constitution**:
+not a leash on something dangerous, but the common law that lets independent
+actors cooperate, delegate, and trust one another *mechanically* rather than
+personally. A neutral **gateway** enforces it deterministically and invents no
+rules of its own — a *Lawful Executor*. Because every actor is bound by the
+same verifiable law, none has to guess at another's intentions to work with
+it; trust becomes structural, which is what makes a mixed community of humans,
+agents, and scripts possible at all.
+
+The rest of the project is the foundation that makes such a community real:
+
+- a **lawful gateway** — every privileged action is validated against the
+  constitution and typed capabilities, then executed inside a sandbox
+  (bubblewrap / docker / microvm / wasm);
+- **immutable recording and data lineage** — a hash-chained causal trace of
+  every turn, replayable and forkable, so an actor's past is a fact it can
+  reason from and anyone can audit, not a memory it might confabulate;
+- **boundaries that protect** — secrets injected at execution time and never
+  seen by the model, and data-locality controls that constrain where
+  information is allowed to flow;
+- **evolution tooling** — agents that build, evaluate, and promote each
+  other's code under the same law, behind audited gates.
+
+None of this is the fastest way to hand a model a terminal, and it is not
+trying to be. Autonoetic is for the harder question underneath: what does an
+agent need in order to know itself, act on its own, cooperate with others, and
+still be fully accountable — and can that be engineered rather than merely
+hoped for.
+
+> New here? [**Why this exists**](#why-this-exists) lays out the three problems
+> that shape everything below; [**Autonoetic for beginners**](docs/autonoetic-concepts-for-beginners.md)
+> builds the same ideas from first principles.
 
 ## Why this exists
 
