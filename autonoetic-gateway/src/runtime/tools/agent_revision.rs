@@ -5639,6 +5639,7 @@ mod approval_execution_context_tests {
             tool_discovery_catalog: None,
             wake_hints_map: None,
             wake_hint: None,
+            egress_taint: None,
         };
         let (root, wf, task) =
             approval_execution_context(Some(&rc), Some(rc.session_id.as_str()));

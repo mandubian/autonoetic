@@ -114,6 +114,7 @@ fn sentinel_suppress_accepts_reason_and_emits_causal_event() -> anyhow::Result<(
         tool_discovery_catalog: None,
         wake_hint: None,
         wake_hints_map: None,
+        egress_taint: None,
     };
 
     let args = r#"{"turns": 3, "reason": "Testing suppression"}"#;

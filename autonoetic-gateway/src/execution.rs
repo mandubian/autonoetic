@@ -882,6 +882,8 @@ impl GatewayExecutionService {
             target_pattern: format!("session:{}", target_session_id),
             message: message.clone(),
             created_at: now.clone(),
+            // Gateway-authored control message — content-free, unrestricted.
+            egress_label: None,
         };
         store.save_agent_message(&record)?;
         store.insert_message_delivery(&message_id, target_session_id)?;

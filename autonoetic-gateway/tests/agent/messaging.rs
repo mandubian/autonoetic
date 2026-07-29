@@ -586,3 +586,58 @@ async fn either_target_is_required() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ── Cross-agent egress taint on the payload (RFC data-envelopes §5.5, 4b) ──
+
+#[test]
+fn agent_message_record_roundtrips_egress_taint() -> anyhow::Result<()> {
+    use autonoetic_gateway::scheduler::gateway_store::AgentMessageRecord;
+    use autonoetic_types::egress::{EgressLabel, Sink};
+
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+
+    // A message from a session that read email carries local_only taint.
+    let tainted = AgentMessageRecord {
+        message_id: "m-tainted".into(),
+        sender_session_id: "sender".into(),
+        sender_agent_id: "mail.default".into(),
+        target_pattern: "session:recv".into(),
+        message: "the emails say...".into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        egress_label: Some(EgressLabel::local_only()),
+    };
+    store.save_agent_message(&tainted)?;
+    store.insert_message_delivery("m-tainted", "recv")?;
+
+    // A clean message from the same/another sender carries no taint.
+    let clean = AgentMessageRecord {
+        message_id: "m-clean".into(),
+        egress_label: None,
+        ..tainted.clone()
+    };
+    store.save_agent_message(&clean)?;
+    store.insert_message_delivery("m-clean", "recv")?;
+
+    let fetched = store.fetch_undelivered_messages("recv")?;
+    let by_id = |id: &str| {
+        fetched
+            .iter()
+            .find(|m| m.message_id == id)
+            .unwrap_or_else(|| panic!("message {id} should be undelivered"))
+    };
+    // The taint survives the store roundtrip (migration column + serde), so the
+    // recipient can label the ingested message and withhold it from a remote
+    // sink; a clean message carries None (⇒ unrestricted).
+    assert_eq!(
+        by_id("m-tainted").egress_label,
+        Some(EgressLabel::local_only())
+    );
+    assert!(!by_id("m-tainted")
+        .egress_label
+        .as_ref()
+        .unwrap()
+        .allows(Sink::RemoteModel));
+    assert_eq!(by_id("m-clean").egress_label, None);
+    Ok(())
+}

@@ -10,18 +10,30 @@ pub struct AgentMessageRecord {
     pub target_pattern: String,
     pub message: String,
     pub created_at: String,
+    /// The sender's accumulated egress taint at send time (RFC §5.5 / slice
+    /// 4b), serialized as a sink-set. `None` ⇒ the sender touched nothing
+    /// restrictive, so the payload is unrestricted. The recipient reads this to
+    /// label the ingested `[Direct Message …]` block and withhold it from a
+    /// sink the taint excludes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_label: Option<autonoetic_types::egress::EgressLabel>,
 }
 
 pub(super) fn save_agent_message(conn: &Connection, record: &AgentMessageRecord) -> Result<()> {
+    let egress_label_json = match &record.egress_label {
+        Some(l) => Some(serde_json::to_string(l)?),
+        None => None,
+    };
     conn.execute(
-        "INSERT INTO agent_messages (message_id, sender_session_id, sender_agent_id, target_pattern, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO agent_messages (message_id, sender_session_id, sender_agent_id, target_pattern, message, created_at, egress_label_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             record.message_id,
             record.sender_session_id,
             record.sender_agent_id,
             record.target_pattern,
             record.message,
-            record.created_at
+            record.created_at,
+            egress_label_json
         ],
     )?;
     Ok(())
@@ -44,13 +56,14 @@ pub(super) fn fetch_undelivered_messages(
     session_id: &str,
 ) -> Result<Vec<AgentMessageRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT m.message_id, m.sender_session_id, m.sender_agent_id, m.target_pattern, m.message, m.created_at
+        "SELECT m.message_id, m.sender_session_id, m.sender_agent_id, m.target_pattern, m.message, m.created_at, m.egress_label_json
          FROM agent_messages m
          JOIN agent_message_deliveries d ON m.message_id = d.message_id
          WHERE d.target_session_id = ?1 AND d.delivered_at IS NULL
          ORDER BY m.created_at ASC"
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
+        let egress_label_json: Option<String> = row.get(6)?;
         Ok(AgentMessageRecord {
             message_id: row.get(0)?,
             sender_session_id: row.get(1)?,
@@ -58,6 +71,8 @@ pub(super) fn fetch_undelivered_messages(
             target_pattern: row.get(3)?,
             message: row.get(4)?,
             created_at: row.get(5)?,
+            egress_label: egress_label_json
+                .and_then(|j| serde_json::from_str(&j).ok()),
         })
     })?;
 
