@@ -39,18 +39,14 @@ The default is `Operator` (`ViewerClass::default()`). See [the default-Operator 
 
 ### `ExecutionTraceRecord`
 
-| Field | `Admin` | `Operator` | `Agent` |
-|---|---|---|---|
-| `trace_id`, `event_id`, `agent_id`, `session_id`, `turn_id`, `timestamp` | identity | identity | identity |
-| `tool_name`, `exit_code`, `duration_ms`, `success` | identity | identity | identity |
-| `error_type`, `error_summary` | identity | identity | identity |
-| `approval_required`, `approval_request_id` | identity | identity | identity |
-| `command` | identity | identity | `"***REDACTED***"` |
-| `stdout`, `stderr` | identity | identity | `None` |
-| `arguments` (JSON string) | identity | secret-key values replaced with `"***REDACTED***"`; non-JSON strings get in-place masking via `redact_embedded_secrets` | `None` |
-| `result` (JSON string) | identity | same as `arguments` | `None` |
-
-Source: `autonoetic-types/src/causal_chain.rs::ExecutionTraceRecord::redact_for_viewer`. The `command` field was previously visible to `Agent` until commit 7f8525d (issue #4 follow-up) blanked it.
+No longer `ViewerClass`-redacted. The sole consumer was
+`runtime/tools/execution.rs::ExecutionSearchTool`, which is a stored-content
+query surface gated by **egress label × query sink** instead (RFC
+data-envelopes-egress-localization §6): `command`/`stdout`/`stderr`/`result`
+pass through `filter_or_indicate_for_sink` and are withheld with an indication
+only when the trace's `egress_label` excludes the caller's sink. The old
+`redact_for_viewer`/`to_json_for_viewer` pair (which blanked content for the
+`Agent` class) was removed as dead code.
 
 ### `CausalEventRecord`
 
@@ -98,12 +94,15 @@ Source: `autonoetic-types/src/background.rs::ScheduledAction::redact_for_viewer`
 
 ## Where the class is selected
 
-The viewer class is chosen at the call site. Two production call sites today pass an explicit class:
+The viewer class is chosen at the call site. One production call site today passes an explicit class:
 
 | Call site | Class | Why |
 |---|---|---|
-| `runtime/tools/execution.rs::ExecutionSearchTool` | `Agent` | The caller is always an agent invoking the `execution.search` tool. |
 | `runtime/tools/approval.rs::approval_summary` | `Agent` | The caller is the agent that requested or is querying the approval. |
+
+(`runtime/tools/execution.rs::ExecutionSearchTool` used to be the second; it
+is now gated by egress label × query sink instead — see the
+`ExecutionTraceRecord` section above.)
 
 Other paths today do **not** invoke `ViewerClass`-aware redaction:
 
@@ -120,7 +119,7 @@ Other paths today do **not** invoke `ViewerClass`-aware redaction:
 
 **Discipline:**
 
-- Code paths that serve agents (gateway tools, agent-side API readers) must pass `ViewerClass::Agent` explicitly. The two existing tool call sites do this.
+- Code paths that serve agents (gateway tools, agent-side API readers) must pass `ViewerClass::Agent` explicitly. The existing tool call site does this.
 - Code review for any new tool path or API endpoint should specifically check for the class selection. Grepping for `ViewerClass::` is the simplest verification.
 - The `ViewerClass::default()` impl on `disclosure.rs` is intentionally an `Operator` rather than a non-`Default` type, to keep ergonomics for CLI rendering. Tightening this (e.g. removing `Default` and forcing every call site to choose explicitly) is a backlog candidate but not currently planned.
 
@@ -130,7 +129,7 @@ Other paths today do **not** invoke `ViewerClass`-aware redaction:
 
 The primitives live in **`autonoetic-types/src/redaction.rs`** (centralised in #161). Three call layers delegate to it:
 
-1. `causal_chain::redact_for_viewer` — for `ExecutionTraceRecord` and `CausalEventRecord`.
+1. `causal_chain::redact_for_viewer` — for `CausalEventRecord`.
 2. `background::ScheduledAction::redact_for_viewer` — for approval subjects.
 3. `gateway::log_redaction` — re-exports the canonical helpers; `RedactedPayload` (the P-4.14 wrapper) stays local.
 
