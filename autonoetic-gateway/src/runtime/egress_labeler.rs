@@ -1246,17 +1246,9 @@ pub fn plan_taint_following_route(
     }
 }
 
-/// Emit `egress.provider_selected` (RFC §9.1) — the per-completion routing
-/// audit that makes "why did turn N run on this provider?" answerable from the
-/// chain alone. Content-free: batch label, eligible set, chosen preset, whether
-/// a reroute happened, and any fallback presets skipped as ineligible.
-///
-/// `chosen_preset` is `None` when the turn refused with
-/// `egress_no_eligible_provider`. Only meaningful for tainted batches — the
-/// lifecycle skips emission entirely for the unrestricted (clean) case.
-#[allow(clippy::too_many_arguments)]
 /// Emit `egress.relabel` for an operator (or sweep) reclassification of stored
 /// content (RFC §6.7 / #908). Content-free metadata only.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_relabel(
     store: &Arc<GatewayStore>,
     session_id: &str,
@@ -1287,6 +1279,15 @@ pub fn emit_relabel(
     );
 }
 
+/// Emit `egress.provider_selected` (RFC §9.1) — the per-completion routing
+/// audit that makes "why did turn N run on this provider?" answerable from the
+/// chain alone. Content-free: batch label, eligible set, chosen preset, whether
+/// a reroute happened, and any fallback presets skipped as ineligible.
+///
+/// `chosen_preset` is `None` when the turn refused with
+/// `egress_no_eligible_provider`. Only meaningful for tainted batches — the
+/// lifecycle skips emission entirely for the unrestricted (clean) case.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_provider_selected(
     store: &Arc<GatewayStore>,
     session_id: &str,

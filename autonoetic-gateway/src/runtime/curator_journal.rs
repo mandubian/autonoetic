@@ -327,6 +327,18 @@ pub fn extract_and_persist(
         ];
         memory.visibility = MemoryVisibility::Global;
         memory.confidence = Some(1.0);
+        // Curator output summarizes the curated session and is stored Global so
+        // the evolution-orchestrator can find it via knowledge_search (a remote
+        // recall path). It must inherit the session's egress taint (RFC §6 /
+        // #908); otherwise a `local_only` session's content leaks through this
+        // memory as `unrestricted`. Mirrors the promote_to_skill gate above.
+        memory.egress_label = Some(
+            store
+                .get_session_egress_taint(session_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(autonoetic_types::egress::EgressLabel::unrestricted),
+        );
         if let Err(e) = store.memory_upsert(&memory) {
             tracing::warn!(
                 target: "curator_journal",
