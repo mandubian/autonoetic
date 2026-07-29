@@ -3550,6 +3550,29 @@ impl GatewayExecutionService {
         .with_extended_instructions(loaded.extended_instructions.clone()),
                 openrouter_catalog,
             );
+            if let Some(meta) = metadata {
+                if let Some(label_val) = meta.get("ofp_inbound_egress_label") {
+                    if let Ok(label) =
+                        serde_json::from_value::<autonoetic_types::egress::EgressLabel>(
+                            label_val.clone(),
+                        )
+                    {
+                        if let Some(ref gs) = self.gateway_store {
+                            if let Err(e) = gs.set_session_egress_taint(session_id, &label) {
+                                tracing::warn!(
+                                    target: "egress",
+                                    error = %e,
+                                    session_id = %session_id,
+                                    "failed to seed OFP inbound session egress taint"
+                                );
+                            }
+                        }
+                        if !label.is_unrestricted() {
+                            runtime = runtime.with_initial_ingest_egress_label(label);
+                        }
+                    }
+                }
+            }
             // Phase 3: propagate overflow_recovery flag so the governor
             // uses an aggressive reduction pipeline on retry.
             let overflow_recovery = metadata

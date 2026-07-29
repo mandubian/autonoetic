@@ -8,6 +8,9 @@ use crate::server::ofp::{
     evaluate_constitution_compatibility, hmac_sign, hmac_verify, parse_ofp_response,
     sign_wire_message, verify_chain_attestation, verify_wire_message, write_framed_message,
 };
+use crate::runtime::egress_labeler::{
+    ofp_federated_egress_refusal, ofp_outbound_wire_fields, require_boundary_session_taint,
+};
 use crate::server::registry::PeerRegistry;
 use autonoetic_ofp::wire::{
     RemoteAgentInfo, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
@@ -63,6 +66,7 @@ impl MessageRouter {
         sender_agent_id: &str,
         target_agent_id: &str,
         message: &str,
+        sender_session_id: Option<&str>,
     ) -> anyhow::Result<String> {
         // 1. Check if the target is remote via PeerRegistry
         if let Some(peer_node_id) = self.registry.resolve_agent_node(target_agent_id).await {
@@ -71,7 +75,13 @@ impl MessageRouter {
                 sender_agent_id, target_agent_id, peer_node_id
             );
             return self
-                .send_via_ofp(&peer_node_id, target_agent_id, message, sender_agent_id)
+                .send_via_ofp(
+                    &peer_node_id,
+                    target_agent_id,
+                    message,
+                    sender_agent_id,
+                    sender_session_id,
+                )
                 .await;
         }
 
@@ -92,6 +102,7 @@ impl MessageRouter {
         target_agent: &str,
         message: &str,
         sender_agent: &str,
+        sender_session_id: Option<&str>,
     ) -> anyhow::Result<String> {
         let peer = self
             .registry
@@ -286,6 +297,21 @@ impl MessageRouter {
         }
 
         // 3. Send AgentMessage with peer_event_ref.
+        if let Some(err) = ofp_federated_egress_refusal(
+            message,
+            sender_session_id,
+            sender_agent,
+            self.gateway_store.as_ref(),
+        ) {
+            return Err(err);
+        }
+        let session_taint = require_boundary_session_taint(
+            None,
+            self.gateway_store.as_deref(),
+            sender_session_id,
+        )?;
+        let (wire_message, wire_egress_label, wire_withheld) =
+            ofp_outbound_wire_fields(message, &session_taint);
         let local_peer_event_ref = emit_federation_message_event(
             self.gateway_store.clone(),
             &self.node_id,
@@ -294,7 +320,7 @@ impl MessageRouter {
             autonoetic_types::causal_chain::EntryStatus::Success,
             Some(sender_agent),
             Some(target_agent),
-            message,
+            &wire_message,
             None,
         );
         let mut agent_msg = WireMessage {
@@ -303,9 +329,11 @@ impl MessageRouter {
             seq_num: None,
             kind: WireMessageKind::Request(WireRequest::AgentMessage {
                 agent: target_agent.to_string(),
-                message: message.to_string(),
+                message: wire_message,
                 sender: Some(sender_agent.to_string()),
                 peer_event_ref: Some(local_peer_event_ref),
+                egress_label: wire_egress_label,
+                withheld_indication: wire_withheld,
             }),
         };
         if use_msg_hmac {

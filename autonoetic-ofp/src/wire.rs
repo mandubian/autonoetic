@@ -95,6 +95,13 @@ pub enum WireRequest {
         /// Optional cross-gateway causal correlation reference.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         peer_event_ref: Option<PeerEventRef>,
+        /// Autonoetic extension: egress label for the message payload (RFC §7).
+        /// Omitted by legacy peers; receivers fail-closed when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        egress_label: Option<serde_json::Value>,
+        /// Autonoetic extension: safe substitute when payload was withheld locally.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        withheld_indication: Option<String>,
     },
     /// Exchange signed chain attestation digests.
     #[serde(rename = "chain_attestation")]
@@ -474,6 +481,34 @@ mod tests {
     #[test]
     fn capsule_transfer_extension_name_is_stable() {
         assert_eq!(CAPSULE_TRANSFER_EXTENSION, "capsule_transfer");
+    }
+
+    #[test]
+    fn agent_message_egress_label_roundtrip() {
+        let msg = WireMessage {
+            id: "am-1".to_string(),
+            signature: None,
+            seq_num: None,
+            kind: WireMessageKind::Request(WireRequest::AgentMessage {
+                agent: "coder".to_string(),
+                message: "hello".to_string(),
+                sender: Some("planner".to_string()),
+                peer_event_ref: None,
+                egress_label: Some(serde_json::json!(["local_model", "local_agent"])),
+                withheld_indication: None,
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("egress_label"));
+        let decoded: WireMessage = serde_json::from_str(&json).unwrap();
+        match decoded.kind {
+            WireMessageKind::Request(WireRequest::AgentMessage {
+                egress_label, ..
+            }) => {
+                assert!(egress_label.is_some());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

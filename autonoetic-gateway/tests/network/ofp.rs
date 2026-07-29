@@ -260,6 +260,8 @@ fn test_encode_decode_all_message_types() {
                 message: "Hello".into(),
                 sender: Some("orchestrator".into()),
                 peer_event_ref: None,
+                egress_label: None,
+                withheld_indication: None,
             }),
         },
         WireMessage {
@@ -1290,6 +1292,8 @@ async fn test_inbound_agent_message() {
             message: "Hello from OFP client!".to_string(),
             sender: Some(source_agent_id.to_string()),
             peer_event_ref: None,
+            egress_label: None,
+            withheld_indication: None,
         }),
     };
 
@@ -1384,6 +1388,8 @@ async fn test_inbound_agent_message_rejects_unadvertised_sender() {
             message: "Hello from OFP client!".to_string(),
             sender: Some("spoofed_sender".to_string()),
             peer_event_ref: None,
+            egress_label: None,
+            withheld_indication: None,
         }),
     };
     agent_msg.signature = Some(
