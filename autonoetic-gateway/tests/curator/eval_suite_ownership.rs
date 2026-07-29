@@ -10,7 +10,6 @@
 //!   7. Store query: list suites targeting a given agent
 //!   8. Backward-compat: old suites without ownership columns decode correctly
 
-mod support;
 
 use autonoetic_gateway::runtime::tools::{
     EvalSuitePublishTool, EvalSuiteUpdateTool, NativeTool,

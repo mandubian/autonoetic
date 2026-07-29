@@ -17,11 +17,11 @@
 use autonoetic_gateway::runtime::parser::SkillParser;
 
 const CURATOR_SKILL_MD: &str =
-    include_str!("../../agents/evolution/memory-curator.default/SKILL.md");
+    include_str!("../../../agents/evolution/memory-curator.default/SKILL.md");
 const ORCHESTRATOR_SKILL_MD: &str =
-    include_str!("../../agents/evolution/evolution-orchestrator.default/SKILL.md");
+    include_str!("../../../agents/evolution/evolution-orchestrator.default/SKILL.md");
 const STEWARD_SKILL_MD: &str =
-    include_str!("../../agents/evolution/evolution-steward.default/SKILL.md");
+    include_str!("../../../agents/evolution/evolution-steward.default/SKILL.md");
 
 #[test]
 fn all_three_manifests_parse() {

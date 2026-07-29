@@ -1,7 +1,7 @@
 //! Live integration test for coder agent content generation with real LLM.
 //!
 //! Run with:
-//!   OPENROUTER_API_KEY=<key> cargo test -p autonoetic-gateway --test coder_live_integration -- --nocapture
+//!   OPENROUTER_API_KEY=<key> cargo test -p autonoetic-gateway --test coder -- live -- --nocapture
 //!
 //! This test spins up a real gateway and uses a live LLM to test:
 //! 1. Coder agent receives a task
@@ -42,7 +42,7 @@ async fn test_live_coder_tool_call_content_write() -> anyhow::Result<()> {
         Ok(k) => k,
         Err(_) => {
             eprintln!("Skipping live test: OPENROUTER_API_KEY not set");
-            eprintln!("Run with: OPENROUTER_API_KEY=<key> cargo test -p autonoetic-gateway --test coder_live_integration -- --nocapture");
+            eprintln!("Run with: OPENROUTER_API_KEY=<key> cargo test -p autonoetic-gateway --test coder -- --nocapture");
             return Ok(());
         }
     };

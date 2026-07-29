@@ -1,7 +1,7 @@
 //! Integration tests for secure secret store directives.
 //!
 //! Run with:
-//!   cargo test -p autonoetic-gateway --test secret_store_integration -- --nocapture
+//!   cargo test -p autonoetic-gateway --test credential -- --nocapture
 //!
 //! Vault persistence requires `AUTONOETIC_VAULT_KEY` or `AUTONOETIC_VAULT_KEY_PATH` (see `vault.rs`).
 
