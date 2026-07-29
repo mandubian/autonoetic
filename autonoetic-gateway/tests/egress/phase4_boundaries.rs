@@ -20,7 +20,7 @@ use autonoetic_gateway::runtime::egress_labeler::{
 use autonoetic_gateway::scheduler::approval::{apply_decision, ApproveOptions, DecisionContext};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::background::{
-    ApprovalDecision, ApprovalLevel, ApprovalStatus, GrantScope, ScheduledAction,
+    ApprovalDecision, ApprovalLevel, ApprovalStatus, ScheduledAction,
 };
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::egress::{EgressClass, EgressLabel, Sink};

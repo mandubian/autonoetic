@@ -216,7 +216,5 @@ fn resolve_session_egress_taint(
 
 ## Immediate next step
 
-Phase 4 slices 0–8 are complete on `main`. Constitution / enforcement-register
-changes remain **Phase 5 #910**.
-
-No constitution / enforcement-register changes in Phase 4 (clause remains Phase 5 #910).
+Phase 4 slices 0–8 are complete. Constitution / enforcement-register changes
+remain **Phase 5 #910**.
