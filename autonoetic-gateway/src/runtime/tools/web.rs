@@ -1564,6 +1564,17 @@ fn execute_web_fetch_http(
             WebFetchHostGate::Allowed => {}
         }
 
+        if let Some(refusal) = web_network_egress_refusal(
+            "web.fetch",
+            gateway_store.as_ref(),
+            run_context,
+            session_id,
+            &manifest.agent.id,
+            None,
+        ) {
+            return Ok(WebFetchHttpOutcome::NeedsApproval(refusal));
+        }
+
         let fetch_url = current_url.clone();
         let hop = block_on_http({
             let client = client.clone();
@@ -1816,17 +1827,6 @@ impl NativeTool for WebFetchTool {
 
         let timeout_secs = args.timeout_secs.unwrap_or(20).clamp(5, 120);
         let max_chars = args.max_chars.unwrap_or(20_000).clamp(512, 200_000);
-
-        if let Some(refusal) = web_network_egress_refusal(
-            "web.fetch",
-            _gateway_store.as_ref(),
-            _run_context,
-            _session_id,
-            &manifest.agent.id,
-            _turn_id,
-        ) {
-            return Ok(refusal);
-        }
 
         let outcome = match execute_web_fetch_http(
             manifest,

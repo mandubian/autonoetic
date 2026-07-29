@@ -480,12 +480,6 @@ impl HookExecutor {
         let callback_url = required_string_param(hook, "url")?;
         let secret_env = required_string_param(hook, "secret_env")?;
         let parsed_url = validate_callback_url(&callback_url, &hook.callback_allowlist)?;
-        // Resolve the hostname *before* connecting and reject if any returned
-        // address is internal. This catches the common case of a hostname
-        // pointing at RFC-1918/loopback space without requiring a custom
-        // connector. Note: this does not fully prevent DNS-rebinding (TOCTOU),
-        // but it raises the bar significantly.
-        check_resolved_ips_not_internal(&parsed_url).await?;
         let hook_session_id = ctx
             .session_id
             .as_deref()
@@ -508,6 +502,12 @@ impl HookExecutor {
                 refusal
             );
         }
+        // Resolve the hostname *before* connecting and reject if any returned
+        // address is internal. This catches the common case of a hostname
+        // pointing at RFC-1918/loopback space without requiring a custom
+        // connector. Note: this does not fully prevent DNS-rebinding (TOCTOU),
+        // but it raises the bar significantly.
+        check_resolved_ips_not_internal(&parsed_url).await?;
         let delivery_id = build_http_callback_delivery_id(ctx, &parsed_url, hook);
         let event_name = ctx.event.as_str();
         let action_name = "http.callback";

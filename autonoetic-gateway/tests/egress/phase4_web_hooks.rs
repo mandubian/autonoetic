@@ -183,3 +183,81 @@ fn hooks_network_egress_refused_under_local_only_taint() -> anyhow::Result<()> {
     assert_eq!(payload["surface"], "hooks");
     Ok(())
 }
+
+#[test]
+fn web_search_network_egress_refused_under_local_only_taint() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+    let session_id = "root-search/researcher";
+    let ctx = run_ctx(session_id, EgressLabel::local_only());
+
+    let refusal = network_egress_boundary_refusal_json(
+        "web",
+        "web.search",
+        Some(&ctx),
+        Some(&store),
+        Some(session_id),
+        "researcher.default",
+        None,
+    )
+    .expect("expected web.search refusal without declassification grant");
+    let payload: serde_json::Value = serde_json::from_str(&refusal)?;
+    assert_eq!(payload["surface"], "web");
+    assert_eq!(payload["tool"], "web.search");
+    Ok(())
+}
+
+#[test]
+fn web_call_network_egress_refused_under_local_only_taint() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+    let session_id = "root-call/researcher";
+    let ctx = run_ctx(session_id, EgressLabel::local_only());
+
+    let refusal = network_egress_boundary_refusal_json(
+        "web",
+        "web.call",
+        Some(&ctx),
+        Some(&store),
+        Some(session_id),
+        "researcher.default",
+        None,
+    )
+    .expect("expected web.call refusal without declassification grant");
+    let payload: serde_json::Value = serde_json::from_str(&refusal)?;
+    assert_eq!(payload["tool"], "web.call");
+    Ok(())
+}
+
+#[test]
+fn hooks_network_egress_allowed_with_declassification_grant() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+    let session_id = "root-hook2/sess";
+    let root = "root-hook2";
+    store.set_session_egress_taint(session_id, &EgressLabel::local_only())?;
+    store.insert_egress_declassification_grant(
+        root,
+        session_id,
+        "planner.default",
+        &session_network_declass_target(root),
+        Sink::Network,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+
+    let refusal = network_egress_boundary_refusal_json(
+        "hooks",
+        "http.callback",
+        None,
+        Some(&store),
+        Some(session_id),
+        "planner.default",
+        None,
+    );
+    assert!(refusal.is_none(), "declassified hook delivery should be allowed");
+    Ok(())
+}
