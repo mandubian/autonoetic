@@ -53,7 +53,7 @@ impl McpToolRuntime {
             .get(tool_name)
             .and_then(|server| self.servers_by_name.get(server))
             .map(|s| s.requires_network_egress_gate())
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn tool_definitions(&self) -> anyhow::Result<Vec<ToolDefinition>> {

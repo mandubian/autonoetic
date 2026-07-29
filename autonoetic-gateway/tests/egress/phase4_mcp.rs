@@ -141,7 +141,46 @@ fn mcp_remote_refused_when_arguments_carry_local_only_taint() -> anyhow::Result<
 }
 
 #[test]
-fn local_stdio_mcp_tool_does_not_require_network_gate() {
+fn unknown_mcp_tool_requires_network_gate_fail_closed() {
     let runtime = McpToolRuntime::empty();
-    assert!(!runtime.tool_requires_network_egress_gate("mcp_mock_echo"));
+    assert!(runtime.tool_requires_network_egress_gate("mcp_unknown_tool"));
+}
+
+#[test]
+fn mcp_remote_allowed_after_network_declass_with_clean_args() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
+        tmp.path(),
+    )?);
+    let session_id = "root-mcp-declass/coder";
+    let root = "root-mcp-declass";
+    let ctx = run_ctx(session_id, EgressLabel::local_only());
+    store.insert_egress_declassification_grant(
+        root,
+        session_id,
+        "coder.default",
+        &autonoetic_gateway::runtime::egress_labeler::session_network_declass_target(root),
+        Sink::Network,
+        &autonoetic_types::background::GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+
+    let refusal = mcp_remote_egress_refusal_json(
+        "mcp_remote_echo",
+        r#"{"text":"hello"}"#,
+        Some(&ctx),
+        Some(&store),
+        Some(session_id),
+        "coder.default",
+        None,
+        &HashMap::new(),
+    );
+    assert!(
+        refusal.is_none(),
+        "declassified session with clean args should allow remote MCP"
+    );
+    Ok(())
 }
