@@ -1040,6 +1040,7 @@ pub fn emit_boundary_refused(
     reason: &str,
 ) {
     let payload = serde_json::json!({
+        "surface": "compression",
         "band_label": serde_json::to_value(band_label).unwrap_or(serde_json::Value::Null),
         "band_label_name": label_display_name(band_label),
         "preset_class": format!("{preset_class:?}").to_ascii_lowercase(),
@@ -1057,6 +1058,57 @@ pub fn emit_boundary_refused(
         turn_id,
         "egress_boundary_refused",
     );
+}
+
+/// Emit `egress.boundary_refused` for a non-LLM egress surface (RFC §7 / §9.1).
+pub fn emit_surface_boundary_refused(
+    store: &Arc<GatewayStore>,
+    session_id: &str,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    surface: &str,
+    label: &EgressLabel,
+    envelope_ids: &[String],
+    reason: &str,
+) {
+    let payload = serde_json::json!({
+        "surface": surface,
+        "label": serde_json::to_value(label).unwrap_or(serde_json::Value::Null),
+        "label_name": label_display_name(label),
+        "envelope_ids": envelope_ids,
+        "reason": reason,
+    });
+    emit_egress_event(
+        store,
+        "egress.boundary_refused",
+        &label_display_name(label),
+        Some(payload),
+        session_id,
+        agent_id,
+        turn_id,
+        "egress_boundary_refused",
+    );
+}
+
+/// Resolve the session's accumulated egress taint for boundary gates (RFC §7).
+///
+/// Prefers the in-memory taint on [`NativeToolRunContext`]; falls back to the
+/// durable `session_egress_taint` row. Errors if the store read fails.
+pub fn resolve_session_egress_taint(
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    store: Option<&GatewayStore>,
+    session_id: Option<&str>,
+) -> anyhow::Result<Option<EgressLabel>> {
+    if let Some(taint) = run_context.and_then(|c| c.egress_taint.clone()) {
+        return Ok(Some(taint));
+    }
+    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(store) = store else {
+        return Ok(None);
+    };
+    store.get_session_egress_taint(sid).map_err(Into::into)
 }
 
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation
