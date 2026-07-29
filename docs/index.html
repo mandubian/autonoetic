@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autonoetic — Visual Maps</title>
+<style>
+  :root {
+    --ink: #171b21;
+    --ink-soft: #2b323d;
+    --paper: #eef1f4;
+    --paper-raised: #ffffff;
+    --paper-sunken: #e3e7ec;
+    --line: #c7cdd6;
+    --line-strong: #a7b0bd;
+    --muted: #5b6472;
+    --accent: #2a4d8f;
+    --rule: #a05a12;
+    --right: #0f6e63;
+    --oblig: #6a4c93;
+    --served: #9c3f4d;
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e7eaef;
+      --ink-soft: #c7cedb;
+      --paper: #11151c;
+      --paper-raised: #171d27;
+      --paper-sunken: #0c0f14;
+      --line: #2c3441;
+      --line-strong: #3c4657;
+      --muted: #93a0b3;
+      --accent: #85a8f2;
+      --rule: #e0a355;
+      --right: #5cc7b6;
+      --oblig: #c1a3ec;
+      --served: #e3919b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: clamp(2.5rem, 6vw, 5rem) clamp(1.25rem, 4vw, 2.5rem) 4rem; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: .72rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 1rem;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: clamp(2rem, 5vw, 3rem);
+    line-height: 1.08;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin: 0 0 1rem;
+  }
+  .dek {
+    font-size: clamp(1.02rem, 2vw, 1.18rem);
+    color: var(--ink-soft);
+    max-width: 60ch;
+    text-wrap: pretty;
+    margin: 0 0 .5rem;
+  }
+  .dek b { color: var(--ink); font-weight: 600; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.1rem;
+    margin: 2.75rem 0 2rem;
+  }
+  a.card {
+    display: block;
+    text-decoration: none;
+    color: inherit;
+    background: var(--paper-raised);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--stripe, var(--accent));
+    border-radius: 12px;
+    padding: 1.25rem 1.35rem 1.4rem;
+    transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease;
+  }
+  a.card:hover, a.card:focus-visible {
+    transform: translateY(-2px);
+    border-color: var(--line-strong);
+    box-shadow: 0 8px 26px rgba(0,0,0,.10);
+    outline: none;
+  }
+  a.card:focus-visible { box-shadow: 0 0 0 3px var(--stripe, var(--accent)); }
+  .card h2 {
+    font-family: var(--font-display);
+    font-size: 1.28rem;
+    font-weight: 600;
+    margin: .1rem 0 .5rem;
+  }
+  .card .file { font-family: var(--font-mono); font-size: .74rem; color: var(--muted); }
+  .card p { margin: .55rem 0 0; font-size: .93rem; color: var(--ink-soft); }
+  .m1 { --stripe: var(--served); }
+  .m2 { --stripe: var(--accent); }
+  .m3 { --stripe: var(--oblig); }
+  .m4 { --stripe: var(--right); }
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 1.4rem;
+    margin-top: 2.5rem;
+    color: var(--muted);
+    font-size: .88rem;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  code { font-family: var(--font-mono); font-size: .85em; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Autonoetic · Visual Maps</p>
+    <h1>Four ways to read the system</h1>
+    <p class="dek">Autonoetic is a runtime where an AI agent — knowing its own past, capabilities, and
+      rights, and bound by the same constitution as every other actor — becomes a <b>trusted member of a
+      community</b> rather than a tool that has to be watched. These maps render that design at four
+      altitudes. Each is a single self-contained page; open one and dig.</p>
+
+    <div class="grid">
+      <a class="card m1" href="diagrams/architecture-map.html">
+        <span class="file">architecture-map.html</span>
+        <h2>Governance architecture</h2>
+        <p>Functional autonoesis and the community-of-equals framing; the bind-direction constitution
+          (rules / rights / obligations / served); enforcement &amp; contract health; the standing
+          governance offices; the amendment lifecycle; and the whole rendered as one correction loop.</p>
+      </a>
+      <a class="card m2" href="diagrams/technical-map.html">
+        <span class="file">technical-map.html</span>
+        <h2>Technical infrastructure</h2>
+        <p>The tool-call lifecycle, the four sandbox drivers, the three storage classes, the credential
+          vault, the egress label plane (lattice · chokepoint · routing · labels at rest), the
+          agent-birth pipeline, and the full native tool surface.</p>
+      </a>
+      <a class="card m3" href="diagrams/runtime-dynamics.html">
+        <span class="file">runtime-dynamics.html</span>
+        <h2>Runtime dynamics</h2>
+        <p>The temporal dimension: the session-lifecycle state machine, the approval &amp; escalation
+          swimlane (suspend-to-checkpoint, resume-with-real-result), the per-turn signed self-model, and
+          the per-turn egress label flow.</p>
+      </a>
+      <a class="card m4" href="diagrams/federation-data-model.html">
+        <span class="file">federation-data-model.html</span>
+        <h2>Federation &amp; data model</h2>
+        <p>OFP node-to-node federation (topology, the HMAC + constitution-digest handshake, compatibility
+          modes, wire protocol) and the <code>gateway.db</code> entity-relationship model — the spine
+          columns, the core ER diagram, and the full table inventory incl. the egress label plane.</p>
+      </a>
+    </div>
+
+    <footer>
+      Self-contained HTML, rendered from <code>docs/diagrams/</code> — no build step, light/dark aware.
+      Start with the <a href="https://github.com/mandubian/autonoetic#readme">README</a> or
+      <a href="https://github.com/mandubian/autonoetic/blob/main/docs/philosophy.md">the philosophy</a>.
+      Source: <a href="https://github.com/mandubian/autonoetic">github.com/mandubian/autonoetic</a>.
+    </footer>
+  </div>
+</body>
+</html>

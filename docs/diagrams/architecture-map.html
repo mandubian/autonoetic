@@ -756,6 +756,21 @@
         <code>RATIFY.md</code> — procedural friction, not a cryptographic lock, backstopped by a test that
         fails loudly if an entrenched clause silently drops out of the register.</p>
     </div>
+
+    <div class="subhead">Data-locality — the mechanism landed ahead of the right</div>
+    <div class="box tone-served">
+      <p>The <strong>egress label plane</strong> (data-envelopes track) lets the gateway enforce
+        <em>where content may flow</em> — local model, remote model, another agent, a federated peer —
+        as deterministic, gateway-assigned metadata, never LLM judgment. It is live today: labels, the
+        model-boundary chokepoint, taint-following provider routing, and labels persisted with stored
+        content. The matching <strong>served-party right</strong> — the end-user's claim over their
+        data's locality — is the sequenced amendment (<span class="badge">§12 · U-*</span>), not yet
+        ratified.</p>
+      <p class="fine">A deliberate ordering: build the enforcement, measure it, then entrench the right —
+        correctability over a right that can't yet be honoured. Enforcement surfaces on the chain as
+        <code>egress.provider_selected</code> · <code>egress.boundary_refused</code> ·
+        <code>egress.relabel</code>, which the contract-health tally reads like any other clause.</p>
+    </div>
   </section>
 
   <!-- ================= C. ENFORCEMENT & CORRECTION ================= -->
