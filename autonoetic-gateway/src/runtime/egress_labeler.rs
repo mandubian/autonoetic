@@ -370,30 +370,11 @@ impl EgressLabeler {
         // to prior labeled envelopes. Two deterministic signals:
         // 1. Handle reference — prior tool_call_id appears in the args JSON.
         // 2. Verbatim content — prior result content snippet appears in args.
-        let mut parent_envelope_ids: Vec<String> = Vec::new();
-        if !prior_labels.is_empty() {
-            let mut taint_label = EgressLabel::unrestricted();
-            for (prior_tcid, prior) in prior_labels {
-                let handle_match = req.arguments_json.contains(prior_tcid.as_str());
-                let verbatim_match = prior
-                    .content_snippet
-                    .as_deref()
-                    .map(|snip| !snip.is_empty() && req.arguments_json.contains(snip))
-                    .unwrap_or(false);
-                if handle_match || verbatim_match {
-                    taint_label = taint_label.restrict(&prior.label);
-                    parent_envelope_ids.push(prior_tcid.clone());
-                }
-            }
-            if !parent_envelope_ids.is_empty() {
-                // `prior_labels` is a HashMap — iteration order is
-                // nondeterministic. Sort so the lineage persisted into
-                // provenance / the `egress.envelope_labeled` event is stable
-                // and reproducible across runs (RFC §9.1 traceability).
-                parent_envelope_ids.sort();
-                resolution.label = resolution.label.restrict(&taint_label);
-                resolution.taint_applied = true;
-            }
+        let (taint_label, mut parent_envelope_ids) =
+            argument_taint_from_prior(req.arguments_json, prior_labels);
+        if !parent_envelope_ids.is_empty() {
+            resolution.label = resolution.label.restrict(&taint_label);
+            resolution.taint_applied = true;
         }
 
         // If the resolved label is unrestricted, there's nothing to audit —
@@ -1171,29 +1152,6 @@ pub fn session_network_declassified(
         .unwrap_or(false)
 }
 
-/// so `apply_decision` can materialize declassification before session finalize.
-pub fn snapshot_session_egress_taint_for_approval(
-    store: &GatewayStore,
-    session_id: &str,
-    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
-) -> anyhow::Result<()> {
-    if session_id.is_empty() {
-        return Ok(());
-    }
-    let taint = if let Some(t) = run_context.and_then(|c| c.egress_taint.clone()) {
-        t
-    } else if let Some(row) = store.get_session_egress_taint(session_id)? {
-        row
-    } else {
-        return Ok(());
-    };
-    if !taint.is_unrestricted() {
-        store.set_session_egress_taint(session_id, &taint)?;
-    }
-    Ok(())
-}
-
-
 /// Fail-closed network egress gate for web tools, hooks, and similar surfaces.
 ///
 /// Returns a JSON tool-error body when the session taint excludes
@@ -1307,6 +1265,204 @@ pub fn network_egress_boundary_refusal_json(
         "repair_hint": "Approve egress declassification for Sink::Network on this session, or clear session taint.",
     });
     Some(payload.to_string())
+}
+
+/// Intersect argument-carried taint from prior labeled results in this turn.
+pub fn argument_taint_from_prior(
+    arguments_json: &str,
+    prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
+) -> (EgressLabel, Vec<String>) {
+    let mut taint_label = EgressLabel::unrestricted();
+    let mut parent_envelope_ids: Vec<String> = Vec::new();
+    if prior_labels.is_empty() {
+        return (taint_label, parent_envelope_ids);
+    }
+    for (prior_tcid, prior) in prior_labels {
+        let handle_match = arguments_json.contains(prior_tcid.as_str());
+        let verbatim_match = prior
+            .content_snippet
+            .as_deref()
+            .map(|snip| !snip.is_empty() && arguments_json.contains(snip))
+            .unwrap_or(false);
+        if handle_match || verbatim_match {
+            taint_label = taint_label.restrict(&prior.label);
+            parent_envelope_ids.push(prior_tcid.clone());
+        }
+    }
+    parent_envelope_ids.sort();
+    (taint_label, parent_envelope_ids)
+}
+
+/// Persist restrictive in-memory session taint when filing a network approval
+/// so `apply_decision` can materialize declassification before session finalize.
+pub fn snapshot_session_egress_taint_for_approval(
+    store: &GatewayStore,
+    session_id: &str,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+) -> anyhow::Result<()> {
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    let taint = if let Some(t) = run_context.and_then(|c| c.egress_taint.clone()) {
+        t
+    } else if let Some(row) = store.get_session_egress_taint(session_id)? {
+        row
+    } else {
+        return Ok(());
+    };
+    if !taint.is_unrestricted() {
+        store.set_session_egress_taint(session_id, &taint)?;
+    }
+    Ok(())
+}
+
+/// Fail-closed MCP egress gate for remote servers: after the session-level
+/// network gate (including declassification), argument-carried taint must allow
+/// [`Sink::Network`]. Emits `egress.boundary_refused` with `surface: "mcp"` on refuse.
+pub fn mcp_remote_egress_refusal_json(
+    tool_name: &str,
+    arguments_json: &str,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    gateway_store: Option<&Arc<GatewayStore>>,
+    session_id: Option<&str>,
+    agent_id: &str,
+    turn_id: Option<&str>,
+    prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
+) -> Option<String> {
+    if let Some(refusal) = network_egress_boundary_refusal_json(
+        "mcp",
+        tool_name,
+        run_context,
+        gateway_store,
+        session_id,
+        agent_id,
+        turn_id,
+    ) {
+        return Some(refusal);
+    }
+
+    let store = gateway_store?;
+    let (arg_taint, parent_envelope_ids) = argument_taint_from_prior(arguments_json, prior_labels);
+    if arg_taint.is_unrestricted() {
+        return None;
+    }
+    if arg_taint.allows(Sink::Network) {
+        return None;
+    }
+
+    emit_surface_boundary_refused(
+        store,
+        session_id.unwrap_or(""),
+        agent_id,
+        turn_id,
+        "mcp",
+        &arg_taint,
+        &parent_envelope_ids,
+        "MCP remote tools/call refused: argument egress labels exclude Network (RFC §7)",
+    );
+    let payload = serde_json::json!({
+        "ok": false,
+        "error_type": "egress_boundary_refused",
+        "surface": "mcp",
+        "tool": tool_name,
+        "message": format!(
+            "{tool_name} refused: argument egress labels exclude Network for remote MCP"
+        ),
+        "parent_envelope_ids": parent_envelope_ids,
+        "repair_hint": "Remove restricted content from arguments, or use a local MCP server.",
+    });
+    Some(payload.to_string())
+}
+
+/// Default inbound OFP label when the peer omits or sends an unparseable
+/// `egress_label` — fail-closed, never [`EgressLabel::unrestricted`].
+pub fn ofp_inbound_fail_closed_label() -> EgressLabel {
+    EgressLabel::no_remote_model()
+}
+
+/// Parse an inbound OFP `egress_label` wire field. Missing or unparseable ⇒
+/// [`ofp_inbound_fail_closed_label`].
+pub fn parse_ofp_inbound_egress_label(raw: Option<&serde_json::Value>) -> EgressLabel {
+    let Some(value) = raw else {
+        return ofp_inbound_fail_closed_label();
+    };
+    match serde_json::from_value::<EgressLabel>(value.clone()) {
+        Ok(label) if !label.is_empty() => label,
+        _ => ofp_inbound_fail_closed_label(),
+    }
+}
+
+/// Whether outbound federation may carry `message` for `session_taint`.
+pub fn ofp_outbound_allows_federation(session_taint: &EgressLabel) -> bool {
+    session_taint.allows(Sink::FederatedAgent)
+}
+
+/// Fail-closed OFP egress gate before writing `AgentMessage` to a peer.
+///
+/// Returns an error message when the session taint excludes
+/// [`Sink::FederatedAgent`]. Emits `egress.boundary_refused` with
+/// `surface: "ofp"` on refuse.
+pub fn ofp_federated_egress_refusal(
+    message: &str,
+    sender_session_id: Option<&str>,
+    sender_agent_id: &str,
+    gateway_store: Option<&Arc<GatewayStore>>,
+) -> Option<anyhow::Error> {
+    let Some(store) = gateway_store else {
+        return Some(anyhow::anyhow!(
+            "OFP agent_message refused: GatewayStore required to confirm session egress taint"
+        ));
+    };
+    let session_taint = match require_boundary_session_taint(None, Some(store.as_ref()), sender_session_id)
+    {
+        Ok(t) => t,
+        Err(e) => {
+            emit_surface_boundary_refused(
+                store,
+                sender_session_id.unwrap_or(""),
+                sender_agent_id,
+                None,
+                "ofp",
+                &EgressLabel::empty(),
+                &[],
+                &format!("session egress taint unresolved: {e}"),
+            );
+            return Some(anyhow::anyhow!("OFP agent_message refused: {e}"));
+        }
+    };
+    if ofp_outbound_allows_federation(&session_taint) {
+        return None;
+    }
+    emit_surface_boundary_refused(
+        store,
+        sender_session_id.unwrap_or(""),
+        sender_agent_id,
+        None,
+        "ofp",
+        &session_taint,
+        &[],
+        "OFP agent_message refused: session egress label excludes FederatedAgent (RFC §7)",
+    );
+    let _ = message; // content-free audit; body never leaves when refused
+    Some(anyhow::anyhow!(
+        "OFP agent_message refused: session egress label excludes FederatedAgent"
+    ))
+}
+
+/// Build outbound OFP wire fields for an allowed federation send.
+///
+/// Returns `(message_text, egress_label, withheld_indication)`. The label is
+/// omitted on the wire when unrestricted.
+pub fn ofp_outbound_wire_fields(
+    message: &str,
+    session_taint: &EgressLabel,
+) -> (String, Option<serde_json::Value>, Option<String>) {
+    let egress_label = if session_taint.is_unrestricted() {
+        None
+    } else {
+        serde_json::to_value(session_taint).ok()
+    };
+    (message.to_string(), egress_label, None)
 }
 
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation

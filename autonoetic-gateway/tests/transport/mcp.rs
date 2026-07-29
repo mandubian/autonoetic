@@ -51,6 +51,7 @@ async fn test_mcp_integration_loads_existing_server_and_exposes_agent_tool() -> 
         command: "bash".to_string(),
         args: vec![script_path.display().to_string()],
         transport: McpTransportConfig::Stdio,
+        egress_class: None,
     }];
     std::fs::write(&registry_path, serde_json::to_vec(&servers)?)?;
 

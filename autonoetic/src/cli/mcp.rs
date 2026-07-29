@@ -31,6 +31,7 @@ pub async fn handle_mcp_add(
         command: command.unwrap_or_default(),
         args: args.clone(),
         transport,
+        egress_class: None,
     };
 
     let mut client = McpClient::connect(&server).await?;

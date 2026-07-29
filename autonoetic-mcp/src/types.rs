@@ -1,5 +1,6 @@
 //! MCP stub types for tool discovery and registration.
 
+use autonoetic_types::egress::EgressClass;
 use serde::{Deserialize, Serialize};
 
 /// A registered MCP server managed by the Gateway.
@@ -15,6 +16,25 @@ pub struct McpServer {
     /// Transport mode used to connect to this MCP server.
     #[serde(default)]
     pub transport: McpTransportConfig,
+    /// Egress class for completions routed through this server (RFC §5.1).
+    /// When omitted, inferred from transport: `stdio` → `local`, `sse` → `remote`.
+    #[serde(default)]
+    pub egress_class: Option<EgressClass>,
+}
+
+impl McpServer {
+    /// Resolved egress class with transport-based default (fail-closed for SSE).
+    pub fn resolved_egress_class(&self) -> EgressClass {
+        self.egress_class.unwrap_or_else(|| match &self.transport {
+            McpTransportConfig::Stdio => EgressClass::Local,
+            McpTransportConfig::Sse { .. } => EgressClass::Remote,
+        })
+    }
+
+    /// Whether tool calls on this server require the Network egress sink gate.
+    pub fn requires_network_egress_gate(&self) -> bool {
+        self.resolved_egress_class() == EgressClass::Remote
+    }
 }
 
 /// A tool discovered from an MCP server via `tools/list`.

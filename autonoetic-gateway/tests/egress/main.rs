@@ -13,6 +13,7 @@ mod compression_eligibility;
 mod floor_and_taint;
 mod mixed_session_e2e;
 mod phase4_declassification;
+mod phase4_mcp;
 mod phase4_sandbox;
 mod phase4_web_hooks;
 mod routing;
