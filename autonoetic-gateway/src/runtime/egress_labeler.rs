@@ -1171,7 +1171,6 @@ pub fn session_network_declassified(
         .unwrap_or(false)
 }
 
-/// Persist restrictive in-memory session taint when filing a network approval
 /// so `apply_decision` can materialize declassification before session finalize.
 pub fn snapshot_session_egress_taint_for_approval(
     store: &GatewayStore,
@@ -1192,6 +1191,124 @@ pub fn snapshot_session_egress_taint_for_approval(
         store.set_session_egress_taint(session_id, &taint)?;
     }
     Ok(())
+}
+
+
+/// Fail-closed network egress gate for web tools, hooks, and similar surfaces.
+///
+/// Returns a JSON tool-error body when the session taint excludes
+/// [`Sink::Network`] and no active declassification grant widens it; `None` when
+/// egress is allowed. Emits `egress.boundary_refused` on refuse when a
+/// [`GatewayStore`] is available.
+pub fn network_egress_boundary_refusal_json(
+    surface: &str,
+    tool_name: &str,
+    run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+    gateway_store: Option<&Arc<GatewayStore>>,
+    session_id: Option<&str>,
+    agent_id: &str,
+    turn_id: Option<&str>,
+) -> Option<String> {
+    let Some(store) = gateway_store else {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_type": "egress_boundary_refused",
+            "surface": surface,
+            "tool": tool_name,
+            "message": format!(
+                "{tool_name} refused: GatewayStore required to confirm session egress taint"
+            ),
+            "repair_hint": "Ensure the tool runs with GatewayStore available.",
+        });
+        return Some(payload.to_string());
+    };
+
+    let session_taint = match require_boundary_session_taint(
+        run_context,
+        Some(store.as_ref()),
+        session_id,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            emit_surface_boundary_refused(
+                store,
+                session_id.unwrap_or(""),
+                agent_id,
+                turn_id,
+                surface,
+                &EgressLabel::empty(),
+                &[],
+                &format!("session egress taint unresolved: {e}"),
+            );
+            let payload = serde_json::json!({
+                "ok": false,
+                "error_type": "egress_boundary_refused",
+                "surface": surface,
+                "tool": tool_name,
+                "message": format!("{tool_name} refused: cannot establish session egress taint ({e})"),
+                "repair_hint": "Ensure the tool runs with a session id and GatewayStore so taint can be confirmed.",
+            });
+            return Some(payload.to_string());
+        }
+    };
+
+    if session_taint.allows(Sink::Network) {
+        return None;
+    }
+
+    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
+        emit_surface_boundary_refused(
+            store,
+            "",
+            agent_id,
+            turn_id,
+            surface,
+            &session_taint,
+            &[],
+            "session egress taint excludes Network but session_id is missing",
+        );
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_type": "egress_boundary_refused",
+            "surface": surface,
+            "tool": tool_name,
+            "message": format!("{tool_name} refused: session egress taint excludes Network"),
+            "repair_hint": "Operator-declassify Sink::Network for this session before network egress.",
+        });
+        return Some(payload.to_string());
+    };
+
+    let root = run_context
+        .map(|c| c.root_session_id.as_str())
+        .or_else(|| sid.split('/').next())
+        .unwrap_or(sid);
+    if session_network_declassified(store.as_ref(), sid, root) {
+        return None;
+    }
+
+    emit_surface_boundary_refused(
+        store,
+        sid,
+        agent_id,
+        turn_id,
+        surface,
+        &session_taint,
+        &[],
+        &format!("session egress taint excludes Network ({tool_name}, RFC §7)"),
+    );
+    let payload = serde_json::json!({
+        "ok": false,
+        "error_type": "egress_boundary_refused",
+        "surface": surface,
+        "tool": tool_name,
+        "message": format!(
+            "{tool_name} refused: session egress taint excludes Network; operator declassification required"
+        ),
+        "repair_hint": "Approve egress declassification for Sink::Network on this session, or clear session taint.",
+    });
+    Some(payload.to_string())
+}
+
 }
 
 /// Emit `egress.envelope_labeled` for a synthesized compression/truncation

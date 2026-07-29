@@ -486,6 +486,28 @@ impl HookExecutor {
         // connector. Note: this does not fully prevent DNS-rebinding (TOCTOU),
         // but it raises the bar significantly.
         check_resolved_ips_not_internal(&parsed_url).await?;
+        let hook_session_id = ctx
+            .session_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(ctx.root_session_id.as_str());
+        let hook_agent_id = ctx.agent_id.as_deref().unwrap_or("gateway");
+        if let Some(refusal) =
+            crate::runtime::egress_labeler::network_egress_boundary_refusal_json(
+                "hooks",
+                "http.callback",
+                None,
+                store.as_ref(),
+                Some(hook_session_id),
+                hook_agent_id,
+                None,
+            )
+        {
+            anyhow::bail!(
+                "http.callback refused by egress boundary gate: {}",
+                refusal
+            );
+        }
         let delivery_id = build_http_callback_delivery_id(ctx, &parsed_url, hook);
         let event_name = ctx.event.as_str();
         let action_name = "http.callback";
