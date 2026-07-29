@@ -233,6 +233,54 @@ The agent chooses visibility **horizons**; the gateway decides **policy** and **
 
 ---
 
+## Egress localization (where content may flow)
+
+Visibility (above) controls *who may read*; **egress labels** control *where
+content may flow afterward* — to a remote model, a peer gateway, the network.
+The label plane is a clean separation-of-powers instance: agents produce and
+reason over content; **the gateway alone labels it, withholds it, and routes
+around it**. (Full design: `docs/rfc/data-envelopes-egress-localization.md`.)
+
+**Agent proposes** content (tool results, replies, messages) and may declare a
+*floor* in its own bundle (`metadata.autonoetic.egress.output_label`) — it can
+restrict its own outputs, never widen.
+
+**Gateway decides** the label (intersection of operator rules + bundle floor +
+argument taint), which providers are eligible for the resulting taint, what to
+withhold, and whether to refuse. Agents **never set, read, or strip labels** —
+that would let the reasoner rewrite the enforcement plane, so it is reserved to
+the executor (the Lawful-Executor invariant: enforcement is a deterministic
+function of declared inputs, never model-inferred content classification).
+
+### Agent side
+
+```
+Agent thinks: "summarize these emails, then continue the code work"
+Agent proposes: tool calls + assistant messages (plain content)
+```
+
+The agent cannot mark its email summary "safe to send remotely," nor can it
+strip the `local_only` label off a tool result — the label plane is not part
+of its writable state.
+
+### Gateway side
+
+```
+Gateway decides (per turn):
+  - Label each new result: operator rules ∩ bundle floor ∩ argument taint   → local_only
+  - Which presets are eligible for the batch's taint?                       → [local]
+  - Route the completion to an eligible preset (reroute / refuse, never leak)
+  - At the chokepoint: withhold labeled content the target sink excludes,
+    substituting a non-divulging indication
+  - Emit causal events so "what left, and why this provider?" is auditable
+```
+
+Because the plane is gateway-only, a compromised or adversarial agent cannot
+launder tainted content to a remote sink by relabeling it — the same reason
+secrets never enter agent state.
+
+---
+
 ## The Vocabulary of Proposals
 
 The agent doesn't call functions — it proposes **intent verbs** that the gateway interprets, validates, and executes:

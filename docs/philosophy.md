@@ -214,6 +214,17 @@ outcomes the served party would refuse. Spreading power inward is safe
 what was done on my behalf, exit without penalty) are entrenched **before**
 the spreading happens.
 
+A **fourth facet** of served-party primacy is taking shape in the
+data-envelope work (`docs/rfc/data-envelopes-egress-localization.md`):
+**data locality** — the right to bound *where* content derived from one's
+data may flow, distinct from who may read it. *"An agent may read my emails,
+but their content must never reach a remote model"* is neither refuse, audit,
+nor exit; it is a standing egress constraint the gateway enforces
+mechanically — labels are declared metadata it alone manipulates, never
+model-inferred (the Lawful-Executor line, §2). It is a check the served party
+holds over the community, so its home is §U, and it inherits the same
+sequencing rule: real and entrenched before decider power spreads inward.
+
 ### 3.4 Iterative constitutionalism
 
 **The current work proposes a first version: a constitution defining rules
@@ -331,6 +342,13 @@ Doors still to open, in rough priority order:
 5. **Sortition / earned-weight mechanisms**, once §U is entrenched and
    qualification is auditable: the §3.2 horizon this whole section points
    at.
+6. **A data-locality invariant.** The data-envelope track
+   (`docs/rfc/data-envelopes-egress-localization.md`) already enforces, in
+   code, that content labeled for a set of sinks never reaches a sink outside
+   it — with a full causal-audit trail (§3.1). Its phase 5 constitutionalizes
+   this as a `P-x.y` rule plus an `I-x` gateway-only invariant (#910), making
+   the served party's data-sovereignty check law. The mechanism is built; the
+   entrenchment is the door — sequence it with §U.
 
 ## 6. Intellectual lineage
 
@@ -475,6 +493,20 @@ disclose only accountably) is the equilibrium that keeps the signal honest.
 The RFC's open question 5 correctly spots the same risk one level up:
 *standing* metrics must not become a reputation target that distorts
 behaviour.
+
+### Decentralized information-flow control — Denning; Myers & Liskov
+Dorothy Denning, *"A Lattice Model of Secure Information Flow"* (1976); Andrew
+Myers & Barbara Liskov, *"A Decentralized Model for Information Flow Control"*
+(1997). The data-envelope plane
+(`docs/rfc/data-envelopes-egress-localization.md`) is decentralized IFC in the
+literal sense: an `EgressLabel` is a set of allowed sinks; derivation takes the
+lattice **meet** (`restrict`/`intersect` — never `join`, which would *widen*);
+taint is monotonic; and operator-approved declassification is the sole
+authorized channel that widens a label. Denning's lattice and the DLM's core
+insight — that data owners, not a central classifier, attach labels, and
+enforcement is a deterministic function of them — are exactly why the plane is
+gateway-only and never asks a model to classify content: the Lawful-Executor
+invariant (§14) restated in information-flow terms.
 
 ### Professional self-regulation
 The chartered-profession analogy of §3.3: bodies like medical boards
