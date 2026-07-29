@@ -14,4 +14,5 @@ mod inspect;
 mod install_approval_e2e;
 mod install_smoke_test_gate;
 mod messaging;
+mod singleton_dedup;
 mod suspend_rpc;

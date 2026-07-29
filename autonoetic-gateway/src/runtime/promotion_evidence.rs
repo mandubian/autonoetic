@@ -149,6 +149,7 @@ mod tests {
             approval_request_id: None,
             arguments: None,
             result: None,
+            egress_label: None,
         };
         assert!(trace_indicates_pass(&pass));
 
@@ -188,6 +189,7 @@ mod tests {
             approval_request_id: None,
             arguments: None,
             result: None,
+            egress_label: None,
         };
         assert!(!trace_indicates_pass(&trace));
     }

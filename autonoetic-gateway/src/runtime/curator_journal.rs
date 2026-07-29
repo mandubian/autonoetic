@@ -228,6 +228,32 @@ pub fn persist_decision_journal_entries(
         }
         let Some(ref agent) = entry.target_agent else { continue };
         let Some(ref instruction) = entry.proposed_instruction else { continue };
+
+        // Mechanical refuse: evidence labeled local_only (or otherwise excluding
+        // RemoteModel) must not graduate into a skill that remote models read
+        // (RFC §6 / #908). Explicit declassification is a later phase.
+        let evidence_label = store
+            .memory_get_unrestricted(&entry.target)?
+            .and_then(|m| m.egress_label)
+            .or_else(|| {
+                // Fall back to the curator's session taint when the evidence
+                // memory has no durable label yet.
+                store
+                    .get_session_egress_taint(session_id)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or_else(autonoetic_types::egress::EgressLabel::unrestricted);
+        if !evidence_label.allows(autonoetic_types::egress::Sink::RemoteModel) {
+            return Err(anyhow::anyhow!(
+                "promote_to_skill refused: evidence '{}' has egress label that \
+                 excludes RemoteModel ({:?}); declassify before graduating into \
+                 a skill (mechanical gate, RFC data-envelopes §6)",
+                entry.target,
+                evidence_label
+            ));
+        }
+
         let content = serde_json::json!({
             "target_agent": agent,
             "proposed_instruction": instruction,
@@ -252,6 +278,7 @@ pub fn persist_decision_journal_entries(
         ];
         memory.visibility = MemoryVisibility::Global;
         memory.confidence = entry.confidence;
+        memory.egress_label = Some(evidence_label);
         store.memory_upsert(&memory)?;
     }
 
@@ -300,6 +327,18 @@ pub fn extract_and_persist(
         ];
         memory.visibility = MemoryVisibility::Global;
         memory.confidence = Some(1.0);
+        // Curator output summarizes the curated session and is stored Global so
+        // the evolution-orchestrator can find it via knowledge_search (a remote
+        // recall path). It must inherit the session's egress taint (RFC §6 /
+        // #908); otherwise a `local_only` session's content leaks through this
+        // memory as `unrestricted`. Mirrors the promote_to_skill gate above.
+        memory.egress_label = Some(
+            store
+                .get_session_egress_taint(session_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(autonoetic_types::egress::EgressLabel::unrestricted),
+        );
         if let Err(e) = store.memory_upsert(&memory) {
             tracing::warn!(
                 target: "curator_journal",

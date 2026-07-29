@@ -1,4 +1,3 @@
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::improvement::AbReplayTool;
@@ -13,7 +12,7 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn test_manifest(capabilities: Vec<Capability>) -> AgentManifest {
     AgentManifest {

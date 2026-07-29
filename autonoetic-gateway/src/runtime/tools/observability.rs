@@ -384,7 +384,7 @@ impl NativeTool for ObservabilityReadTool {
         _turn_id: Option<&str>,
         _config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -424,6 +424,37 @@ impl NativeTool for ObservabilityReadTool {
             .with_code("report_not_found")
             .to_error_response());
         };
+
+        // RFC §6: a report rooted in a tainted session must not re-enter a
+        // remote query sink as raw body — replace with an indication.
+        let sink = crate::runtime::egress_stored::query_sink_or_remote(
+            run_context.and_then(|rc| rc.egress_query_sink),
+        );
+        if let Ok(Some(taint)) = store.get_session_egress_taint(&root_session_id) {
+            if !taint.allows(sink) {
+                let indication = match crate::runtime::egress_stored::filter_or_indicate_for_sink(
+                    "report",
+                    &taint,
+                    sink,
+                    Some("observability_read"),
+                    autonoetic_types::egress::IndicationVerbosity::Descriptive,
+                ) {
+                    crate::runtime::egress_stored::FilteredStoredContent::Withheld {
+                        indication,
+                    } => indication,
+                    crate::runtime::egress_stored::FilteredStoredContent::Allowed(_) => {
+                        unreachable!("checked allows above")
+                    }
+                };
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "uri": args.uri,
+                    "withheld": true,
+                    "indication": indication,
+                })
+                .to_string());
+            }
+        }
 
         match sub_path.as_deref() {
             None | Some("report") | Some("report/") => {

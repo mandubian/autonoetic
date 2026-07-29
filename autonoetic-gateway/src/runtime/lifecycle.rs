@@ -4144,6 +4144,19 @@ impl AgentExecutor {
                         );
                         (!t.is_unrestricted()).then_some(t)
                     },
+                    // Stored-content recall sink (RFC §6): when the session is
+                    // already local-tainted, tools may return local_only content;
+                    // otherwise fail closed to RemoteModel (None → remote).
+                    egress_query_sink: {
+                        let t = crate::runtime::egress_labeler::session_accumulated_taint(
+                            &self.egress_labels,
+                        );
+                        if t.allows(autonoetic_types::egress::Sink::RemoteModel) {
+                            None
+                        } else {
+                            Some(autonoetic_types::egress::Sink::LocalModel)
+                        }
+                    },
                 }
             });
             let mut processor = ToolCallProcessor::new(

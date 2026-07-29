@@ -1,6 +1,5 @@
 //! Singleton agent dedup integration tests (RFC phase 1).
 
-mod support;
 
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -12,7 +11,7 @@ use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::workflow::TaskRunStatus;
 use std::sync::Arc;
 use tempfile::tempdir;
-use support::manifest_builder::TestManifest;
+use crate::support::manifest_builder::TestManifest;
 
 fn planner_manifest() -> AgentManifest {
     AgentManifest {

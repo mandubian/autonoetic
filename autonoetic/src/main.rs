@@ -182,6 +182,9 @@ async fn async_main() -> anyhow::Result<()> {
             } => {
                 cli::gateway::handle_gateway_egress_audit(&config_path, session_id, *json).await?;
             }
+            cli::common::GatewayCommands::Memory { command } => {
+                cli::gateway::handle_gateway_memory(&config_path, command).await?;
+            }
             cli::common::GatewayCommands::SystemAgents { command } => {
                 cli::gateway::handle_gateway_system_agents(&config_path, command).await?;
             }

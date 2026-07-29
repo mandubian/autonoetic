@@ -3397,6 +3397,7 @@ impl GatewayExecutionService {
                                 approval_request_id: None,
                                 arguments: Some(format!("run {}", script_entry)),
                                 result: Some(output.clone()),
+                                egress_label: None,
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
@@ -3456,6 +3457,7 @@ impl GatewayExecutionService {
                                 approval_request_id: None,
                                 arguments: Some(format!("run {}", script_entry)),
                                 result: None,
+                                egress_label: None,
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }

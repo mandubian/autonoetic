@@ -74,6 +74,7 @@ fn make_run_context(root_session_id: &str, wake_hint: Option<WakeHintState>) -> 
         wake_hint,
         wake_hints_map: Some(wake_hints_map),
         egress_taint: None,
+        egress_query_sink: None,
     }
 }
 

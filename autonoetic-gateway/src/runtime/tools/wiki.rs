@@ -1,15 +1,64 @@
 use crate::llm::ToolDefinition;
 use crate::policy::PolicyEngine;
 use crate::runtime::active_execution_registry::NativeToolRunContext;
+use crate::runtime::egress_stored::{
+    filter_or_indicate_for_sink, query_sink_or_remote, resolve_stored_label, FilteredStoredContent,
+};
 use crate::runtime::human_gate::{GateKind, GateRequest, GateResult, GateService};
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use crate::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::agent::AgentManifest;
 use autonoetic_types::capability::Capability;
+use autonoetic_types::egress::{EgressLabel, IndicationVerbosity, NamedEgressLabel};
 use autonoetic_types::wiki::{WikiGetResult, WikiListResult, WikiPageEntry};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Parse optional `egress_label:` from YAML frontmatter (RFC §6 wiki surface).
+///
+/// Returns `Ok(None)` when the key is absent (legacy default applies at filter
+/// time). Returns `Err` when the key is present but the value is unrecognized —
+/// fail-closed rather than silently widening to `legacy_unlabeled`.
+fn wiki_frontmatter_egress_label(content: &str) -> anyhow::Result<Option<EgressLabel>> {
+    let t = content.trim_start();
+    if !t.starts_with("---") {
+        return Ok(None);
+    }
+    let mut lines = t.lines();
+    let _ = lines.next();
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        let line = line.trim();
+        let Some(rest) = line
+            .strip_prefix("egress_label:")
+            .or_else(|| line.strip_prefix("egress-label:"))
+        else {
+            continue;
+        };
+        let raw = rest
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
+        if raw.is_empty() {
+            anyhow::bail!("wiki page frontmatter: egress_label is present but empty");
+        }
+        let named: NamedEgressLabel = serde_json::from_str(&format!("\"{raw}\""))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "wiki page frontmatter: unrecognized egress_label '{raw}' \
+                     (expected unrestricted | local_only | no_remote_model)"
+                )
+            })?;
+        return Ok(Some(named.to_label()));
+    }
+    Ok(None)
+}
 
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(WikiListTool));
@@ -189,9 +238,9 @@ impl NativeTool for WikiGetTool {
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         _gateway_store: Option<Arc<GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -200,7 +249,25 @@ impl NativeTool for WikiGetTool {
         let args: Args = serde_json::from_str(arguments_json).map_err(|e| {
             anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e)
         })?;
-        let result = get_page(gateway_dir, &args.id)?;
+        let mut result = get_page(gateway_dir, &args.id)?;
+        let cfg = config
+            .map(|c| c.egress.clone())
+            .unwrap_or_default();
+        let sink = query_sink_or_remote(run_context.and_then(|rc| rc.egress_query_sink));
+        let stored = wiki_frontmatter_egress_label(&result.content)?;
+        let label = resolve_stored_label(stored.as_ref(), &cfg);
+        match filter_or_indicate_for_sink(
+            &result.content,
+            &label,
+            sink,
+            Some("wiki.get"),
+            IndicationVerbosity::Descriptive,
+        ) {
+            FilteredStoredContent::Allowed(_) => {}
+            FilteredStoredContent::Withheld { indication } => {
+                result.content = indication;
+            }
+        }
         Ok(serde_json::to_string(&result)?)
     }
 }

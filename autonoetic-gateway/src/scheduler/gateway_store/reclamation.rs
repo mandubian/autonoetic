@@ -157,6 +157,7 @@ mod tests {
             binding_session_id: None,
             alias_ref: None,
             quarantine_reason: None,
+            egress_label: None,
         };
         store.memory_upsert(&expired).unwrap();
 
@@ -180,6 +181,7 @@ mod tests {
             binding_session_id: None,
             alias_ref: None,
             quarantine_reason: None,
+            egress_label: None,
         };
         store.memory_upsert(&active).unwrap();
 
@@ -203,6 +205,7 @@ mod tests {
             binding_session_id: None,
             alias_ref: None,
             quarantine_reason: None,
+            egress_label: None,
         };
         store.memory_upsert(&no_expiry).unwrap();
 

@@ -136,11 +136,16 @@ The `autonoetic_sdk` package (Python/TypeScript) provides the agent's view of th
 4. Gateway creates a session binding: stores requested_target, alias_id, revision_id, runtime_lock_hash
 5. Gateway spawns agent session from the pinned revision directory + runtime closure
 6. Agent reasoning loop:
-   a. LLM processes context + instructions
-   b. LLM emits tool calls (content_write, agent_spawn, etc.)
-   c. Gateway validates and executes tools
-   d. Tool results returned to LLM
-   e. Loop until EndTurn
+   a. Gateway picks an egress-eligible provider for the turn's batch taint
+      (taint-following routing) and assembles context
+   b. LLM chokepoint filters the outbound request — content whose label
+      excludes the target provider's sink is replaced by an indication
+      (see Egress Localization under Security Model)
+   c. LLM processes context + instructions
+   d. LLM emits tool calls (content_write, agent_spawn, etc.)
+   e. Gateway validates and executes tools; tool results are labeled at commit
+   f. Tool results returned to LLM
+   g. Loop until EndTurn
 7. Agent response returned through ingress channel
 8. All actions logged to causal chain
 ```
@@ -302,6 +307,53 @@ Reply governance controls what the agent can tell the user:
 | `internal` | Summary only | Internal state, session context |
 | `confidential` | Redacted | Memory contents, tool outputs |
 | `secret` | Never disclosed | Vault secrets, API keys |
+
+`DisclosureClass` governs the **inward** direction (what the assistant may
+repeat to the user/viewers). Its **outward** complement — where content may
+flow to a provider, a peer gateway, or the network — is the egress label plane
+below.
+
+### Egress Localization (Data Envelopes)
+
+A gateway-enforced **label plane** bounds where content may leave the machine
+(full design: `docs/rfc/data-envelopes-egress-localization.md`). Where
+credentials are protected by *never entering context*, this generalizes the
+property to ordinary content — "an agent may read my emails, but their content
+must never reach a remote model."
+
+- **Envelopes & labels.** Content born at a boundary (tool result, LLM
+  response, memory recall) carries an `EgressLabel` — a set of allowed *sinks*
+  (`LocalModel`, `RemoteModel`, `LocalAgent`, `FederatedAgent`, `Network`,
+  `MemoryPersist`, `UserReply`). Labels are **declared metadata the gateway
+  alone manipulates** — never model-inferred (Lawful-Executor). Derivation only
+  ever *restricts* (lattice meet / `intersect`); the sole widening path is
+  operator-approved declassification.
+- **Where labels are born.** Operator source rules (`egress.rules`, e.g.
+  `sandbox.exec:~/mail/** → local_only`), a bundle-declared floor
+  (`metadata.autonoetic.egress.output_label`), argument taint (a tool called
+  with a tainted argument produces tainted output), and the LLM-response label
+  (a completion inherits the intersection of the envelopes it actually saw).
+- **The chokepoint.** Before every provider call a policy-wrapping `LlmDriver`
+  maps the target preset's `egress_class` to a `Sink` and, for each message
+  whose label excludes it, substitutes a non-divulging *indication*
+  (`[withheld: 1× email.read result — policy local_only]`). A verbatim
+  outbound-content assertion is a tripwire against echo-exfil. This applies
+  identically to the failover chain.
+- **Taint-following routing.** Per completion, the intersection of the labels
+  added since the last completion decides which presets are *eligible*; a
+  tainted batch routes to a cleared (local) preset and the failover chain is
+  filtered the same way. No eligible preset ⇒ the turn refuses with a path
+  forward, never a silent downgrade.
+- **Durability & propagation.** Labels serialize into checkpoints (survive
+  suspend/resume/fork), survive history transforms (message ids, §3.4), gate
+  per-label-band context compression (a tainted band never compresses on a
+  remote preset), and cross session boundaries onto spawn-return values and
+  `agent_message` payloads (closing the `LocalAgent` hole).
+- **Traceability.** Every decision emits a content-free causal event
+  (`egress.envelope_labeled` / `envelope_withheld` / `request_filtered` /
+  `provider_selected` / `boundary_refused` / `declassified`); "what left my
+  machine at turn N, and why did it run on this provider?" is answerable from
+  the causal chain alone (`gateway egress audit <session>`).
 
 ---
 

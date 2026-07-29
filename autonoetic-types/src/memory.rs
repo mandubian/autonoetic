@@ -155,6 +155,13 @@ pub struct MemoryObject {
     /// The value is a human-readable reason string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quarantine_reason: Option<String>,
+
+    /// Where this content may flow after it is read (RFC data-envelopes §6).
+    /// Orthogonal to [`Self::visibility`] (who may read). `None` = legacy
+    /// unlabeled (DB column NULL); the gateway applies `egress.legacy_unlabeled`
+    /// via [`crate::egress`] resolve helpers at filter time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_label: Option<crate::egress::EgressLabel>,
 }
 
 impl MemoryObject {
@@ -194,6 +201,9 @@ impl MemoryObject {
             binding_session_id: None,
             alias_ref: None,
             quarantine_reason: None,
+            // New in-memory objects default unrestricted; durable legacy rows
+            // keep `None` so fail-closed `legacy_unlabeled` can still apply.
+            egress_label: Some(crate::egress::EgressLabel::unrestricted()),
         }
     }
 

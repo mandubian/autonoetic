@@ -10,7 +10,6 @@
 //!   7. Store: review_attack_pattern on unknown ID returns error
 //!   8. AttackPatternStatus Display round-trips
 
-mod support;
 
 use autonoetic_gateway::runtime::tools::{
     AttackPatternListTool, AttackPatternProposeTool, NativeTool,
