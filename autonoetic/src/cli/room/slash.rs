@@ -119,6 +119,11 @@ pub fn help_lines() -> Vec<String> {
         "  Enter/o      open selected content · artifact file list · view file".to_string(),
         "  m            comment on open content (prefix L12: or L12-14: for line hint)".to_string(),
         String::new(),
+        "Grants".to_string(),
+        "  G            toggle grants panel (active grants + egress taint)".to_string(),
+        "               j/k · Home/End navigate · r revoke selected (press r twice to confirm)"
+            .to_string(),
+        String::new(),
         "Gates (approval · wiki · escalation · plan · user.ask)".to_string(),
         "  y / n        approve/reject approval · wiki · escalation · plan (n = revision request)"
             .to_string(),

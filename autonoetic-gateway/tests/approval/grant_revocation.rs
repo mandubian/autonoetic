@@ -126,6 +126,53 @@ fn test_delete_grants_removes_revoked_and_active() {
     assert!(store.get_session_grants("root-5").unwrap().is_empty());
 }
 
+/// By-id revoke (the TUI grants panel's per-row path) must be scoped to the
+/// root session that owns the grant. Row ids are `AUTOINCREMENT` and therefore
+/// enumerable, so an id must never be usable as a capability: a caller naming
+/// another root's id gets an idempotent no-op, and that root's grant keeps
+/// covering its host. The owner can still revoke normally.
+#[test]
+fn test_revoke_grant_by_id_is_scoped_to_owning_root() {
+    let tmp = tempdir().unwrap();
+    let gw = make_gateway_dir(&tmp);
+    let store = GatewayStore::open(&gw).unwrap();
+
+    seed_grant(&store, "root-owner", "agent-h", "owned.io");
+    seed_grant(&store, "root-stranger", "agent-i", "other.io");
+
+    let gid = store
+        .get_session_grants_structured("root-owner")
+        .unwrap()
+        .first()
+        .expect("owner grant present")
+        .id;
+
+    // Stranger names the owner's id — no-op, and coverage is untouched.
+    assert!(
+        !store
+            .revoke_session_grant_by_id("root-stranger", gid, "wrong root")
+            .unwrap(),
+        "a foreign root's by-id revoke must not land"
+    );
+    assert!(store.session_grants_cover_targets("root-owner", &["owned.io".to_string()]));
+    assert_eq!(
+        store.get_session_grants("root-owner").unwrap(),
+        vec!["owned.io"]
+    );
+
+    // The owning root revokes it, and only it.
+    assert!(store
+        .revoke_session_grant_by_id("root-owner", gid, "operator: tui revoke")
+        .unwrap());
+    assert!(!store.session_grants_cover_targets("root-owner", &["owned.io".to_string()]));
+    assert!(store.session_grants_cover_targets("root-stranger", &["other.io".to_string()]));
+
+    // Second revoke by the owner is an idempotent no-op.
+    assert!(!store
+        .revoke_session_grant_by_id("root-owner", gid, "again")
+        .unwrap());
+}
+
 #[test]
 fn test_revoke_nonexistent_host_is_noop() {
     let tmp = tempdir().unwrap();

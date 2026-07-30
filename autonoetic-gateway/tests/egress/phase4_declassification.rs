@@ -440,3 +440,149 @@ fn declassify_offer_files_once_and_dedups() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// `revoke_egress_declassification_grant_by_id` — the by-id revoke path the TUI
+/// grants panel uses ("select a row → revoke it"). Covers the case the
+/// host-scoped path (#961) can't reach: a `MemoryId`/`EnvelopeId` target with no
+/// host. Revokes exactly one, enforcement fail-closes, is idempotent, and
+/// leaves sibling grants active.
+#[test]
+fn revoke_egress_declassification_grant_by_id_targets_memory_grant() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+    let root = "root-by-id";
+    // A MemoryId declass grant (no host) + a sibling host-scoped grant.
+    let target_a = EgressDeclassificationTarget::MemoryId("mem-by-id".to_string());
+    let target_b = EgressDeclassificationTarget::SourcePattern(format!(
+        "session:{root}:host:example.com"
+    ));
+    store.insert_egress_declassification_grant(
+        root,
+        root,
+        "memory-curator.default",
+        &target_a,
+        Sink::RemoteModel,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+    store.insert_egress_declassification_grant(
+        root,
+        root,
+        "memory-curator.default",
+        &target_b,
+        Sink::Network,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+
+    let active = store.list_egress_declassification_grants(root)?;
+    assert_eq!(active.len(), 2);
+
+    let gid_a = active
+        .iter()
+        .find(|g| g.target == target_a)
+        .expect("MemoryId grant present")
+        .id;
+
+    // target_a authorized before revoke.
+    assert!(store.egress_declassification_allows(
+        &target_a,
+        Sink::RemoteModel,
+        root,
+        root,
+    )?);
+
+    // By-id revoke: hits exactly the MemoryId grant, transitions active → revoked.
+    assert!(
+        store.revoke_egress_declassification_grant_by_id(root, gid_a, "operator: tui revoke")?,
+        "first revoke transitions active -> revoked"
+    );
+    assert!(
+        !store.revoke_egress_declassification_grant_by_id(root, gid_a, "operator: tui revoke")?,
+        "second revoke is an idempotent no-op"
+    );
+    // Missing id: no-op, not an error.
+    assert!(
+        !store.revoke_egress_declassification_grant_by_id(root, gid_a + 99999, "x")?
+    );
+
+    // Enforcement fail-closes on the revoked grant; the sibling host-scoped
+    // grant is untouched (host-scoped revoke could not have done this without
+    // also being given the host).
+    assert!(!store.egress_declassification_allows(
+        &target_a,
+        Sink::RemoteModel,
+        root,
+        root,
+    )?);
+    assert!(store.egress_declassification_allows(
+        &target_b,
+        Sink::Network,
+        root,
+        root,
+    )?);
+
+    // Re-list drops the revoked row.
+    let active = store.list_egress_declassification_grants(root)?;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].target, target_b);
+    Ok(())
+}
+
+/// A row id is not a capability. Grant ids are `AUTOINCREMENT` and therefore
+/// enumerable across sessions, so the by-id revoke path must be scoped to the
+/// root that owns the grant: root B naming root A's id gets an idempotent
+/// no-op, and A's grant keeps enforcing. Without the `root_session_id`
+/// predicate any caller could revoke another session's declassification grant
+/// by counting up from 1 (the isolation half of P-15.3's "revocable").
+#[test]
+fn revoke_egress_declassification_grant_by_id_is_scoped_to_owning_root() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+    let root_a = "root-a-owner";
+    let root_b = "root-b-stranger";
+    let target = EgressDeclassificationTarget::MemoryId("mem-cross-root".to_string());
+    store.insert_egress_declassification_grant(
+        root_a,
+        root_a,
+        "memory-curator.default",
+        &target,
+        Sink::RemoteModel,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+    let gid = store
+        .list_egress_declassification_grants(root_a)?
+        .first()
+        .expect("grant present under root A")
+        .id;
+
+    // Root B knows (or guessed) the id — the revoke must not land.
+    assert!(
+        !store.revoke_egress_declassification_grant_by_id(root_b, gid, "operator: wrong root")?,
+        "a foreign root's by-id revoke is a no-op"
+    );
+    assert!(
+        store.egress_declassification_allows(&target, Sink::RemoteModel, root_a, root_a)?,
+        "root A's grant still enforces after root B's attempt"
+    );
+    assert_eq!(store.list_egress_declassification_grants(root_a)?.len(), 1);
+
+    // The owning root can still revoke it — scoping blocks strangers, not owners.
+    assert!(store.revoke_egress_declassification_grant_by_id(
+        root_a,
+        gid,
+        "operator: tui revoke"
+    )?);
+    assert!(!store.egress_declassification_allows(&target, Sink::RemoteModel, root_a, root_a)?);
+    Ok(())
+}
