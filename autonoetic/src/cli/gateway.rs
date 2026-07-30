@@ -805,10 +805,21 @@ pub async fn handle_gateway_grants(
                 host.as_deref(),
                 reason_text,
             )?;
-            if count == 0 {
+            // Egress declassification grants ride the same revocation surface:
+            // `--host X` revokes the host-scoped grant, `--all` every active
+            // declassification grant under the root (incl. session-wide).
+            let declass_count = gateway_store.revoke_egress_declassification_grants(
+                root_session,
+                host.as_deref(),
+                reason_text,
+            )?;
+            if count == 0 && declass_count == 0 {
                 println!("No matching grants found for session {}", root_session);
             } else {
                 println!("Revoked {} grant(s) for session {} (reason: {})", count, root_session, reason_text);
+                if declass_count > 0 {
+                    println!("Revoked {} egress declassification grant(s)", declass_count);
+                }
                 if let Some(ref host_val) = host {
                     println!("  Host filter: {}", host_val);
                 }
@@ -829,6 +840,7 @@ pub async fn handle_gateway_grants(
                 payload: Some(serde_json::json!({
                     "reason": reason_text,
                     "count": count,
+                    "egress_declassification_revoked": declass_count,
                 }).to_string()),
                 payload_ref: None,
                 evidence_ref: None,

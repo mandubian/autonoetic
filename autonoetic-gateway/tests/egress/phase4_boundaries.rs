@@ -4,6 +4,10 @@
 //! a single acceptance bar: every Phase 4 egress surface must emit
 //! `egress.boundary_refused` with the correct `surface` field, and the
 //! declassification + capsule paths must remain lawful.
+//!
+//! Declassification grants materialized from ordinary network approvals are
+//! **host-scoped** (`session:<root>:host:<host>`): approving one host widens
+//! only that host, and the operator can revoke it at any time.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +19,8 @@ use autonoetic_gateway::runtime::active_execution_registry::{
 use autonoetic_gateway::runtime::egress_labeler::{
     argument_taint_from_prior, emit_boundary_refused, mcp_remote_egress_refusal_json,
     network_egress_boundary_refusal_json, ofp_federated_egress_refusal,
-    parse_ofp_inbound_egress_label, session_network_declass_target, PriorLabeledResult,
+    parse_ofp_inbound_egress_label, session_host_network_declass_target,
+    session_network_declass_target, PriorLabeledResult,
 };
 use autonoetic_gateway::scheduler::approval::{apply_decision, ApproveOptions, DecisionContext};
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -106,6 +111,7 @@ fn acceptance_web_surface_boundary_refused() -> anyhow::Result<()> {
         Some(session_id),
         "researcher.default",
         None,
+        Some("example.com"),
     )
     .expect("web_fetch should refuse under local_only taint");
     assert!(refusal.contains("egress_boundary_refused"));
@@ -128,6 +134,7 @@ fn acceptance_hooks_surface_boundary_refused() -> anyhow::Result<()> {
         Some(session_id),
         "planner.default",
         None,
+        Some("hooks.example.com"),
     )
     .expect("hook callback should refuse");
     assert!(refusal.contains("egress_boundary_refused"));
@@ -151,6 +158,7 @@ fn acceptance_mcp_surface_boundary_refused() -> anyhow::Result<()> {
         "coder.default",
         None,
         &HashMap::new(),
+        Some("mcp.example.com"),
     )
     .expect("remote MCP should refuse");
     assert!(refusal.contains("egress_boundary_refused"));
@@ -185,6 +193,7 @@ fn acceptance_mcp_argument_taint_refused() -> anyhow::Result<()> {
         "coder.default",
         None,
         &prior,
+        Some("mcp.example.com"),
     )
     .expect("argument taint should refuse remote MCP");
     assert!(refusal.contains("egress_boundary_refused"));
@@ -253,6 +262,7 @@ fn acceptance_declassify_grant_lifecycle() -> anyhow::Result<()> {
             Some(session_id),
             "researcher.default",
             None,
+            Some("example.com"),
         )
         .is_some()
     );
@@ -288,12 +298,23 @@ fn acceptance_declassify_grant_lifecycle() -> anyhow::Result<()> {
         },
     )?;
 
+    // Approving the fetch declassifies Network for the approved host only…
     assert!(store.egress_declassification_allows(
-        &session_network_declass_target(root),
+        &session_host_network_declass_target(root, "example.com"),
         Sink::Network,
         session_id,
         root,
     )?);
+    // …never the whole session.
+    assert!(
+        !store.egress_declassification_allows(
+            &session_network_declass_target(root),
+            Sink::Network,
+            session_id,
+            root,
+        )?,
+        "one-host approval must not materialize a session-wide grant"
+    );
 
     let events = store.search_causal_events(Some(session_id), None, 20)?;
     assert!(
@@ -301,6 +322,7 @@ fn acceptance_declassify_grant_lifecycle() -> anyhow::Result<()> {
         "approval under taint must emit egress.declassified"
     );
 
+    // The declassified host passes the boundary…
     assert!(
         network_egress_boundary_refusal_json(
             "web",
@@ -310,19 +332,52 @@ fn acceptance_declassify_grant_lifecycle() -> anyhow::Result<()> {
             Some(session_id),
             "researcher.default",
             None,
+            Some("example.com"),
         )
         .is_none(),
-        "declassified session should allow network egress"
+        "declassified host should allow network egress"
+    );
+    // …while any other host is still refused.
+    assert!(
+        network_egress_boundary_refusal_json(
+            "web",
+            "web_fetch",
+            Some(&ctx),
+            Some(&store),
+            Some(session_id),
+            "researcher.default",
+            None,
+            Some("other.com"),
+        )
+        .is_some(),
+        "other hosts must stay refused"
     );
 
-    store.delete_egress_declassification_grants(root)?;
+    // Operator revokes the host grant at any time → boundary closes again.
+    let revoked =
+        store.revoke_egress_declassification_grants(root, Some("example.com"), "operator revoke")?;
+    assert_eq!(revoked, 1, "expected exactly one host-scoped grant revoked");
     assert!(
         !store.egress_declassification_allows(
-            &session_network_declass_target(root),
+            &session_host_network_declass_target(root, "example.com"),
             Sink::Network,
             session_id,
             root,
         )?
+    );
+    assert!(
+        network_egress_boundary_refusal_json(
+            "web",
+            "web_fetch",
+            Some(&ctx),
+            Some(&store),
+            Some(session_id),
+            "researcher.default",
+            None,
+            Some("example.com"),
+        )
+        .is_some(),
+        "revoked host grant must close the boundary again"
     );
     Ok(())
 }

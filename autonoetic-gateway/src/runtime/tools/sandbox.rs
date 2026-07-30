@@ -1343,14 +1343,21 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             .map(|c| c.root_session_id.as_str())
             .or_else(|| session_id.and_then(|s| s.split('/').next()))
             .unwrap_or("");
+        // Host-scoped declassification (#909 follow-up): `share_net` may be
+        // enabled by a session-wide grant, or by host-scoped grants covering
+        // **every** concrete host static analysis resolved. Commands with no
+        // concrete hosts stay gated (the `Unresolved` hard-refuse below fires
+        // first for those).
+        let declass_hosts = normalize_targets(&remote_analysis.detected_patterns);
         let network_declassified = if network_sink_excluded {
             gateway_store
                 .as_ref()
                 .map(|store| {
-                    crate::runtime::egress_labeler::session_network_declassified(
+                    crate::runtime::egress_labeler::session_network_declassified_for_hosts(
                         store.as_ref(),
                         session_id.unwrap_or(""),
                         root_for_declass,
+                        &declass_hosts,
                     )
                 })
                 .unwrap_or(false)

@@ -30,7 +30,7 @@ flowchart LR
 1. **Resident agent** — one bundle owns the sensitive source (`agent.resident_idle_ttl_secs` / session residency #902). The session parks instead of dying on idle so siblings can message it.
 2. **Session policy** — root session declares `local_only` taint and source rules on the owner's reads (e.g. `fs.read:~/mail/** → local_only`). Everything the owner accumulates stays labeled by construction.
 3. **Sibling access via `agent_message`** — other agents query the owner; replies carry egress labels and intersect into the caller's session taint (Phase 2/3). Raw paths stay confined to the owner bundle when capability scoping is tightened (recommended hard boundary: only the owner holds `ReadAccess` over `~/mail/**`).
-4. **Network / federation gates (Phase 4)** — even if a sibling could reach the network, session taint excludes `Sink::Network` until operator declassification (`egress.declassified`). The owner itself is pinned to local presets via taint-following routing (#907).
+4. **Network / federation gates (Phase 4)** — even if a sibling could reach the network, session taint excludes `Sink::Network` until operator declassification (`egress.declassified`). Grants from ordinary network approvals are host-scoped (`session:<root>:host:<host>`) and revocable via `gateway grants revoke --host <host>`; session-wide widening requires an explicit `EgressDeclassify` approval. The owner itself is pinned to local presets via taint-following routing (#907).
 
 ## Soft vs hard boundary
 

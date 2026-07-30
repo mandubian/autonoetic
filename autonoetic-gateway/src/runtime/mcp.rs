@@ -56,6 +56,21 @@ impl McpToolRuntime {
             .unwrap_or(true)
     }
 
+    /// Host of the tool's server when it is a remote (SSE) endpoint — used to
+    /// scope egress declassification grants to the approved host.
+    pub fn tool_server_host(&self, tool_name: &str) -> Option<String> {
+        let server = self
+            .tool_server
+            .get(tool_name)
+            .and_then(|name| self.servers_by_name.get(name))?;
+        match &server.transport {
+            autonoetic_mcp::McpTransportConfig::Sse { url } => {
+                crate::runtime::tools::extract_host(url).ok()
+            }
+            _ => None,
+        }
+    }
+
     pub fn tool_definitions(&self) -> anyhow::Result<Vec<ToolDefinition>> {
         let mut defs = Vec::with_capacity(self.tools_by_name.len());
         for tool in self.tools_by_name.values() {

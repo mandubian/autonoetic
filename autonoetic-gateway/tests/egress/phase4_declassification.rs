@@ -4,7 +4,7 @@ use autonoetic_gateway::runtime::curator_journal::{
     persist_decision_journal_entries, DecisionJournalEntry,
 };
 use autonoetic_gateway::runtime::egress_labeler::{
-    session_network_declass_target, snapshot_session_egress_taint_for_approval,
+    session_host_network_declass_target, snapshot_session_egress_taint_for_approval,
 };
 use autonoetic_gateway::runtime::active_execution_registry::{
     ActiveExecutionRegistry, NativeToolRunContext,
@@ -235,7 +235,7 @@ fn approval_snapshot_persists_in_memory_taint_before_finalize() -> anyhow::Resul
     )?;
 
     assert!(store.egress_declassification_allows(
-        &session_network_declass_target(root),
+        &session_host_network_declass_target(root, "example.com"),
         Sink::Network,
         session_id,
         root,

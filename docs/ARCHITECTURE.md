@@ -356,11 +356,14 @@ must never reach a remote model."
   the causal chain alone (`gateway egress audit <session>`).
 - **Phase 4 boundary surfaces (#909).** Non-LLM egress paths gate on session
   taint before bytes leave. Each refusal emits `egress.boundary_refused` with
-  a `surface` tag; operator widening emits `egress.declassified`:
+  a `surface` tag; operator widening emits `egress.declassified`. Widening from
+  an ordinary network approval is **host-scoped** (one grant per approved
+  host, revocable via `gateway grants revoke --host`); session-wide
+  declassification requires an explicit `EgressDeclassify` approval:
 
   | Surface | Gate |
   |---------|------|
-  | `sandbox` | `share_net` requires declassification when taint excludes `Network`; `Unresolved` targets hard-refuse |
+  | `sandbox` | `share_net` requires declassification covering every detected host when taint excludes `Network`; `Unresolved` targets hard-refuse |
   | `web` | `web_fetch` / `web_search` / `web_call` before outbound HTTP |
   | `hooks` | `http.callback` deliveries |
   | `mcp` | Remote SSE `tools/call` — session gate + argument-carried taint |

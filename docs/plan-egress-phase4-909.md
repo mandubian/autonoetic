@@ -130,7 +130,7 @@ fn resolve_session_egress_taint(
 - If taint excludes `Sink::Network`:
   - Do **not** auto-approve via `RemoteAccessApprovalMode::Preapproved`.
   - Do **not** treat exec-cache hits as sufficient to enable `share_net`.
-  - Operator path: approve via machinery that **materializes a declassification grant for `Sink::Network`** (session-scoped target, e.g. `source_pattern: "session:<root>"`) and emits `egress.declassified`. A bare `SandboxExec` host approval without that grant must not set `share_net = true`.
+  - Operator path: approve via machinery that **materializes a declassification grant for `Sink::Network`** and emits `egress.declassified`. Grants are **host-scoped** (`source_pattern: "session:<root>:host:<host>"`, one per approved host from `detected_hosts`) — an ordinary network approval widens only the hosts the operator saw, never the whole session. Session-wide `source_pattern: "session:<root>"` remains possible via the explicit `EgressDeclassify` action only. A bare `SandboxExec` host approval without that grant must not set `share_net = true`. An approval with no concrete `detected_hosts` materializes nothing (fail-closed).
   - `safe_inspection_bypass` must keep `share_net = false` under taint (already required).
 - `NetworkCoverage::Unresolved` + taint excludes `Network` → hard refuse (no approval offer); emit `egress.boundary_refused` with `surface: "sandbox"`.
 
@@ -218,3 +218,11 @@ fn resolve_session_egress_taint(
 
 Phase 4 slices 0–8 are complete. Constitution / enforcement-register changes
 remain **Phase 5 #910**.
+
+**Follow-up (post-slice-8):** declassification grants materialized from ordinary
+network approvals are host-scoped (`session:<root>:host:<host>`), honor
+`default_grant_ttl_secs`, carry `expires_at` in the `egress.declassified`
+payload, and are revocable via `gateway grants revoke --host <host>` (which now
+also revokes matching declassification grants and records the count in the
+`revoke_grants` causal event). The approval request shown to the operator
+discloses the widening.

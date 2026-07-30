@@ -197,6 +197,28 @@ pub struct DecisionContext<'a> {
 /// 5. Emit normalized wiki timeline event
 /// 6. Emit causal event
 /// 7. Unblock workflow task (if workflow-bound)
+/// Expiry for a materialized declassification grant: an explicit
+/// `options.grant_expires_at` wins; otherwise `default_grant_ttl_secs` from
+/// config (0 = no expiry). Shared by the explicit `EgressDeclassify` path and
+/// the implicit host-scoped network-approval path so both honor the same TTL.
+fn declass_grant_expiry(
+    config: &GatewayConfig,
+    options: &ApproveOptions,
+    decided_at: &str,
+) -> Option<String> {
+    if let Some(exp) = options.grant_expires_at.as_deref() {
+        return Some(exp.to_string());
+    }
+    if config.default_grant_ttl_secs > 0 {
+        let ttl_secs = i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
+        let base = chrono::DateTime::parse_from_rfc3339(decided_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        return Some((base + chrono::Duration::seconds(ttl_secs)).to_rfc3339());
+    }
+    None
+}
+
 pub fn apply_decision(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -319,8 +341,12 @@ pub fn apply_decision(
     }
 
     // ── 1e. Network egress under taint = declassification (RFC §8) ─────
-    // Sandbox share_net and gateway web tools widen to Sink::Network — materialize
-    // a session-scoped grant + egress.declassified (#909 slices 2 / 2b).
+    // Sandbox share_net and gateway web tools widen to Sink::Network — but the
+    // operator approved egress to *specific hosts*, so materialize **host-scoped**
+    // grants (`session:<root>:host:<host>`) + egress.declassified, never a silent
+    // session-wide widen (#909 slices 2 / 2b; host-scoping follow-up). Session-wide
+    // Network declassification remains possible via the explicit EgressDeclassify
+    // action (§1d) only.
     if decision.status == ApprovalStatus::Approved {
         let network_action = matches!(
             decision.action,
@@ -341,59 +367,70 @@ pub fn apply_decision(
                     .map(|t| !t.allows(autonoetic_types::egress::Sink::Network))
                     .unwrap_or(false);
                 if network_excluded {
-                    let target =
-                        crate::runtime::egress_labeler::session_network_declass_target(root_sid);
+                    let hosts = decision.action.detected_hosts().unwrap_or_default();
+                    if hosts.is_empty() {
+                        // Fail-closed: an approval without concrete hosts widens
+                        // nothing. The retried call refuses again; the repair hint
+                        // points at the explicit EgressDeclassify path.
+                        tracing::warn!(
+                            target: "approval",
+                            request_id = %decision.request_id,
+                            "Tainted network action approved without detected_hosts — no declassification grant materialized"
+                        );
+                    }
                     let scope = options
                         .grant_scope
                         .clone()
                         .unwrap_or(GrantScope::RootSession);
-                    let expires_at = options.grant_expires_at.as_deref();
-                    let declass_reason = match &decision.action {
-                        ScheduledAction::SandboxExec { .. } => {
-                            "sandbox share_net under session egress taint (RFC §8)"
-                        }
-                        ScheduledAction::WebFetch { .. } => {
-                            "web_fetch network egress under session egress taint (RFC §8)"
-                        }
-                        ScheduledAction::WebSearch { .. } => {
-                            "web_search network egress under session egress taint (RFC §8)"
-                        }
-                        ScheduledAction::WebCall { .. } => {
-                            "web_call network egress under session egress taint (RFC §8)"
-                        }
-                        _ => "network egress under session egress taint (RFC §8)",
+                    let expires_at = declass_grant_expiry(config, options, &decision.decided_at);
+                    let tool_label = match &decision.action {
+                        ScheduledAction::SandboxExec { .. } => "sandbox share_net",
+                        ScheduledAction::WebFetch { .. } => "web_fetch",
+                        ScheduledAction::WebSearch { .. } => "web_search",
+                        ScheduledAction::WebCall { .. } => "web_call",
+                        _ => "network egress",
                     };
-                    match store.insert_egress_declassification_grant(
-                        root_sid,
-                        &decision.session_id,
-                        &decision.agent_id,
-                        &target,
-                        autonoetic_types::egress::Sink::Network,
-                        &scope,
-                        &decision.decided_by,
-                        &decision.decided_at,
-                        Some(&decision.request_id),
-                        expires_at,
-                    ) {
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "approval",
-                                request_id = %decision.request_id,
-                                error = %e,
-                                "Failed to insert Network declassification grant for tainted network action"
+                    for host in &hosts {
+                        let target =
+                            crate::runtime::egress_labeler::session_host_network_declass_target(
+                                root_sid, host,
                             );
-                        }
-                        Ok(()) => {
-                            crate::runtime::egress_labeler::emit_declassified(
-                                store,
-                                &decision.session_id,
-                                &decision.agent_id,
-                                &target,
-                                autonoetic_types::egress::Sink::Network,
-                                scope,
-                                Some(&decision.request_id),
-                                declass_reason,
-                            );
+                        let declass_reason = format!(
+                            "{tool_label} network egress to {host} under session egress taint (RFC §8)"
+                        );
+                        match store.insert_egress_declassification_grant(
+                            root_sid,
+                            &decision.session_id,
+                            &decision.agent_id,
+                            &target,
+                            autonoetic_types::egress::Sink::Network,
+                            &scope,
+                            &decision.decided_by,
+                            &decision.decided_at,
+                            Some(&decision.request_id),
+                            expires_at.as_deref(),
+                        ) {
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "approval",
+                                    request_id = %decision.request_id,
+                                    error = %e,
+                                    "Failed to insert host-scoped Network declassification grant for tainted network action"
+                                );
+                            }
+                            Ok(()) => {
+                                crate::runtime::egress_labeler::emit_declassified(
+                                    store,
+                                    &decision.session_id,
+                                    &decision.agent_id,
+                                    &target,
+                                    autonoetic_types::egress::Sink::Network,
+                                    scope.clone(),
+                                    Some(&decision.request_id),
+                                    &declass_reason,
+                                    expires_at.as_deref(),
+                                );
+                            }
                         }
                     }
                 }
@@ -499,23 +536,7 @@ pub fn apply_decision(
                     .grant_scope
                     .clone()
                     .unwrap_or(GrantScope::RootSession);
-                let computed_expiry = if options.grant_expires_at.is_none()
-                    && config.default_grant_ttl_secs > 0
-                {
-                    let ttl_secs =
-                        i64::try_from(config.default_grant_ttl_secs).unwrap_or(i64::MAX);
-                    let base = chrono::DateTime::parse_from_rfc3339(&decision.decided_at)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now());
-                    let t = base + chrono::Duration::seconds(ttl_secs);
-                    Some(t.to_rfc3339())
-                } else {
-                    None
-                };
-                let expires_at = options
-                    .grant_expires_at
-                    .as_deref()
-                    .or(computed_expiry.as_deref());
+                let expires_at = declass_grant_expiry(config, options, &decision.decided_at);
                 match store.insert_egress_declassification_grant(
                     root_sid,
                     &decision.session_id,
@@ -526,7 +547,7 @@ pub fn apply_decision(
                     &decision.decided_by,
                     &decision.decided_at,
                     Some(&decision.request_id),
-                    expires_at,
+                    expires_at.as_deref(),
                 ) {
                     Err(e) => {
                         tracing::warn!(
@@ -546,6 +567,7 @@ pub fn apply_decision(
                             scope,
                             Some(&decision.request_id),
                             reason,
+                            expires_at.as_deref(),
                         );
                     }
                 }
