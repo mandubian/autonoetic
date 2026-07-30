@@ -1370,3 +1370,149 @@ fn agent_revision_list_filters_by_status_and_reports_truncation() {
         "got:\n{stdout}"
     );
 }
+
+#[test]
+fn test_egress_declassify_intake_file_then_approve() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let config_path = temp.path().join("config.yaml");
+    let agents_dir = temp.path().join("agents");
+    write_config(&config_path, &agents_dir, 4010, 4210, 4);
+    let cfg = config_path.to_string_lossy().to_string();
+
+    // File: leaves a pending approval, no grant materialized.
+    let file = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "egress-declassify",
+            "--root-session", "root-decl",
+            "--target", "source_pattern:session:root-decl:host:example.com",
+            "--sink", "network",
+            "--reason", "allow fetch to example.com",
+        ],
+        None,
+    );
+    assert!(
+        file.status.success(),
+        "egress-declassify failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&file.stdout),
+        String::from_utf8_lossy(&file.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&file.stdout);
+    assert!(
+        stdout.contains("Filed declassification request") && stdout.contains("pending"),
+        "got:\n{stdout}"
+    );
+    let request_id = stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("apr-"))
+        .expect("filed output should name the request id")
+        .to_string();
+
+    // The pending request shows up in the unified pending view.
+    let pending = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "pending", "--root-session", "root-decl", "--json",
+        ],
+        None,
+    );
+    assert!(pending.status.success());
+    let stdout = String::from_utf8_lossy(&pending.stdout);
+    assert!(
+        stdout.contains("egress_declassify"),
+        "pending should list the declassify request, got:\n{stdout}"
+    );
+
+    // Decide it through the normal approval surface. EgressDeclassify is a
+    // high-risk class — the R++4 dwell (3s) must elapse between filing and
+    // decision.
+    std::thread::sleep(Duration::from_millis(3200));
+    let approve = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "approvals", "approve", &request_id,
+            "--reason", "confirmed widen",
+        ],
+        None,
+    );
+    assert!(
+        approve.status.success(),
+        "approvals approve failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&approve.stdout),
+        String::from_utf8_lossy(&approve.stderr)
+    );
+
+    // The grant is live: audit shows egress.declassified with the host target.
+    let audit = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "egress-audit", "root-decl", "--json",
+        ],
+        None,
+    );
+    assert!(audit.status.success());
+    let stdout = String::from_utf8_lossy(&audit.stdout);
+    assert!(
+        stdout.contains("egress.declassified")
+            && stdout.contains("session:root-decl:host:example.com"),
+        "audit should render the declassification, got:\n{stdout}"
+    );
+
+    // And the grant is revocable through the shared grants surface.
+    let revoke = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "grants", "revoke", "root-decl",
+            "--host", "example.com",
+        ],
+        None,
+    );
+    assert!(revoke.status.success());
+    let stdout = String::from_utf8_lossy(&revoke.stdout);
+    assert!(
+        stdout.contains("egress declassification"),
+        "revoke should report the declassification grant, got:\n{stdout}"
+    );
+
+    // Invalid target kind is rejected with a helpful error.
+    let bad = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "egress-declassify",
+            "--root-session", "root-decl",
+            "--target", "bogus:thing",
+            "--sink", "network",
+        ],
+        None,
+    );
+    assert!(!bad.status.success(), "invalid target kind must fail");
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(
+        stderr.contains("invalid --target kind"),
+        "rejection should explain itself, got:\n{stderr}"
+    );
+
+    // A --session outside the declared root is rejected: pending surfaces
+    // derive the root from the session id, so a mismatched pair would orphan
+    // the request.
+    let bad_session = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "egress-declassify",
+            "--root-session", "root-decl",
+            "--session", "other-root/sess",
+            "--target", "memory_id:mem-1",
+            "--sink", "remote_model",
+        ],
+        None,
+    );
+    assert!(
+        !bad_session.status.success(),
+        "out-of-root --session must fail"
+    );
+    let stderr = String::from_utf8_lossy(&bad_session.stderr);
+    assert!(
+        stderr.contains("not under root session"),
+        "rejection should explain itself, got:\n{stderr}"
+    );
+}
