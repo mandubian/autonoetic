@@ -208,6 +208,42 @@ pub(super) fn delete_grants_for_root(conn: &Connection, root_session_id: &str) -
     Ok(())
 }
 
+/// Operator revocation (#909 follow-up). Marks grants revoked (UPDATE, never
+/// DELETE — the row is the audit trail). With `host`, only the host-scoped
+/// grant `session:<root>:host:<host>` is revoked; without, every active grant
+/// under the root (including a session-wide `session:<root>` grant).
+pub(super) fn revoke_grants_for_root(
+    conn: &Connection,
+    root_session_id: &str,
+    host: Option<&str>,
+    reason: &str,
+    now: &str,
+) -> Result<usize> {
+    let count = match host {
+        Some(h) => {
+            // Must match `egress_labeler::session_host_network_declass_target`.
+            let normalized = h.trim().trim_end_matches('.').to_ascii_lowercase();
+            let target_value = format!("session:{root_session_id}:host:{normalized}");
+            // Kind-scoped: an envelope_id/memory_id row with a colliding value
+            // must never be caught by a host revocation.
+            conn.execute(
+                "UPDATE egress_declassification_grants
+                 SET revoked_at = ?1, revoked_reason = ?2
+                 WHERE root_session_id = ?3 AND target_kind = 'source_pattern'
+                   AND target_value = ?4 AND revoked_at IS NULL",
+                params![now, reason, root_session_id, target_value],
+            )?
+        }
+        None => conn.execute(
+            "UPDATE egress_declassification_grants
+             SET revoked_at = ?1, revoked_reason = ?2
+             WHERE root_session_id = ?3 AND revoked_at IS NULL",
+            params![now, reason, root_session_id],
+        )?,
+    };
+    Ok(count)
+}
+
 impl super::GatewayStore {
     pub fn insert_egress_declassification_grant(
         &self,
@@ -261,6 +297,19 @@ impl super::GatewayStore {
     pub fn delete_egress_declassification_grants(&self, root_session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         delete_grants_for_root(&conn, root_session_id)
+    }
+
+    /// Revoke (not delete) declassification grants for a root session —
+    /// per-host when `host` is given, all active grants otherwise.
+    pub fn revoke_egress_declassification_grants(
+        &self,
+        root_session_id: &str,
+        host: Option<&str>,
+        reason: &str,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        revoke_grants_for_root(&conn, root_session_id, host, reason, &now)
     }
 }
 
@@ -366,5 +415,145 @@ mod tests {
             )
             .unwrap()
         );
+    }
+
+    #[test]
+    fn host_scoped_grant_allows_only_that_host() {
+        let conn = open_test_conn();
+        let host_target =
+            EgressDeclassificationTarget::SourcePattern("session:root:host:example.com".into());
+        insert_grant(
+            &conn,
+            "root",
+            "root/sess",
+            "agent",
+            &host_target,
+            Sink::Network,
+            &GrantScope::RootSession,
+            "op",
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            declassification_allows(
+                &conn,
+                &host_target,
+                Sink::Network,
+                "root/sess",
+                "root",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap()
+        );
+        // Session-wide and other-host lookups do not match.
+        for value in ["session:root", "session:root:host:other.com"] {
+            let other = EgressDeclassificationTarget::SourcePattern(value.into());
+            assert!(
+                !declassification_allows(
+                    &conn,
+                    &other,
+                    Sink::Network,
+                    "root/sess",
+                    "root",
+                    "2026-01-01T00:00:00Z",
+                )
+                .unwrap(),
+                "{value} must not be covered by the example.com host grant"
+            );
+        }
+    }
+
+    #[test]
+    fn revoke_by_host_marks_revoked_and_closes() {
+        let conn = open_test_conn();
+        let host_target =
+            EgressDeclassificationTarget::SourcePattern("session:root:host:example.com".into());
+        insert_grant(
+            &conn,
+            "root",
+            "root/sess",
+            "agent",
+            &host_target,
+            Sink::Network,
+            &GrantScope::RootSession,
+            "op",
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let revoked = revoke_grants_for_root(
+            &conn,
+            "root",
+            Some("Example.COM."),
+            "operator revoke",
+            "2026-01-02T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(revoked, 1, "host filter must normalize case/trailing dot");
+        assert!(
+            !declassification_allows(
+                &conn,
+                &host_target,
+                Sink::Network,
+                "root/sess",
+                "root",
+                "2026-01-02T00:00:01Z",
+            )
+            .unwrap(),
+            "revoked grant must not allow"
+        );
+        // Revoking again is a no-op (already revoked).
+        let again = revoke_grants_for_root(
+            &conn,
+            "root",
+            Some("example.com"),
+            "operator revoke",
+            "2026-01-02T00:00:02Z",
+        )
+        .unwrap();
+        assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn revoke_all_covers_session_wide_and_host_scoped() {
+        let conn = open_test_conn();
+        for value in ["session:root", "session:root:host:example.com"] {
+            insert_grant(
+                &conn,
+                "root",
+                "root/sess",
+                "agent",
+                &EgressDeclassificationTarget::SourcePattern(value.into()),
+                Sink::Network,
+                &GrantScope::RootSession,
+                "op",
+                "2026-01-01T00:00:00Z",
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let revoked =
+            revoke_grants_for_root(&conn, "root", None, "operator revoke", "2026-01-02T00:00:00Z")
+                .unwrap();
+        assert_eq!(revoked, 2);
+        for value in ["session:root", "session:root:host:example.com"] {
+            let target = EgressDeclassificationTarget::SourcePattern(value.into());
+            assert!(
+                !declassification_allows(
+                    &conn,
+                    &target,
+                    Sink::Network,
+                    "root/sess",
+                    "root",
+                    "2026-01-02T00:00:01Z",
+                )
+                .unwrap()
+            );
+        }
     }
 }

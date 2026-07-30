@@ -782,6 +782,7 @@ impl<'a> ToolCallProcessor<'a> {
                         &self.manifest.agent.id,
                         self.turn_id.as_deref(),
                         &self.egress_results,
+                        self.mcp_runtime.tool_server_host(tool_name).as_deref(),
                     )
                 {
                     return Ok(ToolCallOutput {

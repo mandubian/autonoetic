@@ -189,6 +189,7 @@ fn session_grants_allow_host(
 
 /// Session-taint network egress gate (#909 slice 2b). Returns a JSON refusal when
 /// taint excludes [`Sink::Network`] without an active declassification grant.
+/// `host` scopes the declassification lookup to host-level grants.
 fn web_network_egress_refusal(
     tool_name: &str,
     gateway_store: Option<&std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -196,6 +197,7 @@ fn web_network_egress_refusal(
     session_id: Option<&str>,
     agent_id: &str,
     turn_id: Option<&str>,
+    host: &str,
 ) -> Option<String> {
     crate::runtime::egress_labeler::network_egress_boundary_refusal_json(
         "web",
@@ -205,6 +207,7 @@ fn web_network_egress_refusal(
         session_id,
         agent_id,
         turn_id,
+        Some(host),
     )
 }
 
@@ -985,6 +988,7 @@ impl NativeTool for WebSearchTool {
                     _session_id,
                     &manifest.agent.id,
                     _turn_id,
+                    &engine_host,
                 ) {
                     return Ok(Some(refusal));
                 }
@@ -1571,6 +1575,7 @@ fn execute_web_fetch_http(
             session_id,
             &manifest.agent.id,
             None,
+            &host,
         ) {
             return Ok(WebFetchHttpOutcome::NeedsApproval(refusal));
         }
@@ -1835,6 +1840,7 @@ impl NativeTool for WebFetchTool {
             _session_id,
             &manifest.agent.id,
             _turn_id,
+            &host,
         ) {
             return Ok(refusal);
         }
@@ -2239,6 +2245,7 @@ impl NativeTool for WebCallTool {
             _session_id,
             &manifest.agent.id,
             _turn_id,
+            &host,
         ) {
             return Ok(refusal);
         }

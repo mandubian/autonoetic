@@ -1152,6 +1152,48 @@ pub fn session_network_declassified(
         .unwrap_or(false)
 }
 
+/// Host-scoped declassification target: widens [`Sink::Network`] for one host
+/// only (`session:<root>:host:<host>`).
+///
+/// This is what an ordinary network approval (web_fetch / web_call /
+/// web_search / sandbox_exec) materializes under taint — the operator approved
+/// egress to *these hosts*, so the grant widens exactly that, never the whole
+/// session. Session-wide declassification (`session:<root>`) stays available
+/// through the explicit `EgressDeclassify` action only.
+pub fn session_host_network_declass_target(
+    root_session_id: &str,
+    host: &str,
+) -> autonoetic_types::egress::EgressDeclassificationTarget {
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    autonoetic_types::egress::EgressDeclassificationTarget::SourcePattern(format!(
+        "session:{root_session_id}:host:{normalized}"
+    ))
+}
+
+/// Host-aware variant of [`session_network_declassified`]: true when a
+/// session-wide grant exists, or when `hosts` is non-empty and **every** host
+/// holds an active host-scoped grant. An empty host list never satisfies the
+/// check (fail-closed — mirrors the `NetworkCoverage::Unresolved` hard-refuse).
+pub fn session_network_declassified_for_hosts(
+    store: &GatewayStore,
+    session_id: &str,
+    root_session_id: &str,
+    hosts: &[String],
+) -> bool {
+    if session_network_declassified(store, session_id, root_session_id) {
+        return true;
+    }
+    if hosts.is_empty() {
+        return false;
+    }
+    hosts.iter().all(|host| {
+        let target = session_host_network_declass_target(root_session_id, host);
+        store
+            .egress_declassification_allows(&target, Sink::Network, session_id, root_session_id)
+            .unwrap_or(false)
+    })
+}
+
 /// Fail-closed network egress gate for web tools, hooks, and similar surfaces.
 ///
 /// Returns a JSON tool-error body when the session taint excludes
@@ -1166,6 +1208,7 @@ pub fn network_egress_boundary_refusal_json(
     session_id: Option<&str>,
     agent_id: &str,
     turn_id: Option<&str>,
+    host: Option<&str>,
 ) -> Option<String> {
     let tool_name =
         crate::runtime::tool_call_processor::canonical_tool_name(tool_name);
@@ -1242,7 +1285,15 @@ pub fn network_egress_boundary_refusal_json(
         .map(|c| c.root_session_id.as_str())
         .or_else(|| sid.split('/').next())
         .unwrap_or(sid);
-    if session_network_declassified(store.as_ref(), sid, root) {
+    let host_buf;
+    let hosts: &[String] = match host {
+        Some(h) => {
+            host_buf = vec![h.to_string()];
+            &host_buf
+        }
+        None => &[],
+    };
+    if session_network_declassified_for_hosts(store.as_ref(), sid, root, hosts) {
         return None;
     }
 
@@ -1256,6 +1307,14 @@ pub fn network_egress_boundary_refusal_json(
         &[],
         &format!("session egress taint excludes Network ({tool_name}, RFC §7)"),
     );
+    let repair_hint = match host {
+        Some(h) => format!(
+            "Approve this {tool_name} request — approval declassifies Network egress to {h} only (host-scoped grant). For session-wide Network, use an explicit EgressDeclassify approval."
+        ),
+        None => format!(
+            "Approve egress declassification for Sink::Network on this session (explicit EgressDeclassify), or clear session taint."
+        ),
+    };
     let payload = serde_json::json!({
         "ok": false,
         "error_type": "egress_boundary_refused",
@@ -1264,7 +1323,7 @@ pub fn network_egress_boundary_refusal_json(
         "message": format!(
             "{tool_name} refused: session egress taint excludes Network; operator declassification required"
         ),
-        "repair_hint": "Approve egress declassification for Sink::Network on this session, or clear session taint.",
+        "repair_hint": repair_hint,
     });
     Some(payload.to_string())
 }
@@ -1330,6 +1389,7 @@ pub fn mcp_remote_egress_refusal_json(
     agent_id: &str,
     turn_id: Option<&str>,
     prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
+    host: Option<&str>,
 ) -> Option<String> {
     let tool_name =
         crate::runtime::tool_call_processor::canonical_tool_name(tool_name);
@@ -1341,6 +1401,7 @@ pub fn mcp_remote_egress_refusal_json(
         session_id,
         agent_id,
         turn_id,
+        host,
     ) {
         return Some(refusal);
     }
@@ -1700,12 +1761,14 @@ pub fn emit_declassified(
     scope: autonoetic_types::background::GrantScope,
     source_approval_id: Option<&str>,
     reason: &str,
+    expires_at: Option<&str>,
 ) {
     let payload = serde_json::json!({
         "target": target,
         "allowed_sink": serde_json::to_value(allowed_sink).unwrap_or(serde_json::Value::Null),
         "scope": scope.as_str(),
         "source_approval_id": source_approval_id,
+        "expires_at": expires_at,
         "reason": reason,
     });
     let event = autonoetic_types::causal_chain::CausalEventRecord {

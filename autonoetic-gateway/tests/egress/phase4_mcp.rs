@@ -85,6 +85,7 @@ fn mcp_remote_refused_under_local_only_session_taint() -> anyhow::Result<()> {
         "coder.default",
         None,
         &HashMap::new(),
+        Some("mcp.example.com"),
     )
     .expect("expected MCP refusal without declassification grant");
 
@@ -131,6 +132,7 @@ fn mcp_remote_refused_when_arguments_carry_local_only_taint() -> anyhow::Result<
         "coder.default",
         None,
         &prior,
+        Some("mcp.example.com"),
     )
     .expect("expected refusal when args inherit local_only taint");
 
@@ -147,7 +149,7 @@ fn unknown_mcp_tool_requires_network_gate_fail_closed() {
 }
 
 #[test]
-fn mcp_remote_allowed_after_network_declass_with_clean_args() -> anyhow::Result<()> {
+fn mcp_remote_allowed_after_host_scoped_network_declass_with_clean_args() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let store = Arc::new(autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
         tmp.path(),
@@ -159,7 +161,10 @@ fn mcp_remote_allowed_after_network_declass_with_clean_args() -> anyhow::Result<
         root,
         session_id,
         "coder.default",
-        &autonoetic_gateway::runtime::egress_labeler::session_network_declass_target(root),
+        &autonoetic_gateway::runtime::egress_labeler::session_host_network_declass_target(
+            root,
+            "mcp.example.com",
+        ),
         Sink::Network,
         &autonoetic_types::background::GrantScope::RootSession,
         "operator",
@@ -168,6 +173,7 @@ fn mcp_remote_allowed_after_network_declass_with_clean_args() -> anyhow::Result<
         None,
     )?;
 
+    // Host-scoped grant covers the declassified server host…
     let refusal = mcp_remote_egress_refusal_json(
         "mcp_remote_echo",
         r#"{"text":"hello"}"#,
@@ -177,10 +183,28 @@ fn mcp_remote_allowed_after_network_declass_with_clean_args() -> anyhow::Result<
         "coder.default",
         None,
         &HashMap::new(),
+        Some("mcp.example.com"),
     );
     assert!(
         refusal.is_none(),
-        "declassified session with clean args should allow remote MCP"
+        "declassified server host with clean args should allow remote MCP"
+    );
+
+    // …but not a different MCP server host.
+    let other = mcp_remote_egress_refusal_json(
+        "mcp_other_echo",
+        r#"{"text":"hello"}"#,
+        Some(&ctx),
+        Some(&store),
+        Some(session_id),
+        "coder.default",
+        None,
+        &HashMap::new(),
+        Some("other-mcp.example.com"),
+    );
+    assert!(
+        other.is_some(),
+        "host-scoped grant must not widen to other MCP server hosts"
     );
     Ok(())
 }

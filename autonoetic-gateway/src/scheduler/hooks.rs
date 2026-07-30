@@ -486,6 +486,7 @@ impl HookExecutor {
             .filter(|s| !s.is_empty())
             .unwrap_or(ctx.root_session_id.as_str());
         let hook_agent_id = ctx.agent_id.as_deref().unwrap_or("gateway");
+        let callback_host = parsed_url.host_str().map(|h| h.to_string());
         if let Some(refusal) =
             crate::runtime::egress_labeler::network_egress_boundary_refusal_json(
                 "hooks",
@@ -495,6 +496,7 @@ impl HookExecutor {
                 Some(hook_session_id),
                 hook_agent_id,
                 None,
+                callback_host.as_deref(),
             )
         {
             anyhow::bail!(

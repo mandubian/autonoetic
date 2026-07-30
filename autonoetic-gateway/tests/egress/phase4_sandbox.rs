@@ -6,8 +6,9 @@ use autonoetic_gateway::runtime::active_execution_registry::{
     ActiveExecutionRegistry, NativeToolRunContext,
 };
 use autonoetic_gateway::runtime::egress_labeler::{
-    require_boundary_session_taint, resolve_session_egress_taint, session_network_declass_target,
-    session_network_declassified,
+    require_boundary_session_taint, resolve_session_egress_taint,
+    session_host_network_declass_target, session_network_declass_target,
+    session_network_declassified, session_network_declassified_for_hosts,
 };
 use autonoetic_gateway::runtime::remote_access::{
     classify_network_coverage, DetectedPattern, NetworkCoverage,
@@ -137,7 +138,7 @@ fn surface_boundary_refused_emits_causal_event() -> anyhow::Result<()> {
 }
 
 #[test]
-fn sandbox_exec_approval_under_taint_materializes_network_declass() -> anyhow::Result<()> {
+fn sandbox_exec_approval_under_taint_materializes_host_scoped_declass() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let store = GatewayStore::open(tmp.path())?;
     let config = GatewayConfig::default();
@@ -179,16 +180,43 @@ fn sandbox_exec_approval_under_taint_materializes_network_declass() -> anyhow::R
     )?;
 
     assert!(
-        session_network_declassified(&store, session_id, root),
-        "SandboxExec approve under Network-excluding taint must materialize declass grant"
+        !session_network_declassified(&store, session_id, root),
+        "SandboxExec approve under taint must NOT materialize a session-wide grant"
     );
-    let target = session_network_declass_target(root);
+    assert!(
+        session_network_declassified_for_hosts(
+            &store,
+            session_id,
+            root,
+            &["example.com".to_string()],
+        ),
+        "SandboxExec approve under taint must materialize a host-scoped declass grant"
+    );
+    assert!(
+        !session_network_declassified_for_hosts(
+            &store,
+            session_id,
+            root,
+            &["example.com".to_string(), "other.com".to_string()],
+        ),
+        "host grant for example.com must not cover other.com"
+    );
+    let target = session_host_network_declass_target(root, "example.com");
     assert!(store.egress_declassification_allows(
         &target,
         Sink::Network,
         session_id,
         root,
     )?);
+    assert!(
+        !store.egress_declassification_allows(
+            &session_network_declass_target(root),
+            Sink::Network,
+            session_id,
+            root,
+        )?,
+        "no silent session-wide widen"
+    );
 
     let events = store.search_causal_events(Some(session_id), None, 50)?;
     assert!(

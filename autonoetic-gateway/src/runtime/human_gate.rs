@@ -1255,11 +1255,47 @@ impl GateService {
                 // identity (operator vs agent) — this is what surfaces to the
                 // decider (determinism-E1).
                 let rendered = req.context.render();
-                if rendered.trim().is_empty() {
+                let mut reason = if rendered.trim().is_empty() {
                     None
                 } else {
                     Some(rendered)
+                };
+                // Non-silent widening (#909 guardrail): approving a network
+                // action under Network-excluding taint materializes host-scoped
+                // egress declassification grants — the decider must see that.
+                if matches!(
+                    action,
+                    ScheduledAction::SandboxExec { .. }
+                        | ScheduledAction::WebFetch { .. }
+                        | ScheduledAction::WebSearch { .. }
+                        | ScheduledAction::WebCall { .. }
+                ) {
+                    let taint_excludes_network = crate::runtime::egress_labeler::resolve_session_egress_taint(
+                        req.run_context,
+                        Some(self.store.as_ref()),
+                        Some(sid),
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|t| !t.allows(autonoetic_types::egress::Sink::Network))
+                    .unwrap_or(false);
+                    if taint_excludes_network {
+                        let hosts = action.detected_hosts().unwrap_or_default();
+                        let note = if hosts.is_empty() {
+                            "Note: session egress taint excludes Network. Approving does NOT widen egress (no concrete hosts to scope a grant to); explicit egress declassification is required.".to_string()
+                        } else {
+                            format!(
+                                "Note: approving also declassifies Network egress to {} for this root session (host-scoped grant; revocable via `gateway grants revoke --host <host>`).",
+                                hosts.join(", ")
+                            )
+                        };
+                        reason = Some(match reason {
+                            Some(r) => format!("{r}\n\n{note}"),
+                            None => note,
+                        });
+                    }
                 }
+                reason
             },
             evidence_ref: None,
             decision_reason: None,
