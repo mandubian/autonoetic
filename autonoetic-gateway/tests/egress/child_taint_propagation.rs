@@ -27,7 +27,8 @@ use autonoetic_gateway::runtime::active_execution_registry::{
 };
 use autonoetic_gateway::runtime::egress_labeler::{
     plan_taint_following_route, resolve_ingest_turn_label, resolve_session_egress_taint,
-    PresetCandidate, INGEST_LABEL_METADATA_KEYS, PARENT_TAINT_METADATA_KEY,
+    strip_ingest_label_keys, PresetCandidate, INGEST_LABEL_METADATA_KEYS,
+    PARENT_TAINT_METADATA_KEY,
 };
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::egress::{EgressClass, EgressLabel, NamedEgressLabel, Sink};
@@ -74,15 +75,61 @@ fn spawn_metadata_for(parent_taint: Option<EgressLabel>) -> serde_json::Value {
     meta
 }
 
-/// Producer and consumer must agree on the key. A typo would not fail loudly —
-/// it would silently mean "the child starts clean", which is exactly the bug
-/// this issue is about, so the agreement is pinned rather than assumed.
+/// Reserved keys are stripped from agent-authored metadata. `agent_spawn`
+/// forwards model-supplied `metadata` into the child's ingest, where these keys
+/// are read as *declarations* — so an agent could otherwise forge an operator
+/// mark, a peer wire label, or a parent taint. Intersection bounds a forgery to
+/// over-restriction rather than a leak, but label resolution must not be a
+/// function of model output at all (I-14).
 #[test]
-fn parent_taint_key_is_wired_into_the_ingest_resolver() {
-    assert!(
-        INGEST_LABEL_METADATA_KEYS.contains(&PARENT_TAINT_METADATA_KEY),
-        "the key agent_spawn stamps must be one the ingest resolver reads"
+fn agent_authored_metadata_cannot_smuggle_label_keys() {
+    let mut meta = serde_json::json!({
+        "operator_egress_label": serde_json::to_value(EgressLabel::local_only()).unwrap(),
+        "ofp_inbound_egress_label": serde_json::to_value(EgressLabel::local_only()).unwrap(),
+        "parent_egress_taint": serde_json::to_value(EgressLabel::local_only()).unwrap(),
+        "keep_me": "an ordinary metadata value",
+    });
+    let stripped = strip_ingest_label_keys(&mut meta);
+
+    assert_eq!(stripped.len(), 3, "every reserved key must be reported");
+    for key in INGEST_LABEL_METADATA_KEYS {
+        assert!(meta.get(key).is_none(), "{key} must be stripped");
+    }
+    assert_eq!(meta["keep_me"], "an ordinary metadata value");
+    assert_eq!(
+        resolve_ingest_turn_label(None, false, Some(&meta)),
+        None,
+        "a stripped payload declares nothing"
     );
+}
+
+/// The case an overwrite-only fix would miss: when the parent is **clean** the
+/// gateway stamps nothing, so a forged key would survive untouched. Stripping
+/// first is what closes it.
+#[test]
+fn a_forged_key_does_not_survive_a_clean_parent_spawn() {
+    let mut meta = serde_json::json!({
+        PARENT_TAINT_METADATA_KEY: serde_json::to_value(EgressLabel::local_only()).unwrap(),
+    });
+    // Gateway-side order: strip what the agent wrote, then stamp what was
+    // actually resolved — which for a clean parent is nothing.
+    strip_ingest_label_keys(&mut meta);
+    let clean_parent: Option<EgressLabel> = None;
+    if let Some(t) = clean_parent.filter(|t: &EgressLabel| !t.is_unrestricted()) {
+        meta[PARENT_TAINT_METADATA_KEY] = serde_json::to_value(&t).unwrap();
+    }
+    assert!(meta.get(PARENT_TAINT_METADATA_KEY).is_none());
+    assert_eq!(resolve_ingest_turn_label(None, false, Some(&meta)), None);
+}
+
+/// Non-object metadata is tolerated rather than panicking — `agent_spawn` wraps
+/// a non-object under `_original_metadata`, and the stripper must be safe to call
+/// on whatever shape arrives.
+#[test]
+fn stripping_is_safe_on_non_object_metadata() {
+    let mut meta = serde_json::json!("just a string");
+    assert!(strip_ingest_label_keys(&mut meta).is_empty());
+    assert_eq!(meta, serde_json::json!("just a string"));
 }
 
 /// The whole point: a tainted parent's child is born tainted, and the label

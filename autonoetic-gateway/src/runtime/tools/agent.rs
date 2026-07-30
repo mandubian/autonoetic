@@ -733,6 +733,29 @@ the single join already does that."
                 }
                 None => serde_json::Value::Object(serde_json::Map::new()),
             };
+            // `args.metadata` is model-authored and is forwarded into the child's
+            // ingest, where the reserved label keys are read as *declarations*.
+            // Strip them before the gateway stamps its own: an agent must not be
+            // able to forge an operator mark, a peer wire label, or a parent
+            // taint (I-14). Stripping rather than merely overwriting matters
+            // because the gateway writes nothing when the parent is clean —
+            // precisely the case a forged key would survive.
+            //
+            // Intersection means a forged key could only ever over-restrict, not
+            // leak; the reason to close it is that label resolution must not be a
+            // function of model output at all.
+            let smuggled =
+                crate::runtime::egress_labeler::strip_ingest_label_keys(&mut spawn_metadata);
+            if !smuggled.is_empty() {
+                tracing::warn!(
+                    target: "egress",
+                    session_id = %resolved_session_id,
+                    agent_id = %source_agent_id,
+                    keys = ?smuggled,
+                    "agent_spawn metadata carried reserved egress label keys — stripped \
+                     (agents do not author labels, I-14)"
+                );
+            }
             if let Some(ref rev_id) = args.revision_id {
                 spawn_metadata["_autonoetic_spawn_revision_id"] = serde_json::json!(rev_id);
             }
