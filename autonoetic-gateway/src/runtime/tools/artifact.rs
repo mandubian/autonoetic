@@ -182,7 +182,7 @@ impl NativeTool for ArtifactBuildTool {
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Args {
@@ -272,6 +272,53 @@ impl NativeTool for ArtifactBuildTool {
             kind.clone(),
             sid,
         )?;
+
+        // Artifact label birth (RFC §4.5, #980). Content written by a tainted
+        // session carries that taint into the content-addressed store; without
+        // this, a later session reading the handle got the bytes unlabeled — the
+        // laundering path that walked straight through the §5.5 compartment
+        // firebreak, because artifacts outlive the session that built them.
+        //
+        // Live taint, not the stored row: the row lands at finalize, so mid-turn
+        // it is stale or absent (same reason as the spawn path, #982).
+        //
+        // Intersects rather than replaces: content-addressed dedup means a second
+        // build of identical bytes returns the *same* artifact, and if any
+        // producer was tainted those bytes are tainted. The label lives in a
+        // sidecar table precisely so this tightening does not have to rewrite an
+        // immutable manifest (which would break the `artifact_ref` digest pins).
+        if let Some(ref gs) = gateway_store {
+            let builder_taint = crate::runtime::egress_labeler::resolve_session_egress_taint(
+                run_context,
+                Some(gs.as_ref()),
+                Some(sid),
+            )
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "egress",
+                    error = %e,
+                    session_id = %sid,
+                    artifact_id = %bundle.artifact_id,
+                    "builder taint read failed at artifact build — failing closed to \
+                     local_only for the artifact"
+                );
+                Some(autonoetic_types::egress::EgressLabel::local_only())
+            });
+            if let Some(taint) = builder_taint.filter(|t| !t.is_unrestricted()) {
+                if let Err(e) = gs.restrict_artifact_egress_label(&bundle.artifact_id, &taint) {
+                    // The artifact exists but its label may not be recorded. Fail
+                    // the tool call rather than hand back a handle whose content
+                    // is tainted and whose label says otherwise.
+                    return Ok(ToolError::resource(
+                        format!(
+                            "artifact built but its egress label could not be recorded: {e}"
+                        ),
+                        None::<String>,
+                    )
+                    .to_error_response());
+                }
+            }
+        }
 
         // Agent bundles are install candidates: agent_revision.create and the
         // agent-factory install pipeline require a SKILL.md manifest. A coder

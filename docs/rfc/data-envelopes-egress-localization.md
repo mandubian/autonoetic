@@ -381,8 +381,19 @@ are not yet clear enough to schedule it). With the decided default
 - **User/operator message** — session policy default; the operator can mark a
   message or the whole session.
 - **Memory recall hit** — the label stored on the `MemoryObject` (§6).
-- **Artifact read** — label in the artifact manifest sidecar
-  (`artifact_store.rs` manifest already carries metadata; add `egress_label`).
+- **Artifact read** — label recorded per `artifact_id` in the
+  `artifact_egress_labels` table (#980), written at build time from the builder
+  session's taint and intersected into any tool result whose arguments name the
+  artifact. **Implementation note:** the label deliberately does *not* live in
+  `manifest.json`, as originally sketched. Artifacts are content-addressed, so
+  identical bytes built by a clean session and a tainted one dedup to one
+  `artifact_id`, and the label therefore has to tighten on reuse — but mutating
+  the manifest changes `artifact_manifest_digest`, which is pinned in
+  `ArtifactRefRecord` and verified on read, so every existing `artifact_ref`
+  would begin failing as tampering. Keeping the label in the store leaves the
+  immutable manifest immutable and both digests (plus the cross-node
+  content-identity promise) untouched, and makes tightening the same
+  read-intersect-write shape as `session_egress_taint`.
 - **MCP tool result** — from the server classification; remote servers' results
   default conservative (`no_remote_model`) unless a rule says otherwise — their
   content came from a third party, but it may quote anything it was given.
@@ -933,6 +944,22 @@ view alone:
   turns still go remote), per-band compression (§5.7 — without it, the first
   governor fire guarantees the cascade), compartments (§5.5), declassification
   (§8), and the relabel sweep (§6.7).
+- **Artifact labels are not consulted at the off-machine boundaries yet.** #980
+  closed the birth point — an artifact carries the builder's taint, and reading it
+  re-applies that label — so the session-level path (a later session reads the
+  artifact, gets tainted, and P-15.2 gates its sends) is covered. What is *not*
+  covered is a boundary consulting an artifact's own label directly: OFP send and
+  capsule export have no artifact-label awareness, so they gate on session taint
+  alone. Tracked separately.
+- **Content written to a new path is not re-labeled.** A labeled read whose bytes
+  are written elsewhere launders the label: `unzip ~/mail/mail.zip -d /tmp/w`
+  followed by a *later* exec reading `/tmp/w/inbox.mbox` matches no rule, and
+  argument taint does not apply because the second call references a filesystem
+  path rather than the first call's result. Plain `cp` does the same. This is a
+  sibling of the static-analysis-evasion bullet above but a distinct class: the
+  path is named honestly, the content moved. Mitigation today is a compartment
+  with `default_label: local_only`, which labels every envelope in the session
+  regardless of which path produced it.
 - **Post-grant sandbox network** has no host-level enforcement today; labels
   escalate and refuse but don't add a proxy. Stated, not solved.
 - **Indications leak existence** ("2 emails withheld"). `terse` verbosity reduces

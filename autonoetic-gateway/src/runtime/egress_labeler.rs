@@ -118,6 +118,11 @@ pub struct Resolution {
     /// Whether argument-taint contributed to this resolution (RFC §4.1 path 3).
     /// `parent_envelope_ids` on the provenance carries the actual lineage.
     pub taint_applied: bool,
+    /// Artifact ids whose stored labels contributed to this resolution (RFC §4.5
+    /// artifact birth point, #980). Recorded so "why is this labeled?" names the
+    /// artifact when a round trip through the content-addressed store — not a
+    /// rule — is what restricted the result.
+    pub artifact_labels_applied: Vec<String>,
 }
 
 impl Resolution {
@@ -316,6 +321,7 @@ impl EgressLabeler {
             paths,
             bundle_floor_applied,
             taint_applied: false,
+            artifact_labels_applied: Vec::new(),
         }
     }
 
@@ -376,6 +382,34 @@ impl EgressLabeler {
         if !parent_envelope_ids.is_empty() {
             resolution.label = resolution.label.restrict(&taint_label);
             resolution.taint_applied = true;
+        }
+
+        // Artifact taint (RFC §4.5 artifact birth point, #980): any artifact
+        // named in the arguments contributes its stored label. `prior_labels`
+        // only reaches back across *this turn*, so without this an artifact
+        // built by a tainted session and read by a later — or entirely
+        // different — session came back unlabeled. Artifacts outlive the session
+        // that produced them, which is what made this a laundering path through
+        // the §5.5 compartment firebreak.
+        //
+        // Covers every artifact-naming tool at once (inspect, read_file, exec,
+        // prepare) because it keys on the arguments rather than the tool name.
+        // For exec-shaped calls it composes with the existing static path
+        // analysis: the bundle's labeled *paths* and the artifact's own label are
+        // independent inputs and both intersect.
+        if let Some(store) = store {
+            let (artifact_label, applied) =
+                artifact_taint_from_store(req.arguments_json, store.as_ref());
+            if !applied.is_empty() {
+                resolution.label = resolution.label.restrict(&artifact_label);
+                // NOT `taint_applied`: that flag means "argument taint from prior
+                // envelopes contributed", and its lineage lives in
+                // `parent_envelope_ids`. Setting it here would emit
+                // `taint_applied: true` with an empty `parent_envelope_ids`,
+                // which reads as a contradiction to anyone auditing the event.
+                // `artifact_labels_applied` carries this path's lineage instead.
+                resolution.artifact_labels_applied = applied;
+            }
         }
 
         // If the resolved label is unrestricted, there's nothing to audit —
@@ -503,6 +537,7 @@ impl EgressLabeler {
             paths: m.matched_patterns,
             bundle_floor_applied,
             taint_applied: false,
+            artifact_labels_applied: Vec::new(),
         }
     }
 
@@ -557,6 +592,11 @@ impl EgressLabeler {
             // labels were intersected into this resolution.
             "parent_envelope_ids": provenance.parent_envelope_ids,
             "taint_applied": resolution.taint_applied,
+            // Artifact birth point (RFC §4.5) — artifact ids whose stored labels
+            // were intersected in. Named because a round trip through the
+            // content-addressed store, not a rule, may be the only reason this
+            // result is labeled, and an operator asking "why?" needs to see it.
+            "artifact_labels_applied": resolution.artifact_labels_applied,
             // Explicitly name the resolution path so the audit answers "why?".
             "resolution": resolution.kind(),
         });
@@ -1445,6 +1485,94 @@ pub fn network_egress_boundary_refusal_json(
         "repair_hint": repair_hint,
     });
     Some(payload.to_string())
+}
+
+/// Artifact ids referenced in a tool call's arguments (RFC §4.5 artifact birth
+/// point, #980).
+///
+/// Ids are `art_` + exactly 8 lowercase hex chars (`compute_deterministic_artifact_id`),
+/// which is specific enough to scan for without parsing every tool's argument
+/// schema — the same "deterministic textual signal" approach argument taint uses
+/// for handle references. Deduped and sorted so the audit record is stable.
+///
+/// Over-matching is safe in the direction that matters: a spurious id resolves to
+/// no stored label and contributes nothing. Under-matching (an artifact named in
+/// a shape this misses) is the risk, which is why the *write* side stamps the
+/// builder's taint rather than relying on read-side detection alone.
+pub fn artifact_ids_in_arguments(arguments_json: &str) -> Vec<String> {
+    const PREFIX: &str = "art_";
+    const ID_HEX_LEN: usize = 8;
+    let bytes = arguments_json.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    for (start, _) in arguments_json.match_indices(PREFIX) {
+        let hex_start = start + PREFIX.len();
+        // Slice BYTES, never the `&str`. `arguments_json` is arbitrary
+        // agent-supplied JSON, so the 8 bytes after `art_` may be the middle of a
+        // multi-byte codepoint (`art_€€€`); a str slice at a non-boundary index
+        // panics, which in this path would take down egress labeling itself.
+        let Some(hex) = bytes.get(hex_start..hex_start + ID_HEX_LEN) else {
+            continue;
+        };
+        if !hex.iter().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        // Reject a longer alphanumeric run: `art_deadbeefcafe` is not an id.
+        if bytes
+            .get(hex_start + ID_HEX_LEN)
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        // Every byte is an ASCII hexdigit, so this cannot fail; matched rather
+        // than unwrapped so there is no branch that could produce a wrong id.
+        let Ok(hex) = std::str::from_utf8(hex) else {
+            continue;
+        };
+        let id = format!("{PREFIX}{hex}");
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Intersect the stored labels of every artifact named in `arguments_json`.
+///
+/// The read half of the artifact birth point: content that was labeled when it
+/// was produced stays labeled after a round trip through the content-addressed
+/// store. Returns the intersection and the ids that contributed.
+///
+/// A store read failure fails closed to `local_only` for that artifact — an
+/// artifact whose label could not be read might have been restricted, and
+/// treating it as clean is the one outcome §2.2 forbids.
+pub fn artifact_taint_from_store(
+    arguments_json: &str,
+    store: &GatewayStore,
+) -> (EgressLabel, Vec<String>) {
+    let mut label = EgressLabel::unrestricted();
+    let mut applied: Vec<String> = Vec::new();
+    for id in artifact_ids_in_arguments(arguments_json) {
+        match store.get_artifact_egress_label(&id) {
+            Ok(Some(stored)) => {
+                label = label.restrict(&stored);
+                applied.push(id);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "egress",
+                    error = %e,
+                    artifact_id = %id,
+                    "artifact egress label read failed — failing closed to local_only \
+                     for this result (RFC §2.2)"
+                );
+                label = label.restrict(&EgressLabel::local_only());
+                applied.push(id);
+            }
+        }
+    }
+    (label, applied)
 }
 
 /// Intersect argument-carried taint from prior labeled results in this turn.

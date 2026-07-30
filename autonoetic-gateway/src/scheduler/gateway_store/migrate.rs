@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 77;
+const SCHEMA_VERSION_LATEST: i64 = 78;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -562,7 +562,56 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_agent_message_egress_taint_v75(conn)?;
     apply_stored_content_egress_labels_v76(conn)?;
     apply_egress_declassification_grants_v77(conn)?;
+    apply_artifact_egress_labels_v78(conn)?;
 
+    Ok(())
+}
+
+/// v78 — `artifact_egress_labels`: the egress label of a content-addressed
+/// artifact (RFC data-envelopes §4.5 artifact birth point, #980).
+///
+/// **Why a sidecar table and not a manifest field.** Artifacts are
+/// content-addressed: `artifact_id` and `artifact_canonical_digest` are derived
+/// from file handles + entrypoints + layers + kind, so identical bytes built by
+/// a clean session and by a tainted one dedup to *one* artifact. A label that
+/// lives in `manifest.json` therefore has to be tightened in place on reuse —
+/// which changes `artifact_manifest_digest`, and that digest is pinned in
+/// `ArtifactRefRecord` and verified on read (`runtime/tools/artifact.rs`), so
+/// every existing ref to that artifact would start failing as tampering.
+///
+/// Keeping the label out of the manifest keeps the immutable thing immutable and
+/// puts the mutable policy metadata in the mutable store. Tightening is then the
+/// same read-intersect-write shape as `session_egress_taint`, and both digests
+/// plus the cross-node content-identity promise stay untouched.
+///
+/// Absence ⇒ unrestricted, as everywhere else in the plane.
+fn apply_artifact_egress_labels_v78(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 78 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS artifact_egress_labels (
+            artifact_id TEXT PRIMARY KEY,
+            -- Serialized autonoetic_types::egress::EgressLabel (sink-set JSON).
+            label_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            78_i64,
+            "artifact_egress_labels",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 
