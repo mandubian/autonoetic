@@ -3212,6 +3212,108 @@ pub async fn handle_gateway_egress_audit(
     Ok(())
 }
 
+/// Parse a `--target <kind>:<value>` spec into an [`EgressDeclassificationTarget`].
+fn parse_egress_declass_target(
+    spec: &str,
+) -> anyhow::Result<autonoetic_types::egress::EgressDeclassificationTarget> {
+    use autonoetic_types::egress::EgressDeclassificationTarget;
+    let (kind, value) = spec.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --target '{spec}': expected `<kind>:<value>` where kind is envelope_id, source_pattern, or memory_id"
+        )
+    })?;
+    anyhow::ensure!(!value.is_empty(), "invalid --target '{spec}': empty value");
+    match kind {
+        "envelope_id" => Ok(EgressDeclassificationTarget::EnvelopeId(value.to_string())),
+        "source_pattern" => Ok(EgressDeclassificationTarget::SourcePattern(value.to_string())),
+        "memory_id" => Ok(EgressDeclassificationTarget::MemoryId(value.to_string())),
+        other => anyhow::bail!(
+            "invalid --target kind '{other}': expected envelope_id, source_pattern, or memory_id"
+        ),
+    }
+}
+
+/// Parse a `--sink` name into a [`Sink`] (snake_case serde names).
+fn parse_egress_sink(spec: &str) -> anyhow::Result<autonoetic_types::egress::Sink> {
+    serde_json::from_value(serde_json::Value::String(spec.to_string())).map_err(|_| {
+        anyhow::anyhow!(
+            "invalid --sink '{spec}': expected one of network, remote_model, federated_agent, local_model, local_agent, memory_persist, user_reply"
+        )
+    })
+}
+
+/// `gateway egress-declassify` — file an egress declassification request
+/// (RFC §8 / #909). The request lands in the normal pending surface
+/// (`gateway pending`, `gateway approvals list`, TUI); the operator decides
+/// it with `gateway approvals approve <id>` (scope/TTL options live there).
+/// On approval the grant is materialized via the `apply_decision` §1d path
+/// and `egress.declassified` is emitted. There is deliberately no
+/// approve-in-one-step flag: EgressDeclassify is a high-risk class and the
+/// R++4 dwell between filing and decision is part of the hardening.
+pub async fn handle_gateway_egress_declassify(
+    config_path: &Path,
+    root_session: &str,
+    target: &str,
+    sink: &str,
+    session: Option<&str>,
+    reason: Option<String>,
+) -> anyhow::Result<()> {
+    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+
+    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let gateway_store =
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+
+    let target = parse_egress_declass_target(target)?;
+    let sink = parse_egress_sink(sink)?;
+    let session_id = session.unwrap_or(root_session).to_string();
+    let reason_text = reason.unwrap_or_else(|| {
+        format!(
+            "operator declassification of {}:{} to {:?}",
+            target.kind_str(),
+            target.value(),
+            sink
+        )
+    });
+
+    let request_id = autonoetic_types::id_format::short_random_id("apr-");
+    let mut request = ApprovalRequest {
+        request_id: request_id.clone(),
+        agent_id: "operator".to_string(),
+        session_id,
+        root_session_id: Some(root_session.to_string()),
+        workflow_id: None,
+        task_id: None,
+        action: ScheduledAction::EgressDeclassify {
+            target: target.clone(),
+            allowed_sink: sink,
+            reason: reason_text.clone(),
+            payload: None,
+        },
+        created_at: chrono::Utc::now().to_rfc3339(),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        reason: Some(reason_text),
+        evidence_ref: None,
+        decision_reason: None,
+        approval_level: ApprovalLevel::Operator,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    gateway_store.create_approval(&mut request)?;
+
+    println!("Filed declassification request {request_id} (pending).");
+    println!("  target: {}:{}", target.kind_str(), target.value());
+    println!("  sink:   {sink:?}");
+    println!("Approve with: autonoetic gateway approvals approve {request_id}");
+    Ok(())
+}
+
 /// `gateway memory relabel` — bulk update memories + traces and emit
 /// `egress.relabel` (RFC §6.7 / #908).
 pub async fn handle_gateway_memory(

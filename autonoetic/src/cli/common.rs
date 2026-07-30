@@ -497,6 +497,33 @@ pub enum GatewayCommands {
         #[arg(long)]
         json: bool,
     },
+    /// File an egress declassification request (RFC §8): widen a content
+    /// target to a sink. Files a pending approval; decide it with
+    /// `gateway approvals approve <request-id>` (EgressDeclassify is a
+    /// high-risk class — R++4 dwell time applies between filing and
+    /// decision). On approval the grant is materialized and
+    /// `egress.declassified` is emitted.
+    EgressDeclassify {
+        /// Root session the grant belongs to.
+        #[arg(long)]
+        root_session: String,
+        /// Target to widen: `envelope_id:<id>`, `memory_id:<id>`, or
+        /// `source_pattern:<pattern>` — e.g.
+        /// `source_pattern:session:<root>:host:example.com` for host-scoped
+        /// Network egress, `source_pattern:session:<root>` for session-wide.
+        #[arg(long)]
+        target: String,
+        /// Sink to allow: `network`, `remote_model`, `federated_agent`,
+        /// `local_model`, `local_agent`, `memory_persist`, `user_reply`.
+        #[arg(long)]
+        sink: String,
+        /// Session id the request is attributed to (defaults to the root).
+        #[arg(long)]
+        session: Option<String>,
+        /// Reason recorded on the request, the grant, and the causal event.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Bulk-relabel stored memories and execution traces (egress Phase 3 / #908).
     Memory {
         #[command(subcommand)]

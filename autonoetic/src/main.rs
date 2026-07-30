@@ -182,6 +182,23 @@ async fn async_main() -> anyhow::Result<()> {
             } => {
                 cli::gateway::handle_gateway_egress_audit(&config_path, session_id, *json).await?;
             }
+            cli::common::GatewayCommands::EgressDeclassify {
+                root_session,
+                target,
+                sink,
+                session,
+                reason,
+            } => {
+                cli::gateway::handle_gateway_egress_declassify(
+                    &config_path,
+                    root_session,
+                    target,
+                    sink,
+                    session.as_deref(),
+                    reason.clone(),
+                )
+                .await?;
+            }
             cli::common::GatewayCommands::Memory { command } => {
                 cli::gateway::handle_gateway_memory(&config_path, command).await?;
             }
