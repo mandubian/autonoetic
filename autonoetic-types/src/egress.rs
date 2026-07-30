@@ -531,6 +531,27 @@ pub struct EgressDeclassificationGrant {
     pub expires_at: Option<String>,
 }
 
+/// Provider selection constraint (RFC §5.4 rung 1) — constrains *which
+/// presets may run completions* for the whole session tree, independent of
+/// content labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderConstraint {
+    /// Every completion routes to an `egress_class: local` preset, even for
+    /// clean batches. "This room is private": the resident data-owner posture
+    /// (RFC §5.5) — without it, a clean batch can route the owner remote and
+    /// get an all-indications context (safe but useless).
+    LocalOnly,
+}
+
+impl ProviderConstraint {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LocalOnly => "local_only",
+        }
+    }
+}
+
 /// Session-scoped egress policy (RFC §5.4) — the operator's per-root-session
 /// additions to the operator-global [`EgressConfig`].
 ///
@@ -539,11 +560,9 @@ pub struct EgressDeclassificationGrant {
 /// global set, never substituted for it — and because label resolution is an
 /// intersection (RFC §4.1), an added rule can only restrict.
 ///
-/// Only the two rungs phase 1c enforces are modeled here. The rest of the §5.4
-/// ladder belongs to later phases: `mode` / `indication_verbosity` are
-/// chokepoint knobs (#905) and `provider_constraint` is taint-following routing
-/// (#907). Adding them here before they are honored would be a config surface
-/// that silently does nothing.
+/// `mode` / `indication_verbosity` remain chokepoint knobs (#905) and are not
+/// modeled here — adding them before they are honored would be a config
+/// surface that silently does nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressSessionPolicy {
     /// Session-scoped source rules, merged into the operator-global set.
@@ -555,13 +574,19 @@ pub struct EgressSessionPolicy {
     /// intersects, so a session cannot widen a tightened global default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_label: Option<NamedEgressLabel>,
+
+    /// Provider selection constraint (RFC §5.4 rung 1). `None` = `any`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_constraint: Option<ProviderConstraint>,
 }
 
 impl EgressSessionPolicy {
-    /// Whether this policy declares nothing (no rules, no default override) —
-    /// equivalent to having no session policy at all.
+    /// Whether this policy declares nothing (no rules, no default override, no
+    /// provider constraint) — equivalent to having no session policy at all.
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty() && self.default_label.is_none()
+        self.rules.is_empty()
+            && self.default_label.is_none()
+            && self.provider_constraint.is_none()
     }
 
     /// Reject shapes that would silently never match, so a typo surfaces at
@@ -1106,6 +1131,7 @@ mod tests {
                 label: EgressLabel::local_only(),
             }],
             default_label: None,
+            provider_constraint: None,
         };
         assert!(blank_source.validate().is_err());
 
@@ -1116,6 +1142,7 @@ mod tests {
                 label: EgressLabel::local_only(),
             }],
             default_label: None,
+            provider_constraint: None,
         };
         assert!(blank_path.validate().is_err());
     }
@@ -1129,6 +1156,7 @@ mod tests {
                 label: EgressLabel::local_only(),
             }],
             default_label: Some(NamedEgressLabel::NoRemoteModel),
+            provider_constraint: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: EgressSessionPolicy = serde_json::from_str(&json).unwrap();

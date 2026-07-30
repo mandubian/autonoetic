@@ -59,7 +59,8 @@ fn tainted_batch_reroute_is_answerable_from_the_chain() -> anyhow::Result<()> {
         &EgressLabel::local_only(),
         Some(EgressClass::Remote),
         &presets,
-    );
+            None,
+        );
     assert!(!plan.primary_eligible);
     assert_eq!(plan.reroute_to.as_ref().map(|c| c.name.as_str()), Some("ollama"));
 
@@ -105,7 +106,8 @@ fn no_eligible_provider_refusal_is_recorded() -> anyhow::Result<()> {
         &EgressLabel::local_only(),
         Some(EgressClass::Remote),
         &presets,
-    );
+            None,
+        );
     assert!(plan.no_eligible_provider());
 
     emit_provider_selected(
@@ -140,8 +142,98 @@ fn clean_batch_needs_no_event() {
         &EgressLabel::unrestricted(),
         Some(EgressClass::Remote),
         &[cand("ollama", EgressClass::Local)],
-    );
+            None,
+        );
     assert!(plan.primary_eligible);
     assert!(plan.reroute_to.is_none());
     assert!(!plan.no_eligible_provider());
+}
+
+#[test]
+fn provider_constraint_local_only_reroutes_clean_batches() -> anyhow::Result<()> {
+    // RFC §5.4 rung 1: a constrained session restricts provider *selection*,
+    // not just content — a clean batch on a remote primary reroutes to local.
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+    let presets = vec![
+        cand("sonnet", EgressClass::Remote),
+        cand("ollama", EgressClass::Local),
+    ];
+    let plan = plan_taint_following_route(
+        &EgressLabel::unrestricted(),
+        Some(EgressClass::Remote),
+        &presets,
+        Some(autonoetic_types::egress::ProviderConstraint::LocalOnly),
+    );
+    assert!(!plan.primary_eligible);
+    assert_eq!(
+        plan.reroute_to.as_ref().map(|c| c.name.as_str()),
+        Some("ollama")
+    );
+    assert_eq!(
+        plan.batch,
+        EgressLabel::local_only(),
+        "effective batch is the constraint intersection"
+    );
+    assert_eq!(
+        plan.provider_constraint,
+        Some(autonoetic_types::egress::ProviderConstraint::LocalOnly)
+    );
+
+    // The audit event names the constraint, so "why did this clean turn run
+    // on ollama?" is answerable from the chain.
+    emit_provider_selected(
+        &store,
+        "sess-private",
+        "mail.default",
+        Some("turn-000001"),
+        &plan,
+        Some("ollama"),
+        &[],
+        true,
+    );
+    let events = provider_selected_events(&store, "sess-private");
+    assert_eq!(events.len(), 1);
+    let p = payload(&events[0]);
+    assert_eq!(p["provider_constraint"], "local_only");
+    assert_eq!(p["chosen_preset"], "ollama");
+
+    // Without the constraint the same clean batch is a no-op.
+    let unconstrained = plan_taint_following_route(
+        &EgressLabel::unrestricted(),
+        Some(EgressClass::Remote),
+        &presets,
+        None,
+    );
+    assert!(unconstrained.primary_eligible);
+    assert!(unconstrained.reroute_to.is_none());
+    Ok(())
+}
+
+#[test]
+fn provider_constraint_local_only_without_local_preset_refuses() {
+    // A constrained session with no local preset refuses even a clean turn —
+    // a refused turn beats a remote leak (RFC §5.4 fail-closed).
+    let presets = vec![cand("sonnet", EgressClass::Remote)];
+    let plan = plan_taint_following_route(
+        &EgressLabel::unrestricted(),
+        Some(EgressClass::Remote),
+        &presets,
+        Some(autonoetic_types::egress::ProviderConstraint::LocalOnly),
+    );
+    assert!(plan.no_eligible_provider());
+    assert!(plan.eligible.is_empty());
+}
+
+#[test]
+fn provider_constraint_local_only_keeps_local_primary() {
+    let presets = vec![cand("ollama", EgressClass::Local)];
+    let plan = plan_taint_following_route(
+        &EgressLabel::unrestricted(),
+        Some(EgressClass::Local),
+        &presets,
+        Some(autonoetic_types::egress::ProviderConstraint::LocalOnly),
+    );
+    assert!(plan.primary_eligible);
+    assert!(plan.reroute_to.is_none());
 }

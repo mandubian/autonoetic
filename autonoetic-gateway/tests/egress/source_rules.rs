@@ -354,6 +354,7 @@ fn stored_session_policy_labels_and_is_attributed_as_session_scoped() -> anyhow:
     let policy = EgressSessionPolicy {
         rules: vec![rule("email.*", None, NamedEgressLabel::LocalOnly)],
         default_label: None,
+        provider_constraint: None,
     };
     store.set_egress_session_policy("sess-scoped", &policy, "operator:cli")?;
 
@@ -404,6 +405,7 @@ fn session_policies_are_isolated_per_root_session() -> anyhow::Result<()> {
         &EgressSessionPolicy {
             rules: vec![rule("slack.*", None, NamedEgressLabel::NoRemoteModel)],
             default_label: None,
+            provider_constraint: None,
         },
         "operator:cli",
     )?;
@@ -432,6 +434,7 @@ fn session_policy_is_deleted_with_the_root_session() -> anyhow::Result<()> {
         &EgressSessionPolicy {
             rules: vec![rule("email.*", None, NamedEgressLabel::LocalOnly)],
             default_label: None,
+            provider_constraint: None,
         },
         "operator:rpc",
     )?;
@@ -457,12 +460,14 @@ fn setting_a_policy_twice_replaces_it() -> anyhow::Result<()> {
         &EgressSessionPolicy {
             rules: vec![rule("email.*", None, NamedEgressLabel::LocalOnly)],
             default_label: None,
+            provider_constraint: None,
         },
         "operator:cli",
     )?;
     let second = EgressSessionPolicy {
         rules: vec![rule("slack.*", None, NamedEgressLabel::NoRemoteModel)],
         default_label: Some(NamedEgressLabel::NoRemoteModel),
+        provider_constraint: None,
     };
     store.set_egress_session_policy("sess-replace", &second, "operator:rpc")?;
 
@@ -487,6 +492,7 @@ fn session_rules_intersect_with_global_rules() -> anyhow::Result<()> {
     .with_session_policy(&EgressSessionPolicy {
         rules: vec![rule("email.read", None, NamedEgressLabel::LocalOnly)],
         default_label: None,
+        provider_constraint: None,
     });
 
     let outcome = labeler
