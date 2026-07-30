@@ -3569,10 +3569,21 @@ impl JsonRpcRouter {
                             );
                         }
                     };
-                // Absence ⇒ unrestricted (only restrictive taint is stored).
-                let current_taint = store
+                // Absence ⇒ unrestricted (only restrictive taint is stored),
+                // but a store ERROR must not masquerade as "unrestricted" in an
+                // operator-facing panel — surface it like the grant queries.
+                let current_taint = match store
                     .get_session_egress_taint(&params.root_session_id)
-                    .unwrap_or(None);
+                {
+                    Ok(label) => label,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("grants.list (current taint) failed: {}", e),
+                        );
+                    }
+                };
                 JsonRpcResponse::success(
                     req.id,
                     serde_json::json!({
