@@ -8,6 +8,7 @@
 //! no external state — no ports, no fixed paths — so cohabitation in one
 //! process is safe under both `cargo test` and nextest).
 
+mod child_taint_propagation;
 mod chokepoint_canary;
 mod compartment;
 mod compression_eligibility;

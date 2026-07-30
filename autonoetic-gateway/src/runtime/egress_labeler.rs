@@ -1576,11 +1576,23 @@ pub fn parse_ofp_inbound_egress_label(raw: Option<&serde_json::Value>) -> Egress
     }
 }
 
-/// Metadata keys that can declare a label for an incoming user-role turn.
-/// Both are *declared inputs* in the I-14 sense — an operator's per-message mark
-/// and a peer's wire label — never model output.
-pub const INGEST_LABEL_METADATA_KEYS: [&str; 2] =
-    ["operator_egress_label", "ofp_inbound_egress_label"];
+/// Metadata keys that can declare a label for an incoming user-role turn. All
+/// are *declared inputs* in the I-14 sense — an operator's per-message mark, a
+/// peer's wire label, a delegating parent's accumulated taint — never model
+/// output. The delegating agent chooses *whether* to spawn; it does not get to
+/// choose the label that rides along, which is stamped from the parent's taint
+/// by the gateway.
+pub const INGEST_LABEL_METADATA_KEYS: [&str; 3] = [
+    "operator_egress_label",
+    "ofp_inbound_egress_label",
+    "parent_egress_taint",
+];
+
+/// Metadata key carrying a delegating parent's accumulated taint to its child
+/// (RFC §5.5, the downward direction). Named as a constant because the producer
+/// (`agent_spawn`) and the consumer ([`resolve_ingest_turn_label`]) sit in
+/// different modules and a typo would silently mean "child starts clean".
+pub const PARENT_TAINT_METADATA_KEY: &str = "parent_egress_taint";
 
 /// Resolve the label for an incoming user-role turn (RFC §4.5 "User/operator
 /// message"), or `None` when nothing restricts it.
