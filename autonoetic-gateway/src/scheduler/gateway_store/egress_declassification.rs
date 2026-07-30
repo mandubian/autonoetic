@@ -311,6 +311,19 @@ impl super::GatewayStore {
         let now = chrono::Utc::now().to_rfc3339();
         revoke_grants_for_root(&conn, root_session_id, host, reason, &now)
     }
+
+    /// List all ACTIVE (non-revoked) declassification grants for a root
+    /// session, newest first. Exposed for operator-facing live views (TUI /
+    /// audit) — the matching engine uses `egress_declassification_allows`
+    /// directly. Previously this query was module-private (`list_grants_for_root`)
+    /// with no `GatewayStore` re-export and zero callers.
+    pub fn list_egress_declassification_grants(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<EgressDeclassificationGrant>> {
+        let conn = self.conn.lock().unwrap();
+        list_grants_for_root(&conn, root_session_id)
+    }
 }
 
 #[cfg(test)]
