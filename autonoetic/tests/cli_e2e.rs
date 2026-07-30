@@ -1491,4 +1491,28 @@ fn test_egress_declassify_intake_file_then_approve() {
         stderr.contains("invalid --target kind"),
         "rejection should explain itself, got:\n{stderr}"
     );
+
+    // A --session outside the declared root is rejected: pending surfaces
+    // derive the root from the session id, so a mismatched pair would orphan
+    // the request.
+    let bad_session = run_autonoetic(
+        &[
+            "--config", cfg.as_str(),
+            "gateway", "egress-declassify",
+            "--root-session", "root-decl",
+            "--session", "other-root/sess",
+            "--target", "memory_id:mem-1",
+            "--sink", "remote_model",
+        ],
+        None,
+    );
+    assert!(
+        !bad_session.status.success(),
+        "out-of-root --session must fail"
+    );
+    let stderr = String::from_utf8_lossy(&bad_session.stderr);
+    assert!(
+        stderr.contains("not under root session"),
+        "rejection should explain itself, got:\n{stderr}"
+    );
 }

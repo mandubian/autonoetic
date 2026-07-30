@@ -195,7 +195,7 @@ async fn async_main() -> anyhow::Result<()> {
                     target,
                     sink,
                     session.as_deref(),
-                    reason.clone(),
+                    reason.as_deref(),
                 )
                 .await?;
             }

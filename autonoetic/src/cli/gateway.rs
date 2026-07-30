@@ -3256,9 +3256,9 @@ pub async fn handle_gateway_egress_declassify(
     target: &str,
     sink: &str,
     session: Option<&str>,
-    reason: Option<String>,
+    reason: Option<&str>,
 ) -> anyhow::Result<()> {
-    use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+    use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
 
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
@@ -3268,7 +3268,13 @@ pub async fn handle_gateway_egress_declassify(
     let target = parse_egress_declass_target(target)?;
     let sink = parse_egress_sink(sink)?;
     let session_id = session.unwrap_or(root_session).to_string();
-    let reason_text = reason.unwrap_or_else(|| {
+    // The request must live under the root it declares: downstream surfaces
+    // (`gateway pending --root-session …`) derive the root from the session id.
+    anyhow::ensure!(
+        autonoetic_gateway::runtime::content_store::root_session_id(&session_id) == root_session,
+        "--session '{session_id}' is not under root session '{root_session}'"
+    );
+    let reason_text = reason.map(str::to_string).unwrap_or_else(|| {
         format!(
             "operator declassification of {}:{} to {:?}",
             target.kind_str(),
@@ -3277,6 +3283,12 @@ pub async fn handle_gateway_egress_declassify(
         )
     });
 
+    let action = ScheduledAction::EgressDeclassify {
+        target: target.clone(),
+        allowed_sink: sink,
+        reason: reason_text.clone(),
+        payload: None,
+    };
     let request_id = autonoetic_types::id_format::short_random_id("apr-");
     let mut request = ApprovalRequest {
         request_id: request_id.clone(),
@@ -3285,12 +3297,8 @@ pub async fn handle_gateway_egress_declassify(
         root_session_id: Some(root_session.to_string()),
         workflow_id: None,
         task_id: None,
-        action: ScheduledAction::EgressDeclassify {
-            target: target.clone(),
-            allowed_sink: sink,
-            reason: reason_text.clone(),
-            payload: None,
-        },
+        approval_level: autonoetic_gateway::scheduler::resolve_approval_level(&config, &action),
+        action,
         created_at: chrono::Utc::now().to_rfc3339(),
         status: None,
         decided_at: None,
@@ -3298,7 +3306,6 @@ pub async fn handle_gateway_egress_declassify(
         reason: Some(reason_text),
         evidence_ref: None,
         decision_reason: None,
-        approval_level: ApprovalLevel::Operator,
         min_dwell_ms: None,
         confirm_phrase: None,
         code_excerpts: None,
