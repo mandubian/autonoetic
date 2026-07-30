@@ -240,7 +240,7 @@ the single join already does that."
         turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
-        _run_context: Option<&NativeToolRunContext>,
+        run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let mut args: SpawnAgentArgs = serde_json::from_str(arguments_json)
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
@@ -733,6 +733,29 @@ the single join already does that."
                 }
                 None => serde_json::Value::Object(serde_json::Map::new()),
             };
+            // `args.metadata` is model-authored and is forwarded into the child's
+            // ingest, where the reserved label keys are read as *declarations*.
+            // Strip them before the gateway stamps its own: an agent must not be
+            // able to forge an operator mark, a peer wire label, or a parent
+            // taint (I-14). Stripping rather than merely overwriting matters
+            // because the gateway writes nothing when the parent is clean —
+            // precisely the case a forged key would survive.
+            //
+            // Intersection means a forged key could only ever over-restrict, not
+            // leak; the reason to close it is that label resolution must not be a
+            // function of model output at all.
+            let smuggled =
+                crate::runtime::egress_labeler::strip_ingest_label_keys(&mut spawn_metadata);
+            if !smuggled.is_empty() {
+                tracing::warn!(
+                    target: "egress",
+                    session_id = %resolved_session_id,
+                    agent_id = %source_agent_id,
+                    keys = ?smuggled,
+                    "agent_spawn metadata carried reserved egress label keys — stripped \
+                     (agents do not author labels, I-14)"
+                );
+            }
             if let Some(ref rev_id) = args.revision_id {
                 spawn_metadata["_autonoetic_spawn_revision_id"] = serde_json::json!(rev_id);
             }
@@ -742,6 +765,46 @@ the single join already does that."
             // operator's `smoke_test_input` against what was actually sent,
             // independent of the presentation-layer wrapping (issue #648).
             spawn_metadata["_autonoetic_spawn_message"] = serde_json::json!(args.message);
+
+            // Downward taint propagation (RFC §5.5, #982). The delegation
+            // instruction is derived from the parent's context, so a child
+            // spawned out of a tainted parent must not start clean: it would
+            // receive the private content as an *unlabeled* first user turn and
+            // ship it to whatever provider its own routing picks.
+            //
+            // Federation inbound already seeds a receiving session's taint; a
+            // local spawn is the strictly easier case and was the one left open.
+            // Stamped from the parent's accumulated taint, not from anything the
+            // delegating model said (I-14) — the agent chooses whether to spawn,
+            // never what label rides along. The recipient side is the ingest
+            // resolver, which intersects this with the child's session policy and
+            // both seeds the child's taint and labels its first turn.
+            //
+            // Mirrors how `ecosystem.send_message` stamps a sibling payload —
+            // same accessor, same reason, other direction.
+            if let Some(parent_taint) = crate::runtime::egress_labeler::resolve_session_egress_taint(
+                run_context,
+                gateway_store.as_deref(),
+                Some(resolved_session_id.as_str()),
+            )
+            .unwrap_or_else(|e| {
+                // A failed read must not silently mean "clean child". Fail closed
+                // to local_only: over-tainting a child is recoverable through
+                // declassification, an unlabeled leak is not (§2.2).
+                tracing::warn!(
+                    target: "egress",
+                    error = %e,
+                    session_id = %resolved_session_id,
+                    "parent taint read failed at spawn — failing closed to local_only \
+                     for the child"
+                );
+                Some(autonoetic_types::egress::EgressLabel::local_only())
+            })
+            .filter(|t| !t.is_unrestricted())
+            {
+                spawn_metadata[crate::runtime::egress_labeler::PARENT_TAINT_METADATA_KEY] =
+                    serde_json::to_value(&parent_taint).unwrap_or(serde_json::Value::Null);
+            }
 
             let task = TaskRun {
                 task_id: task_id.clone(),

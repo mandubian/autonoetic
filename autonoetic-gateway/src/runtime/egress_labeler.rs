@@ -1576,11 +1576,55 @@ pub fn parse_ofp_inbound_egress_label(raw: Option<&serde_json::Value>) -> Egress
     }
 }
 
-/// Metadata keys that can declare a label for an incoming user-role turn.
-/// Both are *declared inputs* in the I-14 sense — an operator's per-message mark
-/// and a peer's wire label — never model output.
-pub const INGEST_LABEL_METADATA_KEYS: [&str; 2] =
-    ["operator_egress_label", "ofp_inbound_egress_label"];
+/// Metadata key for an operator's per-message mark (RFC §5.4 rung 3).
+pub const OPERATOR_LABEL_METADATA_KEY: &str = "operator_egress_label";
+
+/// Metadata key for a federation peer's inbound wire label (RFC §7).
+pub const OFP_INBOUND_LABEL_METADATA_KEY: &str = "ofp_inbound_egress_label";
+
+/// Metadata key carrying a delegating parent's accumulated taint to its child
+/// (RFC §5.5, the downward direction). Named as a constant because the producer
+/// (`agent_spawn`) and the consumer ([`resolve_ingest_turn_label`]) sit in
+/// different modules and a typo would silently mean "child starts clean".
+pub const PARENT_TAINT_METADATA_KEY: &str = "parent_egress_taint";
+
+/// Metadata keys that can declare a label for an incoming user-role turn. All
+/// are *declared inputs* in the I-14 sense — an operator's per-message mark, a
+/// peer's wire label, a delegating parent's accumulated taint — never model
+/// output.
+///
+/// **Reserved namespace.** Because these are read as declarations, any path that
+/// forwards *model-supplied* metadata into an ingest must strip them first (see
+/// [`strip_ingest_label_keys`]) — otherwise an agent could forge an operator
+/// mark or a peer label. Intersection bounds the damage to over-restriction
+/// rather than a leak, but a label the gateway did not stamp has no business in
+/// the resolver at all.
+pub const INGEST_LABEL_METADATA_KEYS: [&str; 3] = [
+    OPERATOR_LABEL_METADATA_KEY,
+    OFP_INBOUND_LABEL_METADATA_KEY,
+    PARENT_TAINT_METADATA_KEY,
+];
+
+/// Remove every [`INGEST_LABEL_METADATA_KEYS`] entry from a metadata object,
+/// returning the keys that were present.
+///
+/// Call this on any metadata an *agent* supplied before it is forwarded into an
+/// ingest. The gateway re-stamps whatever it has actually resolved afterwards,
+/// so stripping first — rather than only overwriting — is what makes the gateway
+/// the sole author: an overwrite leaves a forged key in place in exactly the
+/// case where the gateway has nothing to write (a clean parent).
+///
+/// A non-empty return is worth logging: nothing legitimate puts these keys in
+/// agent-authored metadata.
+pub fn strip_ingest_label_keys(metadata: &mut serde_json::Value) -> Vec<&'static str> {
+    let Some(map) = metadata.as_object_mut() else {
+        return Vec::new();
+    };
+    INGEST_LABEL_METADATA_KEYS
+        .into_iter()
+        .filter(|key| map.remove(*key).is_some())
+        .collect()
+}
 
 /// Resolve the label for an incoming user-role turn (RFC §4.5 "User/operator
 /// message"), or `None` when nothing restricts it.
