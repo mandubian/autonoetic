@@ -118,7 +118,10 @@ pub struct FilterReport {
     pub sink: String,
     /// Tool-result messages whose content was replaced with an indication.
     pub withheld: Vec<WithheldEntry>,
-    /// Tool-result messages whose label permitted the sink (passed through).
+    /// Messages that passed through unfiltered: unlabeled (default
+    /// `unrestricted`), label-permitted for the target sink, or passed via an
+    /// operator declassification grant (the declassified subset is counted in
+    /// `declassified`).
     pub included: usize,
     /// Labeled messages that passed because the operator declassified the
     /// target sink for this session (RFC §8) — subset of `included`.

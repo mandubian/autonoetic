@@ -1273,9 +1273,15 @@ impl AgentExecutor {
                     autonoetic_types::egress::Sink::RemoteModel,
                 )
             });
-        if declassified_remote && !plan.primary_eligible {
-            plan.primary_eligible = true;
-            plan.reroute_to = None;
+        if declassified_remote {
+            if !plan.primary_eligible {
+                plan.primary_eligible = true;
+                plan.reroute_to = None;
+            }
+            // Audit accuracy: the grant makes every buildable preset eligible
+            // whatever the primary — the eligible set must reflect that even
+            // when no reroute was needed (e.g. a local primary), since the
+            // failover chain is unfiltered in this mode.
             plan.eligible = candidates.iter().map(|c| c.name.clone()).collect();
         }
 
