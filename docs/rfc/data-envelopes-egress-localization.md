@@ -489,12 +489,14 @@ run this turn on local preset X / abort — and causal-logs the choice (decided
 2026-07-26). It never silently downgrades (a discretion leak — the Ri-0.6-analogue
 from the inference-profiles RFC applies to egress downgrades too) and never
 hard-refuses without a path forward (a dead end for non-experts). **Status
-(implementation amendment, 2026-07-30):** the inline ask is *not yet implemented* —
-the routing plane has no pin detection, and preset eligibility does not yet consult
-declassification grants, so a `RemoteModel` declassify grant does not unblock a
-refused turn. Today the gateway reroutes to an eligible local preset automatically
-(covering the "run on local" option) or refuses with a path forward. Wiring
-grant-aware eligibility + the declassify offer is the remaining §5.3 slice.
+(implementation amendment, 2026-07-30):** pinning itself works (the pinned preset
+is the primary), but the pin × taint **conflict** path is not yet implemented —
+the routing plane does not detect that the primary was pinned, and preset
+eligibility does not yet consult declassification grants, so a `RemoteModel`
+declassify grant does not unblock a refused turn. Today the gateway reroutes to
+an eligible local preset automatically (covering the "run on local" option) or
+refuses with a path forward. Wiring grant-aware eligibility + the declassify
+offer is the remaining §5.3 slice.
 
 Two session modes tune the behavior (§5.4): `withhold_and_proceed` (default; above)
 and `require_full_context` (a turn that *references* withheld envelopes is refused
@@ -831,7 +833,7 @@ All causal-chained; constitutional ones carry `enforced_rules` (§13).
 | `egress.provider_selected` | turn, eligible presets, chosen preset, batch intersection, fallback skips, inline-ask outcome | "Why did turn 7 run on ollama?" |
 | `egress.assertion_violation` | envelope id, provider, request digest | Tripwire (bug or echo attack) |
 | `egress.declassified` | grant shape (target × sink), scope, expiry, source approval id (operator identity joins through it); revocation rides `grant_revocation` | "Who widened what, when, until when?" |
-| `egress.boundary_refused` | surface (`sandbox` / `web` / `hooks` / `mcp` / `ofp` / `compression`), envelope ids, rule/label | "Why was this send/exec refused?" |
+| `egress.boundary_refused` | surface (`sandbox` / `web` / `hooks` / `mcp` / `ofp` / `compression`), rule/label, reason; envelope ids where envelopes exist (network-boundary refusals fire before any envelope is born — §8; compression refusals carry band label + source message ids + chosen fallback — §5.7) | "Why was this send/exec refused?" |
 | `egress.relabel` | record id, old label, new label, operator | Sweep/manual reclassification audit |
 
 ### 9.2 Evidence: the filtered wire view
