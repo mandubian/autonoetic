@@ -7,6 +7,7 @@
 //! |---|---|
 //! | `RefuseBoot` | Gateway refuses to start. |
 //! | `RefuseSessionStart` | Gateway refuses to create / resume / continue a session. Applies at session creation and at any mid-session enforcement point where the invariant cannot be verified (e.g. cost-budget catalog unavailable). |
+//! | `RefuseTurn` | The in-flight turn is refused: the completion is aborted or the boundary send/exec is denied, mid-turn, without killing the session (§15 egress rules). |
 //! | `Degrade` | Session enters degraded mode (P-7.18). |
 //! | `EmergencyStop` | Session is killed immediately. |
 //! | `LogOnly` | No enforcement action; event is logged for audit. |
@@ -17,6 +18,7 @@ use std::fmt;
 pub enum FailMode {
     RefuseBoot,
     RefuseSessionStart,
+    RefuseTurn,
     Degrade,
     EmergencyStop,
     LogOnly,
@@ -27,6 +29,7 @@ impl fmt::Display for FailMode {
         match self {
             FailMode::RefuseBoot => write!(f, "refuse-boot"),
             FailMode::RefuseSessionStart => write!(f, "refuse-session-start"),
+            FailMode::RefuseTurn => write!(f, "refuse-turn"),
             FailMode::Degrade => write!(f, "degrade"),
             FailMode::EmergencyStop => write!(f, "emergency-stop"),
             FailMode::LogOnly => write!(f, "log-only"),
@@ -846,6 +849,22 @@ const FAIL_MODE_TABLE: &[FailModeEntry] = &[
     FailModeEntry {
         rule_id: "R+++3",
         fail_mode: FailMode::LogOnly,
+    },
+    // §15 Data Egress Localization (#910 / constitution 2026.07.30). All three
+    // rules fail *mid-turn* by construction: the chokepoint aborts the
+    // completion on an outbound-assertion violation, and boundary gates refuse
+    // the send/exec before bytes leave — hence the refuse-turn mode.
+    FailModeEntry {
+        rule_id: "P-15.1",
+        fail_mode: FailMode::RefuseTurn,
+    },
+    FailModeEntry {
+        rule_id: "P-15.2",
+        fail_mode: FailMode::RefuseTurn,
+    },
+    FailModeEntry {
+        rule_id: "P-15.3",
+        fail_mode: FailMode::RefuseTurn,
     },
 ];
 
