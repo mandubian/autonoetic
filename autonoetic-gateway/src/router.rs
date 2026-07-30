@@ -3655,7 +3655,12 @@ impl JsonRpcRouter {
                         );
                     }
                 };
-                let revoked = match params.grant_kind {
+                // Each call targets one grant kind; track both counts so the
+                // emitted event matches the CLI's unified schema (the unacted
+                // kind is 0). See `gateway grants revoke` in cli/gateway.rs.
+                let mut session_approval_count: usize = 0;
+                let mut egress_declassification_count: usize = 0;
+                match params.grant_kind {
                     GrantKindParam::EgressDeclassification => {
                         // #961 host-scoped model: per-host revoke hits only the
                         // matching `session:<root>:host:<host>` source_pattern
@@ -3666,7 +3671,7 @@ impl JsonRpcRouter {
                             params.host.as_deref(),
                             &params.reason,
                         ) {
-                            Ok(count) => count,
+                            Ok(count) => egress_declassification_count = count,
                             Err(e) => {
                                 return JsonRpcResponse::error(
                                     req.id,
@@ -3685,7 +3690,7 @@ impl JsonRpcRouter {
                             params.host.as_deref(),
                             &params.reason,
                         ) {
-                            Ok(count) => count,
+                            Ok(count) => session_approval_count = count,
                             Err(e) => {
                                 return JsonRpcResponse::error(
                                     req.id,
@@ -3695,20 +3700,35 @@ impl JsonRpcRouter {
                             }
                         }
                     }
-                };
-                // Emit the audit event. Failures here surface to the caller but
-                // the revoke has already committed; matching the CLI path's
-                // behavior (the row update and event are not in one transaction
-                // today — tracked separately).
+                }
+                let revoked = session_approval_count + egress_declassification_count;
+                // CONTRACT — `revoke_grants` causal-event payload schema.
+                // Both emitters of `category: "grant_revocation" / action:
+                // "revoke_grants"` MUST share one canonical schema so audit
+                // views / contract-health tallies parse a single shape:
+                //   { reason, count, egress_declassification_revoked }
+                // where `count` = session-approval grants revoked and
+                // `egress_declassification_revoked` = declassification grants
+                // revoked. This RPC path additionally emits provenance keys
+                // (`grant_kind`, `host`, `revoked_by`) the CLI omits;
+                // consumers MUST ignore unknown keys. If you add a third
+                // emitter or a new grant kind, extend BOTH sites (here and
+                // `handle_gateway_grants` in cli/gateway.rs) — see PR #962.
+                //
+                // Failures here surface to the caller but the revoke has
+                // already committed; matching the CLI path's behavior (the row
+                // update and event are not in one transaction today — tracked
+                // separately).
                 let payload = serde_json::json!({
+                    "reason": params.reason,
+                    "count": session_approval_count,
+                    "egress_declassification_revoked": egress_declassification_count,
                     "grant_kind": match params.grant_kind {
                         GrantKindParam::SessionApproval => "session_approval",
                         GrantKindParam::EgressDeclassification => "egress_declassification",
                     },
                     "host": params.host,
                     "revoked_by": params.revoked_by,
-                    "reason": params.reason,
-                    "revoked": revoked,
                 });
                 let event = autonoetic_types::causal_chain::CausalEventRecord {
                     event_id: format!("grant-revoke-{}", uuid::Uuid::new_v4()),
