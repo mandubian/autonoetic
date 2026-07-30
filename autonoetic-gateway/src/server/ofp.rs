@@ -846,7 +846,15 @@ async fn handle_inbound_connection(
                     egress_label.as_ref(),
                 );
                 if let Some(ref store) = gateway_store {
-                    if let Err(e) = store.set_session_egress_taint(&session_id, &inbound_label) {
+                    // Same mechanism the ingest path uses (`restrict_`, not
+                    // `set_`), so inbound taint accumulates monotonically by one
+                    // rule rather than two. `session_id` is a fresh uuid here so
+                    // the two are equivalent today; keeping them the same means
+                    // that stays true if this ever seeds an existing session.
+                    // An unrestricted peer label stores nothing (absence ⇒
+                    // unrestricted), matching the `spawn_metadata` guard below.
+                    if let Err(e) = store.restrict_session_egress_taint(&session_id, &inbound_label)
+                    {
                         tracing::warn!(
                             target: "egress",
                             error = %e,

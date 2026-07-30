@@ -160,14 +160,43 @@ fn restrict_taint_never_widens_an_existing_taint() -> anyhow::Result<()> {
         Some(EgressLabel::local_only())
     );
 
-    // Contrast: the finalize-path replace does widen, so the two are not
-    // interchangeable. Pinning this keeps a future refactor from "simplifying"
-    // the ingest path back onto `set_`.
+    // Contrast: the finalize-path replace *does* discard the accumulated taint,
+    // so the two are not interchangeable. Pinning this keeps a future refactor
+    // from "simplifying" the ingest path back onto `set_`. (The cleared state is
+    // absence, not a stored `unrestricted` row — see the normalization test.)
     store.set_session_egress_taint("sess-b", &EgressLabel::unrestricted())?;
+    assert_eq!(store.get_session_egress_taint("sess-b")?, None);
+    Ok(())
+}
+
+/// "Absence ⇒ unrestricted" is enforced in the store, not by caller-side
+/// guards: an `unrestricted` label clears the row instead of storing one. A
+/// stored `unrestricted` row would read as a taint at a glance while permitting
+/// everything, and would be wrong for any consumer treating `None` as the only
+/// clean state. This is what keeps an unguarded caller from creating them.
+#[test]
+fn unrestricted_never_gets_stored_as_a_row() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+
+    // Directly, onto a clean session.
+    store.set_session_egress_taint("sess-f", &EgressLabel::unrestricted())?;
+    assert_eq!(store.get_session_egress_taint("sess-f")?, None);
+
+    // Over an existing restrictive taint — clears it rather than storing
+    // "everything allowed" on top.
+    store.restrict_session_egress_taint("sess-f", &EgressLabel::local_only())?;
     assert_eq!(
-        store.get_session_egress_taint("sess-b")?,
-        Some(EgressLabel::unrestricted())
+        store.get_session_egress_taint("sess-f")?,
+        Some(EgressLabel::local_only())
     );
+    store.set_session_egress_taint("sess-f", &EgressLabel::unrestricted())?;
+    assert_eq!(store.get_session_egress_taint("sess-f")?, None);
+
+    // And via the restrict path, which delegates to the same normalization.
+    let merged = store.restrict_session_egress_taint("sess-f", &EgressLabel::unrestricted())?;
+    assert!(merged.is_unrestricted());
+    assert_eq!(store.get_session_egress_taint("sess-f")?, None);
     Ok(())
 }
 

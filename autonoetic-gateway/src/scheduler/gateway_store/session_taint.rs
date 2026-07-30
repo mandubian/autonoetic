@@ -22,7 +22,22 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// Record (or replace) a session's accumulated egress taint. The label is
 /// stored as its serde-transparent sink-set JSON — the same wire shape the
 /// chokepoint and label map use.
+///
+/// **Upholds "absence ⇒ unrestricted" structurally**: an `unrestricted` label
+/// *deletes* the row rather than storing it. The module invariant is that only
+/// restrictive taint is stored, and leaving that to caller-side
+/// `if !taint.is_unrestricted()` guards means one unguarded caller silently
+/// creates rows that say "everything is allowed" — indistinguishable at a
+/// glance from a real taint, and wrong for any reader treating `None` as the
+/// only clean state. Enforcing it here means no caller can violate it.
 pub(super) fn set_taint(conn: &Connection, session_id: &str, label: &EgressLabel) -> Result<()> {
+    if label.is_unrestricted() {
+        conn.execute(
+            "DELETE FROM session_egress_taint WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        return Ok(());
+    }
     let label_json = serde_json::to_string(label)?;
     conn.execute(
         "INSERT INTO session_egress_taint (session_id, label_json, updated_at)
@@ -56,12 +71,11 @@ pub(super) fn restrict_taint(
         Some(existing) => existing.restrict(label),
         None => label.clone(),
     };
-    // Absence ⇒ unrestricted, so an unrestricted result needs no row. It also
-    // cannot arise from an existing restrictive taint (intersection only
-    // shrinks), so this writes nothing rather than clearing a real taint.
-    if !merged.is_unrestricted() {
-        set_taint(conn, session_id, &merged)?;
-    }
+    // Unconditional: `set_taint` normalizes an unrestricted result to absence,
+    // so this both stores a real taint and clears a legacy unrestricted row.
+    // Intersection only shrinks, so an unrestricted merge cannot arise from a
+    // restrictive existing taint — the delete can never drop a live taint.
+    set_taint(conn, session_id, &merged)?;
     Ok(merged)
 }
 
