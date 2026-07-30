@@ -3,6 +3,7 @@ mod agent_registry;
 pub mod amendment_invitations;
 pub mod anomaly_flags;
 mod approvals;
+mod artifact_taint;
 mod artifacts;
 pub mod attack_patterns;
 mod channel_bindings;
@@ -471,6 +472,30 @@ impl GatewayStore {
     ) -> Result<Option<autonoetic_types::egress::EgressLabel>> {
         let conn = self.conn.lock().unwrap();
         session_taint::get_taint(&conn, session_id)
+    }
+
+    // ---- Artifact egress labels (RFC data-envelopes §4.5, #980) ----
+
+    /// Intersect a label into an artifact's stored label, never widening it, and
+    /// return the result. Called at build time with the builder session's taint;
+    /// on content-addressed reuse this tightens the existing label rather than
+    /// replacing it.
+    pub fn restrict_artifact_egress_label(
+        &self,
+        artifact_id: &str,
+        label: &autonoetic_types::egress::EgressLabel,
+    ) -> Result<autonoetic_types::egress::EgressLabel> {
+        let conn = self.conn.lock().unwrap();
+        artifact_taint::restrict_label(&conn, artifact_id, label)
+    }
+
+    /// Read an artifact's egress label (`None` ⇒ unrestricted).
+    pub fn get_artifact_egress_label(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<autonoetic_types::egress::EgressLabel>> {
+        let conn = self.conn.lock().unwrap();
+        artifact_taint::get_label(&conn, artifact_id)
     }
 
     // ---- Session residency (parked, addressable sessions) ----
