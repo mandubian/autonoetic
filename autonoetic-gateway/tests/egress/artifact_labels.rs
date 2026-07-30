@@ -148,6 +148,27 @@ fn non_ids_are_not_matched() {
     assert!(artifact_ids_in_arguments("art_").is_empty());
 }
 
+/// Non-ASCII bytes after the prefix must not panic. `arguments_json` is arbitrary
+/// agent-supplied JSON, and the 8 bytes after `art_` can be the middle of a
+/// multi-byte codepoint — `art_€€€` puts byte offset 12 inside the third `€`.
+/// Slicing the `&str` there panics ("byte index 12 is not a char boundary"), which
+/// in this path would crash egress labeling itself: a denial of service on the
+/// enforcement plane, reachable from any tool call. Byte-level validation, not str
+/// slicing.
+#[test]
+fn non_ascii_after_the_prefix_does_not_panic() {
+    assert!(artifact_ids_in_arguments("art_€€€").is_empty());
+    assert!(artifact_ids_in_arguments(r#"{"x":"art_€€€"}"#).is_empty());
+    // Multi-byte immediately after the prefix, and part-way through the id span.
+    assert!(artifact_ids_in_arguments("art_🎉").is_empty());
+    assert!(artifact_ids_in_arguments("art_dead€eef").is_empty());
+    // A valid id is still found when a multi-byte char sits nearby.
+    assert_eq!(
+        artifact_ids_in_arguments(r#"{"note":"€ art_deadbeef €"}"#),
+        vec!["art_deadbeef"]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Read side — the round trip
 // ---------------------------------------------------------------------------

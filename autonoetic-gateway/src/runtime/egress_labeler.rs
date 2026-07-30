@@ -402,7 +402,12 @@ impl EgressLabeler {
                 artifact_taint_from_store(req.arguments_json, store.as_ref());
             if !applied.is_empty() {
                 resolution.label = resolution.label.restrict(&artifact_label);
-                resolution.taint_applied = true;
+                // NOT `taint_applied`: that flag means "argument taint from prior
+                // envelopes contributed", and its lineage lives in
+                // `parent_envelope_ids`. Setting it here would emit
+                // `taint_applied: true` with an empty `parent_envelope_ids`,
+                // which reads as a contradiction to anyone auditing the event.
+                // `artifact_labels_applied` carries this path's lineage instead.
                 resolution.artifact_labels_applied = applied;
             }
         }
@@ -1501,21 +1506,28 @@ pub fn artifact_ids_in_arguments(arguments_json: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (start, _) in arguments_json.match_indices(PREFIX) {
         let hex_start = start + PREFIX.len();
-        let hex_end = hex_start + ID_HEX_LEN;
-        if hex_end > bytes.len() {
+        // Slice BYTES, never the `&str`. `arguments_json` is arbitrary
+        // agent-supplied JSON, so the 8 bytes after `art_` may be the middle of a
+        // multi-byte codepoint (`art_€€€`); a str slice at a non-boundary index
+        // panics, which in this path would take down egress labeling itself.
+        let Some(hex) = bytes.get(hex_start..hex_start + ID_HEX_LEN) else {
             continue;
-        }
-        let hex = &arguments_json[hex_start..hex_end];
-        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        };
+        if !hex.iter().all(|b| b.is_ascii_hexdigit()) {
             continue;
         }
         // Reject a longer alphanumeric run: `art_deadbeefcafe` is not an id.
         if bytes
-            .get(hex_end)
+            .get(hex_start + ID_HEX_LEN)
             .is_some_and(|b| b.is_ascii_alphanumeric())
         {
             continue;
         }
+        // Every byte is an ASCII hexdigit, so this cannot fail; matched rather
+        // than unwrapped so there is no branch that could produce a wrong id.
+        let Ok(hex) = std::str::from_utf8(hex) else {
+            continue;
+        };
         let id = format!("{PREFIX}{hex}");
         if !out.contains(&id) {
             out.push(id);
