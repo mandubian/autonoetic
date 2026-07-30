@@ -13,6 +13,7 @@ mod compartment;
 mod compression_eligibility;
 mod floor_and_taint;
 mod mixed_session_e2e;
+mod operator_message_label;
 mod phase4_boundaries;
 mod phase4_capsule;
 mod phase4_declassification;

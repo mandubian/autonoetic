@@ -33,6 +33,38 @@ pub(super) fn set_taint(conn: &Connection, session_id: &str, label: &EgressLabel
     Ok(())
 }
 
+/// Intersect `label` into a session's stored taint, never widening it, and
+/// return the resulting taint.
+///
+/// [`set_taint`] replaces the row, which is correct for the finalize path (it
+/// recomputes from the whole label sidecar) but wrong for an incremental
+/// contribution: writing a less-restrictive label over an accumulated one would
+/// *widen* the taint and break monotonicity (RFC §2.4). Ingest-side
+/// contributions — a peer's inbound label, an operator's marked message — use
+/// this instead.
+///
+/// Read and write happen under the single `conn` the caller already holds, so
+/// there is no window where a concurrent contribution could be lost to a
+/// read-modify-write race.
+pub(super) fn restrict_taint(
+    conn: &Connection,
+    session_id: &str,
+    label: &EgressLabel,
+) -> Result<EgressLabel> {
+    let current = get_taint(conn, session_id)?;
+    let merged = match current {
+        Some(existing) => existing.restrict(label),
+        None => label.clone(),
+    };
+    // Absence ⇒ unrestricted, so an unrestricted result needs no row. It also
+    // cannot arise from an existing restrictive taint (intersection only
+    // shrinks), so this writes nothing rather than clearing a real taint.
+    if !merged.is_unrestricted() {
+        set_taint(conn, session_id, &merged)?;
+    }
+    Ok(merged)
+}
+
 /// Read a session's accumulated taint. `None` when the session recorded no
 /// restrictive taint (⇒ treat as `unrestricted`).
 pub(super) fn get_taint(conn: &Connection, session_id: &str) -> Result<Option<EgressLabel>> {

@@ -22,6 +22,7 @@
 //! - `/model` — show current inference profile
 //! - `/model <preset>` — set session-level model override
 //! - `/model clear` — clear the override
+//! - `/private <message>` — send one message marked `local_only` (never leaves the machine)
 //!
 //! See [`help_lines()`] for the complete key map and slash-command list.
 
@@ -77,13 +78,17 @@ pub enum SlashCommand {
     ModelSet { preset: String },
     /// Remove the session inference override.
     ModelClear,
+    /// Send one message marked `local_only` (RFC §5.4 rung 3 — "this one message
+    /// is private"). The gateway intersects the mark with the session policy
+    /// default, so it can only restrict this turn's egress, never widen it.
+    PrivateMessage { message: String },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /private · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -155,6 +160,10 @@ pub fn help_lines() -> Vec<String> {
         "  /model                     show current inference profile".to_string(),
         "  /model <preset>            override model until cleared".to_string(),
         "  /model clear               remove the session override".to_string(),
+        "  /private <message>         send one message marked local_only — the gateway"
+            .to_string(),
+        "                             withholds it from any sink the label excludes"
+            .to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -196,6 +205,19 @@ pub fn parse(input: &str) -> SlashCommand {
             SlashCommand::Test { name }
         }
         "model" => parse_model(tail),
+        // `/private <text>` — an empty tail is Unknown rather than an empty
+        // labeled message, so a bare `/private` reports the usage instead of
+        // silently sending nothing.
+        "private" => {
+            let msg = tail.trim();
+            if msg.is_empty() {
+                SlashCommand::Unknown("private (usage: /private <message>)".to_string())
+            } else {
+                SlashCommand::PrivateMessage {
+                    message: msg.to_string(),
+                }
+            }
+        }
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         "estop" | "emergency-stop" => {
@@ -767,5 +789,41 @@ mod tests {
         );
         // A partial word is neither — reported, never guessed.
         assert!(matches!(parse("/cryst"), SlashCommand::Unknown(_)));
+    }
+
+    /// `/private <message>` carries the message through verbatim — the whole
+    /// tail, including internal whitespace and anything that looks like a flag,
+    /// because it is prose the operator is sending, not arguments to parse.
+    #[test]
+    fn private_takes_the_whole_tail_as_the_message() {
+        assert_eq!(
+            parse("/private here is the email thread"),
+            SlashCommand::PrivateMessage {
+                message: "here is the email thread".to_string()
+            }
+        );
+        // Surrounding whitespace trimmed, internal preserved.
+        assert_eq!(
+            parse("/private   two  spaces inside   "),
+            SlashCommand::PrivateMessage {
+                message: "two  spaces inside".to_string()
+            }
+        );
+        // A leading `/` in the message body is not a nested command.
+        assert_eq!(
+            parse("/private see /etc/hosts"),
+            SlashCommand::PrivateMessage {
+                message: "see /etc/hosts".to_string()
+            }
+        );
+    }
+
+    /// A bare `/private` reports usage rather than sending an empty labeled
+    /// message — an empty private turn would burn a turn and teach the operator
+    /// nothing.
+    #[test]
+    fn bare_private_is_unknown_with_usage() {
+        assert!(matches!(parse("/private"), SlashCommand::Unknown(_)));
+        assert!(matches!(parse("/private   "), SlashCommand::Unknown(_)));
     }
 }

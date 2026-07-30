@@ -2993,6 +2993,7 @@ pub fn run(
                                         root_session_id,
                                         &text,
                                         target_agent_id.as_deref(),
+                                        None,
                                     )
                                 });
                                 compose = None;
@@ -3255,6 +3256,7 @@ pub fn run(
                                                         root_session_id,
                                                         msg,
                                                         target_agent_id.as_deref(),
+                                                        None,
                                                     );
                                                     status = Some(format!(
                                                         "✓ emergency stop — {send_status}"
@@ -3424,6 +3426,27 @@ pub fn run(
                                             }
                                             Err(e) => status = Some(format!("✗ {e}")),
                                         }
+                                    }
+                                    SlashCommand::PrivateMessage { message } => {
+                                        // RFC §5.4 rung 3 — mark this one turn.
+                                        // The gateway intersects the mark with
+                                        // the session policy default, so this can
+                                        // only restrict, never widen.
+                                        let send_status = send_message(
+                                            client,
+                                            root_session_id,
+                                            &message,
+                                            target_agent_id.as_deref(),
+                                            Some("local_only"),
+                                        );
+                                        status = Some(if send_status.starts_with('✓') {
+                                            "✓ sent (local_only — withheld from remote sinks)"
+                                                .to_string()
+                                        } else {
+                                            send_status
+                                        });
+                                        follow = true;
+                                        force_timeline_refresh = true;
                                     }
                                     SlashCommand::Unknown(verb) => {
                                         let v = if verb.is_empty() {
@@ -6234,11 +6257,15 @@ fn poll_pending_gate(
 /// (#405) — the same `event.ingest` ingress `chat` uses. Async (`async_mode`)
 /// so the sync TUI loop never blocks on the agent turn; the operator's line
 /// (recorded gateway-side) and the agent's reply then stream in via polling.
+/// `egress_label` marks this one message (RFC §5.4 rung 3) — `Some("local_only")`
+/// for `/private`. The gateway intersects it with the session policy default, so
+/// it can only restrict the turn, never widen it.
 fn send_message(
     client: &RoomClient,
     root_session_id: &str,
     text: &str,
     target_agent_id: Option<&str>,
+    egress_label: Option<&str>,
 ) -> String {
     let mut params = serde_json::json!({
         "event_type": "chat",
@@ -6250,6 +6277,11 @@ fn send_message(
     if let Some(agent_id) = target_agent_id {
         if let Some(map) = params.as_object_mut() {
             map.insert("target_agent_id".to_string(), serde_json::json!(agent_id));
+        }
+    }
+    if let Some(label) = egress_label {
+        if let Some(map) = params.as_object_mut() {
+            map.insert("egress_label".to_string(), serde_json::json!(label));
         }
     }
     match rpc(client, "event.ingest", params) {
@@ -7419,7 +7451,8 @@ fn approve_plan_and_wake(
                         "[Operator approved plan {plan_id}] Plan is approved. Call planframe_get, then agent_spawn the first agent step — do not call agent_list."
                     )
                 });
-            let wake_status = send_message(client, root_session_id, &wake, target_agent_id);
+            let wake_status =
+                send_message(client, root_session_id, &wake, target_agent_id, None);
             if wake_status.starts_with('✓') {
                 Ok(format!("{approval_msg} — planner notified"))
             } else {
