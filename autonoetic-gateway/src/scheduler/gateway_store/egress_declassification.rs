@@ -251,8 +251,15 @@ pub(super) fn revoke_grants_for_root(
 /// reach. The read side (`declassification_allows`) already fail-closes on
 /// `revoked_at`, so enforcement stops honoring the grant as soon as this
 /// commits.
+///
+/// SCOPING — the id is **not** a capability. Row ids are `AUTOINCREMENT`, hence
+/// enumerable across sessions, so the update is scoped to `root_session_id`:
+/// one root can never revoke another root's grant, and the caller's claimed
+/// root is the only one it can act on. An id belonging to a different root
+/// (or absent) is an idempotent no-op, indistinguishable from already-revoked.
 pub(super) fn revoke_grant_by_id(
     conn: &Connection,
+    root_session_id: &str,
     grant_id: i64,
     now: &str,
     reason: &str,
@@ -260,8 +267,8 @@ pub(super) fn revoke_grant_by_id(
     let count = conn.execute(
         "UPDATE egress_declassification_grants
          SET revoked_at = ?1, revoked_reason = ?2
-         WHERE id = ?3 AND revoked_at IS NULL",
-        params![now, reason, grant_id],
+         WHERE id = ?3 AND root_session_id = ?4 AND revoked_at IS NULL",
+        params![now, reason, grant_id, root_session_id],
     )?;
     Ok(count > 0)
 }
@@ -347,19 +354,21 @@ impl super::GatewayStore {
         list_grants_for_root(&conn, root_session_id)
     }
 
-    /// Soft-revoke a single declassification grant by row id. Returns `true`
-    /// when a row transitioned active → revoked, `false` if already revoked or
-    /// absent (idempotent). Complements the host-scoped/all path used by the
-    /// CLI (`revoke_egress_declassification_grants`) for the TUI panel's
-    /// per-row revoke.
+    /// Soft-revoke a single declassification grant by row id, scoped to the
+    /// root session that owns it. Returns `true` when a row transitioned
+    /// active → revoked, `false` if already revoked, absent, or owned by a
+    /// different root (idempotent). Complements the host-scoped/all path used
+    /// by the CLI (`revoke_egress_declassification_grants`) for the TUI
+    /// panel's per-row revoke.
     pub fn revoke_egress_declassification_grant_by_id(
         &self,
+        root_session_id: &str,
         grant_id: i64,
         reason: &str,
     ) -> Result<bool> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
-        revoke_grant_by_id(&conn, grant_id, &now, reason)
+        revoke_grant_by_id(&conn, root_session_id, grant_id, &now, reason)
     }
 }
 

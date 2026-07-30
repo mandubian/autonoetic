@@ -1189,18 +1189,29 @@ impl GatewayStore {
         Ok(count)
     }
 
-    /// Soft-revoke a single ACTIVE session-approval grant by row id. Idempotent:
-    /// a grant already revoked (or missing) reports `false`. Complements the
+    /// Soft-revoke a single ACTIVE session-approval grant by row id, scoped to
+    /// the root session that owns it. Idempotent: a grant already revoked,
+    /// missing, or owned by a different root reports `false`. Complements the
     /// by-host (`revoke_session_grants`) and by-source (`revoke_session_grants_by_source`)
     /// paths for the TUI grants panel's per-row revoke.
-    pub fn revoke_session_grant_by_id(&self, grant_id: i64, reason: &str) -> Result<bool> {
+    ///
+    /// SCOPING — see `revoke_grant_by_id` in `egress_declassification.rs`: row
+    /// ids are `AUTOINCREMENT` and therefore enumerable, so the id alone must
+    /// never authorize a revoke. The `root_session_id` predicate keeps one root
+    /// from revoking another root's grant.
+    pub fn revoke_session_grant_by_id(
+        &self,
+        root_session_id: &str,
+        grant_id: i64,
+        reason: &str,
+    ) -> Result<bool> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         let count = conn.execute(
             "UPDATE session_approval_grants
              SET revoked_at = ?1, revoked_reason = ?2
-             WHERE id = ?3 AND revoked_at IS NULL",
-            params![&now, reason, grant_id],
+             WHERE id = ?3 AND root_session_id = ?4 AND revoked_at IS NULL",
+            params![&now, reason, grant_id, root_session_id],
         )?;
         Ok(count > 0)
     }

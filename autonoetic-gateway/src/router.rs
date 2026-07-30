@@ -3672,9 +3672,14 @@ impl JsonRpcRouter {
                 match params.grant_kind {
                     GrantKindParam::EgressDeclassification => {
                         egress_declassification_count = if let Some(gid) = params.grant_id {
-                            match store
-                                .revoke_egress_declassification_grant_by_id(gid, &params.reason)
-                            {
+                            // Scoped to the caller's root: a row id is not a
+                            // capability (ids are enumerable), so a grant owned
+                            // by another root is an idempotent no-op (count 0).
+                            match store.revoke_egress_declassification_grant_by_id(
+                                &params.root_session_id,
+                                gid,
+                                &params.reason,
+                            ) {
                                 Ok(b) => usize::from(b),
                                 Err(e) => {
                                     return JsonRpcResponse::error(
@@ -3713,7 +3718,12 @@ impl JsonRpcRouter {
                     }
                     GrantKindParam::SessionApproval => {
                         session_approval_count = if let Some(gid) = params.grant_id {
-                            match store.revoke_session_grant_by_id(gid, &params.reason) {
+                            // Same root scoping as the declassification path.
+                            match store.revoke_session_grant_by_id(
+                                &params.root_session_id,
+                                gid,
+                                &params.reason,
+                            ) {
                                 Ok(b) => usize::from(b),
                                 Err(e) => {
                                     return JsonRpcResponse::error(

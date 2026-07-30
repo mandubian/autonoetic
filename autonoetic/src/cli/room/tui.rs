@@ -1884,6 +1884,18 @@ impl GrantKind {
     }
 }
 
+/// Identity of a grant, independent of its position in the row list. The panel
+/// rebuilds its rows from `grants.list` on the idle cadence, so a row INDEX is
+/// not a stable handle: a grant expiring or being granted above the cursor
+/// shifts everything below it. Selection and the armed revoke are both keyed on
+/// this instead, so a background refresh can never silently re-point either at
+/// a different grant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GrantIdent {
+    kind: GrantKind,
+    id: i64,
+}
+
 /// One normalized grant row displayed by the panel. Carries everything needed
 /// to revoke it by id (the primary path) — `host` is kept only for display.
 struct GrantRow {
@@ -1895,14 +1907,24 @@ struct GrantRow {
     detail: String,
 }
 
+impl GrantRow {
+    fn ident(&self) -> GrantIdent {
+        GrantIdent {
+            kind: self.kind,
+            id: self.id,
+        }
+    }
+}
+
 struct GrantsPanel {
     selected: usize,
-    scroll: u16,
     rows: Vec<GrantRow>,
     /// Current root-session egress taint display name (None ⇒ unrestricted).
     taint: Option<String>,
-    /// When Some, the selected row is armed for a confirm-revoke (`r` again).
-    pending_revoke: Option<()>,
+    /// When Some, THAT grant — by identity, not by row position — is armed for
+    /// a confirm-revoke (`r` again). Identity-keyed so the confirm can only
+    /// ever fire at the grant the operator actually saw when they armed it.
+    pending_revoke: Option<GrantIdent>,
 }
 
 impl GrantsPanel {
@@ -1910,6 +1932,40 @@ impl GrantsPanel {
         let max = self.rows.len().saturating_sub(1);
         if self.selected > max {
             self.selected = max;
+        }
+    }
+
+    /// Identity of the currently selected row, if the list is non-empty.
+    fn selected_ident(&self) -> Option<GrantIdent> {
+        self.rows.get(self.selected).map(GrantRow::ident)
+    }
+
+    /// Re-point `selected` at `ident` after the rows were rebuilt. Falls back
+    /// to the clamped previous index when that grant is gone (revoked/expired),
+    /// which is the only case where the cursor legitimately moves to a
+    /// different grant.
+    fn reselect(&mut self, ident: Option<GrantIdent>) {
+        if let Some(target) = ident {
+            if let Some(i) = self.rows.iter().position(|r| r.ident() == target) {
+                self.selected = i;
+                return;
+            }
+        }
+        self.clamp_selection();
+    }
+
+    /// Whether `ident` is the grant currently armed for confirm-revoke.
+    fn is_armed(&self, ident: GrantIdent) -> bool {
+        self.pending_revoke == Some(ident)
+    }
+
+    /// Drop an armed revoke whose grant is no longer in the list, so a stale
+    /// arm can't linger across refreshes.
+    fn prune_armed(&mut self) {
+        if let Some(armed) = self.pending_revoke {
+            if !self.rows.iter().any(|r| r.ident() == armed) {
+                self.pending_revoke = None;
+            }
         }
     }
 }
@@ -4128,11 +4184,19 @@ pub fn run(
                                         panel.pending_revoke = None;
                                         panel.selected = panel.selected.saturating_sub(1);
                                     }
-                                    KeyCode::Char('g') => {
+                                    // `G` is the panel's advertised toggle (title
+                                    // + /help), so inside the panel it closes —
+                                    // first/last are on Home/End here (the
+                                    // approvals popup binds both spellings, but
+                                    // it doesn't claim `G` closes it).
+                                    KeyCode::Char('G') => {
+                                        grants_panel = None;
+                                    }
+                                    KeyCode::Char('g') | KeyCode::Home => {
                                         panel.pending_revoke = None;
                                         panel.selected = 0;
                                     }
-                                    KeyCode::Char('G') => {
+                                    KeyCode::End => {
                                         panel.pending_revoke = None;
                                         panel.selected = row_count.saturating_sub(1);
                                     }
@@ -4145,11 +4209,19 @@ pub fn run(
                                         panel.selected = panel.selected.saturating_sub(5);
                                     }
                                     KeyCode::Char('r') => {
-                                        // Two-step confirm: first `r` arms, second
-                                        // `r` on the same row fires the revoke.
+                                        // Two-step confirm: first `r` arms THAT
+                                        // grant (by identity), second `r` on the
+                                        // same grant fires the revoke. If the
+                                        // armed grant is no longer the selected
+                                        // one — a refresh reordered the rows
+                                        // under the cursor — this re-arms on
+                                        // what is selected now instead of
+                                        // firing, so a confirm never lands on a
+                                        // grant the operator didn't see.
                                         let idx = panel.selected;
                                         let row = &panel.rows[idx];
-                                        if panel.pending_revoke.is_some() {
+                                        let ident = row.ident();
+                                        if panel.is_armed(ident) {
                                             let grant_id = row.id;
                                             let kind = row.kind;
                                             match rpc(
@@ -4169,7 +4241,10 @@ pub fn run(
                                                         grant_id
                                                     ));
                                                     // Re-fetch so the list updates
-                                                    // immediately.
+                                                    // immediately. The revoked
+                                                    // grant is gone, so keep the
+                                                    // cursor on its neighbour by
+                                                    // falling back to the index.
                                                     let (rows, taint) =
                                                         fetch_grant_rows(client, &root_session_id);
                                                     panel.rows = rows;
@@ -4184,7 +4259,7 @@ pub fn run(
                                                 }
                                             }
                                         } else {
-                                            panel.pending_revoke = Some(());
+                                            panel.pending_revoke = Some(ident);
                                             status = Some(format!(
                                                 "press r again to revoke {} grant #{}",
                                                 row.kind.label(),
@@ -4650,14 +4725,13 @@ pub fn run(
                                 } else {
                                     grants_panel = Some(GrantsPanel {
                                         selected: 0,
-                                        scroll: 0,
                                         rows,
                                         taint,
                                         pending_revoke: None,
                                     });
                                     last_grants_poll = Instant::now();
                                     status = Some(
-                                        "grants: j/k navigate · r revoke (confirm) · Esc close"
+                                        "grants: j/k navigate · r revoke (confirm) · G/Esc close"
                                             .to_string(),
                                     );
                                 }
@@ -5736,23 +5810,37 @@ pub fn run(
         // closed panel never spams `grants.list`. Re-fetch rows + taint and
         // replace the panel's data, preserving the selection (mirror
         // LiveContentPane's rebuild pattern).
+        //
+        // Selection is preserved by grant IDENTITY, not by row index: grants
+        // expire and get granted while the panel is open, so an index would
+        // silently slide the cursor onto a different grant — and, with an armed
+        // `r`, aim a confirmed revoke at it. Any armed grant that has left the
+        // list is disarmed. Taint is refreshed unconditionally: it changes
+        // without the row set changing (a turn tainting the session grants no
+        // new rows), and a stale taint line is exactly what this panel exists to
+        // not show.
         if grants_panel.is_some()
             && last_grants_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
         {
             last_grants_poll = Instant::now();
             let (rows, taint) = fetch_grant_rows(client, &root_session_id);
             if let Some(panel) = grants_panel.as_mut() {
-                let prev_selected = panel.selected;
-                let changed = rows.len() != panel.rows.len()
+                let rows_changed = rows.len() != panel.rows.len()
                     || rows
                         .iter()
                         .zip(panel.rows.iter())
                         .any(|(a, b)| a.id != b.id || a.kind != b.kind);
-                if changed {
+                let taint_changed = taint != panel.taint;
+                if rows_changed {
+                    let prev_ident = panel.selected_ident();
                     panel.rows = rows;
+                    panel.reselect(prev_ident);
+                    panel.prune_armed();
+                }
+                if taint_changed {
                     panel.taint = taint;
-                    panel.selected = prev_selected;
-                    panel.clamp_selection();
+                }
+                if rows_changed || taint_changed {
                     needs_redraw = true;
                 }
             }
@@ -8873,9 +8961,16 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
     let area = centered_rect(82, 78, f.area());
     f.render_widget(Clear, area);
 
+    // Scroll is DERIVED from the selection rather than held as state, so the
+    // selected row is always on screen — there is no scroll offset that can go
+    // stale or drift out of sync with `selected`. Keeps the cursor pinned to the
+    // bottom visible line once it scrolls past the first page.
     let inner_height = area.height.saturating_sub(2) as usize;
-    let max_scroll = rows.len().saturating_sub(inner_height) as u16;
-    let scroll = panel.scroll.min(max_scroll);
+    let max_scroll = rows.len().saturating_sub(inner_height);
+    let scroll = panel
+        .selected
+        .saturating_sub(inner_height.saturating_sub(1))
+        .min(max_scroll) as u16;
 
     let lines: Vec<Line> = rows
         .iter()
@@ -8897,12 +8992,14 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
             ];
             if selected {
                 spans.push(Span::raw(format!("   · {}", r.detail)));
-                if panel.pending_revoke.is_some() {
-                    spans.push(Span::styled(
-                        "  [press r again to CONFIRM revoke]",
-                        Style::default().fg(Color::Red).bold(),
-                    ));
-                }
+            }
+            // The armed cue follows the armed GRANT, not the cursor, so it can
+            // never appear against a row that a confirm wouldn't actually hit.
+            if panel.is_armed(r.ident()) {
+                spans.push(Span::styled(
+                    "  [press r again to CONFIRM revoke]",
+                    Style::default().fg(Color::Red).bold(),
+                ));
             }
             let style = if selected {
                 Style::default().fg(Color::Yellow)
