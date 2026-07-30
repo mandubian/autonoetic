@@ -516,7 +516,7 @@ impl EgressDeclassificationTarget {
 }
 
 /// Materialized operator grant widening a specific content target to a sink.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressDeclassificationGrant {
     pub id: i64,
     pub root_session_id: String,

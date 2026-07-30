@@ -3516,6 +3516,223 @@ impl JsonRpcRouter {
                 }
             }
 
+            // Operator-facing grant enumeration for live views (TUI / audit).
+            // Returns both grant kinds for a root session plus the root's
+            // current egress taint. Read-only; the TUI polls this on its idle
+            // cadence to render a grants panel. The store methods are the
+            // single source of truth (Separation of Powers: the TUI never
+            // opens SQLite directly).
+            "grants.list" => {
+                #[derive(Deserialize)]
+                struct GrantsListParams {
+                    root_session_id: String,
+                }
+                let params: GrantsListParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for grants.list: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let session_approval_grants =
+                    match store.get_session_grants_structured(&params.root_session_id) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("grants.list (session approval) failed: {}", e),
+                            );
+                        }
+                    };
+                let egress_declassification_grants =
+                    match store.list_egress_declassification_grants(&params.root_session_id) {
+                        Ok(g) => g,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32000,
+                                format!("grants.list (egress declassification) failed: {}", e),
+                            );
+                        }
+                    };
+                // Absence ⇒ unrestricted (only restrictive taint is stored).
+                let current_taint = store
+                    .get_session_egress_taint(&params.root_session_id)
+                    .unwrap_or(None);
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "root_session_id": params.root_session_id,
+                        "session_approval_grants": session_approval_grants,
+                        "egress_declassification_grants": egress_declassification_grants,
+                        "current_taint": current_taint,
+                    }),
+                )
+            }
+
+            // Operator grant revocation covering BOTH grant kinds. Both use the
+            // same host-scoped shape as the `gateway grants revoke --host/--all`
+            // CLI (which #961 made revoke declassification grants too): with
+            // `host`, only the host-matching grants are revoked; without, every
+            // active grant of that kind under the root. Soft-revoke (sets
+            // revoked_at); the matching engines fail-close on that flag, so
+            // enforcement stops honoring the grant as soon as the statement
+            // commits. Emits a `grant_revocation` causal event. Note revocation
+            // blocks FUTURE uses — it does not cancel an already-authorized
+            // in-flight operation (inherent TOCTOU window vs the coverage check).
+            "grants.revoke" => {
+                #[derive(Deserialize)]
+                struct GrantsRevokeParams {
+                    root_session_id: String,
+                    /// Which grant table to act on.
+                    grant_kind: GrantKindParam,
+                    /// Revoke only grants matching this host (per-host scope);
+                    /// omit to revoke ALL active grants of that kind for the
+                    /// root session.
+                    #[serde(default)]
+                    host: Option<String>,
+                    /// Revocation reason recorded on the row and in the causal
+                    /// event.
+                    #[serde(default = "default_grant_revoke_reason")]
+                    reason: String,
+                    #[serde(default = "default_grant_revoked_by")]
+                    revoked_by: String,
+                }
+                #[derive(Deserialize, PartialEq, Eq)]
+                #[serde(rename_all = "snake_case")]
+                enum GrantKindParam {
+                    SessionApproval,
+                    EgressDeclassification,
+                }
+                fn default_grant_revoke_reason() -> String {
+                    "Revoked by operator".to_string()
+                }
+                fn default_grant_revoked_by() -> String {
+                    "operator".to_string()
+                }
+                let params: GrantsRevokeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for grants.revoke: {}", e),
+                        );
+                    }
+                };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                let revoked = match params.grant_kind {
+                    GrantKindParam::EgressDeclassification => {
+                        // #961 host-scoped model: per-host revoke hits only the
+                        // matching `session:<root>:host:<host>` source_pattern
+                        // grant; without a host, every active declassification
+                        // grant under the root.
+                        match store.revoke_egress_declassification_grants(
+                            &params.root_session_id,
+                            params.host.as_deref(),
+                            &params.reason,
+                        ) {
+                            Ok(count) => count,
+                            Err(e) => {
+                                return JsonRpcResponse::error(
+                                    req.id,
+                                    -32000,
+                                    format!("grants.revoke (egress declassification) failed: {}", e),
+                                );
+                            }
+                        }
+                    }
+                    GrantKindParam::SessionApproval => {
+                        // Session approval grants revoke by host match, or by
+                        // whole root when no host is given (mirrors the
+                        // `gateway grants revoke --host/--all` CLI).
+                        match store.revoke_session_grants(
+                            &params.root_session_id,
+                            params.host.as_deref(),
+                            &params.reason,
+                        ) {
+                            Ok(count) => count,
+                            Err(e) => {
+                                return JsonRpcResponse::error(
+                                    req.id,
+                                    -32000,
+                                    format!("grants.revoke (session approval) failed: {}", e),
+                                );
+                            }
+                        }
+                    }
+                };
+                // Emit the audit event. Failures here surface to the caller but
+                // the revoke has already committed; matching the CLI path's
+                // behavior (the row update and event are not in one transaction
+                // today — tracked separately).
+                let payload = serde_json::json!({
+                    "grant_kind": match params.grant_kind {
+                        GrantKindParam::SessionApproval => "session_approval",
+                        GrantKindParam::EgressDeclassification => "egress_declassification",
+                    },
+                    "host": params.host,
+                    "revoked_by": params.revoked_by,
+                    "reason": params.reason,
+                    "revoked": revoked,
+                });
+                let event = autonoetic_types::causal_chain::CausalEventRecord {
+                    event_id: format!("grant-revoke-{}", uuid::Uuid::new_v4()),
+                    agent_id: "gateway".to_string(),
+                    session_id: params.root_session_id.clone(),
+                    turn_id: None,
+                    event_seq: 0,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    category: "grant_revocation".to_string(),
+                    action: "revoke_grants".to_string(),
+                    status: "completed".to_string(),
+                    enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                    target: params.host.clone(),
+                    payload: Some(payload.to_string()),
+                    payload_ref: None,
+                    evidence_ref: None,
+                    reason: Some(params.reason.clone()),
+                };
+                if let Err(e) = store.create_causal_event(&event) {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32000,
+                        format!("grants.revoke: grant revoked but audit event failed: {}", e),
+                    );
+                }
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "ok": true,
+                        "revoked": revoked,
+                        "root_session_id": params.root_session_id,
+                    }),
+                )
+            }
+
             // Suspend an agent: block new sessions while leaving in-flight
             // sessions running. An operator decision, decoupled from envelope
             // revocation. Read-only resolution stays open.

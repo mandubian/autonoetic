@@ -268,3 +268,90 @@ fn delete_session_grants_clears_declassification_rows() -> anyhow::Result<()> {
     )?);
     Ok(())
 }
+
+/// `list_egress_declassification_grants` (the new operator-facing listing
+/// wrapper) round-trips with the #961 host-scoped revoke: list shows active
+/// grants, revoke-by-host soft-deletes the matching one, enforcement
+/// fail-closes, and re-list drops it. The listing wrapper is the only piece
+/// this branch adds on top of #961's revoke surface.
+#[test]
+fn list_egress_declassification_grants_round_trips_with_host_revoke() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+    // Host-scoped source_pattern targets, the shape #961's approval path and
+    // host revocation both key on (session:<root>:host:<host>).
+    let target_a = EgressDeclassificationTarget::SourcePattern(
+        "session:root-list:host:example.com".to_string(),
+    );
+    let target_b = EgressDeclassificationTarget::SourcePattern(
+        "session:root-list:host:other.com".to_string(),
+    );
+
+    store.insert_egress_declassification_grant(
+        "root-list",
+        "root-list/curator",
+        "memory-curator.default",
+        &target_a,
+        Sink::Network,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+    store.insert_egress_declassification_grant(
+        "root-list",
+        "root-list/curator",
+        "memory-curator.default",
+        &target_b,
+        Sink::Network,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+
+    // Both active and listed; other root sessions are isolated.
+    let active = store.list_egress_declassification_grants("root-list")?;
+    assert_eq!(active.len(), 2);
+    assert!(store
+        .list_egress_declassification_grants("root-other")?
+        .is_empty());
+
+    // target_a is authorized before revoke.
+    assert!(store.egress_declassification_allows(
+        &target_a,
+        Sink::Network,
+        "root-list/curator",
+        "root-list",
+    )?);
+
+    // #961's host-scoped revoke closes only the matching host grant.
+    let revoked = store.revoke_egress_declassification_grants(
+        "root-list",
+        Some("example.com"),
+        "operator live revoke",
+    )?;
+    assert_eq!(revoked, 1, "host-scoped revoke hits exactly one grant");
+
+    // Enforcement fail-closes on the revoked grant; the sibling stays active.
+    assert!(!store.egress_declassification_allows(
+        &target_a,
+        Sink::Network,
+        "root-list/curator",
+        "root-list",
+    )?);
+    assert!(store.egress_declassification_allows(
+        &target_b,
+        Sink::Network,
+        "root-list/curator",
+        "root-list",
+    )?);
+
+    // Re-list drops the revoked row (the audit row stays in the table).
+    let active = store.list_egress_declassification_grants("root-list")?;
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].target, target_b);
+    Ok(())
+}
