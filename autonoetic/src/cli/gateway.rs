@@ -3324,6 +3324,19 @@ pub struct EgressAuditFields {
     pub included_count: Option<u64>,
     pub violation_count: Option<u64>,
     pub payload_digest: Option<String>,
+    /// `egress.boundary_refused` — sandbox / web / hooks / mcp / ofp / compression.
+    pub surface: Option<String>,
+    pub label_name: Option<String>,
+    pub reason: Option<String>,
+    pub envelope_count: Option<u64>,
+    /// Compression-only refusal metadata.
+    pub preset_class: Option<String>,
+    pub fallback: Option<String>,
+    pub source_id_count: Option<u64>,
+    /// `egress.declassified` grant metadata.
+    pub allowed_sink: Option<String>,
+    pub declass_scope: Option<String>,
+    pub declass_target: Option<String>,
 }
 
 /// One turn's worth of egress events, in event-seq order.
@@ -3340,6 +3353,7 @@ pub struct EgressAuditReport {
     pub turns: Vec<EgressAuditTurn>,
     pub total_withheld: u64,
     pub total_violations: u64,
+    pub total_boundary_refusals: u64,
 }
 
 /// Pure rendering: derive the structured audit report from a set of egress
@@ -3364,6 +3378,7 @@ pub fn build_egress_audit(
 
     let mut total_withheld = 0u64;
     let mut total_violations = 0u64;
+    let mut total_boundary_refusals = 0u64;
     let mut turns: Vec<EgressAuditTurn> = Vec::new();
 
     for (turn_id, mut evs) in by_turn {
@@ -3377,6 +3392,12 @@ pub fn build_egress_audit(
                 .unwrap_or(serde_json::Value::Null);
             let get = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
             let get_u = |k: &str| payload.get(k).and_then(|v| v.as_u64());
+            let array_len = |k: &str| {
+                payload
+                    .get(k)
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len() as u64)
+            };
             let preset = get("preset").or_else(|| get("model"));
             let withheld_count = get_u("withheld_count");
             let violation_count = get_u("violation_count");
@@ -3391,9 +3412,21 @@ pub fn build_egress_audit(
                     total_violations += v;
                 }
             }
+            if ev.action == "egress.boundary_refused" {
+                total_boundary_refusals += 1;
+            }
+            let declass_target = payload
+                .get("target")
+                .and_then(|t| t.get("value").and_then(|x| x.as_str()).map(str::to_string))
+                .or_else(|| ev.target.clone());
+            let allowed_sink = payload.get("allowed_sink").and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.get("kind").and_then(|k| k.as_str()).map(str::to_string))
+            });
             let fields = EgressAuditFields {
                 tool_call_id: get("tool_call_id"),
-                tool_name: get("tool_name"),
+                tool_name: get("tool_name").or_else(|| get("tool")),
                 target_sink: get("target_sink"),
                 preset,
                 indication: get("indication"),
@@ -3402,6 +3435,16 @@ pub fn build_egress_audit(
                 included_count: get_u("included_count"),
                 violation_count,
                 payload_digest: get("payload_digest"),
+                surface: get("surface"),
+                label_name: get("label_name").or_else(|| get("band_label_name")),
+                reason: get("reason"),
+                envelope_count: array_len("envelope_ids"),
+                preset_class: get("preset_class"),
+                fallback: get("fallback"),
+                source_id_count: array_len("source_ids"),
+                allowed_sink,
+                declass_scope: get("scope"),
+                declass_target,
             };
             rows.push(EgressAuditRow {
                 action: ev.action.clone(),
@@ -3416,6 +3459,7 @@ pub fn build_egress_audit(
         turns,
         total_withheld,
         total_violations,
+        total_boundary_refusals,
     }
 }
 
@@ -3483,6 +3527,67 @@ pub fn print_egress_audit(report: &EgressAuditReport) {
                         "    {RED}{BOLD}‼ assertion violation: {tc} (digest {digest}) — fail-closed{RESET}"
                     );
                 }
+                "egress.boundary_refused" => {
+                    let surface = f.surface.as_deref().unwrap_or("?");
+                    let label = f.label_name.as_deref().unwrap_or("?");
+                    let reason = f.reason.as_deref().unwrap_or("");
+                    let envs = f.envelope_count.unwrap_or(0);
+                    let env_tag = if envs > 0 {
+                        format!(" {DIM}({envs} envelope(s)){RESET}")
+                    } else {
+                        String::new()
+                    };
+                    match surface {
+                        "compression" => {
+                            let preset_class = f.preset_class.as_deref().unwrap_or("?");
+                            let fallback = f.fallback.as_deref().unwrap_or("?");
+                            let sources = f.source_id_count.unwrap_or(0);
+                            println!(
+                                "  {YELLOW}⊘ boundary refused ({surface}): band={label}, preset={preset_class}{RESET}{env_tag}"
+                            );
+                            if sources > 0 {
+                                println!("    {DIM}{sources} source id(s){RESET}");
+                            }
+                            if !reason.is_empty() {
+                                println!("    {DIM}{reason}{RESET}");
+                            }
+                            println!("    {DIM}fallback: {fallback}{RESET}");
+                        }
+                        "sandbox" | "web" | "hooks" | "mcp" | "ofp" => {
+                            let tool = f
+                                .tool_name
+                                .as_deref()
+                                .map(|t| format!(" {DIM}tool={t}{RESET}"))
+                                .unwrap_or_default();
+                            println!(
+                                "  {YELLOW}⊘ boundary refused ({surface}): label={label}{RESET}{tool}{env_tag}"
+                            );
+                            if !reason.is_empty() {
+                                println!("    {DIM}{reason}{RESET}");
+                            }
+                        }
+                        other => {
+                            println!(
+                                "  {YELLOW}⊘ boundary refused ({other}): label={label}{RESET}{env_tag}"
+                            );
+                            if !reason.is_empty() {
+                                println!("    {DIM}{reason}{RESET}");
+                            }
+                        }
+                    }
+                }
+                "egress.declassified" => {
+                    let sink = f.allowed_sink.as_deref().unwrap_or("?");
+                    let target = f.declass_target.as_deref().unwrap_or("?");
+                    let scope = f.declass_scope.as_deref().unwrap_or("?");
+                    let reason = f.reason.as_deref().unwrap_or("");
+                    println!(
+                        "  {BOLD}✓ declassified: {target} → sink={sink} (scope={scope}){RESET}"
+                    );
+                    if !reason.is_empty() {
+                        println!("    {DIM}{reason}{RESET}");
+                    }
+                }
                 _ => {
                     println!("  {DIM}• {}{RESET}", row.action);
                 }
@@ -3493,8 +3598,8 @@ pub fn print_egress_audit(report: &EgressAuditReport) {
 
     println!("{DIM}───{RESET}");
     println!(
-        "{BOLD}Total: {} envelope(s) withheld, {} assertion violation(s){RESET}",
-        report.total_withheld, report.total_violations
+        "{BOLD}Total: {} envelope(s) withheld, {} assertion violation(s), {} boundary refusal(s){RESET}",
+        report.total_withheld, report.total_violations, report.total_boundary_refusals
     );
     if report.total_violations > 0 {
         println!(
@@ -3534,6 +3639,7 @@ mod egress_audit_tests {
         assert!(report.turns.is_empty());
         assert_eq!(report.total_withheld, 0);
         assert_eq!(report.total_violations, 0);
+        assert_eq!(report.total_boundary_refusals, 0);
     }
 
     #[test]
@@ -3622,6 +3728,145 @@ mod egress_audit_tests {
         assert_eq!(report.total_violations, 1, "must not double-count the mirror event");
         // Both rows are still rendered (the audit shows both); only the totals dedupe.
         assert_eq!(report.turns[0].rows.len(), 2);
+    }
+
+    #[test]
+    fn boundary_refused_surfaces_extracted_and_counted() {
+        let events = vec![
+            ev(
+                "egress.boundary_refused",
+                Some("turn-1"),
+                1,
+                serde_json::json!({
+                    "surface": "sandbox",
+                    "label_name": "local_only",
+                    "envelope_ids": ["env_1"],
+                    "reason": "session egress taint excludes Network",
+                }),
+            ),
+            ev(
+                "egress.boundary_refused",
+                Some("turn-2"),
+                2,
+                serde_json::json!({
+                    "surface": "web",
+                    "label_name": "local_only",
+                    "envelope_ids": [],
+                    "reason": "network egress refused",
+                }),
+            ),
+            ev(
+                "egress.boundary_refused",
+                Some("turn-3"),
+                3,
+                serde_json::json!({
+                    "surface": "compression",
+                    "band_label_name": "local_only",
+                    "preset_class": "remote",
+                    "source_ids": ["msg_1", "msg_2"],
+                    "reason": "band ineligible for remote preset",
+                    "fallback": "token_budget_truncation",
+                }),
+            ),
+            ev(
+                "egress.boundary_refused",
+                Some("turn-4"),
+                4,
+                serde_json::json!({
+                    "surface": "mcp",
+                    "label_name": "local_only",
+                    "envelope_ids": [],
+                    "reason": "argument egress labels exclude Network",
+                }),
+            ),
+            ev(
+                "egress.boundary_refused",
+                Some("turn-5"),
+                5,
+                serde_json::json!({
+                    "surface": "ofp",
+                    "label_name": "local_only",
+                    "envelope_ids": [],
+                    "reason": "session egress label excludes FederatedAgent",
+                }),
+            ),
+            ev(
+                "egress.boundary_refused",
+                Some("turn-6"),
+                6,
+                serde_json::json!({
+                    "surface": "hooks",
+                    "label_name": "local_only",
+                    "envelope_ids": [],
+                    "reason": "hook delivery refused",
+                }),
+            ),
+        ];
+        let report = build_egress_audit("sess", &events);
+        assert_eq!(report.total_boundary_refusals, 6);
+        let sandbox = report.turns[0].rows[0].fields.clone();
+        assert_eq!(sandbox.surface.as_deref(), Some("sandbox"));
+        assert_eq!(sandbox.label_name.as_deref(), Some("local_only"));
+        assert_eq!(sandbox.envelope_count, Some(1));
+        let compression = report.turns[2].rows[0].fields.clone();
+        assert_eq!(compression.surface.as_deref(), Some("compression"));
+        assert_eq!(compression.label_name.as_deref(), Some("local_only"));
+        assert_eq!(compression.preset_class.as_deref(), Some("remote"));
+        assert_eq!(compression.source_id_count, Some(2));
+        assert_eq!(compression.fallback.as_deref(), Some("token_budget_truncation"));
+    }
+
+    #[test]
+    fn declassified_fields_extracted() {
+        let events = vec![ev(
+            "egress.declassified",
+            Some("turn-1"),
+            1,
+            serde_json::json!({
+                "target": {"kind": "source_pattern", "value": "session:root-1"},
+                "allowed_sink": "network",
+                "scope": "root_session",
+                "reason": "web_fetch network egress under session egress taint (RFC §8)",
+            }),
+        )];
+        let report = build_egress_audit("sess", &events);
+        let fields = &report.turns[0].rows[0].fields;
+        assert_eq!(fields.allowed_sink.as_deref(), Some("network"));
+        assert_eq!(fields.declass_scope.as_deref(), Some("root_session"));
+        assert_eq!(
+            fields.declass_target.as_deref(),
+            Some("session:root-1")
+        );
+    }
+
+    #[test]
+    fn print_runs_without_panic_on_boundary_refusals() {
+        let events = vec![
+            ev(
+                "egress.boundary_refused",
+                Some("t1"),
+                1,
+                serde_json::json!({
+                    "surface": "sandbox",
+                    "label_name": "local_only",
+                    "envelope_ids": [],
+                    "reason": "taint excludes Network",
+                }),
+            ),
+            ev(
+                "egress.declassified",
+                Some("t1"),
+                2,
+                serde_json::json!({
+                    "target": {"kind": "source_pattern", "value": "session:root"},
+                    "allowed_sink": "network",
+                    "scope": "root_session",
+                    "reason": "operator widen",
+                }),
+            ),
+        ];
+        let report = build_egress_audit("sess", &events);
+        print_egress_audit(&report);
     }
 
     #[test]

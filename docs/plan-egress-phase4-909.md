@@ -216,8 +216,5 @@ fn resolve_session_egress_taint(
 
 ## Immediate next step
 
-1. Align landed slice-2 sandbox code with declassification semantics (grant + `egress.declassified`; boundary fail-closed).
-2. Land / PR **slice 1 + sandbox declass fix**, then **slice 2b** (web + hooks).
-3. Continue 3 → 4 → 5 → 6 → 8.
-
-No constitution / enforcement-register changes in Phase 4 (clause remains Phase 5 #910).
+Phase 4 slices 0–8 are complete. Constitution / enforcement-register changes
+remain **Phase 5 #910**.
