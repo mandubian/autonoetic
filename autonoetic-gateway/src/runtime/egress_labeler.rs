@@ -258,6 +258,7 @@ impl EgressLabeler {
         self.with_session_policy(&EgressSessionPolicy {
             rules: session_rules,
             default_label: None,
+            provider_constraint: None,
         })
     }
 
@@ -1641,9 +1642,15 @@ pub struct PresetCandidate {
 /// itself is ineligible (prefer `local`, then stable by name), or `None` when
 /// the primary is already eligible or nothing is eligible. `primary_eligible`
 /// and `batch` complete the `egress.provider_selected` payload.
+///
+/// `batch` is the **effective** batch: when the session policy declares a
+/// `provider_constraint` (RFC §5.4 rung 1), the input batch is intersected
+/// with the constraint's label (e.g. `local_only`), so a clean batch in a
+/// constrained session is still routed — and audited — as restricted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressRoutingPlan {
     pub batch: EgressLabel,
+    pub provider_constraint: Option<autonoetic_types::egress::ProviderConstraint>,
     pub primary_eligible: bool,
     pub eligible: Vec<String>,
     pub reroute_to: Option<PresetCandidate>,
@@ -1659,9 +1666,14 @@ impl EgressRoutingPlan {
 }
 
 /// Plan taint-following routing for one completion (RFC §5.3), a pure function
-/// of (batch, primary class, configured presets).
+/// of (batch, primary class, configured presets, session provider constraint).
 ///
-/// - An unrestricted batch is a fast no-op: primary eligible, no reroute.
+/// - An unrestricted batch with no constraint is a fast no-op: primary
+///   eligible, no reroute.
+/// - A `provider_constraint` (RFC §5.4 rung 1) intersects the batch with the
+///   constraint's label first: `local_only` makes every batch — clean ones
+///   included — ineligible for non-local presets. Provider *selection* itself
+///   is constrained, not just content.
 /// - Otherwise the primary is eligible iff its own sink is cleared; when it is
 ///   not, an eligible preset is chosen to reroute to — **preferring `local`
 ///   presets**, then stable-sorted by name for determinism.
@@ -1674,11 +1686,23 @@ pub fn plan_taint_following_route(
     batch: &EgressLabel,
     primary_class: Option<EgressClass>,
     presets: &[PresetCandidate],
+    provider_constraint: Option<autonoetic_types::egress::ProviderConstraint>,
 ) -> EgressRoutingPlan {
+    // RFC §5.4 rung 1: a provider constraint narrows the effective batch so
+    // non-local presets are ineligible even for clean turns.
+    let constrained_batch;
+    let batch = match provider_constraint {
+        Some(autonoetic_types::egress::ProviderConstraint::LocalOnly) => {
+            constrained_batch = batch.clone().restrict(&EgressLabel::local_only());
+            &constrained_batch
+        }
+        None => batch,
+    };
     // Fast path: an unrestricted batch admits everything — no filtering needed.
     if batch.is_unrestricted() {
         return EgressRoutingPlan {
             batch: batch.clone(),
+            provider_constraint,
             primary_eligible: true,
             eligible: Vec::new(),
             reroute_to: None,
@@ -1711,6 +1735,7 @@ pub fn plan_taint_following_route(
 
     EgressRoutingPlan {
         batch: batch.clone(),
+        provider_constraint,
         primary_eligible,
         eligible,
         reroute_to,
@@ -1819,6 +1844,7 @@ pub fn emit_provider_selected(
     let payload = serde_json::json!({
         "batch_label": serde_json::to_value(&plan.batch).unwrap_or(serde_json::Value::Null),
         "batch_label_name": label_display_name(&plan.batch),
+        "provider_constraint": plan.provider_constraint.map(|c| c.as_str()),
         "primary_eligible": plan.primary_eligible,
         "eligible_presets": plan.eligible,
         "chosen_preset": chosen_preset,
@@ -2019,6 +2045,7 @@ mod tests {
         let l = EgressLabeler::from_config(&c).with_session_policy(&EgressSessionPolicy {
             rules: vec![],
             default_label: Some(NamedEgressLabel::NoRemoteModel),
+            provider_constraint: None,
         });
         assert_eq!(l.resolve_label("anything", None).label, EgressLabel::local_only());
 
@@ -2028,6 +2055,7 @@ mod tests {
             &EgressSessionPolicy {
                 rules: vec![],
                 default_label: Some(NamedEgressLabel::LocalOnly),
+                provider_constraint: None,
             },
         );
         assert!(!l2.is_inert(), "a restricting session default cancels the fast path");
@@ -2639,6 +2667,7 @@ mod tests {
             &EgressLabel::unrestricted(),
             Some(EgressClass::Remote),
             &[cand("local", Some(EgressClass::Local))],
+            None,
         );
         assert!(plan.primary_eligible);
         assert!(plan.reroute_to.is_none());
@@ -2658,6 +2687,7 @@ mod tests {
                 cand("sonnet", Some(EgressClass::Remote)),
                 cand("local", Some(EgressClass::Local)),
             ],
+            None,
         );
         assert!(plan.primary_eligible);
         assert!(plan.reroute_to.is_none());
@@ -2674,6 +2704,7 @@ mod tests {
                 cand("sonnet", Some(EgressClass::Remote)),
                 cand("ollama", Some(EgressClass::Local)),
             ],
+            None,
         );
         assert!(!plan.primary_eligible);
         assert_eq!(plan.eligible, vec!["ollama".to_string()]);
@@ -2687,6 +2718,7 @@ mod tests {
             &EgressLabel::local_only(),
             Some(EgressClass::Local),
             &[cand("ollama", Some(EgressClass::Local))],
+            None,
         );
         assert!(plan.primary_eligible);
         assert!(plan.reroute_to.is_none());
@@ -2700,6 +2732,7 @@ mod tests {
             &EgressLabel::local_only(),
             Some(EgressClass::Remote),
             &[cand("sonnet", Some(EgressClass::Remote))],
+            None,
         );
         assert!(!plan.primary_eligible);
         assert!(plan.eligible.is_empty());
@@ -2718,6 +2751,7 @@ mod tests {
                 cand("zeta-local", Some(EgressClass::Local)),
                 cand("alpha-local", Some(EgressClass::Local)),
             ],
+            None,
         );
         assert_eq!(
             plan.reroute_to.as_ref().map(|c| c.name.as_str()),
@@ -2741,6 +2775,7 @@ mod tests {
                 cand("sonnet", Some(EgressClass::Remote)),
                 cand("ollama", Some(EgressClass::Local)),
             ],
+            None,
         );
         assert!(!plan.primary_eligible);
         assert_eq!(plan.reroute_to.as_ref().map(|c| c.name.as_str()), Some("ollama"));

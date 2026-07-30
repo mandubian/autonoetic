@@ -94,12 +94,22 @@ fn handle_egress_policy(
             session_id,
             rules,
             default_label,
+            provider_constraint,
             set_by,
         } => {
             anyhow::ensure!(
-                !rules.is_empty() || default_label.is_some(),
-                "nothing to declare — pass at least one --rule or a --default-label"
+                !rules.is_empty() || default_label.is_some() || provider_constraint.is_some(),
+                "nothing to declare — pass at least one --rule, a --default-label, or --provider-constraint"
             );
+            let provider_constraint = match provider_constraint.as_deref() {
+                Some("local_only") => {
+                    Some(autonoetic_types::egress::ProviderConstraint::LocalOnly)
+                }
+                Some(other) => anyhow::bail!(
+                    "unknown provider constraint '{other}'; expected `local_only`"
+                ),
+                None => None,
+            };
             let policy = autonoetic_types::egress::EgressSessionPolicy {
                 rules: rules
                     .iter()
@@ -109,6 +119,7 @@ fn handle_egress_policy(
                     Some(l) => Some(parse_named_label(l)?),
                     None => None,
                 },
+                provider_constraint,
             };
             let root = root_session_id(session_id).to_string();
             let stored = store.set_egress_session_policy(&root, &policy, set_by)?;

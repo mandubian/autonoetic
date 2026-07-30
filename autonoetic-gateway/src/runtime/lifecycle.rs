@@ -1227,6 +1227,7 @@ impl AgentExecutor {
         fallback_chain: &[(String, String, String)],
         session_id: &str,
         turn_id: &str,
+        provider_constraint: Option<autonoetic_types::egress::ProviderConstraint>,
     ) -> EgressRoutingSelection {
         use crate::runtime::egress_labeler as el;
         let presets = self.config.as_ref().map(|c| &c.llm_presets);
@@ -1249,17 +1250,19 @@ impl AgentExecutor {
                     .collect()
             })
             .unwrap_or_default();
-        let plan = el::plan_taint_following_route(batch, primary_class, &candidates);
+        let plan =
+            el::plan_taint_following_route(batch, primary_class, &candidates, provider_constraint);
 
         // Filter the failover chain to eligible presets: a tainted turn must
         // never fail over into an ineligible (e.g. all-indications remote)
-        // context — worse than refusing (RFC §5.3).
+        // context — worse than refusing (RFC §5.3). Uses the plan's
+        // **effective** batch so a provider constraint filters the chain too.
         let mut fallback_skipped: Vec<String> = Vec::new();
         let filtered_fallback: Vec<(String, String, String)> = fallback_chain
             .iter()
             .filter(|(preset, _, _)| {
                 let class = presets.and_then(|m| m.get(preset)).and_then(|p| p.egress_class);
-                let ok = el::preset_batch_eligible(batch, class);
+                let ok = el::preset_batch_eligible(&plan.batch, class);
                 if !ok {
                     fallback_skipped.push(preset.clone());
                 }
@@ -3122,8 +3125,24 @@ impl AgentExecutor {
                             .and_then(|c| c.routing_preset.clone())
                     })
                     .unwrap_or_else(|| routed_model.clone());
-                let (primary_egress_driver, egress_effective_class, fallback_chain) =
-                    if batch_taint.is_unrestricted() {
+                let (primary_egress_driver, egress_effective_class, fallback_chain) = {
+                    // RFC §5.4 rung 1: a session-policy provider constraint
+                    // (`local_only`) restricts provider *selection* even for
+                    // clean batches, so the unrestricted fast path no longer
+                    // applies. One indexed store read per completion.
+                    let provider_constraint = self
+                        .gateway_store
+                        .as_ref()
+                        .and_then(|store| {
+                            store
+                                .get_egress_session_policy(
+                                    crate::runtime::content_store::root_session_id(&session_id),
+                                )
+                                .ok()
+                                .flatten()
+                        })
+                        .and_then(|stored| stored.policy.provider_constraint);
+                    if batch_taint.is_unrestricted() && provider_constraint.is_none() {
                         (None, primary_egress_class, fallback_chain)
                     } else {
                         let sel = self.plan_egress_routing(
@@ -3133,6 +3152,7 @@ impl AgentExecutor {
                             &fallback_chain,
                             &session_id,
                             &turn_id,
+                            provider_constraint,
                         );
                         if let Some(reason) = sel.refuse_reason {
                             // No eligible provider for a tainted batch — refuse
@@ -3153,7 +3173,8 @@ impl AgentExecutor {
                             actual_model = m;
                         }
                         (sel.primary_driver, sel.effective_class, sel.fallback_chain)
-                    };
+                    }
+                };
 
                 let mut last_err = None;
                 if let Err(e) = self

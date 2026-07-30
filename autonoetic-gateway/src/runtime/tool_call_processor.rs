@@ -271,6 +271,7 @@ impl<'a> ToolCallProcessor<'a> {
                 labeler.with_session_policy(&autonoetic_types::egress::EgressSessionPolicy {
                     rules: Vec::new(),
                     default_label: Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly),
+                    provider_constraint: None,
                 })
             }
         }
@@ -2185,6 +2186,7 @@ mod tests {
                         label: autonoetic_types::egress::EgressLabel::local_only(),
                     }],
                     default_label: None,
+                    provider_constraint: None,
                 },
                 "operator:test",
             )
@@ -2237,6 +2239,7 @@ mod tests {
                         label: autonoetic_types::egress::EgressLabel::local_only(),
                     }],
                     default_label: None,
+                    provider_constraint: None,
                 },
                 "operator:test",
             )

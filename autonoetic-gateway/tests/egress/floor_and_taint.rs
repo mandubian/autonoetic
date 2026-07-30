@@ -148,6 +148,7 @@ fn floor_persists_across_session_policy_merge() -> anyhow::Result<()> {
         .with_session_policy(&autonoetic_types::egress::EgressSessionPolicy {
             rules: vec![rule("slack.*", NamedEgressLabel::NoRemoteModel)],
             default_label: None,
+            provider_constraint: None,
         });
 
     // The floor still applies to unmentioned sources.

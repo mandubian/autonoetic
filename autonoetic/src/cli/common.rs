@@ -357,6 +357,11 @@ pub enum EgressPolicyCommands {
         /// Can only restrict the gateway-wide default.
         #[arg(long)]
         default_label: Option<String>,
+        /// Constrain provider *selection* for the whole session tree
+        /// (RFC §5.4 rung 1): `local_only` routes every completion — clean
+        /// batches included — to `egress_class: local` presets.
+        #[arg(long, value_name = "local_only")]
+        provider_constraint: Option<String>,
         /// Attribution recorded on the declaration (I-6).
         #[arg(long, default_value = "operator:cli")]
         set_by: String,

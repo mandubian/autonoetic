@@ -199,7 +199,7 @@ fn resolve_session_egress_taint(
 ## Slice 7 — Compartment polish + docs follow-up
 
 - Document data-owner pattern: resident agent + `local_only` + `agent_message` replies.
-- Optional: `provider_constraint` on `EgressSessionPolicy`.
+- ~~Optional: `provider_constraint` on `EgressSessionPolicy`.~~ **Landed** (follow-up): `provider_constraint: local_only` constrains provider *selection* for the whole session tree, exposed via `session egress-policy set --provider-constraint local_only`; compartment acceptance in `tests/egress/compartment.rs`.
 - Update Phase 4 egress visual maps + `ARCHITECTURE.md` / `separation-of-powers.md` egress sections for new surfaces (`egress.declassified`, web/hooks/ofp/mcp/sandbox `boundary_refused`).
 
 **PR title:** `docs(egress): data-owner compartment + Phase 4 surface maps (#909 slice 7)`

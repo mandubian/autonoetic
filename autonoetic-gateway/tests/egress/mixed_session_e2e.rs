@@ -201,6 +201,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         &EgressLabel::unrestricted(),
         Some(EgressClass::Remote),
         &presets,
+        None,
     );
     assert!(clean_plan.primary_eligible);
     assert!(clean_plan.reroute_to.is_none());
@@ -244,6 +245,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         &EgressLabel::local_only(),
         Some(EgressClass::Remote),
         &presets,
+        None,
     );
     assert!(!tainted_plan.primary_eligible);
     assert_eq!(
@@ -268,6 +270,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         &EgressLabel::unrestricted(),
         Some(EgressClass::Remote),
         &presets,
+        None,
     );
     assert!(clean_again.primary_eligible);
     emit_provider_selected(

@@ -9,6 +9,7 @@
 //! process is safe under both `cargo test` and nextest).
 
 mod chokepoint_canary;
+mod compartment;
 mod compression_eligibility;
 mod floor_and_taint;
 mod mixed_session_e2e;
