@@ -1130,9 +1130,114 @@ pub fn require_boundary_session_taint(
 pub fn session_network_declass_target(
     root_session_id: &str,
 ) -> autonoetic_types::egress::EgressDeclassificationTarget {
+    session_egress_declass_target(root_session_id)
+}
+
+/// Session-wide declassification target (`session:<root>`), sink-agnostic.
+///
+/// Host-scoped network grants use
+/// [`session_host_network_declass_target`]; this is the session-wide shape an
+/// explicit `EgressDeclassify` approval materializes (RFC §8) — for
+/// `Sink::Network`, and for `Sink::RemoteModel` (the routing-plane widening).
+pub fn session_egress_declass_target(
+    root_session_id: &str,
+) -> autonoetic_types::egress::EgressDeclassificationTarget {
     autonoetic_types::egress::EgressDeclassificationTarget::SourcePattern(format!(
         "session:{root_session_id}"
     ))
+}
+
+/// Whether an active (non-revoked, non-expired) session-wide declassification
+/// grant allows `sink` for this session. Use-time lookup, never cached.
+pub fn session_sink_declassified(
+    store: &GatewayStore,
+    session_id: &str,
+    root_session_id: &str,
+    sink: Sink,
+) -> bool {
+    store
+        .egress_declassification_allows(
+            &session_egress_declass_target(root_session_id),
+            sink,
+            session_id,
+            root_session_id,
+        )
+        .unwrap_or(false)
+}
+
+/// File (or reuse) a pending `EgressDeclassify` approval offering the operator
+/// a one-approve path out of an `egress_no_eligible_provider` refusal
+/// (RFC §5.3 / §8): the session has no preset cleared for the tainted batch,
+/// so the offer is a session-wide declassification to `RemoteModel`.
+///
+/// Dedup: an identical pending request (same target × sink under the root) is
+/// reused, so a session retrying a refused turn doesn't flood the pending
+/// list. Returns the request id (new or existing); `None` when filing fails
+/// (e.g. the approval flood cap rejects it — the refusal text then just omits
+/// the offer).
+pub fn file_declassify_offer(
+    store: &GatewayStore,
+    config: &autonoetic_types::config::GatewayConfig,
+    session_id: &str,
+    root_session_id: &str,
+    agent_id: &str,
+    batch: &EgressLabel,
+) -> Option<String> {
+    use autonoetic_types::background::{ApprovalRequest, ScheduledAction};
+
+    let target = session_egress_declass_target(root_session_id);
+    if let Ok(pending) = store.get_pending_approvals_for_root(root_session_id) {
+        for req in &pending {
+            if let ScheduledAction::EgressDeclassify {
+                target: t,
+                allowed_sink,
+                ..
+            } = &req.action
+            {
+                if *t == target && *allowed_sink == Sink::RemoteModel {
+                    return Some(req.request_id.clone());
+                }
+            }
+        }
+    }
+
+    let reason = format!(
+        "turn refused (egress_no_eligible_provider): this turn's new data is labeled {} and no \
+         configured preset is cleared for it. Approving declassifies this root session to \
+         RemoteModel (session-wide); reject to keep it local-only.",
+        label_display_name(batch)
+    );
+    let action = ScheduledAction::EgressDeclassify {
+        target,
+        allowed_sink: Sink::RemoteModel,
+        reason: reason.clone(),
+        payload: None,
+    };
+    let request_id = autonoetic_types::id_format::short_random_id("apr-");
+    let mut request = ApprovalRequest {
+        request_id: request_id.clone(),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.to_string(),
+        root_session_id: Some(root_session_id.to_string()),
+        workflow_id: None,
+        task_id: None,
+        approval_level: crate::scheduler::approval::resolve_approval_level(config, &action),
+        action,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        reason: Some(reason),
+        evidence_ref: None,
+        decision_reason: None,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut request).ok()?;
+    Some(request_id)
 }
 
 /// Whether an active (non-revoked, non-expired) declassification grant allows
@@ -1840,6 +1945,7 @@ pub fn emit_provider_selected(
     chosen_preset: Option<&str>,
     fallback_skipped: &[String],
     rerouted: bool,
+    declassified_remote: bool,
 ) {
     let payload = serde_json::json!({
         "batch_label": serde_json::to_value(&plan.batch).unwrap_or(serde_json::Value::Null),
@@ -1851,6 +1957,7 @@ pub fn emit_provider_selected(
         "rerouted": rerouted,
         "fallback_skipped": fallback_skipped,
         "no_eligible_provider": chosen_preset.is_none(),
+        "declassified_remote": declassified_remote,
     });
     emit_egress_event(
         store,

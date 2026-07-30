@@ -74,6 +74,7 @@ fn tainted_batch_reroute_is_answerable_from_the_chain() -> anyhow::Result<()> {
         Some("ollama"),
         &["sonnet-fallback".to_string()],
         true,
+        false,
     );
 
     let events = provider_selected_events(&store, "sess-mail");
@@ -118,6 +119,7 @@ fn no_eligible_provider_refusal_is_recorded() -> anyhow::Result<()> {
         &plan,
         None, // refused — no chosen preset
         &[],
+        false,
         false,
     );
 
@@ -191,6 +193,7 @@ fn provider_constraint_local_only_reroutes_clean_batches() -> anyhow::Result<()>
         Some("ollama"),
         &[],
         true,
+        false,
     );
     let events = provider_selected_events(&store, "sess-private");
     assert_eq!(events.len(), 1);

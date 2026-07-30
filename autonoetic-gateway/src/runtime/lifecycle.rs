@@ -1252,26 +1252,55 @@ impl AgentExecutor {
                     .collect()
             })
             .unwrap_or_default();
-        let plan =
+        let mut plan =
             el::plan_taint_following_route(batch, primary_class, &candidates, provider_constraint);
+
+        // RFC §8 consumption: an active session-wide declassification to
+        // RemoteModel lifts the routing restriction — the operator explicitly
+        // widened this session's LLM egress, so every buildable preset is
+        // eligible and the failover chain stays whole. A `provider_constraint`
+        // (RFC §5.4 rung 1) outranks the grant: an operator who pinned the room
+        // local wins over an earlier declassification until they clear it.
+        // Host-scoped grants never apply to model routing, and per-envelope
+        // grants are a chokepoint-level concern (not yet consulted).
+        let root_session = crate::runtime::content_store::root_session_id(session_id);
+        let declassified_remote = provider_constraint.is_none()
+            && self.gateway_store.as_ref().is_some_and(|store| {
+                el::session_sink_declassified(
+                    store,
+                    session_id,
+                    root_session,
+                    autonoetic_types::egress::Sink::RemoteModel,
+                )
+            });
+        if declassified_remote && !plan.primary_eligible {
+            plan.primary_eligible = true;
+            plan.reroute_to = None;
+            plan.eligible = candidates.iter().map(|c| c.name.clone()).collect();
+        }
 
         // Filter the failover chain to eligible presets: a tainted turn must
         // never fail over into an ineligible (e.g. all-indications remote)
         // context — worse than refusing (RFC §5.3). Uses the plan's
-        // **effective** batch so a provider constraint filters the chain too.
+        // **effective** batch so a provider constraint filters the chain too;
+        // skipped entirely when the session is declassified to remote.
         let mut fallback_skipped: Vec<String> = Vec::new();
-        let filtered_fallback: Vec<(String, String, String)> = fallback_chain
-            .iter()
-            .filter(|(preset, _, _)| {
-                let class = presets.and_then(|m| m.get(preset)).and_then(|p| p.egress_class);
-                let ok = el::preset_batch_eligible(&plan.batch, class);
-                if !ok {
-                    fallback_skipped.push(preset.clone());
-                }
-                ok
-            })
-            .cloned()
-            .collect();
+        let filtered_fallback: Vec<(String, String, String)> = if declassified_remote {
+            fallback_chain.to_vec()
+        } else {
+            fallback_chain
+                .iter()
+                .filter(|(preset, _, _)| {
+                    let class = presets.and_then(|m| m.get(preset)).and_then(|p| p.egress_class);
+                    let ok = el::preset_batch_eligible(&plan.batch, class);
+                    if !ok {
+                        fallback_skipped.push(preset.clone());
+                    }
+                    ok
+                })
+                .cloned()
+                .collect()
+        };
 
         let emit = |chosen: Option<&str>, rerouted: bool| {
             if let Some(store) = self.gateway_store.as_ref() {
@@ -1284,6 +1313,7 @@ impl AgentExecutor {
                     chosen,
                     &fallback_skipped,
                     rerouted,
+                    declassified_remote,
                 );
             }
         };
@@ -1291,6 +1321,34 @@ impl AgentExecutor {
         // No eligible provider for a tainted batch → refuse with a path forward.
         if plan.no_eligible_provider() {
             emit(None, false);
+            // RFC §5.3's path forward, made concrete: file (or reuse) a
+            // pending EgressDeclassify request so the operator's way out is a
+            // single approval. Skipped when no buildable preset exists at all
+            // (declassification cannot help then).
+            let offer = if candidates.is_empty() {
+                None
+            } else {
+                self.gateway_store.as_ref().and_then(|store| {
+                    self.config.as_ref().and_then(|cfg| {
+                        el::file_declassify_offer(
+                            store,
+                            cfg,
+                            session_id,
+                            root_session,
+                            &self.manifest.agent.id,
+                            &plan.batch,
+                        )
+                    })
+                })
+            };
+            let offer_note = match &offer {
+                Some(id) => format!(
+                    " A declassification request ({id}) is pending — approve it with \
+                     `autonoetic gateway approvals approve {id}` to run this session on a \
+                     remote preset."
+                ),
+                None => String::new(),
+            };
             return EgressRoutingSelection {
                 primary_driver: None,
                 effective_class: primary_class,
@@ -1299,8 +1357,9 @@ impl AgentExecutor {
                 refuse_reason: Some(format!(
                     "egress_no_eligible_provider: this turn's new data is labeled {} and no \
                      configured LLM preset is cleared for it. Configure a local preset \
-                     (egress_class: local), declassify the specific envelopes, or abort.",
-                    autonoetic_types::egress::label_display_name(batch)
+                     (egress_class: local), declassify the specific envelopes, or abort.{}",
+                    autonoetic_types::egress::label_display_name(batch),
+                    offer_note
                 )),
             };
         }
@@ -2942,6 +3001,28 @@ impl AgentExecutor {
                 .and_then(|e| e.config.context_window_tokens)
                 .or(context_window_resolved);
 
+            // RFC §8: when the operator declassified this session to
+            // RemoteModel, the chokepoint bypass flag rides alongside the
+            // label map — authoritative gateway state, recomputed per request
+            // from the grant table.
+            let declassified_sinks_meta: Option<serde_json::Value> = if self
+                .egress_labels
+                .is_empty()
+            {
+                None
+            } else {
+                self.gateway_store.as_ref().and_then(|store| {
+                    let root = crate::runtime::content_store::root_session_id(&session_id);
+                    crate::runtime::egress_labeler::session_sink_declassified(
+                        store,
+                        &session_id,
+                        root,
+                        autonoetic_types::egress::Sink::RemoteModel,
+                    )
+                    .then(|| serde_json::json!(["remote_model"]))
+                })
+            };
+
             let req = CompletionRequest {
                 model: routed_model.clone(),
                 // Sanitize the wire-format history: strip reasoning content
@@ -2980,7 +3061,8 @@ impl AgentExecutor {
                 // tool-result messages whose label excludes the target sink.
                 // Only attached when labels exist — keeps the common
                 // (unconfigured) case at zero cost (metadata stays None → the
-                // wrapper's fast path fires, no clone).
+                // wrapper's fast path fires, no clone). The declassified-sinks
+                // bypass flag (RFC §8) rides alongside when set.
                 metadata: if self.egress_labels.is_empty() {
                     None
                 } else {
@@ -2989,6 +3071,13 @@ impl AgentExecutor {
                         crate::llm::egress_chokepoint::EGRESS_LABELS_KEY.to_string(),
                         serde_json::to_value(&self.egress_labels).unwrap_or_default(),
                     );
+                    if let Some(v) = &declassified_sinks_meta {
+                        m.insert(
+                            crate::llm::egress_chokepoint::EGRESS_DECLASSIFIED_SINKS_KEY
+                                .to_string(),
+                            v.clone(),
+                        );
+                    }
                     Some(m)
                 },
                 thinking: routed_llm_cfg.thinking.clone(),
@@ -3043,6 +3132,25 @@ impl AgentExecutor {
                         crate::llm::egress_chokepoint::EGRESS_LABELS_KEY.to_string(),
                         serde_json::to_value(&self.egress_labels).unwrap_or_default(),
                     );
+                }
+                // The bypass flag is authoritative gateway state as well:
+                // overwrite whatever the pre-hook left, so a hook can neither
+                // strip the label map nor forge a declassification bypass
+                // (RFC §2.1 — the label plane is gateway-managed).
+                let meta = req.metadata.get_or_insert_with(std::collections::HashMap::new);
+                match &declassified_sinks_meta {
+                    Some(v) => {
+                        meta.insert(
+                            crate::llm::egress_chokepoint::EGRESS_DECLASSIFIED_SINKS_KEY
+                                .to_string(),
+                            v.clone(),
+                        );
+                    }
+                    None => {
+                        meta.remove(
+                            crate::llm::egress_chokepoint::EGRESS_DECLASSIFIED_SINKS_KEY,
+                        );
+                    }
                 }
             }
 

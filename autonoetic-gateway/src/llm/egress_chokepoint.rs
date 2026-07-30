@@ -61,6 +61,14 @@ use crate::llm::{CompletionRequest, CompletionResponse, LlmDriver};
 /// Absent or empty → unconfigured deployment, wrapper is a no-op.
 pub const EGRESS_LABELS_KEY: &str = "__egress_labels";
 
+/// Metadata key: a JSON-serialized `Vec<Sink>` of sinks the operator has
+/// declassified for this session (RFC §8 — a session-wide `EgressDeclassify`
+/// grant). Attached by lifecycle.rs from the grant table — authoritative
+/// gateway state, re-attached/overwritten after the pre-hook so a hook can
+/// neither strip the label map nor forge a bypass. A labeled message whose
+/// label excludes the target sink still passes when that sink is listed here.
+pub const EGRESS_DECLASSIFIED_SINKS_KEY: &str = "__egress_declassified_sinks";
+
 /// Metadata key: a JSON-serialized [`FilterReport`] the wrapper stashes onto
 /// the cloned, filtered request it forwards to the inner driver. This lets
 /// tests and the [`FilterReport::extract`] helper observe what the wrapper did
@@ -112,6 +120,10 @@ pub struct FilterReport {
     pub withheld: Vec<WithheldEntry>,
     /// Tool-result messages whose label permitted the sink (passed through).
     pub included: usize,
+    /// Labeled messages that passed because the operator declassified the
+    /// target sink for this session (RFC §8) — subset of `included`.
+    #[serde(default)]
+    pub declassified: usize,
     /// Assertion violations detected (verbatim echo of withheld content).
     pub violations: Vec<AssertionViolation>,
 }
@@ -205,6 +217,25 @@ impl EgressChokepointDriver {
         Ok(Some(map))
     }
 
+    /// Read the declassified-sink list from a request's metadata. Absent →
+    /// empty (no bypass). Present but malformed → fail closed, same as a
+    /// malformed label map: a corrupt bypass flag on a security boundary is a
+    /// bug or an attack, not silently ignored (RFC §2.2).
+    fn read_declassified_sinks(req: &CompletionRequest) -> anyhow::Result<Vec<Sink>> {
+        let Some(meta) = req.metadata.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(val) = meta.get(EGRESS_DECLASSIFIED_SINKS_KEY) else {
+            return Ok(Vec::new());
+        };
+        serde_json::from_value::<Vec<Sink>>(val.clone()).map_err(|e| {
+            anyhow::anyhow!(
+                "declassified sinks (__egress_declassified_sinks) present but malformed: {e} — \
+                 aborting completion (fail-closed)"
+            )
+        })
+    }
+
     /// Core filter: given a request + label map + target sink, produce a
     /// filtered clone of the request plus a [`FilterReport`]. Pure function of
     /// (request × labels × sink) — RFC §5.2. Exposed for unit testing.
@@ -213,11 +244,16 @@ impl EgressChokepointDriver {
         req: &CompletionRequest,
         labels: &HashMap<String, EgressLabel>,
     ) -> (CompletionRequest, FilterReport) {
+        // Best-effort read: `complete()` already failed closed on a malformed
+        // flag before reaching here; a parse failure in the report-only path
+        // (compute_filter_report) degrades to "no bypass", never to a bypass.
+        let declassified_sinks = Self::read_declassified_sinks(req).unwrap_or_default();
         let mut filtered = req.clone();
         let mut report = FilterReport {
             sink: sink_name(self.sink),
             withheld: Vec::new(),
             included: 0,
+            declassified: 0,
             violations: Vec::new(),
         };
 
@@ -274,6 +310,14 @@ impl EgressChokepointDriver {
             };
             if label.allows(self.sink) {
                 report.included += 1;
+                continue;
+            }
+            // RFC §8: the operator declassified this sink for the session —
+            // the labeled content passes. Counted separately so the audit
+            // trail distinguishes "label allowed" from "grant allowed".
+            if declassified_sinks.contains(&self.sink) {
+                report.included += 1;
+                report.declassified += 1;
                 continue;
             }
             // Withhold: replace content with an indication built from metadata.
@@ -356,6 +400,9 @@ impl LlmDriver for EgressChokepointDriver {
             }
             Some(map) => map,
         };
+        // Fail closed on a malformed bypass flag (RFC §2.2) — same rule as the
+        // label map.
+        Self::read_declassified_sinks(request)?;
         let (filtered, report) = self.filter_request(request, &labels);
         // Fail closed on an outbound-assertion violation (RFC §5.2.3): a
         // withheld payload appearing verbatim in a non-withheld message is a
@@ -945,5 +992,87 @@ mod tests {
             .map(|m| m.content.as_str())
             .collect();
         assert!(body.contains(CANARY), "id-less unlabeled message must pass: {body}");
+    }
+
+    // ── Declassification bypass (RFC §8) ────────────────────────────────────
+
+    fn req_with_labels_and_declass(
+        messages: Vec<Message>,
+        labels: HashMap<String, EgressLabel>,
+        sinks: &[&str],
+    ) -> CompletionRequest {
+        let mut req = req_with_labels(messages, labels);
+        req.metadata.as_mut().unwrap().insert(
+            EGRESS_DECLASSIFIED_SINKS_KEY.to_string(),
+            serde_json::json!(sinks),
+        );
+        req
+    }
+
+    #[tokio::test]
+    async fn declassified_sink_bypasses_withholding() {
+        // A session-wide RemoteModel declassification lets local_only content
+        // reach the remote provider — the operator explicitly widened it.
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let req = req_with_labels_and_declass(
+            vec![tool_msg("tc_secret", CANARY)],
+            labels,
+            &["remote_model"],
+        );
+
+        wrapper.complete(&req).await.unwrap();
+        let caps = inner.captures();
+        assert_eq!(caps.len(), 1);
+        assert!(
+            caps[0].messages[0].content.contains(CANARY),
+            "declassified sink should see the content"
+        );
+        let report = FilterReport::extract(&caps[0]).expect("report stashed");
+        assert!(report.withheld.is_empty());
+        assert_eq!(report.declassified, 1);
+        assert_eq!(report.included, 1);
+    }
+
+    #[tokio::test]
+    async fn declassification_for_other_sink_does_not_bypass() {
+        // A Network declassification must not unwithhold from a remote MODEL.
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let req = req_with_labels_and_declass(
+            vec![tool_msg("tc_secret", CANARY)],
+            labels,
+            &["network"],
+        );
+
+        wrapper.complete(&req).await.unwrap();
+        let body: String = inner.captures()[0]
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect();
+        assert!(!body.contains(CANARY), "network declass must not bypass model filtering");
+        assert!(body.contains("[withheld:"));
+    }
+
+    #[tokio::test]
+    async fn malformed_declassified_sinks_fails_closed() {
+        let inner = Arc::new(CapturingDriver::new());
+        let wrapper = EgressChokepointDriver::new(inner.clone(), Sink::RemoteModel);
+        let mut labels = HashMap::new();
+        labels.insert("tc_secret".to_string(), EgressLabel::local_only());
+        let mut req = req_with_labels(vec![tool_msg("tc_secret", CANARY)], labels);
+        req.metadata.as_mut().unwrap().insert(
+            EGRESS_DECLASSIFIED_SINKS_KEY.to_string(),
+            serde_json::Value::String("not-a-sink-list".to_string()),
+        );
+
+        let result = wrapper.complete(&req).await;
+        assert!(result.is_err(), "malformed bypass flag must fail closed");
+        assert!(inner.captures().is_empty(), "no request forwarded on abort");
     }
 }
