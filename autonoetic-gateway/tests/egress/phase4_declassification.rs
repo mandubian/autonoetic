@@ -355,3 +355,88 @@ fn list_egress_declassification_grants_round_trips_with_host_revoke() -> anyhow:
     assert_eq!(active[0].target, target_b);
     Ok(())
 }
+
+#[test]
+fn session_sink_declassified_tracks_grant_lifecycle() -> anyhow::Result<()> {
+    use autonoetic_gateway::runtime::egress_labeler::{
+        session_egress_declass_target, session_sink_declassified,
+    };
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+    let root = "root-sink";
+    let session = "root-sink/coder";
+
+    // No grant → not declassified.
+    assert!(!session_sink_declassified(&store, session, root, Sink::RemoteModel));
+
+    // Session-wide grant × RemoteModel → declassified…
+    store.insert_egress_declassification_grant(
+        root,
+        session,
+        "coder.default",
+        &session_egress_declass_target(root),
+        Sink::RemoteModel,
+        &GrantScope::RootSession,
+        "operator",
+        &chrono::Utc::now().to_rfc3339(),
+        None,
+        None,
+    )?;
+    assert!(session_sink_declassified(&store, session, root, Sink::RemoteModel));
+    // …but only for that sink — a RemoteModel grant is not a Network grant.
+    assert!(!session_sink_declassified(&store, session, root, Sink::Network));
+
+    // Revoke (--all shape) → closed again.
+    let revoked = store.revoke_egress_declassification_grants(root, None, "test")?;
+    assert_eq!(revoked, 1);
+    assert!(!session_sink_declassified(&store, session, root, Sink::RemoteModel));
+    Ok(())
+}
+
+#[test]
+fn declassify_offer_files_once_and_dedups() -> anyhow::Result<()> {
+    use autonoetic_gateway::runtime::egress_labeler::file_declassify_offer;
+    let tmp = tempfile::tempdir()?;
+    let store = GatewayStore::open(tmp.path())?;
+    let config = GatewayConfig::default();
+    let root = "root-offer";
+    let session = "root-offer/coder";
+
+    let id1 = file_declassify_offer(
+        &store,
+        &config,
+        session,
+        root,
+        "coder.default",
+        &EgressLabel::local_only(),
+    )
+    .expect("offer filed");
+    assert!(id1.starts_with("apr-"));
+
+    // Second refusal reuses the same pending request — no flood.
+    let id2 = file_declassify_offer(
+        &store,
+        &config,
+        session,
+        root,
+        "coder.default",
+        &EgressLabel::local_only(),
+    )
+    .expect("offer reused");
+    assert_eq!(id1, id2);
+
+    let pending = store.get_pending_approvals_for_root(root)?;
+    assert_eq!(pending.len(), 1, "exactly one pending offer");
+    match &pending[0].action {
+        ScheduledAction::EgressDeclassify {
+            target,
+            allowed_sink,
+            ..
+        } => {
+            assert_eq!(target.value(), format!("session:{root}"));
+            assert_eq!(*allowed_sink, Sink::RemoteModel);
+        }
+        other => panic!("expected EgressDeclassify, got {}", other.kind()),
+    }
+    Ok(())
+}

@@ -261,6 +261,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         Some("ollama"),
         &["sonnet-fallback".into()],
         true,
+        false,
     );
     // Local summary response intersects to local_only (§4.5).
     session_labels.insert("msg_local_summary".into(), EgressLabel::local_only());
@@ -281,6 +282,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         &clean_again,
         Some("sonnet"),
         &[],
+        false,
         false,
     );
 
