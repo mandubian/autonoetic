@@ -22,6 +22,7 @@ mod date_2026_07_19_new_clauses_present;
 mod degraded_inspection_available;
 mod denial_affordances;
 mod deny_unknown_tools;
+mod egress_data_localization;
 mod dumb_gateway_cost_fail_shut;
 mod dumb_gateway_declared_patterns;
 mod dumb_gateway_loop_guard_declared;

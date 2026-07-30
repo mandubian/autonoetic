@@ -177,6 +177,19 @@ pub fn principles() -> &'static [Principle] {
                         externally-installed agent carries durable import provenance.",
             entrenched: false,
         },
+        // P-15 — Data Egress Localization (constitution 2026.07.30 / #910).
+        // Parent principle for the §15 sub-rules: the egress label plane keeps
+        // operator-declared private content off every sink its label excludes,
+        // with withholding (not poisoning) and operator-only widening.
+        Principle {
+            id: "P-15",
+            title: "Data Egress Localization",
+            statement: "Content carrying an egress label never reaches a sink the label \
+                        excludes — at the LLM chokepoint, at every off-machine boundary, \
+                        and across sessions via stored content — and widens only via an \
+                        explicit, operator-approved, causal-logged declassification grant.",
+            entrenched: false,
+        },
     ]
 }
 
@@ -605,6 +618,39 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
                    + bootstrap.rs::bootstrap_single_agent_candidate_only",
             test: "skill_install_one_door_provenance.rs::provenance_recorded_on_revision_and_causal_event",
             config: None,
+        },
+        // ── P-15 (data egress localization, binds agent+gateway; #910 / constitution 2026.07.30) ──
+        // The label plane is gateway-managed (I-14); these entries pin the
+        // three §15 rules to their enforcement points.
+        EnforcementEntry {
+            clause_id: "P-15",
+            rule_id: "P-15.1",
+            check_id: "egress_chokepoint_withhold",
+            code: "llm/egress_chokepoint.rs::filter_request \
+                   + runtime/egress_labeler.rs::plan_taint_following_route",
+            test: "egress/chokepoint_canary.rs + egress/routing.rs",
+            config: Some("egress.rules, egress.default_label, llm_presets.*.egress_class"),
+        },
+        EnforcementEntry {
+            clause_id: "P-15",
+            rule_id: "P-15.2",
+            check_id: "egress_boundary_gate",
+            code: "runtime/egress_labeler.rs::network_egress_boundary_refusal_json \
+                   + runtime/egress_labeler.rs::mcp_remote_egress_refusal_json \
+                   + runtime/egress_labeler.rs::ofp_federated_egress_refusal \
+                   + runtime/egress_labeler.rs::emit_surface_boundary_refused",
+            test: "egress/phase4_boundaries.rs + egress/phase4_web_hooks.rs + egress/phase4_sandbox.rs",
+            config: None,
+        },
+        EnforcementEntry {
+            clause_id: "P-15",
+            rule_id: "P-15.3",
+            check_id: "egress_declassification_only",
+            code: "scheduler/approval.rs::apply_decision \
+                   + scheduler/gateway_store/egress_declassification.rs::declassification_allows \
+                   + runtime/egress_labeler.rs::emit_declassified",
+            test: "egress/phase4_declassification.rs + egress/compartment.rs",
+            config: Some("default_grant_ttl_secs"),
         },
     ]
 }

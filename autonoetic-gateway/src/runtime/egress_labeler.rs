@@ -570,10 +570,13 @@ impl EgressLabeler {
             category: "egress".to_string(),
             action: "egress.envelope_labeled".to_string(),
             status: "active".to_string(),
-            // Phase 1c carries only the baseline attribution rule. The
-            // constitution clause for the label-plane invariant is phase 5
-            // (#910).
-            enforced_rules: default_enforced_rules(),
+            // Label-plane events carry the §15 LLM-plane clause (constitution
+            // 2026.07.30 / #910) on top of the baseline attribution rule.
+            enforced_rules: vec![
+                default_enforced_rules(),
+                vec!["P-15.1".to_string()],
+            ]
+            .concat(),
             target: Some(envelope_id.to_string()),
             payload: Some(payload.to_string()),
             payload_ref: None,
@@ -781,7 +784,9 @@ pub fn emit_chokepoint_events(
 
 /// Shared builder for one egress causal event. Mirrors
 /// [`emit_envelope_labeled_event`]'s shape — content-free metadata, baseline
-/// attribution rule (the constitution clause is phase 5 #910).
+/// attribution rule plus the §15 clause for the action (constitution
+/// 2026.07.30 / #910): P-15.1 for the LLM-plane events, P-15.2 for boundary
+/// refusals, P-15.3 for the widening path.
 fn emit_egress_event(
     store: &Arc<GatewayStore>,
     action: &str,
@@ -792,6 +797,11 @@ fn emit_egress_event(
     turn_id: Option<&str>,
     reason: &str,
 ) {
+    let clause = match action {
+        "egress.boundary_refused" => "P-15.2",
+        "egress.declassified" | "egress.relabel" => "P-15.3",
+        _ => "P-15.1",
+    };
     let event = autonoetic_types::causal_chain::CausalEventRecord {
         event_id: format!("egress-{}-{}", action.split('.').last().unwrap_or(action), uuid::Uuid::new_v4()),
         agent_id: agent_id.to_string(),
@@ -802,7 +812,10 @@ fn emit_egress_event(
         category: "egress".to_string(),
         action: action.to_string(),
         status: "active".to_string(),
-        enforced_rules: default_enforced_rules(),
+        enforced_rules: vec![
+            autonoetic_types::causal_chain::RULE_ID_EVENT_ATTRIBUTION.to_string(),
+            clause.to_string(),
+        ],
         target: Some(target.to_string()),
         payload: payload.map(|p| p.to_string()),
         payload_ref: None,
@@ -1911,7 +1924,10 @@ pub fn emit_declassified(
         category: "egress".to_string(),
         action: "egress.declassified".to_string(),
         status: "active".to_string(),
-        enforced_rules: default_enforced_rules(),
+        enforced_rules: vec![
+            autonoetic_types::causal_chain::RULE_ID_EVENT_ATTRIBUTION.to_string(),
+            "P-15.3".to_string(),
+        ],
         target: Some(target.value().to_string()),
         payload: Some(payload.to_string()),
         payload_ref: None,

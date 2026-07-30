@@ -4,7 +4,7 @@
 
 ## Bind-direction summary
 
-5 principle(s) (bind the agent), 9 right(s) (bind the gateway), 4 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
+6 principle(s) (bind the agent), 9 right(s) (bind the gateway), 4 obligation(s) (bind the decider). Counts are partial while migration (#303) is in progress — not the design ratio.
 
 ## Principles (bind: agent)
 
@@ -52,6 +52,16 @@ Three-stage activation — artifact_build, revision.create, revision.promote —
 |---|---|---|---|---|
 | `P-9.15` | `single_door_activation` | `runtime/tools/skill.rs::SkillInstallTool + bootstrap.rs::bootstrap_single_agent_candidate_only + bootstrap.rs::bootstrap_agents + runtime/tools/agent_revision.rs::AgentRevisionPromoteTool + runtime/tools/agent_revision.rs::check_capability_delta` | `skill_install_one_door_provenance.rs::one_door_generous_install_stays_candidate_and_unpromoted` | — |
 | `P-9.16` | `import_provenance_recorded` | `runtime/tools/skill.rs::SkillInstallTool + bootstrap.rs::bootstrap_single_agent_candidate_only` | `skill_install_one_door_provenance.rs::provenance_recorded_on_revision_and_causal_event` | — |
+
+### P-15 — Data Egress Localization
+
+Content carrying an egress label never reaches a sink the label excludes — at the LLM chokepoint, at every off-machine boundary, and across sessions via stored content — and widens only via an explicit, operator-approved, causal-logged declassification grant.
+
+| rule id | check | code | test | config |
+|---|---|---|---|---|
+| `P-15.1` | `egress_chokepoint_withhold` | `llm/egress_chokepoint.rs::filter_request + runtime/egress_labeler.rs::plan_taint_following_route` | `egress/chokepoint_canary.rs + egress/routing.rs` | `egress.rules, egress.default_label, llm_presets.*.egress_class` |
+| `P-15.2` | `egress_boundary_gate` | `runtime/egress_labeler.rs::network_egress_boundary_refusal_json + runtime/egress_labeler.rs::mcp_remote_egress_refusal_json + runtime/egress_labeler.rs::ofp_federated_egress_refusal + runtime/egress_labeler.rs::emit_surface_boundary_refused` | `egress/phase4_boundaries.rs + egress/phase4_web_hooks.rs + egress/phase4_sandbox.rs` | — |
+| `P-15.3` | `egress_declassification_only` | `scheduler/approval.rs::apply_decision + scheduler/gateway_store/egress_declassification.rs::declassification_allows + runtime/egress_labeler.rs::emit_declassified` | `egress/phase4_declassification.rs + egress/compartment.rs` | `default_grant_ttl_secs` |
 
 ## Rights (bind: gateway)
 
