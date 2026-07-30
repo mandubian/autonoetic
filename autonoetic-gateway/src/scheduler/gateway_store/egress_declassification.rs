@@ -244,6 +244,28 @@ pub(super) fn revoke_grants_for_root(
     Ok(count)
 }
 
+/// Soft-revoke a single ACTIVE declassification grant by row id. Idempotent:
+/// a grant already revoked (or missing) reports `false`. Used by the TUI grants
+/// panel ("select a row → revoke it") so the operator can target any grant kind
+/// — including `MemoryId`/`EnvelopeId` targets that the host-scoped path can't
+/// reach. The read side (`declassification_allows`) already fail-closes on
+/// `revoked_at`, so enforcement stops honoring the grant as soon as this
+/// commits.
+pub(super) fn revoke_grant_by_id(
+    conn: &Connection,
+    grant_id: i64,
+    now: &str,
+    reason: &str,
+) -> Result<bool> {
+    let count = conn.execute(
+        "UPDATE egress_declassification_grants
+         SET revoked_at = ?1, revoked_reason = ?2
+         WHERE id = ?3 AND revoked_at IS NULL",
+        params![now, reason, grant_id],
+    )?;
+    Ok(count > 0)
+}
+
 impl super::GatewayStore {
     pub fn insert_egress_declassification_grant(
         &self,
@@ -323,6 +345,21 @@ impl super::GatewayStore {
     ) -> Result<Vec<EgressDeclassificationGrant>> {
         let conn = self.conn.lock().unwrap();
         list_grants_for_root(&conn, root_session_id)
+    }
+
+    /// Soft-revoke a single declassification grant by row id. Returns `true`
+    /// when a row transitioned active → revoked, `false` if already revoked or
+    /// absent (idempotent). Complements the host-scoped/all path used by the
+    /// CLI (`revoke_egress_declassification_grants`) for the TUI panel's
+    /// per-row revoke.
+    pub fn revoke_egress_declassification_grant_by_id(
+        &self,
+        grant_id: i64,
+        reason: &str,
+    ) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        revoke_grant_by_id(&conn, grant_id, &now, reason)
     }
 }
 

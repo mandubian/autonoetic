@@ -3611,9 +3611,16 @@ impl JsonRpcRouter {
                     root_session_id: String,
                     /// Which grant table to act on.
                     grant_kind: GrantKindParam,
+                    /// Revoke a single grant by row id. Takes precedence over the
+                    /// host/all path below — used by the TUI grants panel
+                    /// ("select a row → revoke") so it can target any grant kind,
+                    /// including MemoryId/EnvelopeId declassification grants the
+                    /// host path can't reach.
+                    #[serde(default)]
+                    grant_id: Option<i64>,
                     /// Revoke only grants matching this host (per-host scope);
                     /// omit to revoke ALL active grants of that kind for the
-                    /// root session.
+                    /// root session. Ignored when `grant_id` is set.
                     #[serde(default)]
                     host: Option<String>,
                     /// Revocation reason recorded on the row and in the causal
@@ -3658,47 +3665,83 @@ impl JsonRpcRouter {
                 // Each call targets one grant kind; track both counts so the
                 // emitted event matches the CLI's unified schema (the unacted
                 // kind is 0). See `gateway grants revoke` in cli/gateway.rs.
+                // `grant_id` selects a single row (TUI per-row revoke, count ≤ 1);
+                // without it the host/all path applies (CLI, real count).
                 let mut session_approval_count: usize = 0;
                 let mut egress_declassification_count: usize = 0;
                 match params.grant_kind {
                     GrantKindParam::EgressDeclassification => {
-                        // #961 host-scoped model: per-host revoke hits only the
-                        // matching `session:<root>:host:<host>` source_pattern
-                        // grant; without a host, every active declassification
-                        // grant under the root.
-                        match store.revoke_egress_declassification_grants(
-                            &params.root_session_id,
-                            params.host.as_deref(),
-                            &params.reason,
-                        ) {
-                            Ok(count) => egress_declassification_count = count,
-                            Err(e) => {
-                                return JsonRpcResponse::error(
-                                    req.id,
-                                    -32000,
-                                    format!("grants.revoke (egress declassification) failed: {}", e),
-                                );
+                        egress_declassification_count = if let Some(gid) = params.grant_id {
+                            match store
+                                .revoke_egress_declassification_grant_by_id(gid, &params.reason)
+                            {
+                                Ok(b) => usize::from(b),
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!(
+                                            "grants.revoke (egress declassification) failed: {}",
+                                            e
+                                        ),
+                                    );
+                                }
                             }
-                        }
+                        } else {
+                            // #961 host-scoped model: per-host revoke hits only
+                            // the matching `session:<root>:host:<host>`
+                            // source_pattern grant; without a host, every active
+                            // declassification grant under the root.
+                            match store.revoke_egress_declassification_grants(
+                                &params.root_session_id,
+                                params.host.as_deref(),
+                                &params.reason,
+                            ) {
+                                Ok(count) => count,
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!(
+                                            "grants.revoke (egress declassification) failed: {}",
+                                            e
+                                        ),
+                                    );
+                                }
+                            }
+                        };
                     }
                     GrantKindParam::SessionApproval => {
-                        // Session approval grants revoke by host match, or by
-                        // whole root when no host is given (mirrors the
-                        // `gateway grants revoke --host/--all` CLI).
-                        match store.revoke_session_grants(
-                            &params.root_session_id,
-                            params.host.as_deref(),
-                            &params.reason,
-                        ) {
-                            Ok(count) => session_approval_count = count,
-                            Err(e) => {
-                                return JsonRpcResponse::error(
-                                    req.id,
-                                    -32000,
-                                    format!("grants.revoke (session approval) failed: {}", e),
-                                );
+                        session_approval_count = if let Some(gid) = params.grant_id {
+                            match store.revoke_session_grant_by_id(gid, &params.reason) {
+                                Ok(b) => usize::from(b),
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!("grants.revoke (session approval) failed: {}", e),
+                                    );
+                                }
                             }
-                        }
+                        } else {
+                            // Session approval grants revoke by host match, or
+                            // by whole root when no host is given (mirrors the
+                            // `gateway grants revoke --host/--all` CLI).
+                            match store.revoke_session_grants(
+                                &params.root_session_id,
+                                params.host.as_deref(),
+                                &params.reason,
+                            ) {
+                                Ok(count) => count,
+                                Err(e) => {
+                                    return JsonRpcResponse::error(
+                                        req.id,
+                                        -32000,
+                                        format!("grants.revoke (session approval) failed: {}", e),
+                                    );
+                                }
+                            }
+                        };
                     }
                 }
                 let revoked = session_approval_count + egress_declassification_count;
@@ -3727,6 +3770,7 @@ impl JsonRpcRouter {
                         GrantKindParam::SessionApproval => "session_approval",
                         GrantKindParam::EgressDeclassification => "egress_declassification",
                     },
+                    "grant_id": params.grant_id,
                     "host": params.host,
                     "revoked_by": params.revoked_by,
                 });

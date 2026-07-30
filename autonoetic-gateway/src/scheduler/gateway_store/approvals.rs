@@ -1189,6 +1189,22 @@ impl GatewayStore {
         Ok(count)
     }
 
+    /// Soft-revoke a single ACTIVE session-approval grant by row id. Idempotent:
+    /// a grant already revoked (or missing) reports `false`. Complements the
+    /// by-host (`revoke_session_grants`) and by-source (`revoke_session_grants_by_source`)
+    /// paths for the TUI grants panel's per-row revoke.
+    pub fn revoke_session_grant_by_id(&self, grant_id: i64, reason: &str) -> Result<bool> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "UPDATE session_approval_grants
+             SET revoked_at = ?1, revoked_reason = ?2
+             WHERE id = ?3 AND revoked_at IS NULL",
+            params![&now, reason, grant_id],
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn prune_expired_grants(&self) -> Result<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
