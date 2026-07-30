@@ -224,10 +224,13 @@ pub(super) fn revoke_grants_for_root(
             // Must match `egress_labeler::session_host_network_declass_target`.
             let normalized = h.trim().trim_end_matches('.').to_ascii_lowercase();
             let target_value = format!("session:{root_session_id}:host:{normalized}");
+            // Kind-scoped: an envelope_id/memory_id row with a colliding value
+            // must never be caught by a host revocation.
             conn.execute(
                 "UPDATE egress_declassification_grants
                  SET revoked_at = ?1, revoked_reason = ?2
-                 WHERE root_session_id = ?3 AND target_value = ?4 AND revoked_at IS NULL",
+                 WHERE root_session_id = ?3 AND target_kind = 'source_pattern'
+                   AND target_value = ?4 AND revoked_at IS NULL",
                 params![now, reason, root_session_id, target_value],
             )?
         }

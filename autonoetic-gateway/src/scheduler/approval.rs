@@ -201,6 +201,10 @@ pub struct DecisionContext<'a> {
 /// `options.grant_expires_at` wins; otherwise `default_grant_ttl_secs` from
 /// config (0 = no expiry). Shared by the explicit `EgressDeclassify` path and
 /// the implicit host-scoped network-approval path so both honor the same TTL.
+///
+/// Fail-closed on unrepresentable TTLs: a config value that overflows
+/// chrono's range expires the grant immediately rather than panicking in
+/// approval handling or silently becoming "no expiry".
 fn declass_grant_expiry(
     config: &GatewayConfig,
     options: &ApproveOptions,
@@ -214,7 +218,19 @@ fn declass_grant_expiry(
         let base = chrono::DateTime::parse_from_rfc3339(decided_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
-        return Some((base + chrono::Duration::seconds(ttl_secs)).to_rfc3339());
+        let expiry =
+            chrono::Duration::try_seconds(ttl_secs).and_then(|d| base.checked_add_signed(d));
+        return match expiry {
+            Some(t) => Some(t.to_rfc3339()),
+            None => {
+                tracing::warn!(
+                    target: "approval",
+                    default_grant_ttl_secs = config.default_grant_ttl_secs,
+                    "declassification grant TTL unrepresentable — expiring immediately (fail-closed)"
+                );
+                Some(decided_at.to_string())
+            }
+        };
     }
     None
 }
