@@ -1058,7 +1058,7 @@ fn build_footer(
         Line::from(Span::styled(format!(" {s}"), Style::default().fg(color)))
     } else {
         let gate_hint = gate.map(|g| TuiChannel.gate_prompt(g)).unwrap_or_default();
-        let nav = "q quit · j↓ k↑ · /help · c content · o artifact · ? info";
+        let nav = "q quit · j↓ k↑ · /help · c content · G grants · o artifact · ? info";
         let nav_display = if footer_w < 50 {
             "j↓ k↑ · /help · ?"
         } else if footer_w < 70 {
@@ -1854,6 +1854,208 @@ struct ApprovalsPopup {
     selected: usize,
     scroll: u16,
     rows: Vec<ApprovalRow>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grants panel (`G`) — operator live view of all active grants for the root
+// session (session-approval + egress-declassification) plus the current egress
+// taint, with per-row revoke. Mirrors the approvals-popup pattern. Data comes
+// from `grants.list`; revoke goes through `grants.revoke` (grant_id/by-id).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrantKind {
+    SessionApproval,
+    EgressDeclassification,
+}
+
+impl GrantKind {
+    fn rpc_str(self) -> &'static str {
+        match self {
+            GrantKind::SessionApproval => "session_approval",
+            GrantKind::EgressDeclassification => "egress_declassification",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            GrantKind::SessionApproval => "approval",
+            GrantKind::EgressDeclassification => "declass",
+        }
+    }
+}
+
+/// One normalized grant row displayed by the panel. Carries everything needed
+/// to revoke it by id (the primary path) — `host` is kept only for display.
+struct GrantRow {
+    kind: GrantKind,
+    id: i64,
+    /// Short summary of WHAT the grant widens (hosts / target / sink).
+    summary: String,
+    /// Provenance line: scope · by <granted_by> [exp <expires>].
+    detail: String,
+}
+
+struct GrantsPanel {
+    selected: usize,
+    scroll: u16,
+    rows: Vec<GrantRow>,
+    /// Current root-session egress taint display name (None ⇒ unrestricted).
+    taint: Option<String>,
+    /// When Some, the selected row is armed for a confirm-revoke (`r` again).
+    pending_revoke: Option<()>,
+}
+
+impl GrantsPanel {
+    fn clamp_selection(&mut self) {
+        let max = self.rows.len().saturating_sub(1);
+        if self.selected > max {
+            self.selected = max;
+        }
+    }
+}
+
+/// Render a session-approval `Vec<GrantTarget>` to a compact string. Mirrors
+/// the `gateway grants list` CLI formatting (background.rs has no shared impl).
+fn render_grant_targets(targets: &[serde_json::Value]) -> String {
+    let parts: Vec<String> = targets
+        .iter()
+        .filter_map(|t| {
+            // Each target serializes (from SessionApprovalGrant.targets) as:
+            // {"kind":"exact_host","value":"x"} etc.
+            let kind = t.get("kind")?.as_str()?;
+            let value = t.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            Some(match kind {
+                "any" => "*".to_string(),
+                "exact_host" => value.to_string(),
+                "host_suffix" => format!("*.{value}"),
+                "host_and_port" => value.to_string(),
+                "url_prefix" => value.to_string(),
+                other => format!("{other}:{value}"),
+            })
+        })
+        .collect();
+    if parts.is_empty() {
+        "—".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Render an egress-declassification target (kind/value pair) + `allowed_sink`.
+fn render_declass_target(target_kind: &str, target_value: &str, allowed_sink: &str) -> String {
+    format!("{target_kind}:{target_value} → {allowed_sink}")
+}
+
+/// Extract (kind, value) from a declassification target JSON value.
+fn declass_target_kv(target: Option<&serde_json::Value>) -> (String, String) {
+    let t = match target {
+        Some(t) => t,
+        None => return ("?".to_string(), "?".to_string()),
+    };
+    let kind = t
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let value = t
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    (kind, value)
+}
+
+/// Build the provenance detail line from a grant JSON object: scope · by X [exp Y].
+fn format_grant_detail(g: &serde_json::Value) -> String {
+    let scope = g
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let granted_by = g
+        .get("granted_by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let mut s = format!("{scope} · by {granted_by}");
+    if let Some(exp) = g.get("expires_at").and_then(|v| v.as_str()) {
+        if !exp.is_empty() {
+            s.push_str(&format!(" · exp {exp}"));
+        }
+    }
+    s
+}
+
+/// Poll `grants.list` and fold into display rows + the taint label. Returns
+/// `(rows, taint)`. Errors are swallowed (empty rows) — the caller surfaces a
+/// status message — so a gateway blip never crashes the UI. Mirrors
+/// `fetch_approval_rows`.
+fn fetch_grant_rows(client: &RoomClient, root_session_id: &str) -> (Vec<GrantRow>, Option<String>) {
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    let value = match rpc(client, "grants.list", params) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(target: "room", error = %e, "grants.list failed");
+            return (Vec::new(), None);
+        }
+    };
+
+    let mut rows: Vec<GrantRow> = Vec::new();
+
+    // Session approval grants.
+    if let Some(grants) = value.get("session_approval_grants").and_then(|v| v.as_array()) {
+        for g in grants {
+            let id = g.get("id").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let targets = g
+                .get("targets")
+                .and_then(|v| v.as_array())
+                .map(|a| a.to_vec())
+                .unwrap_or_default();
+            let summary = render_grant_targets(&targets);
+            let detail = format_grant_detail(g);
+            rows.push(GrantRow {
+                kind: GrantKind::SessionApproval,
+                id,
+                summary,
+                detail,
+            });
+        }
+    }
+
+    // Egress declassification grants.
+    if let Some(grants) = value
+        .get("egress_declassification_grants")
+        .and_then(|v| v.as_array())
+    {
+        for g in grants {
+            let id = g.get("id").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let (tkind, tvalue) = declass_target_kv(g.get("target"));
+            let sink = g
+                .get("allowed_sink")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let summary = render_declass_target(&tkind, &tvalue, sink);
+            let detail = format_grant_detail(g);
+            rows.push(GrantRow {
+                kind: GrantKind::EgressDeclassification,
+                id,
+                summary,
+                detail,
+            });
+        }
+    }
+
+    // Taint: null ⇒ unrestricted. Otherwise it is a JSON array of sink strings;
+    // surface the count (mirrors `label_display_name`'s restricted(N)).
+    let taint = value.get("current_taint").and_then(|v| {
+        if v.is_null() {
+            None
+        } else if let Some(arr) = v.as_array() {
+            Some(format!("restricted({} sinks)", arr.len()))
+        } else {
+            Some("restricted".to_string())
+        }
+    });
+
+    (rows, taint)
 }
 
 fn gate_modal_kind(gate: &GateRef) -> bool {
@@ -2925,6 +3127,8 @@ pub fn run(
     let mut last_announced_gate_event: Option<String> = None;
     let mut gate_modal: Option<GateModal> = None;
     let mut approvals_popup: Option<ApprovalsPopup> = None;
+    let mut grants_panel: Option<GrantsPanel> = None;
+    let mut last_grants_poll = Instant::now();
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -3898,6 +4102,106 @@ pub fn run(
                         }
                     }
 
+                    // Grants panel — navigate + two-step confirm revoke. Owns its
+                    // keys (ends in `continue;`) so they never reach the timeline.
+                    if let Some(ref mut panel) = grants_panel {
+                        if panel.rows.is_empty() {
+                            grants_panel = None;
+                        } else {
+                            let ctrl_c = key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL);
+                            if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
+                                // fall through to global quit
+                            } else {
+                                let row_count = panel.rows.len();
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        grants_panel = None;
+                                    }
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        panel.pending_revoke = None;
+                                        if panel.selected + 1 < row_count {
+                                            panel.selected += 1;
+                                        }
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        panel.pending_revoke = None;
+                                        panel.selected = panel.selected.saturating_sub(1);
+                                    }
+                                    KeyCode::Char('g') => {
+                                        panel.pending_revoke = None;
+                                        panel.selected = 0;
+                                    }
+                                    KeyCode::Char('G') => {
+                                        panel.pending_revoke = None;
+                                        panel.selected = row_count.saturating_sub(1);
+                                    }
+                                    KeyCode::PageDown => {
+                                        panel.pending_revoke = None;
+                                        panel.selected = (panel.selected + 5).min(row_count - 1);
+                                    }
+                                    KeyCode::PageUp => {
+                                        panel.pending_revoke = None;
+                                        panel.selected = panel.selected.saturating_sub(5);
+                                    }
+                                    KeyCode::Char('r') => {
+                                        // Two-step confirm: first `r` arms, second
+                                        // `r` on the same row fires the revoke.
+                                        let idx = panel.selected;
+                                        let row = &panel.rows[idx];
+                                        if panel.pending_revoke.is_some() {
+                                            let grant_id = row.id;
+                                            let kind = row.kind;
+                                            match rpc(
+                                                client,
+                                                "grants.revoke",
+                                                serde_json::json!({
+                                                    "root_session_id": &*root_session_id,
+                                                    "grant_kind": kind.rpc_str(),
+                                                    "grant_id": grant_id,
+                                                    "revoked_by": "operator:tui",
+                                                }),
+                                            ) {
+                                                Ok(_) => {
+                                                    status = Some(format!(
+                                                        "✓ revoked {} grant #{}",
+                                                        kind.label(),
+                                                        grant_id
+                                                    ));
+                                                    // Re-fetch so the list updates
+                                                    // immediately.
+                                                    let (rows, taint) =
+                                                        fetch_grant_rows(client, &root_session_id);
+                                                    panel.rows = rows;
+                                                    panel.taint = taint;
+                                                    panel.pending_revoke = None;
+                                                    panel.clamp_selection();
+                                                    needs_redraw = true;
+                                                }
+                                                Err(e) => {
+                                                    status = Some(format!("✗ {e}"));
+                                                    panel.pending_revoke = None;
+                                                }
+                                            }
+                                        } else {
+                                            panel.pending_revoke = Some(());
+                                            status = Some(format!(
+                                                "press r again to revoke {} grant #{}",
+                                                row.kind.label(),
+                                                row.id
+                                            ));
+                                        }
+                                    }
+                                    _ => {
+                                        // Any other key cancels a pending revoke.
+                                        panel.pending_revoke = None;
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     // Approvals popup — list all pending + resolved gates; act directly.
                     if let Some(ref mut popup) = approvals_popup {
                         if popup.rows.is_empty() {
@@ -4322,6 +4626,38 @@ pub fn run(
                                     });
                                     status = Some(
                                         "approvals: j/k navigate · y approve+grant · o approve once · n reject · Esc close"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        // G: grants panel — live view of all active grants for
+                        // the root session (both kinds) + the current taint,
+                        // with per-row revoke. Toggles off if open.
+                        KeyCode::Char('G') => {
+                            if content_view.is_some() || artifact_file_view.is_some()
+                                || artifact_viewer.is_some() || detail.is_some()
+                                || input.is_some() || pending_gate.is_some() || compose.is_some()
+                                || gate_modal.is_some() || approvals_popup.is_some()
+                            {
+                                // don't grab G while another overlay is active
+                            } else if grants_panel.is_some() {
+                                grants_panel = None;
+                            } else {
+                                let (rows, taint) = fetch_grant_rows(client, &root_session_id);
+                                if rows.is_empty() {
+                                    status = Some("no active grants in this session".to_string());
+                                } else {
+                                    grants_panel = Some(GrantsPanel {
+                                        selected: 0,
+                                        scroll: 0,
+                                        rows,
+                                        taint,
+                                        pending_revoke: None,
+                                    });
+                                    last_grants_poll = Instant::now();
+                                    status = Some(
+                                        "grants: j/k navigate · r revoke (confirm) · Esc close"
                                             .to_string(),
                                     );
                                 }
@@ -5217,6 +5553,7 @@ pub fn run(
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                     None,
                     &early_approval_rows,
+                    grants_panel.as_ref(),
                 )
             })?;
         }
@@ -5263,6 +5600,7 @@ pub fn run(
                         .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                     approvals_popup.as_ref(),
                     &[],
+                    grants_panel.as_ref(),
                 )
             })?;
         }
@@ -5391,6 +5729,32 @@ pub fn run(
                 session_async_processing = new_async;
                 session_async_processing_changed = true;
                 needs_redraw = true;
+            }
+        }
+
+        // Grants panel idle refresh — only poll when the panel is open, so a
+        // closed panel never spams `grants.list`. Re-fetch rows + taint and
+        // replace the panel's data, preserving the selection (mirror
+        // LiveContentPane's rebuild pattern).
+        if grants_panel.is_some()
+            && last_grants_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
+        {
+            last_grants_poll = Instant::now();
+            let (rows, taint) = fetch_grant_rows(client, &root_session_id);
+            if let Some(panel) = grants_panel.as_mut() {
+                let prev_selected = panel.selected;
+                let changed = rows.len() != panel.rows.len()
+                    || rows
+                        .iter()
+                        .zip(panel.rows.iter())
+                        .any(|(a, b)| a.id != b.id || a.kind != b.kind);
+                if changed {
+                    panel.rows = rows;
+                    panel.taint = taint;
+                    panel.selected = prev_selected;
+                    panel.clamp_selection();
+                    needs_redraw = true;
+                }
             }
         }
 
@@ -5784,6 +6148,7 @@ pub fn run(
                     .and_then(|m| gate_entry_for_ref(&entries, &m.gate)),
                 approvals_popup.as_ref(),
                 &approval_rows,
+                grants_panel.as_ref(),
             )
         })?;
 
@@ -7807,6 +8172,7 @@ fn draw(
     gate_modal_entry: Option<&SessionTimelineEntry>,
     approvals_popup: Option<&ApprovalsPopup>,
     approval_rows: &[ApprovalRow],
+    grants_panel: Option<&GrantsPanel>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -8432,6 +8798,11 @@ fn draw(
     if let Some(popup) = approvals_popup {
         draw_approvals_popup(f, popup);
     }
+
+    // Grants panel renders last (on top of everything).
+    if let Some(panel) = grants_panel {
+        draw_grants_panel(f, panel);
+    }
 }
 
 fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup) {
@@ -8467,6 +8838,78 @@ fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup) {
                 format!(" {} {} {:<8} {:<20} {}", marker, status_icon, r.kind, id_short, r.summary),
                 style,
             ))
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
+    let rows = &panel.rows;
+    let n_approval = rows
+        .iter()
+        .filter(|r| r.kind == GrantKind::SessionApproval)
+        .count();
+    let n_declass = rows.len() - n_approval;
+    let taint_str = panel
+        .taint
+        .clone()
+        .unwrap_or_else(|| "unrestricted".to_string());
+    let title = format!(
+        " Grants — {} approval · {} declass · taint {} [G/Esc close · j/k nav · r revoke] ",
+        n_approval, n_declass, taint_str,
+    );
+    let area = centered_rect(82, 78, f.area());
+    f.render_widget(Clear, area);
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let max_scroll = rows.len().saturating_sub(inner_height) as u16;
+    let scroll = panel.scroll.min(max_scroll);
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let selected = i == panel.selected;
+            let marker = if selected { "▸" } else { " " };
+            let kind_str = r.kind.label();
+            let kind_style = if r.kind == GrantKind::EgressDeclassification {
+                Color::Magenta
+            } else {
+                Color::Cyan
+            };
+            let mut spans: Vec<Span> = vec![
+                Span::raw(format!(" {marker} ")),
+                Span::styled(format!("{kind_str:<8}"), Style::default().fg(kind_style)),
+                Span::raw(format!(" #{:<5} ", r.id)),
+                Span::raw(&r.summary),
+            ];
+            if selected {
+                spans.push(Span::raw(format!("   · {}", r.detail)));
+                if panel.pending_revoke.is_some() {
+                    spans.push(Span::styled(
+                        "  [press r again to CONFIRM revoke]",
+                        Style::default().fg(Color::Red).bold(),
+                    ));
+                }
+            }
+            let style = if selected {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
+            Line::from(spans).style(style)
         })
         .collect();
 
