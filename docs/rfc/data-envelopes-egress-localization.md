@@ -1,6 +1,7 @@
 # RFC: Data Envelopes — Egress Localization for LLM Context, Memory, and Federation
 
-**Status:** Draft — 2026-07-26 (amended after external expert review, same day) —
+**Status:** Draft — 2026-07-26 (amended after external expert review, same day;
+implementation amendments 2026-07-30) —
 implementation tracked in umbrella issue
 [mandubian/autonoetic#903](https://github.com/mandubian/autonoetic/issues/903)
 (phases: #904, #905, #906, #907, #908, #909, #910).
@@ -19,7 +20,9 @@ gateway-enforced concept: the **data envelope**.
 
 **Decisions so far** (operator, 2026-07-26):
 
-- Default label for unlabeled content: `unrestricted` (one-line config flip to tighten).
+- Default label for unlabeled *locally-originated* content: `unrestricted` (one-line
+  config flip to tighten). Third-party content is the exception: remote MCP results
+  default `no_remote_model` (§4.5) and inbound OFP messages fail closed (§7).
 - `local_only` includes `MemoryPersist` — durable *labeled* memory beats forcing a
   choice between memory and privacy.
 - Pinned-preset conflict with taint: gateway **asks the operator inline**
@@ -53,6 +56,29 @@ gateway-enforced concept: the **data envelope**.
   (§3.2).
 - Fail-mode for outbound-assertion violations: `emergency-stop` / `refuse-turn`,
   not `refuse-session-start` (§13).
+
+**Implementation amendments** (2026-07-30, landed with phases 1–4 / #904–#909):
+
+- **Boundary surfaces are an open set, not a list** (§7): any surface that moves
+  session-derived bytes off-machine gates on taint before send and emits
+  `egress.boundary_refused`. `web` and `hooks` joined `ofp`/`mcp`/`sandbox`, and
+  compression-band refusals (§5.7) use the same event with
+  `surface: "compression"`.
+- **The `unrestricted` default covers locally-originated content only** (see
+  decisions above): inbound OFP messages with a missing/unparseable label are
+  ingested as `FederatedAgent`-tainted, never `unrestricted` — the
+  launder-through-an-unlabeled-peer path is closed (§7).
+- **Boundary declassification is host-scoped** (§8): approving a network action
+  under taint materializes `session:<root>:host:<host>` grants — one per host the
+  operator saw, disclosed in the approval prompt, revocable per host — never a
+  silent session-wide widen. Session-wide `session:<root>` requires an explicit
+  `EgressDeclassify` request.
+- **`egress.declassified` payload** (§9.1): `expires_at` added; operator identity
+  is not duplicated into the payload (it joins through `source_approval_id`);
+  revocation is recorded on the grant row and rides the `grant_revocation`
+  causal event.
+- **`provider_constraint` (§5.4 rung 1) is implemented** and is the liveness pin
+  for resident data-owners (§5.5).
 
 ---
 
@@ -462,7 +488,13 @@ operator inline** — an approval-shaped prompt offering: declassify these envel
 run this turn on local preset X / abort — and causal-logs the choice (decided
 2026-07-26). It never silently downgrades (a discretion leak — the Ri-0.6-analogue
 from the inference-profiles RFC applies to egress downgrades too) and never
-hard-refuses without a path forward (a dead end for non-experts).
+hard-refuses without a path forward (a dead end for non-experts). **Status
+(implementation amendment, 2026-07-30):** the inline ask is *not yet implemented* —
+the routing plane has no pin detection, and preset eligibility does not yet consult
+declassification grants, so a `RemoteModel` declassify grant does not unblock a
+refused turn. Today the gateway reroutes to an eligible local preset automatically
+(covering the "run on local" option) or refuses with a path forward. Wiring
+grant-aware eligibility + the declassify offer is the remaining §5.3 slice.
 
 Two session modes tune the behavior (§5.4): `withhold_and_proceed` (default; above)
 and `require_full_context` (a turn that *references* withheld envelopes is refused
@@ -536,7 +568,13 @@ operator/planner decision.
    (mail, health, finance) this is expected to become the default posture: access,
    labeling, and audit centralize in one agent whose sessions are pinned
    `provider_constraint: local_only`, and its accumulating history is a feature —
-   it builds up context about the source, all `local_only` by design.
+   it builds up context about the source, all `local_only` by design. The pin is
+   **liveness**, not just safety (implementation amendment): taint-following
+   routing decides per *batch*, so a resident owner whose accumulated history is
+   tainted can still route a clean inbound `agent_message` turn remote — and
+   answer from an all-indications context. No leak, but the owner stops
+   functioning as an owner. `provider_constraint` (implemented, §5.4 rung 1)
+   restricts provider *selection* itself, clean batches included.
 
 Two precision notes on the data-owner shape:
 
@@ -653,7 +691,9 @@ explicitly computed label; `egress.envelope_labeled` carries the band membership
 the summary's lineage is queryable). If no eligible compression preset exists for
 the tainted band, the governor falls back to token-budget truncation/dropping for
 that band rather than compressing it remotely — an incomplete local context beats
-a remote leak.
+a remote leak. The refusal is auditable: it emits `egress.boundary_refused` with
+`surface: "compression"`, the band label, the source message ids, and the chosen
+fallback (implementation amendment — §5.7 named the fallback but not the event).
 
 ---
 
@@ -703,12 +743,21 @@ lose. Rules:
 
 ## 7. Other egress surfaces
 
-LLM context is phase 1, but the label plane is designed to cover all of them:
+LLM context is phase 1, but the label plane is designed to cover all of them.
+The rule is open-ended (implementation amendment): **any surface that moves
+session-derived bytes off-machine gates on session taint before send**, and
+every refusal emits `egress.boundary_refused` (§9.1) with a `surface` tag —
+`sandbox` / `web` / `hooks` / `mcp` / `ofp` / `compression`. The named
+surfaces:
 
 - **OFP federation** (`server/router.rs:88`, `server/ofp.rs`): `AgentMessage` gains
   label metadata. The gateway refuses to send an envelope whose label excludes
   `FederatedAgent`; withheld content is replaced with indications before
-  serialization. Because peers enforce the same constitution (P-10.9 digest
+  serialization. **Inbound is fail-closed:** a missing or unparseable inbound
+  label is ingested as `FederatedAgent`-tainted (never `unrestricted`) — the
+  launder-through-an-unlabeled-peer path is closed; the outbound wire field
+  stays optional for backward compatibility with older peers. Because peers
+  enforce the same constitution (P-10.9 digest
   handshake), label semantics become part of the constitutional compatibility
   surface — a peer that doesn't enforce them fails the compatibility profile.
 - **MCP** (`autonoetic-mcp/src/client.rs:87-115`): registry entries gain
@@ -721,11 +770,16 @@ LLM context is phase 1, but the label plane is designed to cover all of them:
   approval even when the manifest declaration passes, and `NetworkCoverage::Unresolved`
   + taint = hard refuse. Full network-layer enforcement (egress proxy) is out of
   scope; documented honestly as a residual gap, as today.
+- **Gateway-native web tools** (`runtime/tools/web.rs`): `web_fetch` /
+  `web_search` / `web_call` gate on session taint × `Sink::Network` before any
+  outbound HTTP — closing only the sandbox would leave exfiltration through
+  gateway-owned HTTP.
+- **Hook deliveries** (`scheduler/hooks.rs`): `http.callback` deliveries gate
+  identically when the delivery is session-derived.
 - **Capsules** (`capsule/export.rs`): the export already redacts memory snapshots;
   with labels it instead *includes* memories whose label permits the capsule's
   declared destination and withholds the rest. The dead-code OFP capsule transfer in
   `autonoetic-ofp/src/wire.rs` must not be wired up without label metadata.
-- Every refusal on any of these surfaces emits `egress.boundary_refused` (§9.1).
 
 ---
 
@@ -735,7 +789,18 @@ The only label-widening path. Mirrors session approval grants:
 
 - Operator approves `(envelope-id | source-pattern | memory-id) × sink` — e.g.
   "this one summary → RemoteModel". Scoped, optionally expiring, revocable.
-- Recorded as `egress.declassified` causal event with `enforced_rules`; appears in
+- **Boundary targets are host-scoped** (implementation amendment). At network
+  boundaries the refusal fires before any envelope exists, so the natural target
+  is the destination: approving a network action (`web_fetch` / `web_call` /
+  `web_search` / `sandbox_exec`) under taint materializes
+  `source_pattern: session:<root>:host:<host>` grants — one per host the operator
+  saw, with the widening disclosed in the approval prompt, revocable per host via
+  `gateway grants revoke --host`. A session-wide `session:<root>` grant is never
+  materialized implicitly; it requires an explicit `EgressDeclassify` request
+  (`gateway egress-declassify`), where the operator chose exactly that breadth.
+- Recorded as `egress.declassified` causal event with `enforced_rules` and
+  `expires_at`; revocation is recorded on the grant row (`revoked_at`, never
+  deleted) and rides the `grant_revocation` causal event. Appears in
   the approval surface alongside existing grants.
 - Never inferred, never agent-requested without operator decision, never granted by
   an LLM judgment. Reuses the approval flood cap machinery (P-7.17 shape).
@@ -765,8 +830,8 @@ All causal-chained; constitutional ones carry `enforced_rules` (§13).
 | `egress.request_filtered` | provider, preset, counts (included/withheld) | Per-request summary |
 | `egress.provider_selected` | turn, eligible presets, chosen preset, batch intersection, fallback skips, inline-ask outcome | "Why did turn 7 run on ollama?" |
 | `egress.assertion_violation` | envelope id, provider, request digest | Tripwire (bug or echo attack) |
-| `egress.declassified` | grant shape, operator identity, scope, expiry, revocation | "Who widened what, when, until when?" |
-| `egress.boundary_refused` | surface (`ofp` / `mcp` / `sandbox`), envelope ids, rule/label | "Why was this send/exec refused?" |
+| `egress.declassified` | grant shape (target × sink), scope, expiry, source approval id (operator identity joins through it); revocation rides `grant_revocation` | "Who widened what, when, until when?" |
+| `egress.boundary_refused` | surface (`sandbox` / `web` / `hooks` / `mcp` / `ofp` / `compression`), envelope ids, rule/label | "Why was this send/exec refused?" |
 | `egress.relabel` | record id, old label, new label, operator | Sweep/manual reclassification audit |
 
 ### 9.2 Evidence: the filtered wire view
