@@ -369,6 +369,14 @@ evidence_mode: full
 # Those rules are added to the ones above (so they can only restrict) and die
 # with the root session.
 #
+# A single *message* can be marked too, without any rule at all (RFC §5.4
+# rung 3) — for the case where the private thing is what the operator is about
+# to type rather than a source the agent will read:
+#   Session Room:  /private here is the email thread, summarize it
+#   RPC:           event.ingest { ..., "egress_label": "local_only" }
+# The mark applies to that one incoming turn and is intersected with
+# `default_label` below, so it can only restrict the turn, never widen it.
+#
 # A bundle may also declare its own output floor in SKILL.md (RFC §4.1 path 2):
 #   metadata:
 #     autonoetic:

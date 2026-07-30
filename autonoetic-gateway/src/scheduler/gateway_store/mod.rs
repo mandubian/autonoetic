@@ -450,6 +450,20 @@ impl GatewayStore {
         session_taint::set_taint(&conn, session_id, label)
     }
 
+    /// Intersect a label into a session's taint without ever widening it, and
+    /// return the resulting taint. Use this for **incremental** ingest-side
+    /// contributions (a peer's inbound label, an operator's marked message);
+    /// [`Self::set_session_egress_taint`] replaces the row and is for the
+    /// finalize path that recomputes from the whole label sidecar.
+    pub fn restrict_session_egress_taint(
+        &self,
+        session_id: &str,
+        label: &autonoetic_types::egress::EgressLabel,
+    ) -> Result<autonoetic_types::egress::EgressLabel> {
+        let conn = self.conn.lock().unwrap();
+        session_taint::restrict_taint(&conn, session_id, label)
+    }
+
     /// Read a session's accumulated egress taint (`None` ⇒ unrestricted).
     pub fn get_session_egress_taint(
         &self,

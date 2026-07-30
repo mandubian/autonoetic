@@ -1652,7 +1652,7 @@ impl JsonRpcRouter {
                 self.handle_evolution_list_pending(req.id, req.params)
             }
             "event.ingest" => {
-                let params: EventIngestParams = match serde_json::from_value(req.params) {
+                let mut params: EventIngestParams = match serde_json::from_value(req.params) {
                     Ok(v) => v,
                     Err(e) => {
                         return JsonRpcResponse::error(
@@ -1662,6 +1662,30 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+
+                // Fold an operator per-message egress mark (§5.4 rung 3) into
+                // the ingest metadata, which is the channel that already carries
+                // the OFP inbound label to `resolve_ingest_egress_label`. Done
+                // before any metadata consumer runs so they all see one shape.
+                //
+                // The typed param is the authority and overwrites the raw key.
+                // A caller writing the raw key directly is not a bypass either:
+                // ingest labels are intersected, so any value — from any
+                // caller — can only restrict the turn, never widen it.
+                if let Some(named) = params.egress_label {
+                    let label = serde_json::to_value(named.to_label())
+                        .unwrap_or(serde_json::Value::Null);
+                    match params.metadata.as_mut() {
+                        Some(serde_json::Value::Object(map)) => {
+                            map.insert("operator_egress_label".to_string(), label);
+                        }
+                        _ => {
+                            params.metadata = Some(serde_json::json!({
+                                "operator_egress_label": label,
+                            }));
+                        }
+                    }
+                }
 
                 // ── Idempotency guard for pump-delivered signals ──
                 // The notification pump retries on timeout, but the gateway may
@@ -5780,6 +5804,11 @@ struct EventIngestParams {
     /// result. Default: false (blocking).
     #[serde(default)]
     async_mode: bool,
+    /// Operator mark for this one message (RFC §5.4 rung 3 — "this one message
+    /// is private"). Intersects with the session policy's `default_label`, so it
+    /// can only restrict what the room already declared, never widen it.
+    #[serde(default)]
+    egress_label: Option<autonoetic_types::egress::NamedEgressLabel>,
 }
 
 /// Task-board status for a delegation whose spawn just returned. A spawn that

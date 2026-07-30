@@ -1283,6 +1283,50 @@ impl GatewayExecutionService {
     // gateway-managed metadata that agents never set, strip, or read
     // (Lawful-Executor, RFC §2.1) — hence RPC/CLI only, no native tool.
 
+    /// Resolve the egress label for an incoming user-role turn (RFC §4.5), or
+    /// `None` when nothing restricts it.
+    ///
+    /// Intersects the three declared contributors — session-policy
+    /// `default_label`, the operator's per-message mark, and a peer's inbound
+    /// federation label. `None` is returned for an unrestricted result because
+    /// absence *is* the unrestricted encoding everywhere else in the plane, and
+    /// an unrestricted label carries no information worth storing.
+    ///
+    /// Fails closed on a policy read error: an unreadable policy could have been
+    /// restrictive, so the turn is treated as `local_only` rather than shipped
+    /// to a remote provider on the strength of a failed lookup.
+    fn resolve_ingest_egress_label(
+        &self,
+        session_id: &str,
+        metadata: Option<&serde_json::Value>,
+    ) -> Option<autonoetic_types::egress::EgressLabel> {
+        let mut policy_default = None;
+        let mut policy_read_failed = false;
+        if let Some(ref gs) = self.gateway_store {
+            let root = crate::runtime::content_store::root_session_id(session_id);
+            match gs.get_egress_session_policy(root) {
+                Ok(stored) => {
+                    policy_default = stored.and_then(|s| s.policy.default_label);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "egress",
+                        error = %e,
+                        session_id = %session_id,
+                        "session egress policy read failed on ingest — failing closed \
+                         to local_only for this turn (RFC §2.2)"
+                    );
+                    policy_read_failed = true;
+                }
+            }
+        }
+        crate::runtime::egress_labeler::resolve_ingest_turn_label(
+            policy_default,
+            policy_read_failed,
+            metadata,
+        )
+    }
+
     pub fn get_session_egress_policy(
         &self,
         session_id: &str,
@@ -3550,28 +3594,38 @@ impl GatewayExecutionService {
         .with_extended_instructions(loaded.extended_instructions.clone()),
                 openrouter_catalog,
             );
-            if let Some(meta) = metadata {
-                if let Some(label_val) = meta.get("ofp_inbound_egress_label") {
-                    if let Ok(label) =
-                        serde_json::from_value::<autonoetic_types::egress::EgressLabel>(
-                            label_val.clone(),
-                        )
-                    {
-                        if let Some(ref gs) = self.gateway_store {
-                            if let Err(e) = gs.set_session_egress_taint(session_id, &label) {
-                                tracing::warn!(
-                                    target: "egress",
-                                    error = %e,
-                                    session_id = %session_id,
-                                    "failed to seed OFP inbound session egress taint"
-                                );
-                            }
-                        }
-                        if !label.is_unrestricted() {
-                            runtime = runtime.with_initial_ingest_egress_label(label);
-                        }
+            // Ingest-side label birth (RFC §4.5 "User/operator message" and the
+            // OFP inbound path). The incoming user turn's label is the
+            // intersection of everything declared about it:
+            //
+            //   session policy `default_label`  (what the operator declared for
+            //                                    unlabeled content in this room)
+            // ∩ operator per-message mark        (§5.4 rung 3, "this one is private")
+            // ∩ peer-supplied inbound label      (federation, fail-closed upstream)
+            //
+            // Intersection means every contributor can only restrict, so no
+            // channel here can widen what another already tightened — the
+            // property that lets the per-message mark be honored from any caller
+            // without becoming a bypass. Per I-14 these are all *declared
+            // inputs*: none of them is model output.
+            if let Some(label) = self.resolve_ingest_egress_label(session_id, metadata) {
+                if let Some(ref gs) = self.gateway_store {
+                    // `restrict_`, not `set_`: an ingest label is an incremental
+                    // contribution, and a resumed session may already carry a
+                    // more restrictive accumulated taint that must survive.
+                    if let Err(e) = gs.restrict_session_egress_taint(session_id, &label) {
+                        tracing::warn!(
+                            target: "egress",
+                            error = %e,
+                            session_id = %session_id,
+                            "failed to seed ingest session egress taint"
+                        );
                     }
                 }
+                // `initial_ingest_egress_label` labels the first user-role turn
+                // of this run, minting the msg id that joins it to the label map
+                // the chokepoint reads (§3.4).
+                runtime = runtime.with_initial_ingest_egress_label(label);
             }
             // Phase 3: propagate overflow_recovery flag so the governor
             // uses an aggressive reduction pipeline on retry.

@@ -1576,6 +1576,65 @@ pub fn parse_ofp_inbound_egress_label(raw: Option<&serde_json::Value>) -> Egress
     }
 }
 
+/// Metadata keys that can declare a label for an incoming user-role turn.
+/// Both are *declared inputs* in the I-14 sense — an operator's per-message mark
+/// and a peer's wire label — never model output.
+pub const INGEST_LABEL_METADATA_KEYS: [&str; 2] =
+    ["operator_egress_label", "ofp_inbound_egress_label"];
+
+/// Resolve the label for an incoming user-role turn (RFC §4.5 "User/operator
+/// message"), or `None` when nothing restricts it.
+///
+/// The pure core of ingest labeling: the caller supplies the session policy's
+/// `default_label` (already read from the store, `None` when unset) and the
+/// ingest metadata; this intersects every declaration found.
+///
+/// - `policy_default` — the room-wide declaration for otherwise-unlabeled content.
+/// - `policy_read_failed` — the caller's policy read errored. Fails closed to
+///   `local_only`: an unreadable policy could have been restrictive, and shipping
+///   the turn remotely on the strength of a failed lookup is the one outcome
+///   §2.2 forbids.
+/// - metadata keys in [`INGEST_LABEL_METADATA_KEYS`] — the per-message mark and
+///   the federation label. A malformed value fails closed rather than dropping
+///   the restriction it was trying to express.
+///
+/// Every contributor intersects, so none can widen what another tightened
+/// (§2.4). `None` is returned for an unrestricted result because absence *is*
+/// the unrestricted encoding throughout the plane.
+pub fn resolve_ingest_turn_label(
+    policy_default: Option<autonoetic_types::egress::NamedEgressLabel>,
+    policy_read_failed: bool,
+    metadata: Option<&serde_json::Value>,
+) -> Option<EgressLabel> {
+    let mut acc = EgressLabel::unrestricted();
+    let mut any = false;
+
+    if policy_read_failed {
+        acc = acc.restrict(&EgressLabel::local_only());
+        any = true;
+    }
+    if let Some(named) = policy_default {
+        acc = acc.restrict(&named.to_label());
+        any = true;
+    }
+    for key in INGEST_LABEL_METADATA_KEYS {
+        let Some(value) = metadata.and_then(|m| m.get(key)) else {
+            continue;
+        };
+        match serde_json::from_value::<EgressLabel>(value.clone()) {
+            Ok(label) => acc = acc.restrict(&label),
+            Err(_) => acc = acc.restrict(&EgressLabel::local_only()),
+        }
+        any = true;
+    }
+
+    if any && !acc.is_unrestricted() {
+        Some(acc)
+    } else {
+        None
+    }
+}
+
 /// Whether outbound federation may carry `message` for `session_taint`.
 pub fn ofp_outbound_allows_federation(session_taint: &EgressLabel) -> bool {
     session_taint.allows(Sink::FederatedAgent)
