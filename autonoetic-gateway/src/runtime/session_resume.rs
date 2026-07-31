@@ -253,6 +253,7 @@ mod session_resume_tests {
         };
         let cp = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![],
             turn_counter: 0,
             loop_guard_state: LoopGuard {

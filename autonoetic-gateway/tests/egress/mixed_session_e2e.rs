@@ -262,6 +262,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         &["sonnet-fallback".into()],
         true,
         false,
+        None,
     );
     // Local summary response intersects to local_only (§4.5).
     session_labels.insert("msg_local_summary".into(), EgressLabel::local_only());
@@ -284,6 +285,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
         &[],
         false,
         false,
+        None,
     );
 
     let inner = Arc::new(CapturingDriver::new());

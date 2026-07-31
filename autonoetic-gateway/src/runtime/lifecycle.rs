@@ -147,6 +147,11 @@ pub struct AgentExecutor {
     /// sink. Empty for unconfigured deployments — the chokepoint is then a
     /// zero-cost pass-through.
     pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+    /// A filed pin×taint conflict ask (RFC §5.3 / #968) whose answer still
+    /// shapes this turn's routing (see `EgressAskState`). Checkpointed so the
+    /// resumed turn honors the operator's choice; cleared when the turn
+    /// changes.
+    pub egress_ask_state: Option<crate::runtime::egress_labeler::EgressAskState>,
     /// Initial taint for the first user turn (OFP inbound `agent_message`, RFC §7).
     pub initial_ingest_egress_label: Option<autonoetic_types::egress::EgressLabel>,
     /// Taint of the tool batch produced since the last completion (RFC §5.3):
@@ -423,6 +428,11 @@ struct EgressRoutingSelection {
     /// `Some(reason)` when a tainted batch has no eligible provider — the
     /// caller refuses the turn with `egress_no_eligible_provider` (RFC §5.3).
     refuse_reason: Option<String>,
+    /// `Some(interaction_id)` when a pinned primary conflicted with the batch
+    /// taint and the gateway filed the three-way inline ask (RFC §5.3 / #968):
+    /// the caller suspends the turn on `UserInputRequired` and the resumed
+    /// turn honors the operator's answer at routing time.
+    pending_ask: Option<String>,
 }
 
 impl AgentExecutor {
@@ -452,6 +462,7 @@ impl AgentExecutor {
             session_started: false,
             turn_counter: 0,
             egress_labels: std::collections::HashMap::new(),
+            egress_ask_state: None,
             initial_ingest_egress_label: None,
             pending_batch_taint: autonoetic_types::egress::EgressLabel::unrestricted(),
             config: None,
@@ -1220,9 +1231,17 @@ impl AgentExecutor {
     /// 1 constrains selection even for clean batches); only an unrestricted
     /// batch with no constraint keeps the primary driver and the full failover
     /// chain with zero cost.
+    ///
+    /// `primary_pinned` (#968) tells the plane whether the primary came from a
+    /// pin (agent manifest `llm_preset`, session override, or legacy fixed
+    /// model) rather than a per-completion routing strategy. A pinned primary
+    /// that conflicts with the batch taint files the three-way inline ask
+    /// (declassify / run local / abort) and suspends the turn — never a silent
+    /// downgrade, never a dead-end refusal. Unpinned primaries keep the
+    /// automatic taint-following reroute.
     #[inline(never)]
     fn plan_egress_routing(
-        &self,
+        &mut self,
         batch: &autonoetic_types::egress::EgressLabel,
         routed_preset: &str,
         primary_class: Option<autonoetic_types::egress::EgressClass>,
@@ -1230,9 +1249,168 @@ impl AgentExecutor {
         session_id: &str,
         turn_id: &str,
         provider_constraint: Option<autonoetic_types::egress::ProviderConstraint>,
+        primary_pinned: bool,
     ) -> EgressRoutingSelection {
         use crate::runtime::egress_labeler as el;
         let presets = self.config.as_ref().map(|c| &c.llm_presets);
+        let root_session = crate::runtime::content_store::root_session_id(session_id);
+
+        // Set when a resumed completion was unblocked by an answered ask; the
+        // resolution emit below records the outcome (RFC §9.1 "inline-ask
+        // outcome", #968).
+        let mut ask_outcome: Option<serde_json::Value> = None;
+
+        // ── Resumed ask (RFC §5.3 / #968) ─────────────────────────────────
+        // A turn suspended on a filed pin×taint ask re-enters routing with the
+        // ask state carried in its checkpoint; honor the operator's answer
+        // without re-deriving the (already consumed) batch taint. Turn-scoped:
+        // a state from a previous turn is stale and dropped.
+        if let Some(state) = self.egress_ask_state.clone() {
+            if state.turn_id != turn_id {
+                self.egress_ask_state = None;
+            } else if let Some(interaction) = self
+                .gateway_store
+                .as_ref()
+                .and_then(|store| store.get_user_interaction(&state.interaction_id).ok().flatten())
+            {
+                match interaction.answer_option_id.as_deref() {
+                    Some(el::egress_ask_options::RUN_LOCAL) => {
+                        if let Some(local) = state.local_preset.clone() {
+                            // The operator picked the offered local preset for
+                            // the rest of this turn — build it and run on it
+                            // directly (it was buildable at filing time:
+                            // candidates are buildable by construction).
+                            let emit_plan = el::EgressRoutingPlan {
+                                batch: state.batch.clone(),
+                                provider_constraint,
+                                primary_eligible: false,
+                                eligible: vec![local.name.clone()],
+                                reroute_to: Some(local.clone()),
+                            };
+                            let inline = serde_json::json!({
+                                "status": "answered",
+                                "outcome": el::egress_ask_options::RUN_LOCAL,
+                                "interaction_id": state.interaction_id,
+                            });
+                            let emit = |chosen: Option<&str>| {
+                                if let Some(store) = self.gateway_store.as_ref() {
+                                    el::emit_provider_selected(
+                                        store,
+                                        session_id,
+                                        &self.manifest.agent.id,
+                                        Some(turn_id),
+                                        &emit_plan,
+                                        chosen,
+                                        &[],
+                                        false,
+                                        false,
+                                        Some(&inline),
+                                    );
+                                }
+                            };
+                            return match self.build_driver_for_preset(&local.name) {
+                                Some(driver) => {
+                                    emit(Some(&local.name));
+                                    let effective_model = presets
+                                        .and_then(|m| m.get(&local.name))
+                                        .and_then(|p| p.model.clone());
+                                    EgressRoutingSelection {
+                                        primary_driver: Some(driver),
+                                        effective_class: local.egress_class,
+                                        effective_model,
+                                        fallback_chain: fallback_chain.to_vec(),
+                                        refuse_reason: None,
+                                        pending_ask: None,
+                                    }
+                                }
+                                None => {
+                                    emit(None);
+                                    EgressRoutingSelection {
+                                        primary_driver: None,
+                                        effective_class: primary_class,
+                                        effective_model: None,
+                                        fallback_chain: fallback_chain.to_vec(),
+                                        refuse_reason: Some(format!(
+                                            "egress_ask_unbuildable: the operator chose local \
+                                             preset '{}' but it could not be built (missing \
+                                             provider/model).",
+                                            local.name
+                                        )),
+                                        pending_ask: None,
+                                    }
+                                }
+                            };
+                        }
+                        self.egress_ask_state = None;
+                    }
+                    Some(el::egress_ask_options::DECLASSIFY) => {
+                        // The grant was materialized at answer time; the normal
+                        // flow below sees the session declassified and keeps
+                        // the pinned primary.
+                        self.egress_ask_state = None;
+                        ask_outcome = Some(serde_json::json!({
+                            "status": "answered",
+                            "outcome": el::egress_ask_options::DECLASSIFY,
+                            "interaction_id": state.interaction_id,
+                        }));
+                    }
+                    Some(el::egress_ask_options::ABORT) => {
+                        self.egress_ask_state = None;
+                        let emit_plan = el::EgressRoutingPlan {
+                            batch: state.batch.clone(),
+                            provider_constraint,
+                            primary_eligible: false,
+                            eligible: Vec::new(),
+                            reroute_to: None,
+                        };
+                        let inline = serde_json::json!({
+                            "status": "answered",
+                            "outcome": el::egress_ask_options::ABORT,
+                            "interaction_id": state.interaction_id,
+                        });
+                        if let Some(store) = self.gateway_store.as_ref() {
+                            el::emit_provider_selected(
+                                store,
+                                session_id,
+                                &self.manifest.agent.id,
+                                Some(turn_id),
+                                &emit_plan,
+                                None,
+                                &[],
+                                false,
+                                false,
+                                Some(&inline),
+                            );
+                        }
+                        return EgressRoutingSelection {
+                            primary_driver: None,
+                            effective_class: primary_class,
+                            effective_model: None,
+                            fallback_chain: Vec::new(),
+                            refuse_reason: Some(format!(
+                                "egress_aborted_by_operator: the operator chose to abort this \
+                                 turn (pinned preset '{}' conflicts with batch {}).",
+                                state.pinned_preset,
+                                autonoetic_types::egress::label_display_name(&state.batch)
+                            )),
+                            pending_ask: None,
+                        };
+                    }
+                    _ => {
+                        // Still pending or unknown answer — the turn resumed
+                        // without a usable choice; keep waiting on the ask.
+                        return EgressRoutingSelection {
+                            primary_driver: None,
+                            effective_class: primary_class,
+                            effective_model: None,
+                            fallback_chain: Vec::new(),
+                            refuse_reason: None,
+                            pending_ask: Some(state.interaction_id.clone()),
+                        };
+                    }
+                }
+            }
+        }
 
         // Candidates are **buildable fixed presets only**: skip routing presets
         // (no direct provider/model) and presets missing provider/model, so the
@@ -1263,7 +1441,6 @@ impl AgentExecutor {
         // local wins over an earlier declassification until they clear it.
         // Host-scoped grants never apply to model routing, and per-envelope
         // grants are a chokepoint-level concern (not yet consulted).
-        let root_session = crate::runtime::content_store::root_session_id(session_id);
         let declassified_remote = provider_constraint.is_none()
             && self.gateway_store.as_ref().is_some_and(|store| {
                 el::session_sink_declassified(
@@ -1308,7 +1485,7 @@ impl AgentExecutor {
                 .collect()
         };
 
-        let emit = |chosen: Option<&str>, rerouted: bool| {
+        let emit = |chosen: Option<&str>, rerouted: bool, inline_ask: Option<&serde_json::Value>| {
             if let Some(store) = self.gateway_store.as_ref() {
                 el::emit_provider_selected(
                     store,
@@ -1320,13 +1497,119 @@ impl AgentExecutor {
                     &fallback_skipped,
                     rerouted,
                     declassified_remote,
+                    inline_ask.or(ask_outcome.as_ref()),
                 );
             }
         };
 
+        // ── Pinned × taint conflict (RFC §5.3 / #968) ─────────────────────
+        // A pinned primary (agent manifest `llm_preset`, session override, or
+        // legacy fixed model) that is not cleared for the batch is a conflict
+        // the operator must resolve: file the three-way ask (declassify / run
+        // this turn on local preset X / abort) and suspend — never silently
+        // downgrade (a discretion leak) and never hard-refuse without a path
+        // forward. Unpinned primaries (routing strategies) keep the automatic
+        // taint-following behavior below.
+        if primary_pinned && !plan.primary_eligible {
+            let local_candidate = plan.reroute_to.clone();
+            // Which conflict this is decides which options can resolve it. A
+            // `provider_constraint` blocks the pin *by operator decree* and
+            // outranks declassification grants (see `declassified_remote`
+            // above), so offering "declassify" here would file the ask,
+            // materialize a grant that changes nothing, and re-file the ask on
+            // resume — indefinitely. Note this case also fires on a perfectly
+            // clean turn: a room pinned local plus a pinned remote preset
+            // conflict with no taint involved at all.
+            let blocker = if provider_constraint.is_some() {
+                el::PinAskBlocker::ProviderConstraint
+            } else {
+                el::PinAskBlocker::BatchTaint
+            };
+            let ask_id = self.gateway_store.as_ref().and_then(|store| {
+                el::file_egress_pin_ask(
+                    store,
+                    session_id,
+                    root_session,
+                    &self.manifest.agent.id,
+                    turn_id,
+                    &plan.batch,
+                    routed_preset,
+                    local_candidate.as_ref(),
+                    blocker,
+                )
+            });
+            if let Some(ask_id) = ask_id {
+                self.egress_ask_state = Some(el::EgressAskState {
+                    interaction_id: ask_id.clone(),
+                    turn_id: turn_id.to_string(),
+                    batch: plan.batch.clone(),
+                    pinned_preset: routed_preset.to_string(),
+                    local_preset: local_candidate.clone(),
+                });
+                let inline = serde_json::json!({
+                    "status": "filed",
+                    "interaction_id": ask_id,
+                    "options": el::egress_ask_options_payload(blocker, local_candidate.as_ref()),
+                });
+                emit(None, false, Some(&inline));
+                return EgressRoutingSelection {
+                    primary_driver: None,
+                    effective_class: primary_class,
+                    effective_model: None,
+                    fallback_chain: filtered_fallback,
+                    refuse_reason: None,
+                    pending_ask: Some(ask_id),
+                };
+            }
+            // Filing failed (flood cap, store error). Refuse, rather than
+            // falling through to the taint-following reroute: that path exists
+            // for *unpinned* primaries, and applying it here would silently run
+            // a pinned preset's turn on a different model — the discretion leak
+            // this whole branch exists to prevent (RFC §5.3). A visible refusal
+            // costs the operator a turn; a silent downgrade costs them the
+            // guarantee, and they would never know it happened.
+            tracing::error!(
+                target: "egress",
+                session_id = %session_id,
+                pinned_preset = %routed_preset,
+                "failed to file egress pin conflict ask — refusing the turn rather than \
+                 silently rerouting a pinned preset"
+            );
+            emit(None, false, None);
+            return EgressRoutingSelection {
+                primary_driver: None,
+                effective_class: primary_class,
+                effective_model: None,
+                fallback_chain: filtered_fallback,
+                refuse_reason: Some(format!(
+                    "egress_pin_conflict_ask_unavailable: the pinned preset '{}' is not cleared \
+                     for this turn ({}), and the gateway could not file the operator ask that \
+                     would resolve it (pending-interaction cap or store error). Refusing rather \
+                     than running a pinned preset on another model. Retry once the pending list \
+                     drains, or resolve the conflict directly{}.",
+                    routed_preset,
+                    match blocker {
+                        el::PinAskBlocker::ProviderConstraint =>
+                            "the room is pinned local by session policy".to_string(),
+                        el::PinAskBlocker::BatchTaint => format!(
+                            "new data labeled {}",
+                            autonoetic_types::egress::label_display_name(&plan.batch)
+                        ),
+                    },
+                    match blocker {
+                        el::PinAskBlocker::ProviderConstraint =>
+                            " by lifting the room pin (`/private`)",
+                        el::PinAskBlocker::BatchTaint =>
+                            " by declassifying the session or clearing the preset pin",
+                    },
+                )),
+                pending_ask: None,
+            };
+        }
+
         // No eligible provider for a tainted batch → refuse with a path forward.
         if plan.no_eligible_provider() {
-            emit(None, false);
+            emit(None, false, None);
             // RFC §5.3's path forward, made concrete: file (or reuse) a
             // pending EgressDeclassify request so the operator's way out is a
             // single approval. Skipped when no buildable preset exists at all
@@ -1367,6 +1650,7 @@ impl AgentExecutor {
                     autonoetic_types::egress::label_display_name(batch),
                     offer_note
                 )),
+                pending_ask: None,
             };
         }
 
@@ -1374,7 +1658,7 @@ impl AgentExecutor {
         match plan.reroute_to.clone() {
             Some(cand) => match self.build_driver_for_preset(&cand.name) {
                 Some(driver) => {
-                    emit(Some(&cand.name), true);
+                    emit(Some(&cand.name), true, None);
                     let effective_model = presets
                         .and_then(|m| m.get(&cand.name))
                         .and_then(|p| p.model.clone());
@@ -1384,10 +1668,11 @@ impl AgentExecutor {
                         effective_model,
                         fallback_chain: filtered_fallback,
                         refuse_reason: None,
+                        pending_ask: None,
                     }
                 }
                 None => {
-                    emit(None, false);
+                    emit(None, false, None);
                     EgressRoutingSelection {
                         primary_driver: None,
                         effective_class: primary_class,
@@ -1399,18 +1684,20 @@ impl AgentExecutor {
                             cand.name,
                             autonoetic_types::egress::label_display_name(batch)
                         )),
+                        pending_ask: None,
                     }
                 }
             },
             None => {
                 // Primary already eligible — keep `self.llm`.
-                emit(Some(routed_preset), false);
+                emit(Some(routed_preset), false, None);
                 EgressRoutingSelection {
                     primary_driver: None,
                     effective_class: primary_class,
                     effective_model: None,
                     fallback_chain: filtered_fallback,
                     refuse_reason: None,
+                    pending_ask: None,
                 }
             }
         }
@@ -1448,6 +1735,7 @@ impl AgentExecutor {
             // session would (RFC data-envelopes §3.4). Clone is empty for
             // unconfigured deployments.
             egress_labels: self.egress_labels.clone(),
+            egress_ask: self.egress_ask_state.clone(),
             history: history.to_vec(),
             turn_counter: self.turn_counter,
             loop_guard_state: self.guard.snapshot(),
@@ -3270,6 +3558,21 @@ impl AgentExecutor {
                     if batch_taint.is_unrestricted() && provider_constraint.is_none() {
                         (None, primary_egress_class, fallback_chain)
                     } else {
+                        // #968: the primary is *pinned* when it did not come
+                        // from a per-completion routing strategy (agent
+                        // manifest `llm_preset`, session override, or legacy
+                        // fixed model) — a pinned primary × tainted batch is a
+                        // conflict the operator must resolve, not a silent
+                        // reroute.
+                        let primary_pinned = match self.resolved_inference.as_ref() {
+                            Some(profile) => !profile.is_routing_preset,
+                            None => self
+                                .manifest
+                                .llm_config
+                                .as_ref()
+                                .and_then(|c| c.routing_preset.clone())
+                                .is_none(),
+                        };
                         let sel = self.plan_egress_routing(
                             &batch_taint,
                             &primary_preset_label,
@@ -3278,7 +3581,27 @@ impl AgentExecutor {
                             &session_id,
                             &turn_id,
                             provider_constraint,
+                            primary_pinned,
                         );
+                        if let Some(ask_id) = sel.pending_ask {
+                            // Pinned preset × tainted batch — the operator must
+                            // choose (RFC §5.3 / #968): suspend the turn on the
+                            // filed interaction; it resumes when answered and
+                            // honors the choice at routing time.
+                            return Err(self.save_and_yield(
+                                history,
+                                &turn_id,
+                                YieldReason::UserInputRequired {
+                                    interaction_id: ask_id,
+                                },
+                                None,
+                                anyhow::anyhow!(
+                                    "egress_pin_ask_filed: the pinned preset conflicts with \
+                                     this turn's batch taint; the operator must choose \
+                                     (declassify / run local / abort)."
+                                ),
+                            ));
+                        }
                         if let Some(reason) = sel.refuse_reason {
                             // No eligible provider for a tainted batch — refuse
                             // the turn with a path forward, never ship taint to
@@ -6782,6 +7105,444 @@ mod tests {
             ]
         );
     }
+    // -- #968 egress pin×taint inline ask (RFC §5.3) ------------------------
+
+    use autonoetic_types::background::UserInteractionAnswer;
+    use autonoetic_types::config::LlmPreset;
+    use autonoetic_types::egress::{EgressClass, EgressLabel, Sink};
+
+    fn egress_preset(name: &str, class: EgressClass) -> (String, LlmPreset) {
+        (
+            name.to_string(),
+            LlmPreset {
+                provider: Some(if class == EgressClass::Local {
+                    "ollama".to_string()
+                } else {
+                    "anthropic".to_string()
+                }),
+                model: Some(if class == EgressClass::Local {
+                    "llama3".to_string()
+                } else {
+                    "claude-sonnet".to_string()
+                }),
+                temperature: Some(0.1),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: None,
+                context_window_tokens: None,
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: None,
+                egress_class: Some(class),
+            },
+        )
+    }
+
+    fn pin_ask_executor(
+        presets: &[(&str, EgressClass)],
+    ) -> (AgentExecutor, Arc<crate::scheduler::gateway_store::GatewayStore>, tempfile::TempDir)
+    {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir");
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).expect("gateway dir");
+        let store = Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+                .expect("gateway store"),
+        );
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.llm_presets = presets
+            .iter()
+            .map(|(name, class)| egress_preset(name, *class))
+            .collect();
+        let runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            Some(store.clone()),
+        )
+        .with_config(Arc::new(cfg));
+        (runtime, store, temp)
+    }
+
+    fn provider_selected_events(
+        store: &crate::scheduler::gateway_store::GatewayStore,
+    ) -> Vec<serde_json::Value> {
+        store
+            .search_causal_events(Some("sess-1"), None, 100)
+            .expect("search_causal_events")
+            .into_iter()
+            .filter(|e| e.action == "egress.provider_selected")
+            .map(|e| {
+                serde_json::from_str(e.payload.as_deref().unwrap_or("{}"))
+                    .unwrap_or_else(|_| serde_json::json!({}))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pinned_remote_tainted_batch_files_ask_and_marks_suspension() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote), ("local", EgressClass::Local)]);
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::local_only(),
+            "remote",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            None,
+            true,
+        );
+        let ask_id = sel.pending_ask.expect("ask should be filed");
+        assert!(ask_id.starts_with("ui-"));
+        assert!(sel.primary_driver.is_none());
+        assert!(sel.refuse_reason.is_none());
+
+        // Ask state rides the executor for the checkpoint.
+        let state = runtime.egress_ask_state.as_ref().expect("ask state set");
+        assert_eq!(state.interaction_id, ask_id);
+        assert_eq!(state.turn_id, "turn-000001");
+        assert_eq!(
+            state.local_preset.as_ref().map(|c| c.name.as_str()),
+            Some("local")
+        );
+
+        // The interaction exists with the three-way options and the tag.
+        let it = store
+            .get_user_interaction(&ask_id)
+            .expect("lookup")
+            .expect("interaction");
+        assert!(crate::runtime::egress_labeler::is_egress_pin_ask(&it));
+        let ids: Vec<&str> = it.options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["declassify", "run_local", "abort"]);
+
+        // provider_selected carries the filed inline-ask outcome (RFC §9.1).
+        let events = provider_selected_events(&store);
+        let ev = events.first().expect("provider_selected emitted");
+        assert_eq!(ev["inline_ask"]["status"], "filed");
+        assert_eq!(ev["inline_ask"]["interaction_id"], ask_id);
+        assert_eq!(ev["chosen_preset"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn pinned_ask_without_local_preset_offers_only_declassify_and_abort() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote)]);
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::local_only(),
+            "remote",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            None,
+            true,
+        );
+        let ask_id = sel.pending_ask.expect("ask filed");
+        let it = store
+            .get_user_interaction(&ask_id)
+            .expect("lookup")
+            .expect("interaction");
+        let ids: Vec<&str> = it.options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["declassify", "abort"]);
+        assert!(runtime.egress_ask_state.as_ref().unwrap().local_preset.is_none());
+    }
+
+    #[test]
+    fn unpinned_routing_primary_tainted_batch_reroutes_without_ask() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote), ("local", EgressClass::Local)]);
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::local_only(),
+            "routing",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            None,
+            false,
+        );
+        assert!(sel.pending_ask.is_none());
+        assert!(sel.primary_driver.is_some(), "auto-reroute to the local preset");
+        assert_eq!(sel.effective_class, Some(EgressClass::Local));
+        assert!(runtime.egress_ask_state.is_none());
+        assert!(
+            store
+                .get_pending_interactions_for_root_session("sess-1")
+                .expect("pending")
+                .is_empty(),
+            "no ask for unpinned primaries"
+        );
+        let evs = provider_selected_events(&store);
+        let ev = evs.first().expect("emitted");
+        assert_eq!(ev["rerouted"], true);
+        assert!(ev["inline_ask"].is_null());
+    }
+
+    /// PR #996 review: a `provider_constraint` blocks the pin by operator
+    /// decree and outranks declassification grants, so offering `declassify`
+    /// would file the ask, materialize a grant that changes nothing, and re-file
+    /// the ask on resume — indefinitely. Note the batch here is **clean**: this
+    /// conflict needs no taint, only a room pinned local plus a pinned remote
+    /// preset.
+    #[test]
+    fn provider_constraint_pin_conflict_offers_no_declassify() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[
+            ("remote", EgressClass::Remote),
+            ("local", EgressClass::Local),
+        ]);
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::unrestricted(),
+            "remote",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            Some(autonoetic_types::egress::ProviderConstraint::LocalOnly),
+            true,
+        );
+        let ask_id = sel.pending_ask.expect("ask should be filed");
+        assert!(sel.refuse_reason.is_none());
+
+        let it = store
+            .get_user_interaction(&ask_id)
+            .expect("lookup")
+            .expect("interaction");
+        let ids: Vec<&str> = it.options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["run_local", "abort"],
+            "declassify cannot lift a room pin and must not be offered"
+        );
+
+        // The audit's option list agrees with what was filed, so it cannot
+        // record an option the operator never saw.
+        let evs = provider_selected_events(&store);
+        let ev = evs.first().expect("emitted");
+        assert_eq!(ev["inline_ask"]["status"], "filed");
+        let opts: Vec<&str> = ev["inline_ask"]["options"]
+            .as_array()
+            .expect("options array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(opts, ["run_local", "abort"]);
+    }
+
+    /// PR #996 review: if the required ask cannot be filed, refusing is correct
+    /// and rerouting is not. The taint-following reroute exists for *unpinned*
+    /// primaries; applying it to a pinned one silently runs the turn on a
+    /// different model — the discretion leak this branch exists to prevent. A
+    /// visible refusal costs a turn; a silent downgrade costs the guarantee.
+    ///
+    /// Simulated by an executor with no store (the same `None` the filing path
+    /// yields on a flood cap or store error).
+    #[test]
+    fn pin_conflict_refuses_when_the_ask_cannot_be_filed() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir");
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.llm_presets = [
+            egress_preset("remote", EgressClass::Remote),
+            egress_preset("local", EgressClass::Local),
+        ]
+        .into_iter()
+        .collect();
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            // No store → `file_egress_pin_ask` is never reached, exactly as when
+            // it fails.
+            None,
+        )
+        .with_config(Arc::new(cfg));
+
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::local_only(),
+            "remote",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            None,
+            true,
+        );
+
+        assert!(sel.pending_ask.is_none());
+        assert!(
+            sel.primary_driver.is_none(),
+            "must not silently reroute a pinned preset"
+        );
+        let reason = sel.refuse_reason.expect("must refuse, not reroute");
+        assert!(
+            reason.starts_with("egress_pin_conflict_ask_unavailable"),
+            "refusal should name the cause: {reason}"
+        );
+        assert!(
+            reason.contains("remote"),
+            "refusal should name the pinned preset: {reason}"
+        );
+        assert!(runtime.egress_ask_state.is_none());
+    }
+
+    #[test]
+    fn resumed_ask_run_local_uses_offered_local_preset_for_the_turn() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote), ("local", EgressClass::Local)]);
+        let batch = EgressLabel::local_only();
+        let first = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        let ask_id = first.pending_ask.expect("ask filed");
+        store
+            .answer_user_interaction(&UserInteractionAnswer {
+                interaction_id: ask_id.clone(),
+                answer_option_id: Some(crate::runtime::egress_labeler::egress_ask_options::RUN_LOCAL.to_string()),
+                answer_text: None,
+                answered_by: "test-operator".to_string(),
+            })
+            .expect("answered");
+
+        let sel = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        assert!(sel.pending_ask.is_none());
+        assert!(sel.refuse_reason.is_none());
+        assert!(sel.primary_driver.is_some(), "resumed turn runs the local preset");
+        assert_eq!(sel.effective_class, Some(EgressClass::Local));
+        assert_eq!(
+            sel.effective_model.as_deref(),
+            Some("llama3"),
+            "cost/tracing attribute the local model"
+        );
+        // The override persists for the rest of THIS turn.
+        assert!(runtime.egress_ask_state.is_some());
+
+        let evs = provider_selected_events(&store);
+        let ev = evs.first().expect("emitted");
+        assert_eq!(ev["inline_ask"]["status"], "answered");
+        assert_eq!(ev["inline_ask"]["outcome"], "run_local");
+        assert_eq!(ev["chosen_preset"], "local");
+    }
+
+    #[test]
+    fn resumed_ask_declassify_materializes_grant_and_keeps_pinned_primary() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote), ("local", EgressClass::Local)]);
+        let batch = EgressLabel::local_only();
+        let first = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        let ask_id = first.pending_ask.expect("ask filed");
+        store
+            .answer_user_interaction(&UserInteractionAnswer {
+                interaction_id: ask_id.clone(),
+                answer_option_id: Some(crate::runtime::egress_labeler::egress_ask_options::DECLASSIFY.to_string()),
+                answer_text: None,
+                answered_by: "test-operator".to_string(),
+            })
+            .expect("answered");
+        // The answer-time hook (interaction_answer.rs) materializes the grant.
+        let it = store
+            .get_user_interaction(&ask_id)
+            .expect("lookup")
+            .expect("interaction");
+        crate::runtime::egress_labeler::apply_egress_ask_declassification(&store, &it)
+            .expect("grant materialized");
+        assert!(
+            crate::runtime::egress_labeler::session_sink_declassified(
+                &store,
+                "sess-1",
+                "sess-1",
+                Sink::RemoteModel
+            ),
+            "session-wide grant live after the declassify answer"
+        );
+
+        let sel = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        assert!(sel.pending_ask.is_none());
+        assert!(sel.refuse_reason.is_none());
+        assert!(sel.primary_driver.is_none(), "pinned primary kept");
+        assert!(runtime.egress_ask_state.is_none(), "ask state consumed");
+
+        let evs = provider_selected_events(&store);
+        let ev = evs.first().expect("emitted");
+        assert_eq!(ev["inline_ask"]["status"], "answered");
+        assert_eq!(ev["inline_ask"]["outcome"], "declassify");
+        assert_eq!(ev["declassified_remote"], true);
+        assert_eq!(ev["chosen_preset"], "remote");
+    }
+
+    #[test]
+    fn resumed_ask_abort_refuses_the_turn() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote), ("local", EgressClass::Local)]);
+        let batch = EgressLabel::local_only();
+        let first = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        let ask_id = first.pending_ask.expect("ask filed");
+        store
+            .answer_user_interaction(&UserInteractionAnswer {
+                interaction_id: ask_id.clone(),
+                answer_option_id: Some(crate::runtime::egress_labeler::egress_ask_options::ABORT.to_string()),
+                answer_text: None,
+                answered_by: "test-operator".to_string(),
+            })
+            .expect("answered");
+
+        let sel = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        assert!(sel.pending_ask.is_none());
+        let reason = sel.refuse_reason.expect("turn refused");
+        assert!(reason.contains("egress_aborted_by_operator"), "reason: {reason}");
+        assert!(runtime.egress_ask_state.is_none());
+
+        let evs = provider_selected_events(&store);
+        let ev = evs.first().expect("emitted");
+        assert_eq!(ev["inline_ask"]["status"], "answered");
+        assert_eq!(ev["inline_ask"]["outcome"], "abort");
+        assert_eq!(ev["no_eligible_provider"], true);
+    }
+
+    #[test]
+    fn ask_state_is_turn_scoped_and_stale_state_is_dropped() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[("remote", EgressClass::Remote), ("local", EgressClass::Local)]);
+        let batch = EgressLabel::local_only();
+        let first = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000001", None, true,
+        );
+        let ask_id = first.pending_ask.expect("ask filed");
+        store
+            .answer_user_interaction(&UserInteractionAnswer {
+                interaction_id: ask_id.clone(),
+                answer_option_id: Some(crate::runtime::egress_labeler::egress_ask_options::RUN_LOCAL.to_string()),
+                answer_text: None,
+                answered_by: "test-operator".to_string(),
+            })
+            .expect("answered");
+
+        // Next turn: the stale state is dropped and the fresh conflict files a
+        // new ask (the answered one is no longer pending, so no reuse).
+        let sel = runtime.plan_egress_routing(
+            &batch, "remote", Some(EgressClass::Remote), &[], "sess-1", "turn-000002", None, true,
+        );
+        let ask2 = sel.pending_ask.expect("fresh ask for the new turn");
+        assert_ne!(ask2, ask_id);
+        assert_eq!(
+            runtime.egress_ask_state.as_ref().unwrap().turn_id,
+            "turn-000002"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7098,4 +7859,5 @@ mod divergence_robustness_tests {
             reason
         );
     }
+
 }

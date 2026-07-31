@@ -28,6 +28,7 @@ mod phase4_mcp;
 mod phase4_ofp;
 mod phase4_sandbox;
 mod phase4_web_hooks;
+mod pin_ask;
 mod proposal_authoring;
 mod routing;
 mod source_rules;

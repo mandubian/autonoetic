@@ -25,6 +25,7 @@ fn test_checkpoint(
 ) -> SessionCheckpoint {
     SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history,
         turn_counter,
         session_state: Default::default(),

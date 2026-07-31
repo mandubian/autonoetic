@@ -27,12 +27,16 @@
 
 use std::sync::Arc;
 
+use autonoetic_types::background::{
+    GrantScope, UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
+};
 use autonoetic_types::causal_chain::{default_enforced_rules, CausalEventRecord};
 use autonoetic_types::egress::{
     label_display_name, matches_simple_glob, source_pattern_matches, EgressClass, EgressConfig,
     EgressLabel, EgressRule, EgressSessionPolicy, Provenance, Sink,
 };
 use autonoetic_types::id_format::short_random_id;
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::egress_path_matcher::{
     collect_exec_dependency_sources, EgressPathMatcher, ExecSourceContext, LabeledPathPattern,
@@ -1293,6 +1297,271 @@ pub fn file_declassify_offer(
     Some(request_id)
 }
 
+// ── RFC §5.3 inline ask (pin × taint conflict, #968) ─────────────────────
+
+/// Option ids of the three-way inline ask filed when a pinned preset
+/// conflicts with a tainted batch (RFC §5.3 / #968).
+pub mod egress_ask_options {
+    pub const DECLASSIFY: &str = "declassify";
+    pub const RUN_LOCAL: &str = "run_local";
+    pub const ABORT: &str = "abort";
+}
+
+/// The routing state of a filed pin×taint conflict ask (RFC §5.3, #968),
+/// carried in the checkpoint so the resumed turn honors the operator's choice
+/// without re-deriving the (already consumed) batch taint.
+///
+/// `local_preset` is the deterministic reroute candidate the "run local once"
+/// option names; `None` when no buildable preset is cleared for the batch (the
+/// ask then offers only declassify / abort).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAskState {
+    pub interaction_id: String,
+    pub turn_id: String,
+    pub batch: EgressLabel,
+    pub pinned_preset: String,
+    pub local_preset: Option<PresetCandidate>,
+}
+
+/// Whether an interaction is a gateway-filed egress pin×taint ask (tagged in
+/// its `context` payload).
+pub fn is_egress_pin_ask(interaction: &UserInteraction) -> bool {
+    interaction
+        .context
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+        .and_then(|v| v.get("egress_pin_ask").cloned())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Why a pinned primary is not cleared for this turn. This decides which
+/// options can *actually* resolve the conflict, which is not cosmetic: an
+/// option the gateway cannot honor sends the operator round the same ask again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinAskBlocker {
+    /// The batch's taint excludes the pinned preset's sink. Declassifying the
+    /// root session to `RemoteModel` lifts it, so that option is real.
+    BatchTaint,
+    /// A session `provider_constraint` (RFC §5.4 rung 1) makes the pinned
+    /// preset ineligible. Declassification **cannot** lift this — the
+    /// constraint outranks grants by design ("an operator who pinned the room
+    /// local wins over an earlier declassification until they clear it") — so
+    /// offering it would file the ask, materialize a grant that changes
+    /// nothing, and re-file the ask on resume, indefinitely. The way out is to
+    /// clear the room pin, which is a separate operator action (`/private`).
+    ProviderConstraint,
+}
+
+/// The option ids actually offered by an egress pin×taint ask, for the
+/// `egress.provider_selected` inline-ask payload.
+///
+/// `declassify` appears only when it can help (see [`PinAskBlocker`]);
+/// `run_local` only when a buildable local preset is cleared for the batch.
+/// `abort` is always present, so the ask is never a dead end.
+pub fn egress_ask_options_payload(
+    blocker: PinAskBlocker,
+    local_preset: Option<&PresetCandidate>,
+) -> Vec<&'static str> {
+    let mut ids = Vec::with_capacity(3);
+    if blocker == PinAskBlocker::BatchTaint {
+        ids.push(egress_ask_options::DECLASSIFY);
+    }
+    if local_preset.is_some() {
+        ids.push(egress_ask_options::RUN_LOCAL);
+    }
+    ids.push(egress_ask_options::ABORT);
+    ids
+}
+
+/// File (or reuse) the three-way inline ask for a pin × taint conflict
+/// (RFC §5.3 / #968): a pinned remote preset cannot take a tainted batch, and
+/// the gateway must neither silently downgrade (a discretion leak) nor
+/// hard-refuse without a path forward — the operator picks declassify / run
+/// this turn on local preset X / abort.
+///
+/// The choice is carried by a `Decision` `UserInteraction`; the suspended turn
+/// resumes on the answer and honors it at routing time (see
+/// [`EgressAskState`]). Dedup: a pending egress ask for the root session is
+/// reused so retried conflicts don't flood the pending list (same shape as
+/// [`file_declassify_offer`]).
+#[allow(clippy::too_many_arguments)]
+pub fn file_egress_pin_ask(
+    store: &GatewayStore,
+    session_id: &str,
+    root_session_id: &str,
+    agent_id: &str,
+    turn_id: &str,
+    batch: &EgressLabel,
+    pinned_preset: &str,
+    local_preset: Option<&PresetCandidate>,
+    blocker: PinAskBlocker,
+) -> Option<String> {
+    if let Ok(pending) = store.get_pending_interactions_for_root_session(root_session_id) {
+        for it in &pending {
+            if is_egress_pin_ask(it) {
+                return Some(it.interaction_id.clone());
+            }
+        }
+    }
+
+    // Options are built from the same predicate as
+    // `egress_ask_options_payload`, so what the operator is offered and what the
+    // `egress.provider_selected` audit says was offered cannot drift.
+    let offered = egress_ask_options_payload(blocker, local_preset);
+    let options: Vec<UserInteractionOption> = offered
+        .iter()
+        .map(|id| {
+            let label = match *id {
+                egress_ask_options::DECLASSIFY => {
+                    "Declassify this root session to the remote model".to_string()
+                }
+                egress_ask_options::RUN_LOCAL => format!(
+                    "Run this turn on the local preset '{}'",
+                    local_preset.map(|c| c.name.as_str()).unwrap_or("local"),
+                ),
+                _ => "Abort this turn".to_string(),
+            };
+            UserInteractionOption {
+                id: (*id).to_string(),
+                label,
+                value: (*id).to_string(),
+            }
+        })
+        .collect();
+
+    let context = serde_json::json!({
+        "egress_pin_ask": true,
+        "batch": batch,
+        "pinned_preset": pinned_preset,
+        "local_preset": local_preset.map(|c| c.name.clone()),
+        // Recorded so the resume side and the audit can tell *why* the pin was
+        // blocked, not merely that it was.
+        "blocker": match blocker {
+            PinAskBlocker::BatchTaint => "batch_taint",
+            PinAskBlocker::ProviderConstraint => "provider_constraint",
+        },
+    })
+    .to_string();
+
+    // The question names only the choices actually offered — promising a local
+    // run when no local preset is configured, or a declassification that cannot
+    // lift a room pin, reads as a broken UI and wastes the operator's decision.
+    let run_local_clause = local_preset
+        .map(|c| format!(" run this turn on the local preset '{}',", c.name))
+        .unwrap_or_default();
+    let question = match blocker {
+        PinAskBlocker::BatchTaint => format!(
+            "The pinned preset '{}' is not cleared for this turn's new data (labeled {}). \
+             The gateway will not silently run it on another model. Choose: declassify this \
+             root session to the remote model,{} or abort this turn.",
+            pinned_preset,
+            label_display_name(batch),
+            run_local_clause,
+        ),
+        PinAskBlocker::ProviderConstraint => format!(
+            "This room is pinned local (session provider_constraint), so the pinned preset \
+             '{}' cannot run this turn. The gateway will not silently run it on another \
+             model. Choose:{} or abort this turn. Declassification is not offered — the room \
+             pin outranks it; lift the pin itself (`/private`) to use '{}' again.",
+            pinned_preset,
+            if run_local_clause.is_empty() {
+                String::new()
+            } else {
+                run_local_clause.trim_end_matches(',').to_string()
+            },
+            pinned_preset,
+        ),
+    };
+
+    let interaction = UserInteraction {
+        interaction_id: short_random_id("ui-"),
+        session_id: session_id.to_string(),
+        root_session_id: root_session_id.to_string(),
+        workflow_id: None,
+        task_id: None,
+        agent_id: agent_id.to_string(),
+        turn_id: turn_id.to_string(),
+        kind: UserInteractionKind::Decision,
+        question,
+        context: Some(context),
+        options,
+        allow_freeform: false,
+        status: UserInteractionStatus::Pending,
+        answer_option_id: None,
+        answer_text: None,
+        answered_by: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        answered_at: None,
+        expires_at: None,
+        checkpoint_turn_id: Some(turn_id.to_string()),
+    };
+    store.create_user_interaction(&interaction).ok()?;
+    Some(interaction.interaction_id)
+}
+
+/// Materialize the "declassify" choice of an answered egress pin×taint ask:
+/// the operator's explicit answer is the authorization (recorded in
+/// `answered_by`), so the session-wide `RemoteModel` declassification grant is
+/// inserted directly — the same grant an approved `EgressDeclassify` approval
+/// would produce (RFC §8), with the interaction as provenance. A no-op for
+/// any other interaction or option.
+///
+/// Single-shot because `GatewayStore::answer_user_interaction` **rejects** an
+/// interaction that is no longer `Pending` (it errors rather than returning
+/// early), so a replayed answer never reaches this function a second time. The
+/// guard is upstream and is a refusal, not a silent no-op — worth stating
+/// precisely, since "returns early" would imply a second call lands here
+/// harmlessly.
+pub fn apply_egress_ask_declassification(
+    store: &GatewayStore,
+    interaction: &UserInteraction,
+) -> anyhow::Result<()> {
+    if !is_egress_pin_ask(interaction)
+        || interaction.answer_option_id.as_deref() != Some(egress_ask_options::DECLASSIFY)
+    {
+        return Ok(());
+    }
+    let root: String = if interaction.root_session_id.is_empty() {
+        crate::runtime::content_store::root_session_id(&interaction.session_id).to_string()
+    } else {
+        interaction.root_session_id.clone()
+    };
+    let target = session_egress_declass_target(&root);
+    let reason = format!(
+        "operator answered egress pin×taint ask {}: declassify to remote model",
+        interaction.interaction_id
+    );
+    let answered_at = interaction
+        .answered_at
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    store.insert_egress_declassification_grant(
+        &root,
+        &interaction.session_id,
+        &interaction.agent_id,
+        &target,
+        Sink::RemoteModel,
+        &GrantScope::RootSession,
+        interaction.answered_by.as_deref().unwrap_or("gateway"),
+        &answered_at,
+        Some(&format!("interaction:{}", interaction.interaction_id)),
+        None,
+    )?;
+    emit_declassified(
+        store,
+        &interaction.session_id,
+        &interaction.agent_id,
+        &target,
+        Sink::RemoteModel,
+        GrantScope::RootSession,
+        None,
+        &reason,
+        None,
+    );
+    Ok(())
+}
+
 /// Whether an active (non-revoked, non-expired) declassification grant allows
 /// `Sink::Network` for this session. Lookup is always at use time — no cache.
 pub fn session_network_declassified(
@@ -1978,7 +2247,7 @@ pub fn preset_batch_eligible(batch: &EgressLabel, egress_class: Option<EgressCla
 }
 
 /// One preset considered for taint-following routing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresetCandidate {
     pub name: String,
     pub egress_class: Option<EgressClass>,
@@ -2182,6 +2451,13 @@ pub fn emit_declassified(
 /// `chosen_preset` is `None` when the turn refused with
 /// `egress_no_eligible_provider`. Only meaningful for tainted batches — the
 /// lifecycle skips emission entirely for the unrestricted (clean) case.
+///
+/// `inline_ask` (RFC §9.1's "inline-ask outcome", #968) carries the
+/// pin×taint ask state for this completion: `{status: "filed", interaction_id,
+/// options: [...]}` when the completion suspended on a filed ask, or
+/// `{status: "answered", outcome: <option id>, interaction_id}` when the
+/// resumed completion ran (or refused) per the operator's choice. `None`
+/// when no ask was involved.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_provider_selected(
     store: &Arc<GatewayStore>,
@@ -2193,6 +2469,7 @@ pub fn emit_provider_selected(
     fallback_skipped: &[String],
     rerouted: bool,
     declassified_remote: bool,
+    inline_ask: Option<&serde_json::Value>,
 ) {
     let payload = serde_json::json!({
         "batch_label": serde_json::to_value(&plan.batch).unwrap_or(serde_json::Value::Null),
@@ -2205,6 +2482,7 @@ pub fn emit_provider_selected(
         "fallback_skipped": fallback_skipped,
         "no_eligible_provider": chosen_preset.is_none(),
         "declassified_remote": declassified_remote,
+        "inline_ask": inline_ask,
     });
     emit_egress_event(
         store,

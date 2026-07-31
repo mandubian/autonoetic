@@ -10,6 +10,7 @@ use autonoetic_gateway::runtime::guard::LoopGuard;
 fn make_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
     SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history: vec![Message::user(format!("turn-{turn}"))],
         turn_counter: turn,
         loop_guard_state: LoopGuard {

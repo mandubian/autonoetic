@@ -499,15 +499,21 @@ operator inline** — an approval-shaped prompt offering: declassify these envel
 run this turn on local preset X / abort — and causal-logs the choice (decided
 2026-07-26). It never silently downgrades (a discretion leak — the Ri-0.6-analogue
 from the inference-profiles RFC applies to egress downgrades too) and never
-hard-refuses without a path forward (a dead end for non-experts). **Status
-(implementation amendment, 2026-07-30):** pinning itself works (the pinned preset
-is the primary), but the pin × taint **conflict** path is not yet implemented —
-the routing plane does not detect that the primary was pinned, and preset
-eligibility does not yet consult declassification grants, so a `RemoteModel`
-declassify grant does not unblock a refused turn. Today the gateway reroutes to
-an eligible local preset automatically (covering the "run on local" option) or
-refuses with a path forward. Wiring grant-aware eligibility + the declassify
-offer is the remaining §5.3 slice.
+hard-refuses without a path forward (a dead end for non-experts). **Status:
+implemented (#968).** The routing plane detects pin-ness (a primary that did not
+come from a per-completion routing strategy) and a pinned primary × tainted batch
+files a three-way `Decision` interaction (tagged `egress_pin_ask` in its context,
+deduped while pending), suspending the turn on `UserInputRequired`. The operator's
+answer is honored on resume: **declassify** materializes the session-wide
+`RemoteModel` grant at answer time (the resumed turn runs the pinned remote preset;
+a session-wide declassification grant is consulted at eligibility time in any
+case), **run local** runs the rest of that turn on the offered local preset
+(turn-scoped — the next turn re-evaluates), and **abort** refuses the turn with
+`egress_aborted_by_operator`. Every choice is causal-logged in the
+`egress.provider_selected` payload's `inline_ask` field (filed / answered with the
+chosen outcome). Unpinned primaries (routing strategies) keep the automatic
+taint-following reroute, and a batch with no eligible preset at all still refuses
+with `egress_no_eligible_provider` plus a filed declassify offer.
 
 Two session modes tune the behavior (§5.4): `withhold_and_proceed` (default; above)
 and `require_full_context` (a turn that *references* withheld envelopes is refused

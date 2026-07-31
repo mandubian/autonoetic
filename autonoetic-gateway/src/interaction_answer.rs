@@ -227,6 +227,12 @@ pub async fn answer_and_orchestrate_resume(
         .get_user_interaction(&params.interaction_id)?
         .ok_or_else(|| anyhow::anyhow!("interaction missing after answer"))?;
 
+    // #968: an egress pin×taint ask answered "declassify" materializes the
+    // session-wide RemoteModel declassification grant right here — the
+    // operator's explicit answer is the authorization, and the resumed turn's
+    // routing sees the grant as an already-made decision.
+    crate::runtime::egress_labeler::apply_egress_ask_declassification(store.as_ref(), &interaction)?;
+
     {
         let gateway_dir = crate::execution::gateway_root_dir(cfg.as_ref());
         if let Ok(mut report) = crate::runtime::session_report::SessionReportWriter::open(
