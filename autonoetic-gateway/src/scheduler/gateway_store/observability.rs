@@ -333,6 +333,25 @@ impl GatewayStore {
                 }
             }
         }
+        // Mirror `egress.*` causal events onto the room timeline (#972): the
+        // causal event is the one durable record of egress enforcement, so
+        // the live-digest row is derived here rather than at each of the many
+        // emission sites. Best-effort — a timeline write failure must never
+        // fail the causal event itself.
+        if event.category == "egress" {
+            if let Some(record) =
+                crate::runtime::session_timeline::egress_causal_event_to_timeline(event)
+            {
+                if let Err(e) = self.create_live_digest_event(&record) {
+                    tracing::warn!(
+                        target: "session_timeline",
+                        error = %e,
+                        action = %event.action,
+                        "egress timeline mirror emit failed"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
