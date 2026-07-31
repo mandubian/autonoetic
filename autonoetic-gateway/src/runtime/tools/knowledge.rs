@@ -446,7 +446,7 @@ impl NativeTool for KnowledgeRecallTool {
             memory.egress_label.as_ref(),
             &cfg,
             sink,
-            "knowledge.recall",
+            "knowledge_recall",
         );
 
         serde_json::to_string(&serde_json::json!({
@@ -567,7 +567,7 @@ impl NativeTool for KnowledgeSearchTool {
                     m.egress_label.as_ref(),
                     &cfg,
                     sink,
-                    "knowledge.search",
+                    "knowledge_search",
                 );
                 serde_json::json!({
                     "id": m.memory_id,

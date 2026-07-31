@@ -260,7 +260,7 @@ impl NativeTool for WikiGetTool {
             &result.content,
             &label,
             sink,
-            Some("wiki.get"),
+            Some("wiki_get"),
             IndicationVerbosity::Descriptive,
         ) {
             FilteredStoredContent::Allowed(_) => {}

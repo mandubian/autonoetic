@@ -131,7 +131,7 @@ fn remote_recall_withholds_canary_local_sees_it() -> anyhow::Result<()> {
         &mem.content,
         &label,
         Sink::RemoteModel,
-        Some("knowledge.recall"),
+        Some("knowledge_recall"),
         IndicationVerbosity::Descriptive,
     );
     match remote {
@@ -145,7 +145,7 @@ fn remote_recall_withholds_canary_local_sees_it() -> anyhow::Result<()> {
         &mem.content,
         &label,
         Sink::LocalModel,
-        Some("knowledge.recall"),
+        Some("knowledge_recall"),
         IndicationVerbosity::Descriptive,
     );
     assert_eq!(local, FilteredStoredContent::Allowed(CANARY.into()));
@@ -164,7 +164,7 @@ fn legacy_unlabeled_fail_closed_withholds_from_remote() {
         CANARY,
         &label,
         Sink::RemoteModel,
-        Some("knowledge.recall"),
+        Some("knowledge_recall"),
         IndicationVerbosity::Descriptive,
     ) {
         FilteredStoredContent::Withheld { indication } => {

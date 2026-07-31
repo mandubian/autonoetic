@@ -101,7 +101,7 @@ mod tests {
             "CANARY-SECRET",
             &EgressLabel::local_only(),
             Sink::RemoteModel,
-            Some("knowledge.recall"),
+            Some("knowledge_recall"),
             IndicationVerbosity::Descriptive,
         );
         match out {
@@ -119,7 +119,7 @@ mod tests {
             "CANARY-SECRET",
             &EgressLabel::local_only(),
             Sink::LocalModel,
-            Some("knowledge.recall"),
+            Some("knowledge_recall"),
             IndicationVerbosity::Descriptive,
         );
         assert_eq!(out, FilteredStoredContent::Allowed("CANARY-SECRET".into()));

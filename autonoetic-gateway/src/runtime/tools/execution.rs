@@ -150,8 +150,8 @@ impl NativeTool for ExecutionSearchTool {
                 // filtered fields below are what the caller's sink may see.
                 // `error_summary` is derived from tool output (stderr first line,
                 // error message) so it is gated like the content fields. The
-                // indication kind is the dotted tool name, matching the other
-                // stored-content surfaces (`knowledge.recall`, `wiki.get`).
+                // indication kind is the tool name, matching the other
+                // stored-content surfaces (`knowledge_recall`, `wiki_get`).
                 let label = resolve_stored_label(t.egress_label.as_ref(), &cfg);
                 t.command = filter_opt_field(t.command.as_deref(), &label, sink, "execution_search");
                 t.stdout = filter_opt_field(t.stdout.as_deref(), &label, sink, "execution_search");
