@@ -42,7 +42,7 @@ The default is `Operator` (`ViewerClass::default()`). See [the default-Operator 
 No longer `ViewerClass`-redacted. The sole consumer was
 `runtime/tools/execution.rs::ExecutionSearchTool`, which is a stored-content
 query surface gated by **egress label × query sink** instead (RFC
-data-envelopes-egress-localization §6): `command`/`stdout`/`stderr`/`result`
+data-envelopes-egress-localization §6): `command`/`stdout`/`stderr`/`error_summary`
 pass through `filter_or_indicate_for_sink` and are withheld with an indication
 only when the trace's `egress_label` excludes the caller's sink. The old
 `redact_for_viewer`/`to_json_for_viewer` pair (which blanked content for the

@@ -310,6 +310,81 @@ fn execution_search_filters_stdout_for_remote() -> anyhow::Result<()> {
 }
 
 #[test]
+fn execution_search_filters_error_summary_for_remote() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+    store.create_execution_trace(&ExecutionTraceRecord {
+        trace_id: "trc-canary-err".into(),
+        event_id: None,
+        agent_id: "coder.default".into(),
+        session_id: "sess-908".into(),
+        turn_id: None,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        tool_name: "sandbox_exec".into(),
+        command: Some("cat mail".into()),
+        exit_code: Some(1),
+        stdout: None,
+        stderr: Some("boom".into()),
+        duration_ms: 1,
+        success: 0,
+        error_type: Some("runtime".into()),
+        error_summary: Some(CANARY.into()),
+        approval_required: None,
+        approval_request_id: None,
+        arguments: None,
+        result: None,
+        egress_label: Some(EgressLabel::local_only()),
+    })?;
+
+    let registry = default_registry();
+    let manifest = test_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let config = GatewayConfig::default();
+    let agent_dir = PathBuf::from(".");
+
+    let remote_out = registry.execute(
+        "execution_search",
+        &manifest,
+        &policy,
+        &agent_dir,
+        None,
+        r#"{"session_id":"sess-908","limit":10}"#,
+        Some("sess-908"),
+        None,
+        Some(&config),
+        Some(store.clone()),
+        Some(&run_ctx(Some(Sink::RemoteModel), None)),
+    )?;
+    assert!(
+        !remote_out.contains(CANARY),
+        "execution_search leaked error_summary to remote sink: {remote_out}"
+    );
+    assert!(
+        remote_out.contains("withheld"),
+        "expected a withheld indication for error_summary: {remote_out}"
+    );
+
+    let local_out = registry.execute(
+        "execution_search",
+        &manifest,
+        &policy,
+        &agent_dir,
+        None,
+        r#"{"session_id":"sess-908","limit":10}"#,
+        Some("sess-908"),
+        None,
+        Some(&config),
+        Some(store),
+        Some(&run_ctx(Some(Sink::LocalModel), None)),
+    )?;
+    assert!(
+        local_out.contains(CANARY),
+        "local sink should see error_summary: {local_out}"
+    );
+    Ok(())
+}
+
+#[test]
 fn memory_relabel_updates_and_is_auditable() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     let store = Arc::new(GatewayStore::open(tmp.path())?);

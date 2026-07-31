@@ -148,11 +148,15 @@ impl NativeTool for ExecutionSearchTool {
                 // RFC data-envelopes §6: stored-content query surfaces are gated by
                 // egress label × query sink — not by ViewerClass redaction. The
                 // filtered fields below are what the caller's sink may see.
+                // `error_summary` is derived from tool output (stderr first line,
+                // error message) so it is gated like the content fields. The
+                // indication kind is the dotted tool name, matching the other
+                // stored-content surfaces (`knowledge.recall`, `wiki.get`).
                 let label = resolve_stored_label(t.egress_label.as_ref(), &cfg);
-                t.command = filter_opt_field(t.command.as_deref(), &label, sink, "execution_search.command");
-                t.stdout = filter_opt_field(t.stdout.as_deref(), &label, sink, "execution_search.stdout");
-                t.stderr = filter_opt_field(t.stderr.as_deref(), &label, sink, "execution_search.stderr");
-                t.result = filter_opt_field(t.result.as_deref(), &label, sink, "execution_search.result");
+                t.command = filter_opt_field(t.command.as_deref(), &label, sink, "execution_search");
+                t.stdout = filter_opt_field(t.stdout.as_deref(), &label, sink, "execution_search");
+                t.stderr = filter_opt_field(t.stderr.as_deref(), &label, sink, "execution_search");
+                t.error_summary = filter_opt_field(t.error_summary.as_deref(), &label, sink, "execution_search");
                 t.egress_label = Some(label);
                 serde_json::json!({
                     "trace_id": t.trace_id,
