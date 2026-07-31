@@ -1,7 +1,7 @@
 //! The per-turn egress audit view — RFC data-envelopes §9.3.
 //!
-//! Answers the RFC §9.4 introspection bar for one session, from the causal
-//! chain alone:
+//! Carries the *evidence* for the RFC §9.4 introspection bar, from the causal
+//! chain alone. Each question maps to a row family in the report:
 //!
 //! 1. *What left the machine at turn N?* → the `egress.request_filtered` /
 //!    `request_forwarded` summary (sink, preset, withheld/included counts).
@@ -10,6 +10,24 @@
 //! 4. *Why did turn N run on this provider?* → the summary's `preset` +
 //!    `target_sink`.
 //! 5. *Who declassified what?* → `egress.declassified` (scope, target, sink).
+//!
+//! Note what this is *not*: nothing here turns one of those questions into a
+//! query. §9.4 is an acceptance bar on the recorded data, not a query
+//! interface — the report is a single per-turn shape, and today the operator
+//! does the mapping by eye (which is why the rows are grouped by turn and
+//! labeled by action rather than returned as a flat list). An asking layer, if
+//! one is wanted, belongs above this module in the shape
+//! `gateway approvals ask` already uses — an LLM over one structured record —
+//! and egress is an unusually safe place for it, since the report is
+//! content-free by construction and so can be handed to a model without
+//! creating an egress problem of its own.
+//!
+//! Also not here: the agent-facing half of §9.3 ("`ViewerClass::Agent` may see
+//! [egress events] for its own session via the observability tools", so an
+//! agent can explain a missing context chunk without being shown withheld
+//! content). No agent tool reads causal events at all today, and `egress.audit`
+//! is operator-only (I-14, like `labels.list`), so that paragraph is currently
+//! unimplemented rather than served from here.
 //!
 //! This module lives in the gateway crate, not in the CLI, because the report
 //! has two consumers: `gateway egress-audit` and the `egress.audit` JSON-RPC
