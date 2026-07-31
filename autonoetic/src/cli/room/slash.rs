@@ -262,18 +262,12 @@ pub fn parse(input: &str) -> SlashCommand {
         "taint" => parse_taint(tail),
         // `/local <intent>` — RFC §4.3 authoring aid (#978): "emails stay
         // local" → gateway proposes a concrete rule set → operator confirms
-        // with one keystroke (y) or cancels (n/Esc). An empty intent is a
-        // usage error — `/local` alone cannot guess what to keep local.
-        "local" => {
-            let intent = tail.trim();
-            if intent.is_empty() {
-                SlashCommand::Unknown("local".to_string())
-            } else {
-                SlashCommand::LocalIntent {
-                    intent: intent.to_string(),
-                }
-            }
-        }
+        // with one keystroke (y) or cancels (n/Esc). An empty intent stays a
+        // `LocalIntent` so the TUI can render a specific "missing intent"
+        // usage message instead of "unknown command".
+        "local" => SlashCommand::LocalIntent {
+            intent: tail.trim().to_string(),
+        },
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         "estop" | "emergency-stop" => {
@@ -992,11 +986,18 @@ mod tests {
         );
     }
 
-    /// `/local` with no intent is a usage error — the gateway cannot guess
-    /// what the operator wants to keep local.
+    /// `/local` with no intent is a usage error — still a `LocalIntent` (not
+    /// `Unknown`) so the TUI renders "missing intent" instead of "unknown
+    /// command".
     #[test]
-    fn empty_local_intent_is_unknown() {
-        assert!(matches!(parse("/local"), SlashCommand::Unknown(_)));
-        assert!(matches!(parse("/local  "), SlashCommand::Unknown(_)));
+    fn empty_local_intent_parses_with_empty_intent() {
+        assert!(matches!(
+            parse("/local"),
+            SlashCommand::LocalIntent { intent } if intent.is_empty()
+        ));
+        assert!(matches!(
+            parse("/local  "),
+            SlashCommand::LocalIntent { intent } if intent.is_empty()
+        ));
     }
 }

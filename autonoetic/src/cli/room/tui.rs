@@ -4342,6 +4342,15 @@ pub fn run(
                                         // pending confirm (`y` declares, `n`/
                                         // Esc cancels). Nothing applies
                                         // unconfirmed.
+                                        if intent.trim().is_empty() {
+                                            pending_local_proposal = None;
+                                            status = Some(
+                                                "usage: /local <intent> — e.g. \
+                                                 '/local emails stay local'"
+                                                    .to_string(),
+                                            );
+                                            continue;
+                                        }
                                         match propose_egress_policy(
                                             client,
                                             root_session_id,

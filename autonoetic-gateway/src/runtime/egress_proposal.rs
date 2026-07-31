@@ -314,18 +314,36 @@ fn match_tool_token(token: &str, catalog: &SourceCatalog) -> (Vec<ProposedRule>,
 }
 
 /// Whether `a` and `b` share a common `n`-character substring (case already
-/// folded). Short tokens fall back to exact equality.
+/// folded). Short tokens fall back to exact equality. Char-boundary safe:
+/// iterates `char`s rather than slicing `&str` at byte indices, so non-ASCII
+/// source names (e.g. an MCP server name from the registry file) cannot panic.
 fn shares_ngram(a: &str, b: &str, n: usize) -> bool {
     if a == b {
         return true;
     }
-    if a.len() < n || b.len() < n {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    if a_chars.len() < n || b_chars.len() < n {
         return a.contains(b) || b.contains(a);
     }
-    let grams: HashSet<String> = (0..=a.len() - n)
-        .map(|i| a[i..i + n].to_string())
+    let grams: HashSet<String> = a_chars
+        .windows(n)
+        .map(|w| w.iter().collect())
         .collect();
-    (0..=b.len() - n).any(|i| grams.contains(&b[i..i + n]))
+    b_chars
+        .windows(n)
+        .any(|w| grams.contains(&w.iter().collect::<String>()))
+}
+
+/// Resolve the subject `kind` from the rules actually matched: when only MCP
+/// server rules were produced, the subject names an MCP server, not a tool
+/// ("gmail" + a registered gmail server → `kind: "mcp_server"`).
+fn matched_kind(rules: &[ProposedRule]) -> String {
+    if rules.iter().all(|r| r.rule.source.starts_with("mcp.")) {
+        "mcp_server".to_string()
+    } else {
+        "tool".to_string()
+    }
 }
 
 /// Path rules for a path subject: every path-taking source family gets a
@@ -372,6 +390,7 @@ pub fn build_egress_proposal(intent: &str, catalog: &SourceCatalog) -> EgressPro
     let (subject_text, kind, rules, known_sources, note) = match &subject {
         IntentSubject::Tool(token) => {
             let (rules, known) = match_tool_token(token, catalog);
+            let kind = matched_kind(&rules);
             let note = if rules.is_empty() {
                 Some(format!(
                     "'{token}' matches no registered tool family or MCP server — nothing proposed"
@@ -379,7 +398,7 @@ pub fn build_egress_proposal(intent: &str, catalog: &SourceCatalog) -> EgressPro
             } else {
                 None
             };
-            (token.clone(), "tool".to_string(), rules, known, note)
+            (token.clone(), kind, rules, known, note)
         }
         IntentSubject::McpServer(server) => {
             let (rules, known) = match_tool_token(server, catalog);
@@ -532,6 +551,7 @@ mod tests {
     #[test]
     fn maps_mcp_server_subject_to_server_glob() {
         let proposal = build_egress_proposal("keep gmail local", &catalog());
+        assert_eq!(proposal.kind, "mcp_server");
         assert_eq!(proposal.rules.len(), 1);
         assert_eq!(proposal.rules[0].rule.source, "mcp.gmail.*");
         assert!(proposal.rules[0].rationale.contains("gmail"));
@@ -540,8 +560,34 @@ mod tests {
     #[test]
     fn maps_exact_tool_name_without_glob() {
         let proposal = build_egress_proposal("keep web_search local", &catalog());
+        assert_eq!(proposal.kind, "tool");
         assert_eq!(proposal.rules.len(), 1);
         assert_eq!(proposal.rules[0].rule.source, "web_search");
+    }
+
+    #[test]
+    fn unicode_near_miss_matching_does_not_panic() {
+        // `shares_ngram` must stay char-boundary safe — an unregistered
+        // Unicode server name (registry files are unvalidated) must not panic
+        // while generating near-miss suggestions.
+        let mut catalog = catalog();
+        catalog.mcp_server_names = vec![
+            "gmail".to_string(),
+            "café".to_string(),
+            "日本語ボックス".to_string(),
+        ];
+        let proposal = build_egress_proposal("keep café local", &catalog);
+        assert_eq!(proposal.kind, "mcp_server");
+        assert_eq!(proposal.rules.len(), 1);
+        assert_eq!(proposal.rules[0].rule.source, "mcp.café.*");
+        let near_miss = build_egress_proposal("keep 日本語ボックス local", &catalog);
+        assert_eq!(near_miss.kind, "mcp_server");
+        assert!(near_miss.rules.iter().any(|r| r.rule.source == "mcp.日本語ボックス.*"));
+        // Near-miss path with a non-matching Unicode token: 3-gram matching
+        // runs over chars, never slicing bytes.
+        let miss = build_egress_proposal("keep 日本語ボx local", &catalog);
+        assert!(miss.rules.is_empty());
+        assert!(miss.known_sources.contains(&"mcp.日本語ボックス.*".to_string()));
     }
 
     #[test]
