@@ -98,13 +98,18 @@ pub enum SlashCommand {
         path: Option<String>,
         label: autonoetic_types::egress::NamedEgressLabel,
     },
+    /// RFC §4.3 authoring aid (#978): `/local <intent>` — "emails stay local".
+    /// The gateway proposes a concrete rule set from known tool catalogs +
+    /// MCP servers; the operator confirms with one keystroke or edits. An
+    /// unconfirmed proposal has no effect (Lawful-Executor §14).
+    LocalIntent { intent: String },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /private · /taint · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /private · /taint · /local · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -193,6 +198,10 @@ pub fn help_lines() -> Vec<String> {
         "  /taint <source>[:<path>] <label>   declare a session egress rule (rung 2)".to_string(),
         "                             e.g. /taint email.* local_only or".to_string(),
         "                             /taint fs.read:~/mail/**.md no_remote_model".to_string(),
+        "  /local <intent>            'emails stay local' → the gateway proposes".to_string(),
+        "                             concrete rules from known tool catalogs and".to_string(),
+        "                             MCP servers; press y to declare them (n/Esc".to_string(),
+        "                             cancels — nothing applies unconfirmed)".to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -251,6 +260,20 @@ pub fn parse(input: &str) -> SlashCommand {
         }
         // `/taint <source>[:<path>] <label>` — rung 2, a session-scoped rule.
         "taint" => parse_taint(tail),
+        // `/local <intent>` — RFC §4.3 authoring aid (#978): "emails stay
+        // local" → gateway proposes a concrete rule set → operator confirms
+        // with one keystroke (y) or cancels (n/Esc). An empty intent is a
+        // usage error — `/local` alone cannot guess what to keep local.
+        "local" => {
+            let intent = tail.trim();
+            if intent.is_empty() {
+                SlashCommand::Unknown("local".to_string())
+            } else {
+                SlashCommand::LocalIntent {
+                    intent: intent.to_string(),
+                }
+            }
+        }
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         "estop" | "emergency-stop" => {
@@ -945,5 +968,35 @@ mod tests {
             parse("/taint email.* unrestricted"),
             SlashCommand::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn parse_local_intent_variants() {
+        assert_eq!(
+            parse("/local emails stay local"),
+            SlashCommand::LocalIntent {
+                intent: "emails stay local".into()
+            }
+        );
+        assert_eq!(
+            parse("/local   keep ~/mail off the network  "),
+            SlashCommand::LocalIntent {
+                intent: "keep ~/mail off the network".into()
+            }
+        );
+        assert_eq!(
+            parse("/local gmail"),
+            SlashCommand::LocalIntent {
+                intent: "gmail".into()
+            }
+        );
+    }
+
+    /// `/local` with no intent is a usage error — the gateway cannot guess
+    /// what the operator wants to keep local.
+    #[test]
+    fn empty_local_intent_is_unknown() {
+        assert!(matches!(parse("/local"), SlashCommand::Unknown(_)));
+        assert!(matches!(parse("/local  "), SlashCommand::Unknown(_)));
     }
 }

@@ -24,6 +24,8 @@ mod phase4_mcp;
 mod phase4_ofp;
 mod phase4_sandbox;
 mod phase4_web_hooks;
+mod proposal_authoring;
 mod routing;
+mod shared_env;
 mod source_rules;
 mod stored_content;

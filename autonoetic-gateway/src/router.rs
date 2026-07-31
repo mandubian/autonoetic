@@ -3316,6 +3316,12 @@ impl JsonRpcRouter {
             "session.egress_policy.set" => handle_egress_policy_set(&self.execution, req),
             "session.egress_policy.clear" => handle_egress_policy_clear(&self.execution, req),
 
+            // RFC §4.3 authoring aid (#978): "emails stay local" → a concrete
+            // proposed rule set from known tool catalogs + the MCP server list.
+            // Pure and deterministic — the proposal has no effect until the
+            // operator confirms it through `session.egress_policy.set`.
+            "session.egress_policy.propose" => handle_egress_policy_propose(req),
+
             // Operator label-listing RPC (#974, RFC §9.3). Read-only, metadata
             // only (never content), root-tree scoped. Out of line for the same
             // stack-frame reason as the policy handlers above. Operator-only by
@@ -5977,6 +5983,40 @@ fn handle_egress_policy_clear(
         Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
+}
+
+/// RFC §4.3 authoring aid (#978): *"emails stay local"* → a concrete proposed
+/// rule set built from known tool catalogs + the registered MCP server list,
+/// without connecting to anything. Pure and deterministic — the proposal is
+/// display-only and has **no** effect until the operator confirms it through
+/// `session.egress_policy.set` (Lawful-Executor §14: enforcement stays a
+/// function of declared inputs; the natural language is only an authoring
+/// convenience).
+#[inline(never)]
+fn handle_egress_policy_propose(req: JsonRpcRequest) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+        intent: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.egress_policy.propose", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for session.egress_policy.propose: session_id must not be empty",
+        );
+    }
+    let catalog = crate::runtime::egress_proposal::SourceCatalog {
+        tool_names: crate::runtime::tools::default_registry().registered_tool_names(),
+        mcp_server_names: crate::runtime::egress_proposal::mcp_server_names_from_env(),
+    };
+    let proposal =
+        crate::runtime::egress_proposal::build_egress_proposal(&params.intent, &catalog);
+    JsonRpcResponse::success(req.id, serde_json::to_value(&proposal).unwrap_or_default())
 }
 
 /// Default envelope-event cap. Egress events are sparse (one per labeled
