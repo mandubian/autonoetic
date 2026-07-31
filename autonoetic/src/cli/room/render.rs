@@ -1759,7 +1759,23 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             s
         }
         "egress.declassified" => {
-            let target = field("target").unwrap_or_else(|| "?".into());
+            // `target` is serialized as the tagged enum (`serde(tag = "kind",
+            // content = "value")`) — `{"kind":"source_pattern","value":"…"}` —
+            // never a bare string. Same parse as the grants panel's
+            // `declass_target_kv` and the audit CLI's `build_egress_audit`.
+            let target = p
+                .as_ref()
+                .and_then(|v| v.get("target"))
+                .map(|t| {
+                    t.as_str().map(str::to_string).unwrap_or_else(|| {
+                        format!(
+                            "{}:{}",
+                            t.get("kind").and_then(|k| k.as_str()).unwrap_or("?"),
+                            t.get("value").and_then(|v| v.as_str()).unwrap_or("?"),
+                        )
+                    })
+                })
+                .unwrap_or_else(|| "?".into());
             let sink = field("allowed_sink").unwrap_or_else(|| "?".into());
             format!("egress widened: {target} → {sink}")
         }
@@ -3723,15 +3739,24 @@ mod tests {
         assert!(refused.contains("boundary refused: sandbox.share_net"), "{refused}");
         assert!(refused.contains("local_only"), "{refused}");
 
-        let declassified = summarize(&mk(
-            "egress.declassified",
-            serde_json::json!({
-                "target": "session:root-1",
-                "allowed_sink": "network",
-                "source_approval_id": "apr-1",
-            }),
-        ));
-        assert!(declassified.contains("egress widened: session:root-1 → network"), "{declassified}");
+        // Payload built through the real serialization path (tagged enum) so
+        // the test can't drift from the emitter's shape again.
+        let declass_target = serde_json::to_value(
+            autonoetic_types::egress::EgressDeclassificationTarget::SourcePattern(
+                "session:root-1".to_string(),
+            ),
+        )
+        .expect("declass target serializes");
+        let mut declass_payload = serde_json::json!({
+            "allowed_sink": "network",
+            "source_approval_id": "apr-1",
+        });
+        declass_payload["target"] = declass_target;
+        let declassified = summarize(&mk("egress.declassified", declass_payload));
+        assert!(
+            declassified.contains("egress widened: source_pattern:session:root-1 → network"),
+            "{declassified}"
+        );
 
         // High-volume metadata rows read sanely too (dial-down view).
         let labeled = summarize(&mk(
