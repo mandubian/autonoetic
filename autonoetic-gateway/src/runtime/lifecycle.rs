@@ -1512,6 +1512,19 @@ impl AgentExecutor {
         // taint-following behavior below.
         if primary_pinned && !plan.primary_eligible {
             let local_candidate = plan.reroute_to.clone();
+            // Which conflict this is decides which options can resolve it. A
+            // `provider_constraint` blocks the pin *by operator decree* and
+            // outranks declassification grants (see `declassified_remote`
+            // above), so offering "declassify" here would file the ask,
+            // materialize a grant that changes nothing, and re-file the ask on
+            // resume — indefinitely. Note this case also fires on a perfectly
+            // clean turn: a room pinned local plus a pinned remote preset
+            // conflict with no taint involved at all.
+            let blocker = if provider_constraint.is_some() {
+                el::PinAskBlocker::ProviderConstraint
+            } else {
+                el::PinAskBlocker::BatchTaint
+            };
             let ask_id = self.gateway_store.as_ref().and_then(|store| {
                 el::file_egress_pin_ask(
                     store,
@@ -1522,6 +1535,7 @@ impl AgentExecutor {
                     &plan.batch,
                     routed_preset,
                     local_candidate.as_ref(),
+                    blocker,
                 )
             });
             if let Some(ask_id) = ask_id {
@@ -1535,7 +1549,7 @@ impl AgentExecutor {
                 let inline = serde_json::json!({
                     "status": "filed",
                     "interaction_id": ask_id,
-                    "options": el::egress_ask_options_payload(local_candidate.as_ref()),
+                    "options": el::egress_ask_options_payload(blocker, local_candidate.as_ref()),
                 });
                 emit(None, false, Some(&inline));
                 return EgressRoutingSelection {
@@ -1547,14 +1561,50 @@ impl AgentExecutor {
                     pending_ask: Some(ask_id),
                 };
             }
-            // Filing failed (flood cap, store error) — never dead-end the
-            // turn: fall through to the pre-ask behavior (taint-following
-            // reroute or refuse-with-offer).
-            tracing::warn!(
+            // Filing failed (flood cap, store error). Refuse, rather than
+            // falling through to the taint-following reroute: that path exists
+            // for *unpinned* primaries, and applying it here would silently run
+            // a pinned preset's turn on a different model — the discretion leak
+            // this whole branch exists to prevent (RFC §5.3). A visible refusal
+            // costs the operator a turn; a silent downgrade costs them the
+            // guarantee, and they would never know it happened.
+            tracing::error!(
                 target: "egress",
                 session_id = %session_id,
-                "failed to file egress pin×taint ask — falling back to taint-following behavior"
+                pinned_preset = %routed_preset,
+                "failed to file egress pin conflict ask — refusing the turn rather than \
+                 silently rerouting a pinned preset"
             );
+            emit(None, false, None);
+            return EgressRoutingSelection {
+                primary_driver: None,
+                effective_class: primary_class,
+                effective_model: None,
+                fallback_chain: filtered_fallback,
+                refuse_reason: Some(format!(
+                    "egress_pin_conflict_ask_unavailable: the pinned preset '{}' is not cleared \
+                     for this turn ({}), and the gateway could not file the operator ask that \
+                     would resolve it (pending-interaction cap or store error). Refusing rather \
+                     than running a pinned preset on another model. Retry once the pending list \
+                     drains, or resolve the conflict directly{}.",
+                    routed_preset,
+                    match blocker {
+                        el::PinAskBlocker::ProviderConstraint =>
+                            "the room is pinned local by session policy".to_string(),
+                        el::PinAskBlocker::BatchTaint => format!(
+                            "new data labeled {}",
+                            autonoetic_types::egress::label_display_name(&plan.batch)
+                        ),
+                    },
+                    match blocker {
+                        el::PinAskBlocker::ProviderConstraint =>
+                            " by lifting the room pin (`/private`)",
+                        el::PinAskBlocker::BatchTaint =>
+                            " by declassifying the session or clearing the preset pin",
+                    },
+                )),
+                pending_ask: None,
+            };
         }
 
         // No eligible provider for a tainted batch → refuse with a path forward.
@@ -7232,6 +7282,116 @@ mod tests {
         let ev = evs.first().expect("emitted");
         assert_eq!(ev["rerouted"], true);
         assert!(ev["inline_ask"].is_null());
+    }
+
+    /// PR #996 review: a `provider_constraint` blocks the pin by operator
+    /// decree and outranks declassification grants, so offering `declassify`
+    /// would file the ask, materialize a grant that changes nothing, and re-file
+    /// the ask on resume — indefinitely. Note the batch here is **clean**: this
+    /// conflict needs no taint, only a room pinned local plus a pinned remote
+    /// preset.
+    #[test]
+    fn provider_constraint_pin_conflict_offers_no_declassify() {
+        let (mut runtime, store, _tmp) = pin_ask_executor(&[
+            ("remote", EgressClass::Remote),
+            ("local", EgressClass::Local),
+        ]);
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::unrestricted(),
+            "remote",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            Some(autonoetic_types::egress::ProviderConstraint::LocalOnly),
+            true,
+        );
+        let ask_id = sel.pending_ask.expect("ask should be filed");
+        assert!(sel.refuse_reason.is_none());
+
+        let it = store
+            .get_user_interaction(&ask_id)
+            .expect("lookup")
+            .expect("interaction");
+        let ids: Vec<&str> = it.options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["run_local", "abort"],
+            "declassify cannot lift a room pin and must not be offered"
+        );
+
+        // The audit's option list agrees with what was filed, so it cannot
+        // record an option the operator never saw.
+        let evs = provider_selected_events(&store);
+        let ev = evs.first().expect("emitted");
+        assert_eq!(ev["inline_ask"]["status"], "filed");
+        let opts: Vec<&str> = ev["inline_ask"]["options"]
+            .as_array()
+            .expect("options array")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(opts, ["run_local", "abort"]);
+    }
+
+    /// PR #996 review: if the required ask cannot be filed, refusing is correct
+    /// and rerouting is not. The taint-following reroute exists for *unpinned*
+    /// primaries; applying it to a pinned one silently runs the turn on a
+    /// different model — the discretion leak this branch exists to prevent. A
+    /// visible refusal costs a turn; a silent downgrade costs the guarantee.
+    ///
+    /// Simulated by an executor with no store (the same `None` the filing path
+    /// yields on a flood cap or store error).
+    #[test]
+    fn pin_conflict_refuses_when_the_ask_cannot_be_filed() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir");
+        let mut cfg = GatewayConfig::default();
+        cfg.agents_dir = temp.path().to_path_buf();
+        cfg.llm_presets = [
+            egress_preset("remote", EgressClass::Remote),
+            egress_preset("local", EgressClass::Local),
+        ]
+        .into_iter()
+        .collect();
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "System prompt".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            // No store → `file_egress_pin_ask` is never reached, exactly as when
+            // it fails.
+            None,
+        )
+        .with_config(Arc::new(cfg));
+
+        let sel = runtime.plan_egress_routing(
+            &EgressLabel::local_only(),
+            "remote",
+            Some(EgressClass::Remote),
+            &[],
+            "sess-1",
+            "turn-000001",
+            None,
+            true,
+        );
+
+        assert!(sel.pending_ask.is_none());
+        assert!(
+            sel.primary_driver.is_none(),
+            "must not silently reroute a pinned preset"
+        );
+        let reason = sel.refuse_reason.expect("must refuse, not reroute");
+        assert!(
+            reason.starts_with("egress_pin_conflict_ask_unavailable"),
+            "refusal should name the cause: {reason}"
+        );
+        assert!(
+            reason.contains("remote"),
+            "refusal should name the pinned preset: {reason}"
+        );
+        assert!(runtime.egress_ask_state.is_none());
     }
 
     #[test]
