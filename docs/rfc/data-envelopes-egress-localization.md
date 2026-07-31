@@ -865,6 +865,15 @@ history (visible locally to Operator/Admin viewers, never in events).
   eligible set, withheld envelopes with indications, labeling provenance per
   envelope, declassifications, assertion violations. Exportable through
   `session_report` / capsule (viewer-redacted as usual).
+- **`egress.audit` operator RPC (#973)** — the same report over JSON-RPC, so the
+  audit is no longer local-admin-CLI-only. Params `{session_id, limit?}`,
+  returning `{report, truncated, limit}`. Both callers share one code path
+  (`egress_audit::load_egress_audit`), so a local admin and a remote operator
+  cannot see different audits of one session, and a capped scan is reported as
+  `truncated` by both rather than looking complete. The Session Room's `/audit`
+  renders it for the watched session. Metadata only — the report is content-free
+  by construction, which is what makes it safe on the wire; a store error
+  surfaces as an error rather than as an empty "nothing left the machine".
 - **`labels.list` operator RPC (#974)** — live, root-tree-scoped view over the
   label plane, returning **metadata only** (never content): labeled envelopes
   (provenance + resolution kind from `egress.envelope_labeled`), per-session

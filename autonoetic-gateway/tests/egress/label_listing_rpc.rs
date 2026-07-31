@@ -3,56 +3,16 @@
 //! label filters, the per-source store-error surfacing, and the metadata-only
 //! invariant (no `content`/`stdout`/`message` keys leak into the response).
 
-use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
+use crate::rpc_env::{env, rpc_as};
+use autonoetic_gateway::router::JsonRpcResponse;
 use autonoetic_gateway::scheduler::gateway_store::{AgentMessageRecord, GatewayStore};
 use autonoetic_types::artifact::{ArtifactRefRecord, ArtifactRefScopeType};
 use autonoetic_types::causal_chain::{CausalEventRecord, ExecutionTraceRecord};
-use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::egress::EgressLabel;
 use autonoetic_types::memory::MemoryObject;
-use std::sync::{Arc, OnceLock};
-
-struct Env {
-    _tmp: tempfile::TempDir,
-    store: Arc<GatewayStore>,
-    router: JsonRpcRouter,
-}
-
-static ENV: OnceLock<Env> = OnceLock::new();
-
-// One shared workspace/router — initializing the config + store is cheap, and
-// sharing avoids each test re-running constitution init. All tests are
-// tempfile-isolated and share no external state.
-fn env() -> &'static Env {
-    ENV.get_or_init(|| {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // JsonRpcRouter::new reads the constitution from `agents_dir`, so point
-        // it at the temp workspace (an absent constitution dir is tolerated by
-        // the init path used in tests).
-        let mut config = GatewayConfig::default();
-        config.agents_dir = tmp.path().to_path_buf();
-        let store = Arc::new(GatewayStore::open(tmp.path()).expect("store open"));
-        let router = JsonRpcRouter::new(config, Some(store.clone()));
-        Env {
-            _tmp: tmp,
-            store,
-            router,
-        }
-    })
-}
-
-fn make_jsonrpc(method: &str, params: serde_json::Value) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: "labels-test".to_string(),
-        method: method.to_string(),
-        params,
-        auth_token: None,
-    }
-}
 
 async fn rpc(method: &str, params: serde_json::Value) -> JsonRpcResponse {
-    env().router.dispatch(make_jsonrpc(method, params)).await
+    rpc_as("labels-test", method, params).await
 }
 
 async fn labels_list(params: serde_json::Value) -> serde_json::Value {

@@ -3323,6 +3323,8 @@ impl JsonRpcRouter {
             // (I-14: the label plane stays gateway-only).
             "labels.list" => handle_labels_list(&self.execution, req),
 
+            "egress.audit" => handle_egress_audit(&self.execution, req),
+
             "session.envelope.propose" => {
                 #[derive(Deserialize)]
                 struct EnvelopeProposeParams {
@@ -5976,6 +5978,64 @@ fn handle_egress_policy_clear(
     match execution.clear_session_egress_policy(&params.session_id, &params.set_by) {
         Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `egress.audit` — the per-turn egress report for one session (RFC §9.3,
+/// #973).
+///
+/// The richest egress view that exists was CLI-only until now: the handler
+/// opened `GatewayStore` directly, so the session room (a JSON-RPC client by
+/// design) and every remote operator were locked out of it. This exposes the
+/// same code path — `egress_audit::load_egress_audit` — so a local admin and a
+/// remote operator cannot see different audits of one session.
+///
+/// Operator-facing and **read-only**. The report is content-free metadata by
+/// construction (ids, labels, sinks, counts, and indication text, which is
+/// itself non-divulging by RFC §3.3), which is what makes it safe to return
+/// over the wire at all. A store error surfaces as `-32000` rather than an
+/// empty report: "nothing left the machine" and "the read failed" must not look
+/// alike (mirrors `labels.list` / `grants.list`).
+#[inline(never)]
+fn handle_egress_audit(execution: &GatewayExecutionService, req: JsonRpcRequest) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+        /// Cap on causal events scanned. Defaults to
+        /// `egress_audit::DEFAULT_AUDIT_LIMIT`; the response always echoes the
+        /// limit in force alongside `truncated`.
+        #[serde(default)]
+        limit: Option<i64>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "egress.audit", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "egress.audit: session_id must not be empty".to_string(),
+        );
+    }
+
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => {
+            return JsonRpcResponse::error(req.id, -32000, "Gateway store not available".to_string())
+        }
+    };
+
+    match crate::egress_audit::load_egress_audit(store.as_ref(), &params.session_id, params.limit) {
+        Ok(audit) => match serde_json::to_value(&audit) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("egress.audit serialization failed: {}", e),
+            ),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("egress.audit failed: {}", e)),
     }
 }
 
