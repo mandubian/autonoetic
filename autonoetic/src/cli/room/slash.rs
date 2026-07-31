@@ -17,6 +17,7 @@
 //! - `/curate [notes...]` — run memory curation on this session now (notes steer the curator)
 //! - `/crystallize [notes...]` — make what worked here reusable (notes name the tactic)
 //! - `/skills` — standing view of proposed skill work and what was decided
+//! - `/audit` — per-turn egress audit for this session (what left, what was withheld)
 //! - `/quit` / `/q` — exit the TUI
 //! - `/help` / `/?` — full command reference in the detail pane
 //! - `/model` — show current inference profile
@@ -74,6 +75,11 @@ pub enum SlashCommand {
     /// graduations, the decisions recorded against them, and the Candidate
     /// revisions waiting on the promotion gate.
     ListSkills,
+    /// Per-turn egress audit for the watched session (RFC §9.3): what left the
+    /// machine at each turn, what was withheld and why, and which
+    /// declassifications were in force. Read from the causal chain via
+    /// `egress.audit`; metadata only, never content.
+    EgressAudit,
     /// Show resolved inference profile for the current session.
     ModelShow,
     /// Override the session inference preset until cleared.
@@ -104,7 +110,7 @@ pub enum SlashCommand {
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /private · /taint · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /audit · /cron · /wiki · /test · /model · /private · /taint · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -179,6 +185,7 @@ pub fn help_lines() -> Vec<String> {
         "  /curate [focus notes]      run memory curation on this session now (notes steer the curator)".to_string(),
         "  /crystallize [what worked]  make it reusable — instruction, wrapper, or new skill".to_string(),
         "  /skills                    proposed skill work: verdicts, decisions, candidates".to_string(),
+        "  /audit                     egress audit: what left this machine per turn, and why".to_string(),
         "  /wiki  /wiki proposals|list|ls  list pending wiki proposals (1–9 detail)".to_string(),
         "  /test <scenario>           inject synthetic events (dev)".to_string(),
         "  /test help                 list test scenarios".to_string(),
@@ -228,6 +235,8 @@ pub fn parse(input: &str) -> SlashCommand {
         // No sub-verbs: the view is read-only, and acting on a row happens
         // through the promotion gate, not from here.
         "skills" => SlashCommand::ListSkills,
+        // Read-only as well; an audit is a record, there is nothing to act on.
+        "audit" => SlashCommand::EgressAudit,
         "wiki" => parse_wiki(tail),
         "test" => {
             let name = tail.trim().to_string();
@@ -845,6 +854,16 @@ mod tests {
         assert_eq!(parse("/skills pending"), SlashCommand::ListSkills);
         // Singular is a different word: report it rather than guess.
         assert!(matches!(parse("/skill"), SlashCommand::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_audit_takes_no_arguments() {
+        assert_eq!(parse("/audit"), SlashCommand::EgressAudit);
+        assert_eq!(parse("/audit   "), SlashCommand::EgressAudit);
+        // Read-only view: a tail has nothing to mean, so it is ignored rather
+        // than misread as a session id (which would audit the wrong session).
+        assert_eq!(parse("/audit sess-other"), SlashCommand::EgressAudit);
+        assert!(matches!(parse("/audits"), SlashCommand::Unknown(_)));
     }
 
     /// `/curate` and `/crystallize` share a prefix; the dispatcher must not

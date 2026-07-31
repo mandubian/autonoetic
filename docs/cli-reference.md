@@ -370,6 +370,7 @@ autonoetic chat researcher.default --session-id my-session
 | `/curate [focus notes]` | Run memory curation on the current session now; optional focus notes steer the curator |
 | `/crystallize [what worked]` | Make a tactic from this session reusable; the crystallizer picks instruction / wrapper / new skill |
 | `/skills` | Standing view of proposed skill work: verdicts, recorded decisions, and Candidate revisions awaiting promotion |
+| `/audit` | Per-turn egress audit for this session: what left the machine, what was withheld and why (metadata only) |
 | `/cancel` | Leave the current picker/prompt |
 | `/quit` or `/exit` | Exit chat |
 | `/help` | Show all commands |
