@@ -2557,6 +2557,65 @@ fn push_egress_policy(
     )
 }
 
+/// RFC §4.3 authoring aid (#978): ask the gateway for a concrete rule
+/// proposal for an intent phrase ("emails stay local"). Pure gateway-side
+/// mapping over known tool catalogs + MCP servers — the proposal has no
+/// effect until the operator confirms it with a keystroke.
+fn propose_egress_policy(
+    client: &RoomClient,
+    root_session_id: &str,
+    intent: &str,
+) -> anyhow::Result<autonoetic_gateway::runtime::egress_proposal::EgressProposal> {
+    let v = rpc(
+        client,
+        "session.egress_policy.propose",
+        serde_json::json!({
+            "session_id": root_session_id,
+            "intent": intent,
+        }),
+    )?;
+    Ok(serde_json::from_value(v)?)
+}
+
+/// One-line room status for a proposal: either the proposed rules (with the
+/// y/n confirm hint) or an honest "nothing proposed" with near-miss sources.
+fn local_proposal_status(
+    proposal: &autonoetic_gateway::runtime::egress_proposal::EgressProposal,
+) -> String {
+    use autonoetic_types::egress::label_display_name;
+    if proposal.rules.is_empty() {
+        let note = proposal
+            .note
+            .clone()
+            .unwrap_or_else(|| "no rules to propose".to_string());
+        if proposal.known_sources.is_empty() {
+            return format!("✗ /local: {note}");
+        }
+        return format!(
+            "✗ /local: {note} — known sources: {}",
+            proposal.known_sources.join(" · ")
+        );
+    }
+    let rules: Vec<String> = proposal
+        .rules
+        .iter()
+        .map(|r| match &r.rule.path {
+            Some(p) => format!(
+                "{}:{} → {}",
+                r.rule.source,
+                p,
+                label_display_name(&r.rule.label)
+            ),
+            None => format!("{} → {}", r.rule.source, label_display_name(&r.rule.label)),
+        })
+        .collect();
+    format!(
+        "✓ {} rule(s) proposed: {} — press y to declare, n/Esc to cancel",
+        proposal.rules.len(),
+        rules.join(" · ")
+    )
+}
+
 fn gate_modal_kind(gate: &GateRef) -> bool {
     matches!(
         gate.kind,
@@ -3638,6 +3697,13 @@ pub fn run(
     let mut current_trace_labels: HashMap<String, String> = HashMap::new();
     let mut last_taint_poll = Instant::now();
     let mut force_taint_refresh = false;
+    // RFC §4.3 (#978): an in-flight `/local` proposal awaiting the operator's
+    // one-keystroke confirm. `None` when no proposal is pending; `y` declares
+    // the proposed rules, `n`/Esc cancels — an unconfirmed proposal has no
+    // effect (Lawful-Executor §14).
+    let mut pending_local_proposal: Option<
+        autonoetic_gateway::runtime::egress_proposal::EgressProposal,
+    > = None;
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -4276,6 +4342,51 @@ pub fn run(
                                             }
                                             Err(e) => {
                                                 status = Some(format!("✗ /taint failed: {e}"));
+                                            }
+                                        }
+                                    }
+                                    SlashCommand::LocalIntent { intent } => {
+                                        // RFC §4.3 rung 4 (#978) — intent →
+                                        // proposed rule set → one-keystroke
+                                        // confirm. The gateway maps the intent
+                                        // deterministically over known tool
+                                        // catalogs + MCP servers; this arm
+                                        // renders the proposal and arms the
+                                        // pending confirm (`y` declares, `n`/
+                                        // Esc cancels). Nothing applies
+                                        // unconfirmed.
+                                        if intent.trim().is_empty() {
+                                            pending_local_proposal = None;
+                                            status = Some(
+                                                "usage: /local <intent> — e.g. \
+                                                 '/local emails stay local'"
+                                                    .to_string(),
+                                            );
+                                            continue;
+                                        }
+                                        match propose_egress_policy(
+                                            client,
+                                            root_session_id,
+                                            &intent,
+                                        ) {
+                                            Ok(proposal) => {
+                                                if proposal.rules.is_empty() {
+                                                    pending_local_proposal = None;
+                                                    status = Some(local_proposal_status(
+                                                        &proposal,
+                                                    ));
+                                                } else {
+                                                    pending_local_proposal = Some(proposal.clone());
+                                                    status = Some(local_proposal_status(
+                                                        &proposal,
+                                                    ));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                pending_local_proposal = None;
+                                                status = Some(format!(
+                                                    "✗ /local failed: {e}"
+                                                ));
                                             }
                                         }
                                     }
@@ -5095,6 +5206,17 @@ pub fn run(
                     }
                     match key.code {
                         KeyCode::Esc => {
+                            // RFC §4.3 (#978): Esc cancels a pending `/local`
+                            // proposal — nothing was declared, matching the
+                            // y/n confirm contract.
+                            if pending_local_proposal.is_some() {
+                                pending_local_proposal = None;
+                                status = Some(
+                                    "canceled — nothing was declared (/local applies only on y)"
+                                        .to_string(),
+                                );
+                                continue;
+                            }
                             // Batch-close: when a sub-view is open from the content pane,
                             // one Esc closes everything back to the main timeline view.
                             if live_content_pane.is_some()
@@ -5230,6 +5352,65 @@ pub fn run(
                         // y/n: approve/reject the selected pending approval; y on a
                         // plan row (or in the plan review pane) approves the PlanFrame.
                         KeyCode::Char('y') | KeyCode::Char('n') => {
+                            // RFC §4.3 (#978): a pending `/local` proposal is
+                            // confirmed with one keystroke — `y` declares the
+                            // proposed rules into the session egress policy,
+                            // `n` cancels. The proposal is display-only until
+                            // then; confirming writes real rules (restrict-only
+                            // by construction).
+                            if let Some(proposal) = pending_local_proposal.clone() {
+                                pending_local_proposal = None;
+                                if key.code == KeyCode::Char('y') {
+                                    let mut policy =
+                                        match current_egress_policy(client, root_session_id) {
+                                            Some(p) => p,
+                                            None => {
+                                                status = Some(
+                                                    "✗ could not read session egress policy — /local confirm aborted, nothing changed"
+                                                        .to_string(),
+                                                );
+                                                continue;
+                                            }
+                                        };
+                                    let mut added = 0usize;
+                                    for proposed in &proposal.rules {
+                                        let dup = policy.rules.iter().any(|r| {
+                                            r.source == proposed.rule.source
+                                                && r.path == proposed.rule.path
+                                                && r.label == proposed.rule.label
+                                        });
+                                        if !dup {
+                                            policy.rules.push(proposed.rule.clone());
+                                            added += 1;
+                                        }
+                                    }
+                                    match push_egress_policy(client, root_session_id, &policy) {
+                                        Ok(_) => {
+                                            status = Some(if added == 0 {
+                                                format!(
+                                                    "ℹ already declared: {} rule(s) — nothing new",
+                                                    proposal.rules.len()
+                                                )
+                                            } else {
+                                                format!(
+                                                    "✓ declared {added} rule(s) local_only for this root session"
+                                                )
+                                            });
+                                            force_timeline_refresh = true;
+                                            force_taint_refresh = true;
+                                        }
+                                        Err(e) => {
+                                            status = Some(format!("✗ /local confirm failed: {e}"));
+                                        }
+                                    }
+                                } else {
+                                    status = Some(
+                                        "canceled — nothing was declared (/local applies only on y)"
+                                            .to_string(),
+                                    );
+                                }
+                                continue;
+                            }
                             let plan_target = detail
                                 .as_ref()
                                 .and_then(|d| d.plan_id.clone())
