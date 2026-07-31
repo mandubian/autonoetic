@@ -6,7 +6,6 @@ use crate::runtime::egress_stored::{
 };
 use crate::runtime::tools::{NativeTool, NativeToolRegistry};
 use autonoetic_types::agent::AgentManifest;
-use autonoetic_types::disclosure::ViewerClass;
 use autonoetic_types::egress::{EgressConfig, IndicationVerbosity, Sink};
 use autonoetic_types::tool_error::ToolError;
 use serde::Deserialize;
@@ -51,7 +50,7 @@ impl NativeTool for ExecutionSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns execution metadata including exit codes, duration, and error info. For cross-session discovery of high-level session summaries, use observability.search instead.".to_string(),
+            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns execution metadata including exit codes, duration, and error info. For cross-session discovery of high-level session summaries, use observability_search instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -125,12 +124,11 @@ impl NativeTool for ExecutionSearchTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("execution.search requires GatewayStore to be configured", None::<String>).to_error_response());
+            return Ok(ToolError::resource("execution_search requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let limit = args.limit.unwrap_or(10).min(100) as i64;
 
-        let viewer = ViewerClass::Agent;
         let cfg: EgressConfig = config.map(|c| c.egress.clone()).unwrap_or_default();
         let sink = query_sink_or_remote(run_context.and_then(|rc| rc.egress_query_sink));
 
@@ -147,13 +145,37 @@ impl NativeTool for ExecutionSearchTool {
         let items: Vec<serde_json::Value> = traces
             .into_iter()
             .map(|mut t| {
+                // RFC data-envelopes §6: stored-content query surfaces are gated by
+                // egress label × query sink — not by ViewerClass redaction. The
+                // filtered fields below are what the caller's sink may see.
+                // `error_summary` is derived from tool output (stderr first line,
+                // error message) so it is gated like the content fields. The
+                // indication kind is the tool name, matching the other
+                // stored-content surfaces (`knowledge_recall`, `wiki_get`).
                 let label = resolve_stored_label(t.egress_label.as_ref(), &cfg);
-                t.command = filter_opt_field(t.command.as_deref(), &label, sink, "execution_search.command");
-                t.stdout = filter_opt_field(t.stdout.as_deref(), &label, sink, "execution_search.stdout");
-                t.stderr = filter_opt_field(t.stderr.as_deref(), &label, sink, "execution_search.stderr");
-                t.result = filter_opt_field(t.result.as_deref(), &label, sink, "execution_search.result");
+                t.command = filter_opt_field(t.command.as_deref(), &label, sink, "execution_search");
+                t.stdout = filter_opt_field(t.stdout.as_deref(), &label, sink, "execution_search");
+                t.stderr = filter_opt_field(t.stderr.as_deref(), &label, sink, "execution_search");
+                t.error_summary = filter_opt_field(t.error_summary.as_deref(), &label, sink, "execution_search");
                 t.egress_label = Some(label);
-                t.to_json_for_viewer(viewer)
+                serde_json::json!({
+                    "trace_id": t.trace_id,
+                    "agent_id": t.agent_id,
+                    "session_id": t.session_id,
+                    "turn_id": t.turn_id,
+                    "timestamp": t.timestamp,
+                    "tool_name": t.tool_name,
+                    "command": t.command,
+                    "exit_code": t.exit_code,
+                    "stdout": t.stdout,
+                    "stderr": t.stderr,
+                    "duration_ms": t.duration_ms,
+                    "success": t.success == 1,
+                    "error_type": t.error_type,
+                    "error_summary": t.error_summary,
+                    "approval_required": t.approval_required == Some(1),
+                    "approval_request_id": t.approval_request_id,
+                })
             })
             .collect();
 

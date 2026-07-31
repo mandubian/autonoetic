@@ -167,7 +167,7 @@ impl NativeTool for WikiListTool {
         ToolDefinition {
             name: self.name().to_string(),
             description: "List all available wiki pages in the knowledge corpus. \
-                Returns page IDs, titles, and tags. Use wiki.get to retrieve the full \
+                Returns page IDs, titles, and tags. Use wiki_get to retrieve the full \
                 content of a specific page. Start here to discover what documentation \
                 is available about the Autonoetic platform, tools, SDK, and architecture."
                 .to_string(),
@@ -212,7 +212,7 @@ impl NativeTool for WikiGetTool {
         ToolDefinition {
             name: self.name().to_string(),
             description: "Get the full content of a wiki page by its ID. \
-                Use wiki.list first to discover available page IDs. \
+                Use wiki_list first to discover available page IDs. \
                 Returns the page title, content (markdown), and tags."
                 .to_string(),
             input_schema: serde_json::json!({
@@ -220,7 +220,7 @@ impl NativeTool for WikiGetTool {
                 "properties": {
                     "id": {
                         "type": "string",
-                        "description": "The page ID from wiki.list (e.g. 'sdk-python', 'architecture-overview', 'approval-system')"
+                        "description": "The page ID from wiki_list (e.g. 'sdk-python', 'architecture-overview', 'approval-system')"
                     }
                 },
                 "required": ["id"],
@@ -260,7 +260,7 @@ impl NativeTool for WikiGetTool {
             &result.content,
             &label,
             sink,
-            Some("wiki.get"),
+            Some("wiki_get"),
             IndicationVerbosity::Descriptive,
         ) {
             FilteredStoredContent::Allowed(_) => {}

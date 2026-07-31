@@ -1889,7 +1889,7 @@ mod tests {
         // This time it should succeed
         let parsed_success: serde_json::Value = serde_json::from_str(&result_turn2[0].2).unwrap();
         assert_eq!(parsed_success.get("ok").unwrap(), true);
-        // knowledge.store returns "id" field, not "memory_id"
+        // knowledge_store returns "id" field, not "memory_id"
         assert!(parsed_success.get("id").is_some() || parsed_success.get("memory_id").is_some());
     }
 

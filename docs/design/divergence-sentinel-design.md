@@ -208,8 +208,8 @@ explicitly **not** wired into every session. It runs only when:
 
 **Capabilities**
 
-- `digest.query` — read the live digest of the target session
-- `execution.search` — query causal events
+- `digest_query` — read the live digest of the target session
+- `execution_search` — query causal events
 - `agent.message` — send a message to the root planner
 - `user_interaction.escalate` — escalate to the operator
 
@@ -337,7 +337,7 @@ If the experiment fails, P3+ is dropped and Layer 1 is enough.
   warning, a partial existing example of trajectory monitoring
 - `autonoetic-gateway/src/runtime/post_session_digest.rs` — post-session
   analysis (Sentinel is its in-session counterpart)
-- `docs/agent-learning.md` — `digest.query`, `execution.search` APIs the
+- `docs/agent-learning.md` — `digest_query`, `execution_search` APIs the
   watchdog will use
 - `docs/separation-of-powers.md` — why the watchdog has no execution
   capabilities

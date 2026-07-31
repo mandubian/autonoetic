@@ -354,7 +354,7 @@ pub(crate) async fn execute_script_in_sandbox(
 
 /// Write a single `causal_events` row for script-agent fast-path execution.
 /// Called in place of the former no-op `log_gateway_causal_event` so that
-/// script agent runs are visible in `execution.search` and session_overview.
+/// script agent runs are visible in `execution_search` and session_overview.
 pub(crate) fn script_causal_event(
     store: Option<&crate::scheduler::gateway_store::GatewayStore>,
     agent_id: &str,

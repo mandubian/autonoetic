@@ -33,7 +33,7 @@ impl NativeTool for ObservabilitySearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Discover observability resources across sessions. Searches published session reports by text. Returns matching reports with URIs and summaries. Unlike execution.search (which searches raw tool execution traces within a session), observability.search finds high-level session summaries and reports across sessions. Use this to discover what happened in other sessions, then use observability.read to drill into details.".to_string(),
+            description: "Discover observability resources across sessions. Searches published session reports by text. Returns matching reports with URIs and summaries. Unlike execution_search (which searches raw tool execution traces within a session), observability_search finds high-level session summaries and reports across sessions. Use this to discover what happened in other sessions, then use observability_read to drill into details.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -82,7 +82,7 @@ impl NativeTool for ObservabilitySearchTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("observability.search requires GatewayStore to be configured", None::<String>).to_error_response());
+            return Ok(ToolError::resource("observability_search requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let limit = args.limit.clamp(1, 100);
@@ -353,7 +353,7 @@ impl NativeTool for ObservabilityReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Read an observability resource by URI. Fetches published session report metadata and sub-resource summaries. The view parameter controls depth: 'metadata' returns structure only, 'summary' returns compact body (default), 'full' returns complete detail. Published reports are sanitized — input/output previews, tool details, and approval reasons are stripped before storage. Unlike execution.search (raw tool traces), this returns high-level session reports suitable for cross-session learning.".to_string(),
+            description: "Read an observability resource by URI. Fetches published session report metadata and sub-resource summaries. The view parameter controls depth: 'metadata' returns structure only, 'summary' returns compact body (default), 'full' returns complete detail. Published reports are sanitized — input/output previews, tool details, and approval reasons are stripped before storage. Unlike execution_search (raw tool traces), this returns high-level session reports suitable for cross-session learning.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -401,7 +401,7 @@ impl NativeTool for ObservabilityReadTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("observability.read requires GatewayStore to be configured", None::<String>).to_error_response());
+            return Ok(ToolError::resource("observability_read requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let root_session_id = match parse_root_from_uri(&args.uri) {

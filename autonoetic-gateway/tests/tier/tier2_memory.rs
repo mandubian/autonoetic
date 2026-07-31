@@ -53,7 +53,7 @@ async fn test_tier2_memory_cross_agent_session_visibility() {
     let err = mem_reader.recall("fact_123").await.unwrap_err();
     assert!(err.to_string().contains("not accessible"));
 
-    // Widen to session (same pattern as knowledge.store upsert)
+    // Widen to session (same pattern as knowledge_store upsert)
     let mut m = mem_writer.recall("fact_123").await.unwrap();
     m.visibility = MemoryVisibility::Session {
         session_id: "demo-session".into(),

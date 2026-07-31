@@ -558,7 +558,7 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
    invent a placeholder. If `agent_revision_create` returns
    `promotion_gate_content_digest_would_change`, the artifact changed since the gates ran —
    re-run federation on the current `artifact_ref` rather than reseeding. Save the returned
-   `approval_request_id` (`apr-esc-*`). Do **not** use `session.escalate` for promotion review.
+   `approval_request_id` (`apr-esc-*`). Do **not** use `session_escalate` for promotion review.
 5. Tell the operator how to approve/reject in plain text; **do not** `user_ask` for the same
    decision — `user_ask` does not resolve `apr-esc-*` gates.
 

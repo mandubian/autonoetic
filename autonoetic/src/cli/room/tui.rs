@@ -2114,6 +2114,345 @@ fn fetch_grant_rows(client: &RoomClient, root_session_id: &str) -> (Vec<GrantRow
     (rows, taint)
 }
 
+// Labels panel (`T`) — operator live view of every labeled thing in the root
+// session tree (#974, RFC §9.3): envelopes, per-session taints (children too),
+// memories, artifacts, traces, messages. Metadata only — no content of any
+// kind is ever shown. Data comes from `labels.list` (an operator RPC, never
+// an agent tool — I-14). A label filter cycles with `f`; the selected row's
+// resolution path opens in the detail pane on Enter.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Which kind of labeled item a row is. Drives the section header it sits
+/// under and the identity tag used to keep the cursor stable across refreshes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LabelKind {
+    Envelope,
+    SessionTaint,
+    Memory,
+    Artifact,
+    Trace,
+    Message,
+}
+
+impl LabelKind {
+    fn section(self) -> &'static str {
+        match self {
+            LabelKind::Envelope => "Envelopes",
+            LabelKind::SessionTaint => "Session taints",
+            LabelKind::Memory => "Memories",
+            LabelKind::Artifact => "Artifacts",
+            LabelKind::Trace => "Execution traces",
+            LabelKind::Message => "Agent messages",
+        }
+    }
+    /// Short tag rendered before each row's summary.
+    fn tag(self) -> &'static str {
+        match self {
+            LabelKind::Envelope => "env",
+            LabelKind::SessionTaint => "taint",
+            LabelKind::Memory => "mem",
+            LabelKind::Artifact => "art",
+            LabelKind::Trace => "trace",
+            LabelKind::Message => "msg",
+        }
+    }
+    fn color(self) -> Color {
+        match self {
+            LabelKind::Envelope => Color::Cyan,
+            LabelKind::SessionTaint => Color::Red,
+            LabelKind::Memory => Color::Magenta,
+            LabelKind::Artifact => Color::Blue,
+            LabelKind::Trace => Color::Yellow,
+            LabelKind::Message => Color::Green,
+        }
+    }
+}
+
+/// Stable identity for a row across rebuilds — the kind + its item id. A row
+/// INDEX isn't stable: sections fill/drain and taint rows appear/disappear
+/// while the panel is open, so the cursor is keyed on this instead (mirrors
+/// `GrantIdent`).
+#[derive(Clone, PartialEq, Eq)]
+struct LabelIdent {
+    kind: LabelKind,
+    id: String,
+}
+
+/// One normalized label row. `summary` is the id-ish display; `detail` is the
+/// provenance/label line shown on the selected row.
+struct LabelRow {
+    kind: LabelKind,
+    id: String,
+    /// Human label name (local_only / no_remote_model / restricted(N) / …).
+    label_name: String,
+    /// Sink-set JSON string for the filter (`f`) to compare without re-parsing
+    /// the structured type — kept as the wire array string the RPC returns.
+    sinks_json: String,
+    summary: String,
+    /// Provenance line: resolution · matched rules · parents · turn.
+    detail: String,
+}
+
+impl LabelRow {
+    fn ident(&self) -> LabelIdent {
+        LabelIdent {
+            kind: self.kind,
+            id: self.id.clone(),
+        }
+    }
+}
+
+/// Cycle the label filter. `All` shows everything; the next two answer the two
+/// questions an operator most often asks of this plane ("what can't leave to a
+/// remote model?" and "what is pinned local-only?").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LabelFilter {
+    All,
+    CannotReachRemoteModel,
+    LocalOnly,
+}
+
+impl LabelFilter {
+    fn label(self) -> &'static str {
+        match self {
+            LabelFilter::All => "all",
+            LabelFilter::CannotReachRemoteModel => "≠ remote_model",
+            LabelFilter::LocalOnly => "local_only",
+        }
+    }
+    fn next(self) -> Self {
+        match self {
+            LabelFilter::All => LabelFilter::CannotReachRemoteModel,
+            LabelFilter::CannotReachRemoteModel => LabelFilter::LocalOnly,
+            LabelFilter::LocalOnly => LabelFilter::All,
+        }
+    }
+    /// Apply in Rust (the labeled sets are small); mirrors the RPC's filters so
+    /// the panel and the `labels.list` call agree on semantics.
+    fn matches(self, row: &LabelRow) -> bool {
+        match self {
+            LabelFilter::All => true,
+            LabelFilter::CannotReachRemoteModel => {
+                // A label allows remote_model iff its sink set contains
+                // "remote_model". `local_only` and `no_remote_model` withhold it.
+                !row.sinks_json.contains("\"remote_model\"")
+            }
+            LabelFilter::LocalOnly => row.label_name == "local_only",
+        }
+    }
+}
+
+struct LabelsPanel {
+    selected: usize,
+    /// All rows fetched (unfiltered); the visible list is derived by applying
+    /// `filter`, so toggling `f` doesn't require a re-fetch.
+    all_rows: Vec<LabelRow>,
+    /// Cached section boundaries over `all_rows` (index → section title).
+    sections: Vec<(usize, &'static str)>,
+    filter: LabelFilter,
+    /// Current root-session taint display name (None ⇒ unrestricted).
+    taint: Option<String>,
+}
+
+impl LabelsPanel {
+    /// Indices into `all_rows` that pass the current filter, in order.
+    fn visible_indices(&self) -> Vec<usize> {
+        self.all_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| self.filter.matches(r))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn selected_ident(&self) -> Option<LabelIdent> {
+        let visible = self.visible_indices();
+        visible
+            .binary_search(&self.selected)
+            .ok()
+            .and_then(|vi| self.all_rows.get(visible[vi]).map(LabelRow::ident))
+    }
+
+    /// Re-point `selected` at `ident` after a refresh; fall back to clamping
+    /// when the item is gone.
+    fn reselect(&mut self, ident: Option<LabelIdent>) {
+        if let Some(target) = ident {
+            if let Some(i) = self.all_rows.iter().position(|r| r.ident() == target) {
+                if self.filter.matches(&self.all_rows[i]) {
+                    self.selected = i;
+                    return;
+                }
+            }
+        }
+        // Snap to the first visible row.
+        self.selected = self
+            .visible_indices()
+            .first()
+            .copied()
+            .unwrap_or_else(|| self.all_rows.len().saturating_sub(1));
+    }
+}
+
+/// Map a sink-set JSON array string to a display name without parsing the
+/// structured type — enough fidelity for a tag, and never panics on an
+/// unexpected shape.
+fn sinks_label_name(sinks_json: &str) -> String {
+    // Distinguish empty / blocked from a parse miss.
+    let trimmed = sinks_json.trim();
+    if trimmed == "[]" {
+        return "blocked".to_string();
+    }
+    let count = trimmed.matches(',').count() + 1;
+    // Sink::ALL.len() is 7; unrestricted is the full set.
+    const ALL_SINKS: usize = 7;
+    let has_remote = sinks_json.contains("\"remote_model\"");
+    let has_local = sinks_json.contains("\"local_model\"");
+    let has_network = sinks_json.contains("\"network\"");
+    if count == ALL_SINKS {
+        "unrestricted".to_string()
+    } else if !has_remote && has_local && has_network {
+        // local_model + network but no remote_model ⇒ no_remote_model's shape.
+        "no_remote_model".to_string()
+    } else if !has_remote && has_local && !has_network && count == 4 {
+        "local_only".to_string()
+    } else {
+        format!("restricted({} sinks)", count)
+    }
+}
+
+/// Pull a `&str` field off a JSON object, defaulting to "?".
+fn js_str<'a>(v: &'a serde_json::Value, k: &str) -> &'a str {
+    v.get(k).and_then(|x| x.as_str()).unwrap_or("?")
+}
+
+/// Build one LabelRow from a section entry. `id_field` names the identity
+/// column for this kind; `summary` is a short what-it-is line.
+fn label_row_from(kind: LabelKind, v: &serde_json::Value) -> LabelRow {
+    let id = js_str(v, id_field(kind)).to_string();
+    let label_val = v.get("label").cloned().unwrap_or(serde_json::Value::Null);
+    let sinks_json = serde_json::to_string(&label_val).unwrap_or_else(|_| "[]".to_string());
+    let label_name = sinks_label_name(&sinks_json);
+    let summary = summary_for(kind, v, &id);
+    let detail = label_detail_for(kind, v, &label_name);
+    LabelRow {
+        kind,
+        id,
+        label_name,
+        sinks_json,
+        summary,
+        detail,
+    }
+}
+
+fn id_field(kind: LabelKind) -> &'static str {
+    match kind {
+        LabelKind::Envelope => "envelope_id",
+        LabelKind::SessionTaint => "session_id",
+        LabelKind::Memory => "memory_id",
+        LabelKind::Artifact => "artifact_id",
+        LabelKind::Trace => "trace_id",
+        LabelKind::Message => "message_id",
+    }
+}
+
+fn summary_for(kind: LabelKind, v: &serde_json::Value, id: &str) -> String {
+    match kind {
+        LabelKind::Envelope => {
+            let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("?");
+            format!("{id} · {tool}")
+        }
+        LabelKind::SessionTaint => id.to_string(),
+        LabelKind::Memory => {
+            let scope = js_str(v, "scope");
+            format!("{id} · {scope}")
+        }
+        LabelKind::Artifact => {
+            let scope = js_str(v, "scope_id");
+            let r#ref = v.get("ref_id").and_then(|x| x.as_str()).unwrap_or("—");
+            format!("{id} · {ref} @ {scope}")
+        }
+        LabelKind::Trace => {
+            let tool = v.get("tool_name").and_then(|x| x.as_str()).unwrap_or("?");
+            let session = js_str(v, "session_id");
+            format!("{id} · {tool} @ {session}")
+        }
+        LabelKind::Message => {
+            let from = v.get("from_agent").and_then(|x| x.as_str()).unwrap_or("?");
+            format!("{id} · from {from}")
+        }
+    }
+}
+
+fn label_detail_for(kind: LabelKind, v: &serde_json::Value, label_name: &str) -> String {
+    match kind {
+        LabelKind::Envelope => {
+            let resolution = v
+                .get("resolution")
+                .and_then(|x| x.as_str())
+                .unwrap_or("default");
+            let parents = v
+                .get("parent_envelope_ids")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let taint = v.get("taint_applied").and_then(|x| x.as_bool()).unwrap_or(false);
+            format!("label {label_name} · {resolution} · parents={parents} · taint={taint}")
+        }
+        LabelKind::SessionTaint => format!("label {label_name}"),
+        LabelKind::Memory | LabelKind::Artifact => format!("label {label_name}"),
+        LabelKind::Trace | LabelKind::Message => format!("label {label_name}"),
+    }
+}
+
+/// Poll `labels.list` and fold every section into display rows + the taint.
+/// Errors are swallowed (empty rows) — the caller surfaces a status message —
+/// so a gateway blip never crashes the UI (mirrors `fetch_grant_rows`).
+fn fetch_label_rows(
+    client: &RoomClient,
+    root_session_id: &str,
+) -> (Vec<LabelRow>, Vec<(usize, &'static str)>, Option<String>) {
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    let value = match rpc(client, "labels.list", params) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(target: "room", error = %e, "labels.list failed");
+            return (Vec::new(), Vec::new(), None);
+        }
+    };
+
+    let mut rows: Vec<LabelRow> = Vec::new();
+    let mut sections: Vec<(usize, &'static str)> = Vec::new();
+    for (kind, key) in [
+        (LabelKind::Envelope, "envelopes"),
+        (LabelKind::SessionTaint, "session_taints"),
+        (LabelKind::Memory, "memories"),
+        (LabelKind::Artifact, "artifacts"),
+        (LabelKind::Trace, "execution_traces"),
+        (LabelKind::Message, "agent_messages"),
+    ] {
+        if let Some(arr) = value.get(key).and_then(|v| v.as_array()) {
+            if !arr.is_empty() {
+                sections.push((rows.len(), kind.section()));
+                for item in arr {
+                    rows.push(label_row_from(kind, item));
+                }
+            }
+        }
+    }
+
+    let taint = value.get("current_taint").and_then(|v| {
+        if v.is_null() {
+            None
+        } else if let Some(arr) = v.as_array() {
+            Some(sinks_label_name(&serde_json::to_string(arr).unwrap_or_default()))
+        } else {
+            Some("restricted".to_string())
+        }
+    });
+
+    (rows, sections, taint)
+}
+
 fn gate_modal_kind(gate: &GateRef) -> bool {
     matches!(
         gate.kind,
@@ -3185,6 +3524,8 @@ pub fn run(
     let mut approvals_popup: Option<ApprovalsPopup> = None;
     let mut grants_panel: Option<GrantsPanel> = None;
     let mut last_grants_poll = Instant::now();
+    let mut labels_panel: Option<LabelsPanel> = None;
+    let mut last_labels_poll = Instant::now();
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -4300,6 +4641,93 @@ pub fn run(
                         }
                     }
 
+                    // Labels panel — navigate + filter + open detail. Owns its
+                    // keys (ends in `continue;`) so they never reach the
+                    // timeline. No destructive action here: this panel is
+                    // read-only (metadata only), so there's no confirm step.
+                    if let Some(ref mut panel) = labels_panel {
+                        if panel.all_rows.is_empty() {
+                            labels_panel = None;
+                        } else {
+                            let ctrl_c = key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL);
+                            if matches!(key.code, KeyCode::Char('q')) || ctrl_c {
+                                // fall through to global quit
+                            } else {
+                                let visible = panel.visible_indices();
+                                let row_count = visible.len();
+                                let pos_in_visible = |idx: usize| {
+                                    visible.iter().position(|&i| i == idx).unwrap_or(0)
+                                };
+                                let at = pos_in_visible(panel.selected);
+                                match key.code {
+                                    KeyCode::Esc | KeyCode::Char('T') => {
+                                        labels_panel = None;
+                                    }
+                                    KeyCode::Char('f') => {
+                                        panel.filter = panel.filter.next();
+                                        status = Some(format!(
+                                            "labels filter: {}",
+                                            panel.filter.label()
+                                        ));
+                                        panel.reselect(panel.selected_ident());
+                                    }
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        if at + 1 < row_count {
+                                            panel.selected = visible[at + 1];
+                                        }
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        if at > 0 {
+                                            panel.selected = visible[at - 1];
+                                        }
+                                    }
+                                    KeyCode::Char('g') | KeyCode::Home => {
+                                        panel.selected = *visible.first().unwrap_or(&0);
+                                    }
+                                    KeyCode::End => {
+                                        panel.selected = *visible.last().unwrap_or(&0);
+                                    }
+                                    KeyCode::PageDown => {
+                                        let nxt = (at + 5).min(row_count.saturating_sub(1));
+                                        panel.selected = visible[nxt];
+                                    }
+                                    KeyCode::PageUp => {
+                                        let prv = at.saturating_sub(5);
+                                        panel.selected = visible[prv];
+                                    }
+                                    KeyCode::Enter => {
+                                        // Open the resolution path for the selected
+                                        // row in the detail pane. For envelopes that
+                                        // is the matched rules + parent lineage; for
+                                        // the other kinds it's the label summary.
+                                        if let Some(row) = panel.all_rows.get(panel.selected) {
+                                            let mut lines = vec![
+                                                format!(
+                                                    "{} {}  ·  label {}",
+                                                    row.kind.tag(),
+                                                    row.id,
+                                                    row.label_name
+                                                ),
+                                                row.detail.clone(),
+                                            ];
+                                            if row.kind == LabelKind::Envelope {
+                                                lines.push(format!("filter: {}", panel.filter.label()));
+                                            }
+                                            detail = Some(DetailPane {
+                                                rendered: render_detail_lines(&lines),
+                                                plan_id: None,
+                                                spawn_agent_id: None,
+                                            });
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
                     // Approvals popup — list all pending + resolved gates; act directly.
                     if let Some(ref mut popup) = approvals_popup {
                         if popup.rows.is_empty() {
@@ -4737,6 +5165,7 @@ pub fn run(
                                 || artifact_viewer.is_some() || detail.is_some()
                                 || input.is_some() || pending_gate.is_some() || compose.is_some()
                                 || gate_modal.is_some() || approvals_popup.is_some()
+                                || labels_panel.is_some()
                             {
                                 // don't grab G while another overlay is active
                             } else if grants_panel.is_some() {
@@ -4755,6 +5184,43 @@ pub fn run(
                                     last_grants_poll = Instant::now();
                                     status = Some(
                                         "grants: j/k navigate · r revoke (confirm) · G/Esc close"
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        // T: labels panel — live, metadata-only view of every
+                        // labeled thing in the root session tree (#974). The
+                        // deferred `T` panel from the original egress work:
+                        // what's local-only, what can't reach a remote model.
+                        // Toggles off if open.
+                        KeyCode::Char('T') => {
+                            if content_view.is_some() || artifact_file_view.is_some()
+                                || artifact_viewer.is_some() || detail.is_some()
+                                || input.is_some() || pending_gate.is_some() || compose.is_some()
+                                || gate_modal.is_some() || approvals_popup.is_some()
+                                || grants_panel.is_some()
+                            {
+                                // don't grab T while another overlay is active
+                            } else if labels_panel.is_some() {
+                                labels_panel = None;
+                            } else {
+                                let (rows, sections, taint) =
+                                    fetch_label_rows(client, &root_session_id);
+                                if rows.is_empty() {
+                                    status =
+                                        Some("no labeled content in this session".to_string());
+                                } else {
+                                    labels_panel = Some(LabelsPanel {
+                                        selected: 0,
+                                        all_rows: rows,
+                                        sections,
+                                        filter: LabelFilter::All,
+                                        taint,
+                                    });
+                                    last_labels_poll = Instant::now();
+                                    status = Some(
+                                        "labels: j/k nav · f filter · Enter detail · T/Esc close"
                                             .to_string(),
                                     );
                                 }
@@ -5651,6 +6117,7 @@ pub fn run(
                     None,
                     &early_approval_rows,
                     grants_panel.as_ref(),
+                    labels_panel.as_ref(),
                 )
             })?;
         }
@@ -5698,6 +6165,7 @@ pub fn run(
                     approvals_popup.as_ref(),
                     &[],
                     grants_panel.as_ref(),
+                    labels_panel.as_ref(),
                 )
             })?;
         }
@@ -5859,6 +6327,38 @@ pub fn run(
                     panel.rows = rows;
                     panel.reselect(prev_ident);
                     panel.prune_armed();
+                }
+                if taint_changed {
+                    panel.taint = taint;
+                }
+                if rows_changed || taint_changed {
+                    needs_redraw = true;
+                }
+            }
+        }
+
+        // Labels panel idle refresh — only poll when open, so a closed panel
+        // never spams `labels.list`. Re-fetch rows + taint and replace the
+        // panel's data, preserving the selection by identity (mirrors the
+        // grants-panel rebuild). The filter is local state, so it survives a
+        // refresh unchanged.
+        if labels_panel.is_some()
+            && last_labels_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
+        {
+            last_labels_poll = Instant::now();
+            let (rows, sections, taint) = fetch_label_rows(client, &root_session_id);
+            if let Some(panel) = labels_panel.as_mut() {
+                let rows_changed = rows.len() != panel.all_rows.len()
+                    || rows
+                        .iter()
+                        .zip(panel.all_rows.iter())
+                        .any(|(a, b)| a.id != b.id || a.kind != b.kind);
+                let taint_changed = taint != panel.taint;
+                if rows_changed {
+                    let prev_ident = panel.selected_ident();
+                    panel.all_rows = rows;
+                    panel.sections = sections;
+                    panel.reselect(prev_ident);
                 }
                 if taint_changed {
                     panel.taint = taint;
@@ -6260,6 +6760,7 @@ pub fn run(
                 approvals_popup.as_ref(),
                 &approval_rows,
                 grants_panel.as_ref(),
+                labels_panel.as_ref(),
             )
         })?;
 
@@ -8294,6 +8795,7 @@ fn draw(
     approvals_popup: Option<&ApprovalsPopup>,
     approval_rows: &[ApprovalRow],
     grants_panel: Option<&GrantsPanel>,
+    labels_panel: Option<&LabelsPanel>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -8924,6 +9426,12 @@ fn draw(
     if let Some(panel) = grants_panel {
         draw_grants_panel(f, panel);
     }
+
+    // Labels panel renders on top of the grants panel (they're mutually
+    // exclusive by the toggle guards, so only one is ever open).
+    if let Some(panel) = labels_panel {
+        draw_labels_panel(f, panel);
+    }
 }
 
 fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup) {
@@ -9055,6 +9563,111 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
             .scroll((scroll, 0)),
         area,
     );
+}
+
+fn draw_labels_panel(f: &mut Frame, panel: &LabelsPanel) {
+    let rows = &panel.all_rows;
+    let taint_str = panel
+        .taint
+        .clone()
+        .unwrap_or_else(|| "unrestricted".to_string());
+    let title = format!(
+        " Labels — {} items · filter {} · taint {} [T/Esc close · j/k nav · f filter · Enter detail] ",
+        rows.len(),
+        panel.filter.label(),
+        taint_str,
+    );
+    let area = centered_rect(86, 80, f.area());
+    f.render_widget(Clear, area);
+
+    // Only the rows passing the current filter are visible. Build the line list
+    // with section separators at the cached boundaries, and recompute the
+    // scroll from the selection so the cursor stays on screen (same
+    // derived-scroll approach as the grants panel).
+    let visible: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| panel.filter.matches(r))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut section_starts: Vec<usize> = Vec::new();
+    // Re-derive visible section headers: a section header shows where the next
+    // visible row begins a new kind.
+    let mut last_section: Option<&'static str> = None;
+    for &idx in &visible {
+        let row = &rows[idx];
+        let section = row.kind.section();
+        if Some(section) != last_section {
+            lines.push(Line::from(format!("── {section} ")).style(Style::default().fg(Color::DarkGray)));
+            section_starts.push(lines.len()); // index of first row under header
+            last_section = Some(section);
+        }
+        let selected = idx == panel.selected;
+        let marker = if selected { "▸" } else { " " };
+        let label_style = label_color(&row.label_name);
+        let mut spans: Vec<Span> = vec![
+            Span::raw(format!(" {marker} ")),
+            Span::styled(
+                format!("{:<6}", row.kind.tag()),
+                Style::default().fg(row.kind.color()),
+            ),
+            Span::raw(format!(" {:<14} ", row.label_name))
+                .style(Style::default().fg(label_style)),
+            Span::raw(&row.summary),
+        ];
+        if selected {
+            spans.push(Span::raw(format!("   · {}", row.detail)));
+        }
+        let style = if selected {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(spans).style(style));
+    }
+
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let selected_line = visible
+        .iter()
+        .position(|&i| i == panel.selected)
+        .map(|p| {
+            // +1 per section header above this row; approximate by counting the
+            // headers (section_starts holds line indices of first rows).
+            let headers_above = section_starts.iter().filter(|&&s| s <= lines.len()).count();
+            p + headers_above.min(inner_height)
+        })
+        .unwrap_or(0);
+    let max_scroll = lines.len().saturating_sub(inner_height);
+    let scroll = selected_line
+        .saturating_sub(inner_height.saturating_sub(1))
+        .min(max_scroll) as u16;
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+/// Render color for a label name — local_only is the strictest (red),
+/// no_remote_model looser (yellow), unrestricted safe (green), custom restricted (magenta).
+fn label_color(name: &str) -> Color {
+    match name {
+        "local_only" => Color::Red,
+        "no_remote_model" => Color::Yellow,
+        "unrestricted" => Color::Green,
+        "blocked" => Color::LightRed,
+        _ => Color::Magenta,
+    }
 }
 
 fn gate_modal_title(modal: &GateModal, entry: Option<&SessionTimelineEntry>) -> String {
@@ -9691,6 +10304,72 @@ mod tests {
         assert!(is_system_session("system"));
         assert!(!is_system_session("session-abc123"));
         assert!(!is_system_session("systematic-session"));
+    }
+
+    // ---- labels panel (#974) — pure helpers only ----
+
+    #[test]
+    fn sinks_label_name_recognizes_named_labels() {
+        // local_only = 4 sinks, no remote_model, no network.
+        let local_only = r#"["local_agent","local_model","memory_persist","user_reply"]"#;
+        assert_eq!(sinks_label_name(local_only), "local_only");
+        // no_remote_model: local + network, no remote_model.
+        let no_remote =
+            r#"["local_agent","local_model","memory_persist","network","user_reply"]"#;
+        assert_eq!(sinks_label_name(no_remote), "no_remote_model");
+        // unrestricted = all 7 sinks.
+        let all = r#"["federated_agent","local_agent","local_model","memory_persist","network","remote_model","user_reply"]"#;
+        assert_eq!(sinks_label_name(all), "unrestricted");
+        // blocked = empty.
+        assert_eq!(sinks_label_name("[]"), "blocked");
+        // custom restricted falls back to a sink-count summary.
+        assert_eq!(sinks_label_name(r#"["local_model"]"#), "restricted(1 sinks)");
+    }
+
+    #[test]
+    fn label_filter_cycles_three_states() {
+        assert_eq!(LabelFilter::All.next(), LabelFilter::CannotReachRemoteModel);
+        assert_eq!(
+            LabelFilter::CannotReachRemoteModel.next(),
+            LabelFilter::LocalOnly
+        );
+        assert_eq!(LabelFilter::LocalOnly.next(), LabelFilter::All);
+    }
+
+    #[test]
+    fn label_filter_cannot_reach_remote_withholds_remote_model() {
+        // A row carrying remote_model in its sink set is NOT matched by the
+        // cannot-reach-remote-model filter.
+        let with_remote = label_row_test(LabelKind::Envelope, r#"["remote_model","local_model"]"#);
+        assert!(!LabelFilter::CannotReachRemoteModel.matches(&with_remote));
+        let without_remote = label_row_test(LabelKind::Envelope, r#"["local_model"]"#);
+        assert!(LabelFilter::CannotReachRemoteModel.matches(&without_remote));
+    }
+
+    #[test]
+    fn label_row_identity_is_kind_plus_id() {
+        let row = label_row_test(LabelKind::Memory, r#"["local_model"]"#);
+        assert_eq!(row.ident().kind, LabelKind::Memory);
+        // id_field for Memory is memory_id; the synthetic value below is the
+        // literal id the helper places under that key.
+        assert_eq!(row.id, "memory-1");
+    }
+
+    /// Build a LabelRow from a synthetic RPC object for the filter/identity
+    /// tests, without a live gateway. Uses the same builder the panel uses.
+    fn label_row_test(kind: LabelKind, sinks_json_array: &str) -> LabelRow {
+        let label: serde_json::Value =
+            serde_json::from_str(sinks_json_array).unwrap_or(serde_json::Value::Null);
+        let (id_field, id_value) = match kind {
+            LabelKind::Envelope => ("envelope_id", "memory-1".to_string()),
+            LabelKind::SessionTaint => ("session_id", "memory-1".to_string()),
+            LabelKind::Memory => ("memory_id", "memory-1".to_string()),
+            LabelKind::Artifact => ("artifact_id", "memory-1".to_string()),
+            LabelKind::Trace => ("trace_id", "memory-1".to_string()),
+            LabelKind::Message => ("message_id", "memory-1".to_string()),
+        };
+        let v = serde_json::json!({ id_field: id_value, "label": label });
+        label_row_from(kind, &v)
     }
 
     #[test]

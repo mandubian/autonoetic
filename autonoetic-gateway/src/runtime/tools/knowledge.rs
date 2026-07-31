@@ -15,7 +15,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Resolve the egress label to stamp on a knowledge.store write (RFC §6).
+/// Resolve the egress label to stamp on a knowledge_store write (RFC §6).
 /// Prefer in-memory `run_context.egress_taint`; else read durable session
 /// taint. Fail closed when a session-bound write cannot see store taint.
 fn resolve_memory_store_label(
@@ -34,7 +34,7 @@ fn resolve_memory_store_label(
     };
     let store = gateway_store.ok_or_else(|| {
         anyhow::anyhow!(
-            "knowledge.store requires gateway_store to resolve session egress taint \
+            "knowledge_store requires gateway_store to resolve session egress taint \
              for session-bound writes (fail-closed)"
         )
     })?;
@@ -42,7 +42,7 @@ fn resolve_memory_store_label(
         Ok(Some(label)) => Ok(label),
         Ok(None) => Ok(EgressLabel::unrestricted()),
         Err(e) => Err(anyhow::anyhow!(
-            "knowledge.store failed to read session_egress_taint for '{sid}': {e} (fail-closed)"
+            "knowledge_store failed to read session_egress_taint for '{sid}': {e} (fail-closed)"
         )),
     }
 }
@@ -110,7 +110,7 @@ fn parse_knowledge_store_visibility(
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "knowledge.store visibility \"session\" requires a non-empty tool session_id"
+                        "knowledge_store visibility \"session\" requires a non-empty tool session_id"
                     )
                 })?;
             Ok(MemoryVisibility::Session {
@@ -170,7 +170,7 @@ impl NativeTool for KnowledgeStoreTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Store a durable fact in the knowledge base with provenance. Default visibility is global: all agents across sessions can read it; use session to restrict to the same session, or private to restrict to yourself. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge.store again with the same id. IMPORTANT: 'content' must be a plain string — never a JSON object. If you want to store structured data, serialize it to a JSON string first (e.g., JSON.stringify or serde_json::to_string).".to_string(),
+            description: "Store a durable fact in the knowledge base with provenance. Default visibility is global: all agents across sessions can read it; use session to restrict to the same session, or private to restrict to yourself. Use retention for TTL: stable (default), ephemeral (~1 hour), 1d, or 30d. To widen visibility later, call knowledge_store again with the same id. IMPORTANT: 'content' must be a plain string — never a JSON object. If you want to store structured data, serialize it to a JSON string first (e.g., JSON.stringify or serde_json::to_string).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -350,7 +350,7 @@ impl NativeTool for KnowledgeStoreTool {
         if let Some(sid) = session_id {
             let store = gateway_store.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "knowledge.store requires gateway_store to tag revision/binding provenance for session-bound writes"
+                    "knowledge_store requires gateway_store to tag revision/binding provenance for session-bound writes"
                 )
             })?;
             if let Ok(Some(binding)) = store.get_session_agent_binding(sid) {
@@ -446,7 +446,7 @@ impl NativeTool for KnowledgeRecallTool {
             memory.egress_label.as_ref(),
             &cfg,
             sink,
-            "knowledge.recall",
+            "knowledge_recall",
         );
 
         serde_json::to_string(&serde_json::json!({
@@ -567,7 +567,7 @@ impl NativeTool for KnowledgeSearchTool {
                     m.egress_label.as_ref(),
                     &cfg,
                     sink,
-                    "knowledge.search",
+                    "knowledge_search",
                 );
                 serde_json::json!({
                     "id": m.memory_id,
@@ -690,7 +690,7 @@ impl NativeTool for DigestQueryTool {
         anyhow::ensure!((1..=100).contains(&args.limit), "limit must be 1–100");
 
         let Some(gw_dir) = gateway_dir else {
-            return Ok(ToolError::resource("digest.query requires gateway directory", None::<String>).to_error_response());
+            return Ok(ToolError::resource("digest_query requires gateway directory", None::<String>).to_error_response());
         };
 
         let reader_sid = args.session_id.as_deref().or(session_id);
@@ -717,7 +717,7 @@ impl NativeTool for DigestQueryTool {
                     m.egress_label.as_ref(),
                     &cfg,
                     sink,
-                    "digest.query",
+                    "digest_query",
                 );
                 serde_json::json!({
                     "id": m.memory_id,
@@ -749,7 +749,7 @@ impl NativeTool for DigestQueryTool {
             );
             let sid = sid_for_narrative.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "digest.query narrative_handle requires session_id (argument) or an active tool session context"
+                    "digest_query narrative_handle requires session_id (argument) or an active tool session context"
                 )
             })?;
             let store = crate::runtime::content_store::ContentStore::new(gw_dir)?;

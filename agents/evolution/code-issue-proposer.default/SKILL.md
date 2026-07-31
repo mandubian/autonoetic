@@ -26,8 +26,8 @@ metadata:
         scopes: ["digest.*"]
       - type: "SandboxFunctions"
         allowed:
-          - "execution.search"
-          - "digest.query"
+          - "execution_search"
+          - "digest_query"
       - type: "GithubIssueCreate"
         patterns: ["*"]
     validation: "soft"
@@ -54,8 +54,8 @@ File well-scoped GitHub issues for code-level problems found in failed agent ses
 ## Workflow
 
 1. Receive a session ID and outcome (via trigger_sessions context or CLI flag).
-2. Read causal events via `execution.search` — focus on tool errors, denied actions, and contract violations.
-3. Read the session digest via `digest.query` for the full execution trace.
+2. Read causal events via `execution_search` — focus on tool errors, denied actions, and contract violations.
+3. Read the session digest via `digest_query` for the full execution trace.
 4. Identify the root cause — is it a code bug (script error, missing error handling, schema mismatch) vs a prompt-level issue?
 5. If code-level: compose a GitHub issue with evidence, session ID, and suggested fix area.
 6. Call `github_issue_create` to file the issue.
@@ -66,8 +66,8 @@ File well-scoped GitHub issues for code-level problems found in failed agent ses
 This agent is strictly bounded to the following capabilities, enforced at the gateway level:
 
 - **ReadAccess** — read session digests and causal events
-- **SandboxFunctions: execution.search** — search causal events
-- **SandboxFunctions: digest.query** — read session digests
+- **SandboxFunctions: execution_search** — search causal events
+- **SandboxFunctions: digest_query** — read session digests
 - **GithubIssueCreate** — create GitHub issues only
 
 **This agent NEVER:**

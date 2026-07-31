@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn escalation_uses_reason_not_message() {
-        // The session.escalate tool always sets a static `message`. The
+        // The session_escalate tool always sets a static `message`. The
         // fingerprint must use `reason` (the escalation-specific text) so
         // that different escalation reasons produce different fingerprints.
         let a = r#"{"escalation_required":true,"message":"Escalation logged.","reason":"coder.default cannot be spawned"}"#;

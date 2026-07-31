@@ -1,7 +1,7 @@
-//! Integration tests: session.escalate tool and human escalation approval flow.
+//! Integration tests: session_escalate tool and human escalation approval flow.
 //!
 //! Verifies the full escalation lifecycle:
-//!   1. Agent calls `session.escalate(target="human")` — creates approval request, returns `escalation_required: true`.
+//!   1. Agent calls `session_escalate(target="human")` — creates approval request, returns `escalation_required: true`.
 //!   2. Lifecycle detects sentinel, saves checkpoint with `YieldReason::HumanEscalation`, returns `TurnOutcome::Escalated`.
 //!   3. Operator approves the escalation via `approve_request`.
 //!   4. Session resumes from checkpoint with operator guidance injected as system message.
@@ -150,7 +150,7 @@ async fn test_session_escalate_creates_approval_and_suspends() -> anyhow::Result
         None,
     );
 
-    assert!(result.is_ok(), "session.escalate should succeed");
+    assert!(result.is_ok(), "session_escalate should succeed");
     let response: serde_json::Value = serde_json::from_str(&result.unwrap())?;
 
     assert_eq!(
@@ -363,7 +363,7 @@ async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()
     let first_result = execution
         .spawn_agent_once(
             "escalation-test-agent",
-            "I need help with this problem. session.escalate(target='human', reason='stuck', context='tried everything')",
+            "I need help with this problem. session_escalate(target='human', reason='stuck', context='tried everything')",
             session_id,
             None,
             false,

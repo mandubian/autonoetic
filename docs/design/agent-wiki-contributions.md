@@ -7,7 +7,7 @@
 
 ## Problem Statement
 
-The wiki system (`wiki.list` / `wiki.get`) provides a curated, read-only documentation corpus bootstrapped from `docs/wiki/` into `.gateway/wiki/` at startup. This gives every agent access to platform knowledge — SDK reference, architecture overview, tool guide, approval system, promotion lifecycle, etc.
+The wiki system (`wiki_list` / `wiki_get`) provides a curated, read-only documentation corpus bootstrapped from `docs/wiki/` into `.gateway/wiki/` at startup. This gives every agent access to platform knowledge — SDK reference, architecture overview, tool guide, approval system, promotion lifecycle, etc.
 
 But the corpus is **only authored at build time** by developers. Agents that discover patterns, write runbooks, or develop reusable guidance during a session have no way to contribute that knowledge back to the wiki. The existing `knowledge_store` tool provides durable fact storage, but those facts are:
 - **Session-scoped** by default — they don't survive across root sessions unless explicitly tagged `global`
@@ -25,7 +25,7 @@ A wiki contribution pipeline would let agents **reify knowledge** — promote se
 Wiki proposals are **not** a new approval mechanism. They are a new `GateKind` variant that flows through the existing `GateService` pipeline — deduplication, session grants, approval flood cap, operator resolution, timeline events. Everything works the same way as `sandbox_exec` approvals or `user_ask` interactions.
 
 ```
-Agent → wiki.propose(id, title, content, tags) → GateService.check()
+Agent → wiki_propose(id, title, content, tags) → GateService.check()
                                                      │
                           ┌──────────────────────────┼──────────────────────┐
                           ▼                          ▼                      ▼
@@ -43,12 +43,12 @@ Agent → wiki.propose(id, title, content, tags) → GateService.check()
                                                 emit causal event)
 ```
 
-### Single New Tool: `wiki.propose`
+### Single New Tool: `wiki_propose`
 
-This is the **only new tool**. No `wiki.promote`, `wiki.reject`, `wiki.withdraw`, or `wiki.list_proposals` — those are all covered by the existing gate infrastructure and operator CLI.
+This is the **only new tool**. No `wiki_promote`, `wiki_reject`, `wiki_withdraw`, or `wiki_list_proposals` — those are all covered by the existing gate infrastructure and operator CLI.
 
 ```
-wiki.propose(id, title, content, tags?)
+wiki_propose(id, title, content, tags?)
 ```
 
 **Parameters:**
@@ -73,7 +73,7 @@ wiki.propose(id, title, content, tags?)
 }
 ```
 
-**Edition**: `wiki.propose` with an existing page ID is an edit. The gate description notes "edit proposal" instead of "new proposal". On promote, the existing `.md` file is overwritten and the `index.toml` entry is updated (title/tags may change). No separate version tracking — last promoted content wins.
+**Edition**: `wiki_propose` with an existing page ID is an edit. The gate description notes "edit proposal" instead of "new proposal". On promote, the existing `.md` file is overwritten and the `index.toml` entry is updated (title/tags may change). No separate version tracking — last promoted content wins.
 
 **Deduplication**: Proposing the same `id` while a gate is already pending returns `AlreadyPending` — the existing gate ID is reused. The agent can see its proposal is still awaiting review.
 
@@ -114,7 +114,7 @@ When the operator approves the gate (via existing `approvals.approve`), the reso
 1. Write `{id}.md` to `.gateway/wiki/` (atomic: write-to-temp → rename)
 2. Update `index.toml`: add new entry or update existing entry for the ID
 3. Emit `wiki.promoted` causal event with `content_sha256`
-4. Reload the wiki index in-memory so `wiki.list` / `wiki.get` see the new page immediately
+4. Reload the wiki index in-memory so `wiki_list` / `wiki_get` see the new page immediately
 
 When the operator rejects the gate (via `approvals.reject`):
 
@@ -125,7 +125,7 @@ When the operator rejects the gate (via `approvals.reject`):
 
 | Event | Trigger | Payload |
 |-------|---------|---------|
-| `wiki.proposed` | `wiki.propose` creates a gate | `page_id`, `title`, `content_sha256`, `is_edit`, `proposed_by_agent` |
+| `wiki.proposed` | `wiki_propose` creates a gate | `page_id`, `title`, `content_sha256`, `is_edit`, `proposed_by_agent` |
 | `wiki.promoted` | Operator approves | `page_id`, `title`, `content_sha256`, `is_edit`, `approved_by` |
 | `wiki.rejected` | Operator rejects | `page_id`, `title`, `rejected_by`, `reason` |
 
@@ -149,7 +149,7 @@ The authoritative wiki directory is `.gateway/wiki/`. The source tree `docs/wiki
 
 2. **Page deletion.** Once promoted and materialized, pages are permanently available. Deletion is CLI-only, not agent-facing.
 
-3. **Wiki search.** `wiki.list` + tag-based navigation is sufficient. Semantic search can layer on top later.
+3. **Wiki search.** `wiki_list` + tag-based navigation is sufficient. Semantic search can layer on top later.
 
 4. **Content-addressed storage.** Wiki pages are mutable files, not immutable artifacts. A SHA-256 hash in the causal event provides auditability without the complexity of content-addressed storage.
 
@@ -176,7 +176,7 @@ The authoritative wiki directory is `.gateway/wiki/`. The source tree `docs/wiki
 
 - `WikiContribute` capability in `capability.rs`
 - `GateKind::WikiProposal` variant
-- `wiki.propose` NativeTool (gated on `WikiContribute`)
+- `wiki_propose` NativeTool (gated on `WikiContribute`)
 - Materialization handler in gate resolution (`on_approval_resolved`)
 - Causal events: `wiki.proposed`, `wiki.promoted`, `wiki.rejected`
 - Policy enforcement: `WikiContribute` gating on propose
@@ -199,7 +199,7 @@ The authoritative wiki directory is `.gateway/wiki/`. The source tree `docs/wiki
 
 1. **Content quality.** Agent-generated docs may be inaccurate. The operator review gate mitigates this — nothing enters the wiki without human approval.
 
-2. **Index bloat.** A large wiki makes `wiki.list` less useful. Tags mitigate this — agents discover by tag, not by scanning.
+2. **Index bloat.** A large wiki makes `wiki_list` less useful. Tags mitigate this — agents discover by tag, not by scanning.
 
 3. **Materialization race.** Two promotions writing to the same file. Mitigated by gate dedup (same `page_id` reuses existing gate) and atomic file writes.
 

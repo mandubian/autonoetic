@@ -3316,6 +3316,13 @@ impl JsonRpcRouter {
             "session.egress_policy.set" => handle_egress_policy_set(&self.execution, req),
             "session.egress_policy.clear" => handle_egress_policy_clear(&self.execution, req),
 
+            // Operator label-listing RPC (#974, RFC §9.3). Read-only, metadata
+            // only (never content), root-tree scoped. Out of line for the same
+            // stack-frame reason as the policy handlers above. Operator-only by
+            // construction — a router method, never registered as an agent tool
+            // (I-14: the label plane stays gateway-only).
+            "labels.list" => handle_labels_list(&self.execution, req),
+
             "session.envelope.propose" => {
                 #[derive(Deserialize)]
                 struct EnvelopeProposeParams {
@@ -5971,6 +5978,209 @@ fn handle_egress_policy_clear(
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
+
+/// Default envelope-event cap. Egress events are sparse (one per labeled
+/// result), so a generous window covers long sessions; when hit the response
+/// carries `truncated: true` so the panel isn't silently partial — same shape
+/// as `gateway egress audit`'s cap.
+const LABELS_LIST_DEFAULT_LIMIT: i64 = 5_000;
+
+/// `labels.list` — operator-facing, read-only, metadata-only view over the
+/// label plane for a root session tree (RFC §9.3, #974).
+///
+/// Returns six sections: labeled envelopes (reconstructed from
+/// `egress.envelope_labeled` causal events), per-session taints (root +
+/// children), labeled memories, artifacts, execution traces, and agent
+/// messages. Optional filters (`named_label`, `cannot_reach`, `can_reach`,
+/// `turn_id`) are applied in Rust after the fetch, since the labeled sets are
+/// small and the queries are root-tree-scoped reads.
+///
+/// **Never** returns content of any kind — only ids, scopes, labels, and
+/// timestamps. Every store error surfaces as `-32000` rather than degrading to
+/// an "unrestricted" gap, mirroring `grants.list`.
+#[inline(never)]
+fn handle_labels_list(execution: &GatewayExecutionService, req: JsonRpcRequest) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        root_session_id: String,
+        /// Named-label filter: `unrestricted` | `local_only` | `no_remote_model`
+        /// | `blocked`. Applied to every section's label.
+        #[serde(default)]
+        named_label: Option<String>,
+        /// Keep only rows whose label does NOT permit this sink (e.g.
+        /// `remote_model` answers "what can't leave to a remote model").
+        #[serde(default)]
+        cannot_reach: Option<autonoetic_types::egress::Sink>,
+        /// Keep only rows whose label DOES permit this sink.
+        #[serde(default)]
+        can_reach: Option<autonoetic_types::egress::Sink>,
+        /// Envelope filter: restrict to this turn id. Other sections are
+        /// unfiltered by turn (a taint/memory is not turn-bound).
+        #[serde(default)]
+        turn_id: Option<String>,
+        #[serde(default)]
+        limit: Option<i64>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "labels.list", e),
+    };
+
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => {
+            return JsonRpcResponse::error(req.id, -32000, "Gateway store not available".to_string())
+        }
+    };
+
+    let limit = params.limit.unwrap_or(LABELS_LIST_DEFAULT_LIMIT).max(1);
+
+    let filter = LabelFilter {
+        named_label: params.named_label.clone(),
+        cannot_reach: params.cannot_reach,
+        can_reach: params.can_reach,
+    };
+
+    // ---- envelopes (causal events) ---------------------------------------
+    let mut envelopes = match store.list_envelope_events_for_root(&params.root_session_id, limit) {
+        Ok(v) => v,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (envelopes) failed: {}", e),
+            )
+        }
+    };
+    let truncated = envelopes.len() as i64 >= limit;
+    if let Some(t) = &params.turn_id {
+        envelopes.retain(|r| r.turn_id.as_deref() == Some(t.as_str()));
+    }
+    envelopes.retain(|r| filter.matches(&r.label));
+
+    // ---- session taints --------------------------------------------------
+    let mut session_taints = match store.list_session_taints_for_root(&params.root_session_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (session taints) failed: {}", e),
+            )
+        }
+    };
+    session_taints.retain(|r| filter.matches(&r.label));
+
+    // ---- memories --------------------------------------------------------
+    let mut memories = match store.list_labeled_memories_for_root(&params.root_session_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (memories) failed: {}", e),
+            )
+        }
+    };
+    memories.retain(|r| filter.matches(&r.label));
+
+    // ---- artifacts -------------------------------------------------------
+    let mut artifacts = match store.list_labeled_artifacts_for_root(&params.root_session_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (artifacts) failed: {}", e),
+            )
+        }
+    };
+    artifacts.retain(|r| filter.matches(&r.label));
+
+    // ---- execution traces ------------------------------------------------
+    let mut execution_traces = match store.list_labeled_traces_for_root(&params.root_session_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (execution traces) failed: {}", e),
+            )
+        }
+    };
+    execution_traces.retain(|r| filter.matches(&r.label));
+
+    // ---- agent messages --------------------------------------------------
+    let mut agent_messages = match store.list_labeled_messages_for_root(&params.root_session_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (agent messages) failed: {}", e),
+            )
+        }
+    };
+    agent_messages.retain(|r| filter.matches(&r.label));
+
+    // Root session's own current taint (None ⇒ unrestricted), mirroring
+    // grants.list's current_taint so a badge can reuse either call.
+    let current_taint = match store.get_session_egress_taint(&params.root_session_id) {
+        Ok(label) => label,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (current taint) failed: {}", e),
+            )
+        }
+    };
+
+    let response = autonoetic_types::egress::LabelsListResponse {
+        root_session_id: params.root_session_id,
+        current_taint,
+        envelopes,
+        session_taints,
+        memories,
+        artifacts,
+        execution_traces,
+        agent_messages,
+        truncated,
+    };
+    JsonRpcResponse::success(req.id, serde_json::to_value(&response).unwrap_or_default())
+}
+
+/// Compiled label filter applied uniformly to every section after the fetch.
+/// A row's original label is kept verbatim on a match (the display layer
+/// renders the real label, not a filtered subset).
+struct LabelFilter {
+    named_label: Option<String>,
+    cannot_reach: Option<autonoetic_types::egress::Sink>,
+    can_reach: Option<autonoetic_types::egress::Sink>,
+}
+
+impl LabelFilter {
+    fn matches(&self, label: &autonoetic_types::egress::EgressLabel) -> bool {
+        use autonoetic_types::egress::label_display_name;
+        if let Some(named) = &self.named_label {
+            if &label_display_name(label) != named {
+                return false;
+            }
+        }
+        if let Some(sink) = self.cannot_reach {
+            if label.allows(sink) {
+                return false;
+            }
+        }
+        if let Some(sink) = self.can_reach {
+            if !label.allows(sink) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

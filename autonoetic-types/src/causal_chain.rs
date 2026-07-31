@@ -132,68 +132,6 @@ pub struct ExecutionTraceRecord {
     pub egress_label: Option<crate::egress::EgressLabel>,
 }
 
-impl ExecutionTraceRecord {
-    pub fn redact_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> Self {
-        match viewer {
-            super::disclosure::ViewerClass::Admin => self.clone(),
-            super::disclosure::ViewerClass::Operator => {
-                let mut out = self.clone();
-                if let Some(ref args) = self.arguments {
-                    out.arguments = Some(redact_json_string(args));
-                }
-                if let Some(ref result) = self.result {
-                    out.result = Some(redact_json_string(result));
-                }
-                out
-            }
-            super::disclosure::ViewerClass::Agent => Self {
-                trace_id: self.trace_id.clone(),
-                event_id: self.event_id.clone(),
-                agent_id: self.agent_id.clone(),
-                session_id: self.session_id.clone(),
-                turn_id: self.turn_id.clone(),
-                timestamp: self.timestamp.clone(),
-                tool_name: self.tool_name.clone(),
-                command: self.command.as_ref().map(|_| "***REDACTED***".to_string()),
-                exit_code: self.exit_code,
-                stdout: None,
-                stderr: None,
-                duration_ms: self.duration_ms,
-                success: self.success,
-                error_type: self.error_type.clone(),
-                error_summary: self.error_summary.clone(),
-                approval_required: self.approval_required,
-                approval_request_id: self.approval_request_id.clone(),
-                arguments: None,
-                result: None,
-                egress_label: self.egress_label.clone(),
-            },
-        }
-    }
-
-    pub fn to_json_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> serde_json::Value {
-        let r = self.redact_for_viewer(viewer);
-        serde_json::json!({
-            "trace_id": r.trace_id,
-            "agent_id": r.agent_id,
-            "session_id": r.session_id,
-            "turn_id": r.turn_id,
-            "timestamp": r.timestamp,
-            "tool_name": r.tool_name,
-            "command": r.command,
-            "exit_code": r.exit_code,
-            "stdout": r.stdout,
-            "stderr": r.stderr,
-            "duration_ms": r.duration_ms,
-            "success": r.success == 1,
-            "error_type": r.error_type,
-            "error_summary": r.error_summary,
-            "approval_required": r.approval_required == Some(1),
-            "approval_request_id": r.approval_request_id,
-        })
-    }
-}
-
 impl CausalEventRecord {
     pub fn redact_for_viewer(&self, viewer: super::disclosure::ViewerClass) -> Self {
         match viewer {
@@ -275,7 +213,7 @@ pub struct PublishedSessionReportRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tests for `redact_for_viewer` on ExecutionTraceRecord and CausalEventRecord.
+// Tests for `redact_for_viewer` on CausalEventRecord.
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod redaction_tests {
@@ -296,36 +234,6 @@ mod redaction_tests {
         "PASSWORD=hunter2",
         "api_key=verysecret",
     ];
-
-    /// A trace fixture stuffed with every secret-bearing string we care about.
-    fn trace_with_secrets() -> ExecutionTraceRecord {
-        ExecutionTraceRecord {
-            trace_id: "trc_001".into(),
-            event_id: Some("evt_001".into()),
-            agent_id: "coder.default".into(),
-            session_id: "sess_001".into(),
-            turn_id: Some("turn_001".into()),
-            timestamp: "2026-05-08T12:00:00Z".into(),
-            tool_name: "sandbox_exec".into(),
-            command: Some("curl -H 'Authorization: Bearer eyJhbGc.foo.bar' https://api".into()),
-            exit_code: Some(0),
-            stdout: Some("PASSWORD=hunter2 was set".into()),
-            stderr: Some("warning: -----BEGIN PRIVATE KEY----- detected".into()),
-            duration_ms: 42,
-            success: 1,
-            error_type: None,
-            error_summary: Some("benign error message".into()),
-            approval_required: Some(0),
-            approval_request_id: None,
-            arguments: Some(
-                r#"{"token":"sk-test-12345abcdefghij","host":"github.com"}"#.into(),
-            ),
-            result: Some(
-                r#"{"api_key":"verysecret","ok":true,"items":["a","b"]}"#.into(),
-            ),
-            egress_label: None,
-        }
-    }
 
     /// A causal-event fixture stuffed with every secret-bearing string we care about.
     fn event_with_secrets() -> CausalEventRecord {
@@ -352,105 +260,9 @@ mod redaction_tests {
 
     /// Stringify a record's redacted form into a single blob for property
     /// assertions — any secret leaking into any field will show up here.
-    fn trace_blob_for(record: &ExecutionTraceRecord, viewer: ViewerClass) -> String {
-        let r = record.redact_for_viewer(viewer);
-        serde_json::to_string(&r).unwrap_or_default()
-    }
-
     fn event_blob_for(record: &CausalEventRecord, viewer: ViewerClass) -> String {
         let r = record.redact_for_viewer(viewer);
         serde_json::to_string(&r).unwrap_or_default()
-    }
-
-    // ── ExecutionTraceRecord ─────────────────────────────────────────────
-
-    #[test]
-    fn trace_admin_viewer_round_trips() {
-        let original = trace_with_secrets();
-        let redacted = original.redact_for_viewer(ViewerClass::Admin);
-        // Every field must equal the original — Admin is identity.
-        assert_eq!(redacted.command, original.command);
-        assert_eq!(redacted.stdout, original.stdout);
-        assert_eq!(redacted.stderr, original.stderr);
-        assert_eq!(redacted.arguments, original.arguments);
-        assert_eq!(redacted.result, original.result);
-    }
-
-    #[test]
-    fn trace_agent_viewer_blanks_secret_bearing_fields() {
-        let r = trace_with_secrets().redact_for_viewer(ViewerClass::Agent);
-        assert_eq!(r.command.as_deref(), Some("***REDACTED***"));
-        assert_eq!(r.stdout, None);
-        assert_eq!(r.stderr, None);
-        assert_eq!(r.arguments, None);
-        assert_eq!(r.result, None);
-    }
-
-    #[test]
-    fn trace_agent_viewer_preserves_metadata() {
-        let original = trace_with_secrets();
-        let r = original.redact_for_viewer(ViewerClass::Agent);
-        // Structural / metadata fields are visible to the Agent class.
-        assert_eq!(r.trace_id, original.trace_id);
-        assert_eq!(r.agent_id, original.agent_id);
-        assert_eq!(r.session_id, original.session_id);
-        assert_eq!(r.tool_name, original.tool_name);
-        assert_eq!(r.exit_code, original.exit_code);
-        assert_eq!(r.success, original.success);
-        assert_eq!(r.duration_ms, original.duration_ms);
-        assert_eq!(r.error_summary, original.error_summary);
-    }
-
-    #[test]
-    fn trace_operator_viewer_redacts_arguments_and_result_json_secrets() {
-        let r = trace_with_secrets().redact_for_viewer(ViewerClass::Operator);
-        let args = r.arguments.expect("arguments preserved structurally");
-        let result = r.result.expect("result preserved structurally");
-        assert!(
-            !args.contains("sk-test-12345"),
-            "operator must not see openai-style key in arguments: {args}"
-        );
-        assert!(
-            args.contains("github.com"),
-            "operator must keep non-secret arg fields: {args}"
-        );
-        assert!(
-            !result.contains("verysecret"),
-            "operator must not see api_key value in result: {result}"
-        );
-        assert!(
-            result.contains("\"items\""),
-            "operator must keep non-secret result fields: {result}"
-        );
-    }
-
-    #[test]
-    fn trace_command_field_is_visible_to_operator() {
-        // The Operator class shows the command structure (only Agent class
-        // blanks it). This is intentional: operators triage commands;
-        // the redaction layer for command secrets is log_redaction at write time.
-        let original = trace_with_secrets();
-        let r = original.redact_for_viewer(ViewerClass::Operator);
-        assert_eq!(r.command, original.command);
-    }
-
-    #[test]
-    fn trace_agent_viewer_property_no_secrets_leak() {
-        let blob = trace_blob_for(&trace_with_secrets(), ViewerClass::Agent);
-        for token in SECRET_TOKENS {
-            assert!(
-                !blob.contains(token),
-                "Agent-class redacted trace must not contain '{token}' — full blob: {blob}"
-            );
-        }
-    }
-
-    #[test]
-    fn trace_to_json_for_viewer_omits_command_for_agent() {
-        let v = trace_with_secrets().to_json_for_viewer(ViewerClass::Agent);
-        assert_eq!(v["command"].as_str(), Some("***REDACTED***"));
-        assert_eq!(v["stdout"].as_str(), None);
-        assert_eq!(v["stderr"].as_str(), None);
     }
 
     // ── CausalEventRecord ────────────────────────────────────────────────

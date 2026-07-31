@@ -19,6 +19,7 @@ pub use fork_lineage::ForkLineageRecord;
 mod gate_messages;
 mod hook_deliveries;
 mod improvement_cycles;
+mod label_listing;
 mod memory;
 mod messages;
 mod migrate;
@@ -496,6 +497,62 @@ impl GatewayStore {
     ) -> Result<Option<autonoetic_types::egress::EgressLabel>> {
         let conn = self.conn.lock().unwrap();
         artifact_taint::get_label(&conn, artifact_id)
+    }
+
+    // ---- `labels.list` read queries (#974, RFC §9.3) ----
+    //
+    // Operator-facing, read-only, metadata-only views over the label plane.
+    // Each is root-tree scoped. The router surfaces store errors rather than
+    // masquerading them as `unrestricted` (same fail-visible contract as
+    // `grants.list`).
+
+    pub fn list_envelope_events_for_root(
+        &self,
+        root_session_id: &str,
+        limit: i64,
+    ) -> Result<Vec<autonoetic_types::egress::LabeledEnvelopeRow>> {
+        let conn = self.conn.lock().unwrap();
+        label_listing::list_envelope_events_for_root(&conn, root_session_id, limit)
+    }
+
+    pub fn list_session_taints_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::egress::SessionTaintRow>> {
+        let conn = self.conn.lock().unwrap();
+        label_listing::list_session_taints_for_root(&conn, root_session_id)
+    }
+
+    pub fn list_labeled_memories_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::egress::LabeledMemoryRow>> {
+        let conn = self.conn.lock().unwrap();
+        label_listing::list_labeled_memories_for_root(&conn, root_session_id)
+    }
+
+    pub fn list_labeled_artifacts_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::egress::LabeledArtifactRow>> {
+        let conn = self.conn.lock().unwrap();
+        label_listing::list_labeled_artifacts_for_root(&conn, root_session_id)
+    }
+
+    pub fn list_labeled_traces_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::egress::LabeledTraceRow>> {
+        let conn = self.conn.lock().unwrap();
+        label_listing::list_labeled_traces_for_root(&conn, root_session_id)
+    }
+
+    pub fn list_labeled_messages_for_root(
+        &self,
+        root_session_id: &str,
+    ) -> Result<Vec<autonoetic_types::egress::LabeledMessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        label_listing::list_labeled_messages_for_root(&conn, root_session_id)
     }
 
     // ---- Session residency (parked, addressable sessions) ----
