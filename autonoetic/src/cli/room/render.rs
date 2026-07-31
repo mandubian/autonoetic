@@ -1815,36 +1815,22 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
 
 /// Display name for a label value in an egress event payload: a named string
 /// (`local_only`, `no_remote_model`, `unrestricted`) or the wire shape of an
-/// `EgressLabel` — a sink-set array — mapped to the nearest named label.
-/// Mirrors the room's `sinks_label_name` heuristic.
+/// `EgressLabel` — a sink-set array — delegated to the room's canonical
+/// `sinks_label_name` so summaries agree with the labels panel. Missing/null
+/// labels are "?" — an unknown payload must never render as fully cleared.
 fn egress_label_display(p: &Option<serde_json::Value>, key: &str) -> String {
     let Some(v) = p.as_ref().and_then(|v| v.get(key)) else {
-        return "unrestricted".into();
+        return "?".into();
     };
     if let Some(s) = v.as_str() {
         return s.to_string();
     }
     if let Some(arr) = v.as_array() {
-        const ALL_SINKS: usize = 7;
-        let names: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
-        let has_remote = names.contains(&"remote_model");
-        let has_fed = names.contains(&"federated_agent");
-        let has_network = names.contains(&"network");
-        if names.len() == ALL_SINKS {
-            return "unrestricted".into();
-        }
-        // no_remote_model = ALL minus {remote_model, federated_agent}.
-        if !has_remote && !has_fed && has_network && names.len() == 5 {
-            return "no_remote_model".into();
-        }
-        // local_only = {local_model, local_agent, user_reply, memory_persist}.
-        if !has_remote && !has_fed && !has_network && names.len() == 4 {
-            return "local_only".into();
-        }
-        return format!("restricted({} sinks)", names.len());
+        let sinks_json = serde_json::to_string(arr).unwrap_or_default();
+        return super::tui::sinks_label_name(&sinks_json);
     }
     if v.is_null() {
-        return "unrestricted".into();
+        return "?".into();
     }
     "?".into()
 }
@@ -3810,6 +3796,37 @@ mod tests {
             }),
         ));
         assert!(relabeled.contains("memory → local_only"), "{relabeled}");
+    }
+
+    #[test]
+    fn egress_label_display_stays_honest_on_empty_or_missing() {
+        // A missing/empty label must never render as fully cleared — "?" or
+        // "blocked", matching the labels panel's sinks_label_name.
+        let mk = |et: &str, payload: serde_json::Value| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                payload,
+            )
+        };
+        let empty = summarize(&mk(
+            "egress.envelope_withheld",
+            serde_json::json!({
+                "tool_call_id": "tc_1",
+                "target_sink": "remote_model",
+                "label": [],
+                "indication": "[withheld]",
+            }),
+        ));
+        assert!(empty.contains("blocked"), "{empty}");
+
+        let missing = summarize(&mk(
+            "egress.envelope_labeled",
+            serde_json::json!({ "tool_name": "email.send", "matched_rules": [] }),
+        ));
+        assert!(missing.contains("→ ?"), "{missing}");
     }
 
     #[test]

@@ -2308,7 +2308,7 @@ impl LabelsPanel {
 /// Map a sink-set JSON array string to a display name without parsing the
 /// structured type — enough fidelity for a tag, and never panics on an
 /// unexpected shape.
-fn sinks_label_name(sinks_json: &str) -> String {
+pub(crate) fn sinks_label_name(sinks_json: &str) -> String {
     // Distinguish empty / blocked from a parse miss.
     let trimmed = sinks_json.trim();
     if trimmed == "[]" {
