@@ -1,22 +1,9 @@
 use super::{GatewayStore, LiveDigestEventRecord, LIVE_DIGEST_BUFFER_CAPACITY};
+use super::util::decode_egress_label_json;
 use anyhow::Result;
 use autonoetic_types::config::RetentionConfig;
-use autonoetic_types::egress::EgressLabel;
 use rusqlite::params;
 use std::collections::BTreeMap;
-
-fn decode_egress_label_json(raw: Option<String>) -> rusqlite::Result<Option<EgressLabel>> {
-    match raw {
-        Some(s) if !s.is_empty() => serde_json::from_str(&s).map(Some).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                19,
-                rusqlite::types::Type::Text,
-                e.to_string().into(),
-            )
-        }),
-        _ => Ok(None),
-    }
-}
 
 fn execution_trace_from_row(
     row: &rusqlite::Row<'_>,

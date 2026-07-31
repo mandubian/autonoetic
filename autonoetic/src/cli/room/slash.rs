@@ -129,6 +129,11 @@ pub fn help_lines() -> Vec<String> {
         "               j/k · Home/End navigate · r revoke selected (press r twice to confirm)"
             .to_string(),
         String::new(),
+        "Labels".to_string(),
+        "  T            toggle labels panel (every labeled item in the session tree)".to_string(),
+        "               j/k · Home/End navigate · f cycle filter · Enter open resolution detail"
+            .to_string(),
+        String::new(),
         "Gates (approval · wiki · escalation · plan · user.ask)".to_string(),
         "  y / n        approve/reject approval · wiki · escalation · plan (n = revision request)"
             .to_string(),

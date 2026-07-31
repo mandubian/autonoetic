@@ -696,6 +696,160 @@ pub fn matches_simple_glob(pattern: &str, candidate: &str) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Label-listing DTOs — `labels.list` operator RPC (#974)
+// ---------------------------------------------------------------------------
+//
+// Operator-facing, read-only view over the label plane (RFC §9.3). Metadata
+// only — these rows deliberately never carry content (no tool result body, no
+// memory content, no trace stdout/stderr). The interesting queries are
+// label-shaped ("show me everything that can't leave"), so this is its own RPC
+// rather than a field bolted onto `content.list`.
+//
+// All of these serialize `EgressLabel` in its transparent sink-set form;
+// callers render the human name with `label_display_name`.
+
+/// One labeled envelope, reconstructed from its `egress.envelope_labeled`
+/// causal event (RFC §9.1 provenance + the resolution kind from §4).
+///
+/// Envelopes are ephemeral at runtime (they live in the in-turn sidecar); the
+/// durable record per envelope *is* the causal event, so this row is a typed
+/// view onto that event's payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabeledEnvelopeRow {
+    /// `env_<id>` — the envelope identity minted at labeling time.
+    pub envelope_id: String,
+    /// Session that produced the envelope (a child of the queried root).
+    pub session_id: String,
+    /// Turn within which the envelope was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// RFC3339 timestamp of the causal event.
+    pub timestamp: String,
+    /// The tool that produced the labeled result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// The tool-call id whose result was labeled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// The resolved allowed-sink set.
+    pub label: EgressLabel,
+    /// Resolution kind: `operator_and_session_rule` | `operator_rule` |
+    /// `session_rule` | `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// Operator source rules whose intersection produced the label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_rules: Vec<String>,
+    /// Scope of each entry in `matched_rules` (`global` | `session`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_rule_scopes: Vec<String>,
+    /// Parent envelope ids when argument-taint contributed (RFC §4.1 path 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parent_envelope_ids: Vec<String>,
+    /// True when accumulated session taint was intersected into this label.
+    #[serde(default)]
+    pub taint_applied: bool,
+    /// True when stored artifact labels were intersected into this label.
+    #[serde(default)]
+    pub artifact_labels_applied: Vec<String>,
+    /// True when the bundle floor was intersected into this label.
+    #[serde(default)]
+    pub bundle_floor_applied: bool,
+}
+
+/// A session's accumulated taint row (root or a child in the queried tree).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTaintRow {
+    pub session_id: String,
+    pub label: EgressLabel,
+    /// RFC3339 timestamp of the last restrictive write.
+    pub updated_at: String,
+}
+
+/// A labeled memory — metadata only, never the memory content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabeledMemoryRow {
+    pub memory_id: String,
+    /// Memory scope string (e.g. `session:<sid>` / `session:<sid>:turn:<t>`).
+    pub scope: String,
+    pub owner_agent_id: String,
+    pub label: EgressLabel,
+    /// RFC3339 timestamp of the last label write.
+    pub updated_at: String,
+}
+
+/// A labeled artifact — the `artifact_egress_labels` sidecar row joined to a
+/// session-scoped artifact ref. The label table is session-agnostic, so the
+/// ref's `scope_id` is what scopes this to the queried root tree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabeledArtifactRow {
+    /// `art_<id>` — content-addressed store locator.
+    pub artifact_id: String,
+    /// Short alias agents use (e.g. `ar.aabb1234ef56`), if a ref exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ref_id: Option<String>,
+    /// Session the ref was minted for.
+    pub scope_id: String,
+    pub label: EgressLabel,
+    /// RFC3339 timestamp of the last label write.
+    pub updated_at: String,
+}
+
+/// A labeled execution trace — metadata only, never stdout/stderr/command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabeledTraceRow {
+    pub trace_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    pub label: EgressLabel,
+    /// RFC3339 timestamp of the trace.
+    pub timestamp: String,
+}
+
+/// A labeled agent message — metadata only, never the message body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabeledMessageRow {
+    pub message_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_agent: Option<String>,
+    pub label: EgressLabel,
+    /// RFC3339 timestamp of the message.
+    pub timestamp: String,
+}
+
+/// Response of the `labels.list` operator RPC (#974).
+///
+/// Every section is independently sourced; a store error on any one fails the
+/// whole call rather than returning a partial view that silently drops a label
+/// source (the same fail-visible precedent as `grants.list`). Absence of a row
+/// ⇒ `unrestricted`; only restrictive labels are persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelsListResponse {
+    pub root_session_id: String,
+    /// The root session's own current taint (`None` ⇒ unrestricted). Mirrors
+    /// the `current_taint` field `grants.list` already returns, so a badge can
+    /// reuse either call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_taint: Option<EgressLabel>,
+    pub envelopes: Vec<LabeledEnvelopeRow>,
+    pub session_taints: Vec<SessionTaintRow>,
+    pub memories: Vec<LabeledMemoryRow>,
+    pub artifacts: Vec<LabeledArtifactRow>,
+    pub execution_traces: Vec<LabeledTraceRow>,
+    pub agent_messages: Vec<LabeledMessageRow>,
+    /// True when the envelope-event query hit its limit (early turns may be
+    /// missing). Surfaces the same way `gateway egress audit` does.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

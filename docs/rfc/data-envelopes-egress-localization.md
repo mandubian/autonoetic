@@ -865,6 +865,15 @@ history (visible locally to Operator/Admin viewers, never in events).
   eligible set, withheld envelopes with indications, labeling provenance per
   envelope, declassifications, assertion violations. Exportable through
   `session_report` / capsule (viewer-redacted as usual).
+- **`labels.list` operator RPC (#974)** — live, root-tree-scoped view over the
+  label plane, returning **metadata only** (never content): labeled envelopes
+  (provenance + resolution kind from `egress.envelope_labeled`), per-session
+  taints (root + children), labeled memories, artifacts, execution traces, and
+  agent messages. Filters are label-shaped (`named_label`, `cannot_reach`,
+  `can_reach`, `turn_id`) — "show me everything that can't reach a remote
+  model." An operator RPC, never an agent tool (I-14); the Session Room TUI
+  consumes it for the `T` labels panel. Absence ⇒ unrestricted everywhere; a
+  store error surfaces rather than masquerading as an unrestricted gap.
 - **Agent-level introspection:** because events are content-free metadata,
   `ViewerClass::Agent` may see them for its own session via the observability
   tools — this is how an agent explains `egress_no_eligible_provider` or a missing
