@@ -2474,13 +2474,15 @@ fn fetch_label_rows(
 fn fetch_taint_and_trace_labels(
     client: &RoomClient,
     root_session_id: &str,
+    prior_taint: Option<String>,
+    prior_trace_labels: HashMap<String, String>,
 ) -> (Option<String>, HashMap<String, String>) {
     let params = serde_json::json!({ "root_session_id": root_session_id });
     let value = match rpc(client, "labels.list", params) {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!(target: "room", error = %e, "labels.list failed");
-            return (None, HashMap::new());
+            return (prior_taint, prior_trace_labels);
         }
     };
     let taint = value.get("current_taint").and_then(|v| {
@@ -2510,26 +2512,29 @@ fn fetch_taint_and_trace_labels(
     (taint, trace_labels)
 }
 
-/// Read the current session egress policy as a typed value, defaulting to an
-/// empty policy when none is declared. Errors degrade to the default (the
-/// follow-up `set` call surfaces any real gateway problem to the operator).
+/// Read the current session egress policy as a typed value. Returns
+/// `Some(empty policy)` when none is declared; `None` when the read itself
+/// fails — the caller must abort rather than `set` a degraded default, since
+/// `set` replaces wholesale and a default would drop existing rules
+/// (widening egress).
 fn current_egress_policy(
     client: &RoomClient,
     root_session_id: &str,
-) -> autonoetic_types::egress::EgressSessionPolicy {
+) -> Option<autonoetic_types::egress::EgressSessionPolicy> {
     use autonoetic_types::egress::EgressSessionPolicy;
     match rpc(
         client,
         "session.egress_policy.get",
         serde_json::json!({ "session_id": root_session_id }),
     ) {
-        Ok(v) => v
-            .get("policy")
-            .and_then(|p| serde_json::from_value(p.clone()).ok())
-            .unwrap_or_default(),
+        Ok(v) => Some(
+            v.get("policy")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default(),
+        ),
         Err(e) => {
             tracing::debug!(target: "room", error = %e, "session.egress_policy.get failed");
-            EgressSessionPolicy::default()
+            None
         }
     }
 }
@@ -4163,7 +4168,16 @@ pub fn run(
                                         // existing rules/default_label). Only the
                                         // constraint flips; rules stay.
                                         let mut policy =
-                                            current_egress_policy(client, root_session_id);
+                                            match current_egress_policy(client, root_session_id) {
+                                                Some(p) => p,
+                                                None => {
+                                                    status = Some(
+                                                        "✗ could not read session egress policy — /private aborted, nothing changed"
+                                                            .to_string(),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
                                         let pinning = policy.provider_constraint
                                             != Some(
                                                 autonoetic_types::egress::ProviderConstraint::
@@ -4204,7 +4218,16 @@ pub fn run(
                                         // get → append → set; a duplicate
                                         // (same source/path/label) is idempotent.
                                         let mut policy =
-                                            current_egress_policy(client, root_session_id);
+                                            match current_egress_policy(client, root_session_id) {
+                                                Some(p) => p,
+                                                None => {
+                                                    status = Some(
+                                                        "✗ could not read session egress policy — /taint aborted, nothing changed"
+                                                            .to_string(),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
                                         let rule = autonoetic_types::egress::EgressRule {
                                             source: source.clone(),
                                             path: path.clone(),
@@ -6575,7 +6598,12 @@ pub fn run(
         {
             last_taint_poll = Instant::now();
             force_taint_refresh = false;
-            let (taint, trace_labels) = fetch_taint_and_trace_labels(client, &root_session_id);
+            let (taint, trace_labels) = fetch_taint_and_trace_labels(
+                client,
+                &root_session_id,
+                current_taint.clone(),
+                current_trace_labels.clone(),
+            );
             if taint != current_taint || trace_labels != current_trace_labels {
                 current_taint = taint;
                 current_trace_labels = trace_labels;

@@ -5153,7 +5153,8 @@ mod tests {
             show_reasoning: true,
             egress_label: None,
         };
-        let row = RenderedRow::Line(spec);        let s = row_text(&row);
+        let row = RenderedRow::Line(spec);
+        let s = row_text(&row);
         assert!(s.contains('\n'), "detail boundary must be preserved: {s:?}");
         assert!(s.contains("hello world"));
     }
