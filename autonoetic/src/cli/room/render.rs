@@ -1652,6 +1652,55 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 format!("network envelope locked: {hosts} ({grants} {grant_word})")
             }
         }
+        // Operator egress-policy declarations (RFC §5.4) — `/private` and
+        // `/taint` in the room, `session egress-policy set/clear` on the CLI.
+        // Metadata only: the operation, the operator attribution, and the
+        // rule/default summary from the causal event payload.
+        "egress.session_policy" => {
+            let operation = field("operation").unwrap_or_default();
+            let set_by = field("set_by").unwrap_or_default();
+            let detail = p.as_ref().and_then(|v| v.get("detail"));
+            let mut head = match operation.as_str() {
+                "clear" => "egress policy cleared".to_string(),
+                "set" => {
+                    if let Some(d) = detail {
+                        let rules = d.get("rule_count").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let sources = d
+                            .get("rule_sources")
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
+                        let default = d
+                            .get("default_label")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or_default();
+                        let mut s = format!(
+                            "egress policy set ({rules} rule{})",
+                            if rules == 1 { "" } else { "s" }
+                        );
+                        if !sources.is_empty() {
+                            s.push_str(&format!(": {sources}"));
+                        }
+                        if !default.is_empty() {
+                            s.push_str(&format!(" · default {default}"));
+                        }
+                        s
+                    } else {
+                        "egress policy set".to_string()
+                    }
+                }
+                _ => "egress policy change".to_string(),
+            };
+            if !set_by.is_empty() {
+                head.push_str(&format!(" — {set_by}"));
+            }
+            head
+        }
         // Reserved — no emitter today (failures use `tool.completed` with
         // `ok:false`); kept so a future dedicated failure event renders sanely.
         "tool.failed" => {
@@ -2097,6 +2146,7 @@ pub fn render_spec(entry: &SessionTimelineEntry) -> RowSpec {
         turn_label: None, // Child spawn badge (e.g. `3→coder`) filled by the TUI.
         in_flight: false, // The TUI fills this in once it knows turn lifecycle.
         show_reasoning,
+        egress_label: None, // The TUI fills this from the labels.list trace map.
     }
 }
 
@@ -2276,6 +2326,11 @@ pub struct RowSpec {
     pub in_flight: bool,
     /// Show the 💭 reasoning prefix — false when reasoning is hidden by toggle.
     pub show_reasoning: bool,
+    /// Egress label display name for this row's content (e.g. `local_only`,
+    /// `no_remote_model`) when its execution trace is labeled. `None` =
+    /// unrestricted / not yet labeled. Operator-surface only (#971); the TUI
+    /// renders a compact marker from it.
+    pub egress_label: Option<String>,
 }
 
 impl RowSpec {
@@ -2448,6 +2503,9 @@ const SIGNIFICANT_EVENT_TYPES: &[&str] = &[
     "llm.request_failed", "llm.empty_response", "llm.retry",
     "tool.failed", "guard.tripped",
     "session.emergency_stop", "security.sandbox_escape",
+    // Operator egress-policy declarations (`/private`, `/taint`) — a change to
+    // what may leave the machine is consciously kept individual (#977).
+    "egress.session_policy",
 ];
 
 /// Routine-tier event types (see [`EventTier::Routine`]).
@@ -3445,6 +3503,44 @@ mod tests {
                 "{et} falls back to the raw event_type string in summarize() — add a match arm"
             );
         }
+    }
+
+    #[test]
+    fn egress_policy_declaration_summarizes_operator_readable() {
+        // `/private` (provider constraint) and `/taint` (rule) both land here.
+        let e = entry(
+            SessionRole::Operator,
+            Principal::human("operator"),
+            "egress.session_policy",
+            Altitude::Normal,
+            serde_json::json!({
+                "operation": "set",
+                "set_by": "operator:tui",
+                "detail": {
+                    "rule_count": 1,
+                    "rule_sources": ["email.*"],
+                    "default_label": "local_only",
+                },
+            }),
+        );
+        let summary = summarize(&e);
+        assert!(summary.contains("egress policy set"), "{summary}");
+        assert!(summary.contains("1 rule"), "{summary}");
+        assert!(summary.contains("email.*"), "{summary}");
+        assert!(summary.contains("default local_only"), "{summary}");
+        assert!(summary.contains("operator:tui"), "{summary}");
+
+        // Clear has no detail — must not render a stale rule line.
+        let cleared = entry(
+            SessionRole::Operator,
+            Principal::human("operator"),
+            "egress.session_policy",
+            Altitude::Normal,
+            serde_json::json!({ "operation": "clear", "set_by": "operator:tui", "detail": null }),
+        );
+        let s2 = summarize(&cleared);
+        assert!(s2.contains("cleared"), "{s2}");
+        assert!(!s2.contains("email.*"), "{s2}");
     }
 
     #[test]
@@ -4948,6 +5044,7 @@ mod tests {
             turn_label: None,
             in_flight: false,
             show_reasoning: true,
+            egress_label: None,
         };
         let s = spec.to_plain_text();
         assert!(s.contains("headline here"));
@@ -5054,9 +5151,9 @@ mod tests {
             turn_label: None,
             in_flight: false,
             show_reasoning: true,
+            egress_label: None,
         };
-        let row = RenderedRow::Line(spec);
-        let s = row_text(&row);
+        let row = RenderedRow::Line(spec);        let s = row_text(&row);
         assert!(s.contains('\n'), "detail boundary must be preserved: {s:?}");
         assert!(s.contains("hello world"));
     }

@@ -1471,6 +1471,43 @@ impl GatewayExecutionService {
                 "failed to emit egress.session_policy causal event"
             );
         }
+        // Also surface the declaration in the room timeline (live digest) so the
+        // policy change is part of the session narrative, not invisible state —
+        // mirrors the `envelope.proposed` emitter. `set_by` values the room/CLI
+        // send (`operator`, `operator:tui`, `operator:rpc`) map to the Operator
+        // seat; anything else falls through to `decider_seat`.
+        let (principal, role) = if set_by == "operator" || set_by.starts_with("operator:") {
+            (
+                autonoetic_types::principal::Principal::human("operator"),
+                autonoetic_types::session_timeline::SessionRole::Operator,
+            )
+        } else {
+            crate::runtime::session_timeline::decider_seat(set_by)
+        };
+        let timeline_event = crate::runtime::session_timeline::build_timeline_event(
+            root_session_id.to_string(),
+            session_id.to_string(),
+            None,
+            &principal,
+            &role,
+            "egress.session_policy",
+            None,
+            Some(serde_json::json!({
+                "operation": operation,
+                "root_session_id": root_session_id,
+                "set_by": set_by,
+                "detail": detail,
+            })),
+            autonoetic_types::session_timeline::TimelineRefs::default(),
+        );
+        if let Err(e) = store.create_live_digest_event(&timeline_event) {
+            tracing::warn!(
+                target: "session_timeline",
+                error = %e,
+                root_session_id = %root_session_id,
+                "egress.session_policy timeline emit failed"
+            );
+        }
     }
 
     /// Operator / gateway / privileged-agent root-session circuit breaker (see Phase 2C).

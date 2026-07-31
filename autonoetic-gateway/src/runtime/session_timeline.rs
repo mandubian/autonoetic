@@ -719,8 +719,11 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         // milestone, audits, retries, and gate abandonments.
         "agent.message" | "operator.message" | "agent.peer_message" | "session.start"
         | "session.end" | "workbench.created" | "digest_annotate" | "llm.retry"
-        | "approval.cancelled" | "wiki.withdrawn" => Altitude::Normal,
-
+        | "approval.cancelled" | "wiki.withdrawn"
+        // Operator egress-policy declarations (`egress.session_policy`) are
+        // visible progress, not plumbing — a `/taint`/`/private` change alters
+        // what may leave the machine.
+        | "egress.session_policy" => Altitude::Normal,
         // ─── Detail: hidable plumbing. ───
         // Turns, LLM rounds, reasoning, tool requests AND successful tool
         // completions (failures are bumped to Attention at the emit site),

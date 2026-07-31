@@ -301,3 +301,53 @@ fn taint_intersection_of_local_only_and_no_remote_model() -> anyhow::Result<()> 
     assert_eq!(outcome.provenance.parent_envelope_ids.len(), 2);
     Ok(())
 }
+
+/// The room's `/private` and `/taint` affordances land on
+/// `session.egress_policy.set` (#977). The gateway must surface the declaration
+/// in the room timeline (live digest) as well as the causal chain, so the
+/// change is part of the session narrative rather than invisible state.
+#[tokio::test]
+async fn egress_policy_set_surfaces_in_room_timeline() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+    let execution = autonoetic_gateway::execution::GatewayExecutionService::new(
+        autonoetic_types::config::GatewayConfig::default(),
+        Some(store.clone()),
+    );
+
+    let policy = autonoetic_types::egress::EgressSessionPolicy {
+        rules: vec![rule("email.*", NamedEgressLabel::LocalOnly)],
+        provider_constraint: Some(autonoetic_types::egress::ProviderConstraint::LocalOnly),
+        ..Default::default()
+    };
+    let resp = execution.set_session_egress_policy("root-977", policy, "operator:tui")?;
+    assert_eq!(resp.get("root_session_id").and_then(|v| v.as_str()), Some("root-977"));
+
+    let timeline = store.list_session_timeline("root-977", None, 50, None, None)?;
+    let entry = timeline
+        .entries
+        .iter()
+        .find(|e| e.event_type == "egress.session_policy")
+        .expect("session.egress_policy.set must emit a room timeline event");
+    let payload: serde_json::Value =
+        serde_json::from_str(entry.payload.as_deref().unwrap_or("null"))?;
+    assert_eq!(payload.get("operation").and_then(|v| v.as_str()), Some("set"));
+    assert_eq!(payload.get("set_by").and_then(|v| v.as_str()), Some("operator:tui"));
+    // Attribution: an operator:… actor sits in the Operator seat (not Runtime).
+    assert_eq!(entry.role, autonoetic_types::session_timeline::SessionRole::Operator);
+    // Normal altitude → visible at the default floor (a taint change is
+    // progress, not plumbing).
+    assert_eq!(entry.altitude, autonoetic_types::session_timeline::Altitude::Normal);
+
+    // Clearing also surfaces.
+    execution.clear_session_egress_policy("root-977", "operator:tui")?;
+    let timeline2 = store.list_session_timeline("root-977", None, 50, None, None)?;
+    assert!(
+        timeline2
+            .entries
+            .iter()
+            .any(|e| e.event_type == "egress.session_policy"
+                && e.payload.as_deref().unwrap_or("").contains("\"operation\":\"clear\""))
+    );
+    Ok(())
+}
