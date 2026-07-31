@@ -50,7 +50,7 @@ impl NativeTool for ExecutionSearchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns execution metadata including exit codes, duration, and error info. For cross-session discovery of high-level session summaries, use observability.search instead.".to_string(),
+            description: "Search raw execution traces for tool-level debugging within sessions. Query by tool name, success status, error type, command pattern, or agent ID. Returns execution metadata including exit codes, duration, and error info. For cross-session discovery of high-level session summaries, use observability_search instead.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -124,7 +124,7 @@ impl NativeTool for ExecutionSearchTool {
             .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
 
         let Some(store) = gateway_store else {
-            return Ok(ToolError::resource("execution.search requires GatewayStore to be configured", None::<String>).to_error_response());
+            return Ok(ToolError::resource("execution_search requires GatewayStore to be configured", None::<String>).to_error_response());
         };
 
         let limit = args.limit.unwrap_or(10).min(100) as i64;

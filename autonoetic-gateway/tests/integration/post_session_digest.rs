@@ -187,7 +187,7 @@ fn digest_query_returns_narrative_via_content_handle() -> anyhow::Result<()> {
 
     let session_id = "digest-query-handle-session";
     let cs = autonoetic_gateway::runtime::content_store::ContentStore::new(&gateway_dir)?;
-    let body = b"Narrative reachable via digest.query narrative_handle.";
+    let body = b"Narrative reachable via digest_query narrative_handle.";
     let handle = cs.write(body)?;
     cs.register_name(session_id, POST_SESSION_NARRATIVE_CONTENT_NAME, &handle)?;
 
@@ -236,7 +236,7 @@ fn digest_query_returns_narrative_via_content_handle() -> anyhow::Result<()> {
     let narr = v["narrative"].as_object().expect("narrative object");
     let text = narr["text"].as_str().expect("narrative text");
     assert!(
-        text.contains("digest.query narrative_handle"),
+        text.contains("digest_query narrative_handle"),
         "unexpected narrative: {text}"
     );
     assert_eq!(v["memory_count"], 1);

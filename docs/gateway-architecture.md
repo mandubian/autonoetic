@@ -89,7 +89,7 @@ autonoetic-gateway/src/
 │   │   ├── user_interaction.rs    #     user_interaction.*
 │   │   ├── user_profile.rs        #     user.profile
 │   │   ├── wiki.rs                #     wiki.*
-│   │   ├── digest.rs              #     digest.query
+│   │   ├── digest.rs              #     digest_query
 │   │   ├── session.rs             #     session.*
 │   │   ├── resolve.rs             #     resolve
 │   │   ├── quality_trend.rs       #     quality_trend.*

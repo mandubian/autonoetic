@@ -201,7 +201,7 @@ pub enum Capability {
 
     /// Propose new wiki pages (docs) to be curated into the platform wiki.
     /// Writing durable documentation is a trust boundary — requires judgment.
-    /// Only agents with this capability can call wiki.propose.
+    /// Only agents with this capability can call wiki_propose.
     WikiContribute,
 
     /// Access to PlanFrame operations (propose, amend, list, get).

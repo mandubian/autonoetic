@@ -550,7 +550,7 @@ The operator resolves it via the chat TUI's pending-approvals command or `autono
 - **Fix**: route findings to `coder.default`, re-run federation after fixes
 - **Reject**: report to user, do NOT promote
 
-**Note**: Do NOT use `session.escalate` for federation reviews — use `federation.escalate`. The `session.escalate` tool is for when the agent itself is stuck and needs human guidance, not for structured promotion review.
+**Note**: Do NOT use `session_escalate` for federation reviews — use `federation.escalate`. The `session_escalate` tool is for when the agent itself is stuck and needs human guidance, not for structured promotion review.
 
 **Step 6: Wait for the operator decision — one channel only**
 

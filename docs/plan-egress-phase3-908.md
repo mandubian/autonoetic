@@ -9,7 +9,7 @@ Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Depends on me
 - Session taint is durable (`session_egress_taint`, agent_messages labeled).
 - Tool-result / response / compression / routing labels exist in-session.
 - **No** `egress_label` on `MemoryObject` (`autonoetic-types/src/memory.rs`), `memories` table, or `execution_traces`.
-- `knowledge.store` (`runtime/tools/knowledge.rs`) ignores `_run_context` / session taint.
+- `knowledge_store` (`runtime/tools/knowledge.rs`) ignores `_run_context` / session taint.
 - `build_memory_context_snippet` (`runtime/context.rs`) injects content into prompts with no provider-class filter.
 - `post_session_digest` (`runtime/post_session_digest.rs`) always uses configured digest preset; stores Global memories with no label.
 - `SCHEMA_VERSION_LATEST = 75` — next migration is **v76**.
@@ -29,7 +29,7 @@ Parent [#903](https://github.com/mandubian/autonoetic/issues/903). Depends on me
 | Slice | Scope | Blast radius | Depends |
 |---|---|---|---|
 | **0. Plan doc** | `docs/plan-egress-phase3-908.md` | docs only | — |
-| **1. Memory label vertical** | `MemoryObject.egress_label`, v76 `memories.egress_label_json`, store-time intersection on `knowledge.store`, request-time filter on recall/search/`build_memory_context_snippet` | types + migrate + knowledge + context | 0 |
+| **1. Memory label vertical** | `MemoryObject.egress_label`, v76 `memories.egress_label_json`, store-time intersection on `knowledge_store`, request-time filter on recall/search/`build_memory_context_snippet` | types + migrate + knowledge + context | 0 |
 | **2. Execution traces** | label on `ExecutionTraceRecord` + column; write from tool-result label; filter `execution_search` | migrate + tool_call_processor + execution tool | 1 (shared filter helper) |
 | **3. Digest** | tainted session → local digest preset (or indications); digest memories inherit intersection; `digest_query` filters | post_session_digest | 1 |
 | **4. Other re-entry surfaces** | `observability_read`, `session_peek`, `wiki_get` filter/indicate by target sink | tools | 1–2 |
@@ -51,7 +51,7 @@ Rationale: Slice 1 closes the highest-risk hole (prompt priming + knowledge). Sl
 - `filter_or_indicate_for_sink(content, label, sink, verbosity)` — drop/indicate when label excludes sink.
 - Target sink from the completion’s effective `EgressClass` (same as chokepoint), threaded into snippet/tool paths — **not** LLM judgment.
 
-**Store-time intersection:** `session_accumulated_taint` (or `NativeToolRunContext.egress_taint`) at `knowledge.store` and at `create_execution_trace` (tool-result label when present).
+**Store-time intersection:** `session_accumulated_taint` (or `NativeToolRunContext.egress_taint`) at `knowledge_store` and at `create_execution_trace` (tool-result label when present).
 
 **Fail closed on missing taint context for store:** if store path cannot see session labels, read `session_egress_taint` from the store when the in-memory map is unavailable — error if store read fails rather than silently widening.
 
@@ -62,7 +62,7 @@ Rationale: Slice 1 closes the highest-risk hole (prompt priming + knowledge). Sl
 - `MemoryObject.egress_label` with serde default unrestricted.
 - Migration **v76**: `memories.egress_label_json` + `execution_traces.egress_label_json` (both columns in one migration so Slice 2 does not need a second bump).
 - Config: `egress.legacy_unlabeled: unrestricted | no_remote_model` on `EgressConfig`.
-- `knowledge.store` intersects session taint onto the memory before upsert.
+- `knowledge_store` intersects session taint onto the memory before upsert.
 - `knowledge_recall` / `knowledge_search` / `build_memory_context_snippet` filter by target sink.
 
 **PR title:** `feat(egress): MemoryObject egress_label + store/recall filter (#908 slice 1)`

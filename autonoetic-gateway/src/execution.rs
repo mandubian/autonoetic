@@ -3449,7 +3449,7 @@ impl GatewayExecutionService {
                         // timeline as an `agent.message` so it shows inline in
                         // the room TUI at the default altitude. Without this,
                         // script output is captured only in `execution_traces`
-                        // (execution.search) and `causal_events`, neither of
+                        // (execution_search) and `causal_events`, neither of
                         // which the room reads — see issue #644.
                         crate::runtime::script_execute::emit_script_message_timeline(
                             self.gateway_store.as_deref(),

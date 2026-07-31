@@ -14,7 +14,7 @@ The gateway has two redaction surfaces because they answer two different questio
 
 | Question | Mechanism | Scope |
 |---|---|---|
-| *Who is reading this trace right now?* | `ViewerClass` | Observability and approval reads (execution.search, approval_summary, …). |
+| *Who is reading this trace right now?* | `ViewerClass` | Observability and approval reads (execution_search, approval_summary, …). |
 | *What may the LLM repeat back to the user in its reply?* | `DisclosureClass` | Per-content classification consumed by the assistant-reply filter. |
 
 A piece of output can be `Public` to the assistant (DisclosureClass) and still be redacted from a low-trust agent reading the trace later (ViewerClass) — and vice versa.
@@ -184,7 +184,7 @@ They cooperate; neither subsumes the other.
 
 ### What this protects against
 
-- **Cross-agent secret leakage via observability tools.** A specialist agent invoking `execution.search` to learn from another session sees only metadata, not stdout/stderr/headers/bodies. Even if the source agent had `NetworkAccess` and made a credential-bearing request, the credential-in-body never reaches the curious agent. (One known gap: `approval_summary` for `ScheduledAction::SandboxExec` currently exposes the command verbatim — issue #158, fixed by PR #160.)
+- **Cross-agent secret leakage via observability tools.** A specialist agent invoking `execution_search` to learn from another session sees only metadata, not stdout/stderr/headers/bodies. Even if the source agent had `NetworkAccess` and made a credential-bearing request, the credential-in-body never reaches the curious agent. (One known gap: `approval_summary` for `ScheduledAction::SandboxExec` currently exposes the command verbatim — issue #158, fixed by PR #160.)
 - **Operator-class triage with redacted secrets.** Operators inspecting payloads see structural fields (host, method, path, JSON keys) but secret-named keys have their values replaced with `"***REDACTED***"`. Non-JSON strings get precise in-place masking via `redact_embedded_secrets` — Bearer headers, env-var assignments, and URL query secrets are masked while the surrounding prose is preserved.
 - **Inadvertent exposure through reports.** The HTML and JSON session reports go through `redact_text_for_logs` before being written to the content store (commit 7f8525d, closes part of issue #4).
 

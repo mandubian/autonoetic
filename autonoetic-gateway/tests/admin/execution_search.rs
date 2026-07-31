@@ -1,5 +1,5 @@
 //! Integration test: sandbox.exec → fails → execution_traces has full error →
-//! agent uses execution.search to find the error → gets structured result
+//! agent uses execution_search to find the error → gets structured result
 
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -100,7 +100,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
     };
     store.create_execution_trace(&success_trace)?;
 
-    // Now use execution.search tool to find the compilation error
+    // Now use execution_search tool to find the compilation error
     let registry = autonoetic_gateway::runtime::tools::default_registry();
     let manifest = test_manifest();
     let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());

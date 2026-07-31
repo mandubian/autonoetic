@@ -151,7 +151,7 @@ Notable suite for approval continuation:
 - `docs/CLI.md` — Complete CLI reference
 - `docs/separation-of-powers.md` — Agent vs gateway responsibilities
 - `docs/remote-agents-http-api.md` — HTTP API and SDK transport
-- `docs/agent-learning.md` — How agents learn from past sessions using execution.search, knowledge.search, digest.query
+- `docs/agent-learning.md` — How agents learn from past sessions using execution_search, knowledge_search, digest_query
 - `docs/planner-principles.md` — Principle-first planner design: why principles beat rules, security boundary, what moved to specialists
 - `docs/agent-discovery.md` — Agent discovery: agent.list gateway tool + discovery.default semantic matching agent
 - `docs/agent-prompt-guidance.md` — How the system prompt is composed: foundation layers, the guidance-block mechanism (tool/capability/model/role-gated, `NativeTool::guidance()`), the `io.returns` Output Contract, the SKILL.md doctrine regression guard, and how to add doctrine without re-introducing duplication

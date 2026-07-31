@@ -107,7 +107,7 @@ else there is no answer to "may this content leave the machine?":
   preset (`resolve_compression_llm_config`, `compression.rs:45`) and returns a
   rewritten history — today with no locality check, and structurally hostile to
   per-envelope labeling (see §5.7).
-- **Memory is an unlabeled side door.** `knowledge.store` defaults to
+- **Memory is an unlabeled side door.** `knowledge_store` defaults to
   `visibility: global` (`runtime/tools/knowledge.rs`), recall hits are appended
   verbatim to the system prompt (`runtime/context.rs:182`,
   `lifecycle.rs:1367-1370`), and `post_session_digest` ships session content to the
@@ -719,7 +719,7 @@ lose. Rules:
    alongside `MemoryVisibility`). Visibility governs *which agent* may read; the
    egress label governs *where the content may go after it's read*. Orthogonal, both
    enforced.
-2. **`knowledge.store` label** = intersection of (explicit label arg if the
+2. **`knowledge_store` label** = intersection of (explicit label arg if the
    *gateway* supplies one, labels of session content the stored text derives from).
    In practice: the gateway intersects the session's accumulated taint at store
    time. `visibility: global` stays allowed — but the label travels with the record.
@@ -1007,7 +1007,7 @@ Each phase is independently shippable and testable.
    transform-preservation test (§3.4).
 3. **Memory + all stored-content surfaces.** `egress_label` on `MemoryObject` **and
    `execution_traces`**, store-time intersection, request-time recall/query filter
-   across `knowledge.recall`, `execution_search`, `digest_query`,
+   across `knowledge_recall`, `execution_search`, `digest_query`,
    `observability_read`, `session_peek`, `wiki_get`, digest/curator rules, relabel
    sweep with `egress.relabel` audit events.
 4. **Federation/MCP/sandbox composition + declassification approvals** (OFP label
