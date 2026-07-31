@@ -4155,6 +4155,19 @@ pub fn run(
                                                 .to_string(),
                                         );
                                     }
+                                    SlashCommand::EgressAudit => {
+                                        // Read-only record of what already left
+                                        // the machine — nothing to confirm.
+                                        detail = Some(DetailPane::event(
+                                            egress_audit_detail(client, &root_session_id),
+                                            None,
+                                        ));
+                                        session_pick_list = None;
+                                        status = Some(
+                                            "egress audit: per-turn sent / withheld · Esc close"
+                                                .to_string(),
+                                        );
+                                    }
                                     SlashCommand::ModelShow => {
                                         match rpc(client, "session.inference.get", serde_json::json!({
                                             "session_id": &*root_session_id,
@@ -9013,6 +9026,145 @@ fn list_skills_detail(client: &RoomClient) -> Vec<String> {
         }
         Err(e) => vec![format!("✗ evolution.list_pending failed: {e}")],
     }
+}
+
+/// `/audit` — the per-turn egress report for the watched session (RFC §9.3,
+/// #973), rendered into the detail pane.
+///
+/// Reads `egress.audit`, which is the same code path `gateway egress-audit`
+/// uses, so the room and the admin CLI cannot disagree about what left the
+/// machine. Metadata only: ids, sinks, presets, counts, and the indication text
+/// that *replaced* withheld content — never the content itself.
+///
+/// A turn with no egress events is a turn where nothing was labeled, so the
+/// empty report says exactly that rather than looking like a failed read; a
+/// failed read is a `✗` line, and the two must not be confusable.
+fn egress_audit_detail(client: &RoomClient, session_id: &str) -> Vec<String> {
+    let params = serde_json::json!({ "session_id": session_id });
+    let value = match rpc(client, "egress.audit", params) {
+        Ok(v) => v,
+        Err(e) => return vec![format!("✗ egress.audit failed: {e}")],
+    };
+
+    let report = value.get("report").cloned().unwrap_or_default();
+    let turns = report
+        .get("turns")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let total_u = |k: &str| report.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut lines = vec![
+        format!("Egress audit — session {session_id}"),
+        format!(
+            "{} withheld · {} violation(s) · {} boundary refusal(s) across {} turn(s)",
+            total_u("total_withheld"),
+            total_u("total_violations"),
+            total_u("total_boundary_refusals"),
+            turns.len(),
+        ),
+        String::new(),
+    ];
+
+    if value.get("truncated").and_then(|v| v.as_bool()) == Some(true) {
+        let limit = value.get("limit").and_then(|v| v.as_i64()).unwrap_or(0);
+        lines.push(format!(
+            "⚠ truncated at {limit} causal events — early turns may be missing; \
+             totals cover the returned window only"
+        ));
+        lines.push(String::new());
+    }
+
+    if turns.is_empty() {
+        lines.push("(no egress events recorded for this session)".to_string());
+        lines.push(String::new());
+        lines.push(
+            "Nothing here means nothing was labeled — with no source rules in force, \
+             content is `unrestricted` and passes unremarked."
+                .to_string(),
+        );
+        return lines;
+    }
+
+    for turn in &turns {
+        let turn_id = turn
+            .get("turn_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(session-level)");
+        lines.push(format!("turn {turn_id}"));
+        let rows = turn
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for row in &rows {
+            let action = row.get("action").and_then(|v| v.as_str()).unwrap_or("?");
+            let f = row.get("fields").cloned().unwrap_or_default();
+            let s = |k: &str| f.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            let u = |k: &str| f.get(k).and_then(|v| v.as_u64());
+            // Short action name — the `egress.` prefix is redundant here.
+            let verb = action.strip_prefix("egress.").unwrap_or(action);
+            // One line per event, carrying only the fields that action fills in.
+            let detail = match verb {
+                "request_filtered" | "request_forwarded" => {
+                    let mut parts = Vec::new();
+                    if let Some(p) = s("preset") {
+                        parts.push(format!("preset {p}"));
+                    }
+                    if let Some(sink) = s("target_sink") {
+                        parts.push(format!("→ {sink}"));
+                    }
+                    parts.push(format!(
+                        "{} sent / {} withheld",
+                        u("included_count").unwrap_or(0),
+                        u("withheld_count").unwrap_or(0),
+                    ));
+                    if let Some(v) = u("violation_count").filter(|v| *v > 0) {
+                        parts.push(format!("{v} violation(s)"));
+                    }
+                    parts.join("  ")
+                }
+                "envelope_withheld" => {
+                    let ind = s("indication").unwrap_or_else(|| "[withheld]".to_string());
+                    match s("target_sink") {
+                        Some(sink) => format!("from {sink}: {ind}"),
+                        None => ind,
+                    }
+                }
+                "envelope_labeled" => {
+                    let tool = s("tool_name").unwrap_or_else(|| "?".to_string());
+                    let label = s("label_name").unwrap_or_else(|| "labeled".to_string());
+                    let how = s("resolution").unwrap_or_else(|| "?".to_string());
+                    format!("{tool} → {label} (via {how})")
+                }
+                "boundary_refused" => {
+                    let surface = s("surface").unwrap_or_else(|| "?".to_string());
+                    let why = s("reason").unwrap_or_else(|| "refused".to_string());
+                    format!("{surface}: {why}")
+                }
+                "assertion_violation" => format!(
+                    "digest {}",
+                    s("payload_digest").unwrap_or_else(|| "?".to_string())
+                ),
+                "declassified" => {
+                    let target = s("declass_target").unwrap_or_else(|| "?".to_string());
+                    let sink = s("allowed_sink").unwrap_or_else(|| "?".to_string());
+                    let scope = s("declass_scope").unwrap_or_else(|| "?".to_string());
+                    format!("{target} → {sink} (scope {scope})")
+                }
+                _ => s("reason").unwrap_or_default(),
+            };
+            if detail.is_empty() {
+                lines.push(format!("  {verb}"));
+            } else {
+                lines.push(format!("  {verb}  {detail}"));
+            }
+        }
+        lines.push(String::new());
+    }
+
+    lines.push("read-only — content-free metadata (RFC §9.3)".to_string());
+    lines
 }
 
 fn list_wiki_proposals_detail(client: &RoomClient, root_session_id: &str) -> (Vec<String>, Vec<String>) {

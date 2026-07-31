@@ -4,23 +4,13 @@
 //! no-effect-until-confirmed invariant (Lawful-Executor §14), and the
 //! confirm-by-set round trip the room performs on one keystroke.
 
-use super::shared_env::env;
-use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse};
+use crate::rpc_env::rpc_as;
+use autonoetic_gateway::router::JsonRpcResponse;
 use autonoetic_gateway::runtime::egress_proposal::EgressProposal;
 use autonoetic_types::egress::{label_display_name, EgressLabel, EgressSessionPolicy};
 
-fn make_jsonrpc(method: &str, params: serde_json::Value) -> JsonRpcRequest {
-    JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: "propose-test".to_string(),
-        method: method.to_string(),
-        params,
-        auth_token: None,
-    }
-}
-
 async fn rpc(method: &str, params: serde_json::Value) -> JsonRpcResponse {
-    env().router.dispatch(make_jsonrpc(method, params)).await
+    rpc_as("propose-test", method, params).await
 }
 
 async fn propose(intent: &str) -> EgressProposal {

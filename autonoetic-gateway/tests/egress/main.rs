@@ -8,7 +8,11 @@
 //! no external state — no ports, no fixed paths — so cohabitation in one
 //! process is safe under both `cargo test` and nextest).
 
+// Shared JSON-RPC env — one router per process (see the module docs for why).
+mod rpc_env;
+
 mod artifact_labels;
+mod audit_rpc;
 mod child_taint_propagation;
 mod chokepoint_canary;
 mod compartment;
@@ -26,6 +30,5 @@ mod phase4_sandbox;
 mod phase4_web_hooks;
 mod proposal_authoring;
 mod routing;
-mod shared_env;
 mod source_rules;
 mod stored_content;
