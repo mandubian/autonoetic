@@ -351,3 +351,107 @@ async fn egress_policy_set_surfaces_in_room_timeline() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// #972: egress enforcement events surface in the room timeline via the
+/// causal-event mirror (`create_causal_event` → `live_digest_events`). One
+/// store hook covers all emitters — withheld content, assertion violations,
+/// boundary refusals, relabels, and routing audits become rows with the
+/// issue's altitude split, attributed to the emitting agent's seat and root
+/// session. `egress.session_policy` is NOT duplicated (site-emitted, #977).
+#[test]
+fn egress_enforcement_events_surface_in_room_timeline() -> anyhow::Result<()> {
+    use autonoetic_gateway::llm::egress_chokepoint::{
+        AssertionViolation, FilterReport, WithheldEntry,
+    };
+    use autonoetic_gateway::runtime::egress_labeler::{
+        emit_boundary_refused, emit_chokepoint_events, emit_relabel,
+    };
+    use autonoetic_types::egress::EgressClass;
+    use autonoetic_types::session_timeline::{Altitude, SessionRole};
+
+    let tmp = tempfile::tempdir()?;
+    let store = Arc::new(GatewayStore::open(tmp.path())?);
+
+    // A filtered completion: one withheld envelope + one assertion violation.
+    let report = FilterReport {
+        sink: "remote_model".to_string(),
+        withheld: vec![WithheldEntry {
+            tool_call_id: "tc_w".into(),
+            label: EgressLabel::local_only(),
+            indication: "[withheld: local_only]".into(),
+        }],
+        included: 3,
+        declassified: 0,
+        violations: vec![AssertionViolation {
+            tool_call_id: "tc_w".into(),
+            payload_digest: "deadbeef1234".into(),
+            found_in_message_index: 2,
+        }],
+    };
+    emit_chokepoint_events(
+        &store,
+        &report,
+        "remote",
+        "root-972",
+        "planner.default",
+        Some("turn-1"),
+    );
+    // A child-session relabel (RFC §6.7) — must land on the root's timeline.
+    emit_relabel(
+        &store,
+        "root-972/coder",
+        "curator.default",
+        "memory",
+        1,
+        &EgressLabel::local_only(),
+        Some("mem-1"),
+        None,
+    );
+    // A compression-band boundary refusal (RFC §5.7).
+    emit_boundary_refused(
+        &store,
+        "root-972",
+        "researcher.default",
+        Some("turn-2"),
+        &EgressLabel::local_only(),
+        EgressClass::Remote,
+        &["env-1".to_string()],
+        "compression preset not cleared for the band's taint",
+    );
+
+    let timeline = store.list_session_timeline("root-972", None, 50, None, None)?;
+    let find = |et: &str| timeline.entries.iter().find(|e| e.event_type == et);
+
+    let withheld = find("egress.envelope_withheld").expect("envelope_withheld row");
+    assert_eq!(withheld.altitude, Altitude::Normal, "withheld must be operator-visible");
+    assert_eq!(withheld.role, SessionRole::Planner);
+    assert!(withheld.payload.as_deref().unwrap_or("").contains("tc_w"));
+
+    let violation = find("egress.assertion_violation").expect("assertion_violation row");
+    assert_eq!(violation.altitude, Altitude::Normal, "tripwire must be operator-visible");
+    assert_eq!(violation.role, SessionRole::Planner);
+
+    let refused = find("egress.boundary_refused").expect("boundary_refused row");
+    assert_eq!(refused.altitude, Altitude::Normal, "refusal must be operator-visible");
+    assert_eq!(refused.role, SessionRole::Specialist { kind: "researcher".into() });
+    assert!(refused.payload.as_deref().unwrap_or("").contains("compression"));
+
+    // High-volume metadata rows exist (dial-down view) with child-session
+    // attribution to the right root.
+    let filtered = find("egress.request_filtered").expect("request_filtered row");
+    assert_eq!(filtered.altitude, Altitude::Detail);
+    let relabel = find("egress.relabel").expect("relabel row");
+    assert_eq!(relabel.altitude, Altitude::Detail);
+    assert_eq!(relabel.role, SessionRole::Curator);
+    assert_eq!(relabel.source_session_id, "root-972/coder");
+
+    // The mirror must not duplicate the site-emitted session_policy row.
+    assert!(
+        !timeline
+            .entries
+            .iter()
+            .any(|e| e.event_type == "egress.session_policy"),
+        "session_policy is site-emitted (#977); the mirror must skip it"
+    );
+    Ok(())
+}

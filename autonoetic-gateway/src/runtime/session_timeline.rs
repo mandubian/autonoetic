@@ -6,10 +6,52 @@
 //! critical seat (Sentinel) always surfaces. `role_floor` defaults live here and
 //! are config-tunable (don't-pin-tunables); base mapping is deterministic.
 
+use autonoetic_types::causal_chain::CausalEventRecord;
 use autonoetic_types::principal::Principal;
 use autonoetic_types::session_timeline::{Altitude, SessionRole, TimelineRefs};
 
 use crate::scheduler::gateway_store::LiveDigestEventRecord;
+
+/// Mirror an `egress.*` causal event onto the canonical timeline (#972).
+///
+/// The ten egress actions are emitted across many sites (labeler, lifecycle,
+/// tracer, sandbox, approval); the persisted causal event is the one durable,
+/// uniform record, so `create_causal_event` mirrors it into
+/// `live_digest_events` at persistence time. Payloads are content-free
+/// metadata already (ids, labels, sinks, counts), so they pass through
+/// unchanged. Altitude comes from [`base_altitude`] + the role floor.
+///
+/// Returns `None` for non-egress categories and for `egress.session_policy` —
+/// that declaration is emitted at its own site (`record_egress_policy_event`,
+/// #977) so the operator attribution (`set_by` → Operator seat) survives;
+/// mirroring it here would duplicate the row.
+pub fn egress_causal_event_to_timeline(
+    event: &CausalEventRecord,
+) -> Option<LiveDigestEventRecord> {
+    if event.category != "egress" || event.action == "egress.session_policy" {
+        return None;
+    }
+    // Session ids are hierarchical (`<root>` or `<root>/<child>`); the root is
+    // what the room's timeline RPC filters on.
+    let root_session_id = event.session_id.split('/').next().unwrap_or(&event.session_id);
+    let principal = Principal::agent(&event.agent_id);
+    let role = derive_role(&event.agent_id);
+    let payload = event
+        .payload
+        .as_deref()
+        .and_then(|p| serde_json::from_str(p).ok());
+    Some(build_timeline_event(
+        root_session_id.to_string(),
+        event.session_id.clone(),
+        event.turn_id.clone(),
+        &principal,
+        &role,
+        &event.action,
+        None,
+        payload,
+        TimelineRefs::default(),
+    ))
+}
 
 /// Build a canonical-timeline (`live_digest_events`) record with attribution.
 /// Centralizes the event_id / node_id / kind-storage boilerplate so every
@@ -662,6 +704,16 @@ pub fn operator_comment_event(
 /// | `operator.comment` | Attention | operator comment anchored to a live file — an issue the agent should address |
 /// | `wiki.proposed` / `wiki.promoted` / `wiki.rejected` | Attention | wiki-contribution gate lifecycle |
 /// | `wiki.withdrawn` | Normal | abandonment, not a decision |
+/// | `egress.envelope_withheld` | Normal | content withheld from the model — the operator should know what the agent didn't see |
+/// | `egress.assertion_violation` | Normal | outbound-assertion tripwire (RFC §5.2.3) — aborts the completion |
+/// | `egress.boundary_refused` | Normal | a non-LLM surface refused labeled content (RFC §7) |
+/// | `egress.declassified` | Normal | operator grant widened a target — a change to what may leave the machine |
+/// | `egress.session_policy` | Normal | operator declaration (`/private`, `/taint`) |
+/// | `egress.envelope_labeled` | Detail | per-envelope labeling metadata — high volume, for investigation |
+/// | `egress.request_filtered` | Detail | per-request chokepoint summary |
+/// | `egress.request_forwarded` | Detail | tracer mirror of a filtered request |
+/// | `egress.provider_selected` | Detail | per-completion routing audit |
+/// | `egress.relabel` | Detail | stored-content relabel bookkeeping |
 /// | `divergence.intervention` | Attention | sentinel intervention (emit site raises to Error when critical) |
 /// | `runtime.lock_drift` | Attention | integrity event (emit site stores Error when rejected) |
 /// | `security.escape_threshold` | Attention | escape-probability threshold reached |
@@ -720,10 +772,16 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         "agent.message" | "operator.message" | "agent.peer_message" | "session.start"
         | "session.end" | "workbench.created" | "digest_annotate" | "llm.retry"
         | "approval.cancelled" | "wiki.withdrawn"
-        // Operator egress-policy declarations (`egress.session_policy`) are
-        // visible progress, not plumbing — a `/taint`/`/private` change alters
-        // what may leave the machine.
-        | "egress.session_policy" => Altitude::Normal,
+        // Operator egress-policy declarations (`egress.session_policy`) and
+        // enforcement outcomes are visible progress, not plumbing (#977 #972):
+        // a `/taint`/`/private` change, a withheld envelope, a refused
+        // boundary, a tripwire violation, or a widening grant all alter what
+        // may leave the machine.
+        | "egress.session_policy"
+        | "egress.envelope_withheld"
+        | "egress.assertion_violation"
+        | "egress.boundary_refused"
+        | "egress.declassified" => Altitude::Normal,
         // ─── Detail: hidable plumbing. ───
         // Turns, LLM rounds, reasoning, tool requests AND successful tool
         // completions (failures are bumped to Attention at the emit site),
@@ -741,7 +799,15 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "workflow.signal"
         | "scheduled_job.triggered"
         | "scheduled_job.completed"
-        | "scheduled_job.failed" => Altitude::Detail,
+        | "scheduled_job.failed"
+        // High-volume egress metadata — per-envelope labelings, per-request
+        // chokepoint summaries, routing audits, relabel bookkeeping. Hidden at
+        // the default floor; surfaced when investigating (dial-down, #972).
+        | "egress.envelope_labeled"
+        | "egress.request_filtered"
+        | "egress.request_forwarded"
+        | "egress.provider_selected"
+        | "egress.relabel" => Altitude::Detail,
 
         // Unknown event type: Normal is the safe default (visible). New event
         // types surface until consciously classified above.
@@ -1174,6 +1240,30 @@ mod tests {
         // Abandonments — visible, but not decision checkpoints.
         assert_eq!(base_altitude("approval.cancelled"), Altitude::Normal);
         assert_eq!(base_altitude("wiki.withdrawn"), Altitude::Normal);
+    }
+
+    #[test]
+    fn altitude_policy_egress_enforcement_split_normal_and_detail() {
+        // #972: enforcement outcomes the operator should see at the default
+        // floor vs. high-volume metadata for investigation (dial-down).
+        for et in [
+            "egress.envelope_withheld",
+            "egress.assertion_violation",
+            "egress.boundary_refused",
+            "egress.declassified",
+            "egress.session_policy",
+        ] {
+            assert_eq!(base_altitude(et), Altitude::Normal, "{et}");
+        }
+        for et in [
+            "egress.envelope_labeled",
+            "egress.request_filtered",
+            "egress.request_forwarded",
+            "egress.provider_selected",
+            "egress.relabel",
+        ] {
+            assert_eq!(base_altitude(et), Altitude::Detail, "{et}");
+        }
     }
 
     #[test]

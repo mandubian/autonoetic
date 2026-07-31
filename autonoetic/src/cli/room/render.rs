@@ -1701,6 +1701,105 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
             }
             head
         }
+        // Egress enforcement rows (#972) — metadata-only summaries driven by
+        // the content-free payloads of the egress.* causal events.
+        "egress.envelope_labeled" => {
+            let tool = field("tool_name").unwrap_or_else(|| "tool".into());
+            let label = egress_label_display(&p, "label");
+            let mut s = format!("{tool} labeled → {label}");
+            if let Some(rules) = p
+                .as_ref()
+                .and_then(|v| v.get("matched_rules"))
+                .and_then(|x| x.as_array())
+            {
+                let r: Vec<&str> = rules.iter().filter_map(|v| v.as_str()).collect();
+                if !r.is_empty() {
+                    s.push_str(&format!(" ({})", r.join(", ")));
+                }
+            }
+            s
+        }
+        "egress.envelope_withheld" => {
+            let tcid = field("tool_call_id").unwrap_or_else(|| "?".into());
+            let sink = field("target_sink").unwrap_or_else(|| "?".into());
+            let label = egress_label_display(&p, "label");
+            format!("content withheld from {sink}: {tcid} ({label})")
+        }
+        "egress.request_filtered" | "egress.request_forwarded" => {
+            let sink = field("target_sink").unwrap_or_else(|| "?".into());
+            let withheld = p
+                .as_ref()
+                .and_then(|v| v.get("withheld_count"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let included = p
+                .as_ref()
+                .and_then(|v| v.get("included_count"))
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0);
+            let suffix = field("model")
+                .map(|m| format!(" (forwarded to {m})"))
+                .unwrap_or_default();
+            format!("egress filter{suffix}: {withheld} withheld, {included} included ({sink})")
+        }
+        "egress.assertion_violation" => {
+            let tcid = field("tool_call_id").unwrap_or_else(|| "?".into());
+            let sink = field("target_sink").unwrap_or_else(|| "?".into());
+            format!("egress assertion violation: {tcid} aborted before {sink}")
+        }
+        "egress.boundary_refused" => {
+            let surface = field("surface").unwrap_or_else(|| "?".into());
+            let label = field("label_name")
+                .or_else(|| field("band_label_name"))
+                .unwrap_or_else(|| "?".into());
+            let mut s = format!("egress boundary refused: {surface} ({label})");
+            if let Some(preset) = field("preset_class") {
+                s.push_str(&format!(" — {preset} not cleared"));
+            }
+            s
+        }
+        "egress.declassified" => {
+            // `target` is serialized as the tagged enum (`serde(tag = "kind",
+            // content = "value")`) — `{"kind":"source_pattern","value":"…"}` —
+            // never a bare string. Same parse as the grants panel's
+            // `declass_target_kv` and the audit CLI's `build_egress_audit`.
+            let target = p
+                .as_ref()
+                .and_then(|v| v.get("target"))
+                .map(|t| {
+                    t.as_str().map(str::to_string).unwrap_or_else(|| {
+                        format!(
+                            "{}:{}",
+                            t.get("kind").and_then(|k| k.as_str()).unwrap_or("?"),
+                            t.get("value").and_then(|v| v.as_str()).unwrap_or("?"),
+                        )
+                    })
+                })
+                .unwrap_or_else(|| "?".into());
+            let sink = field("allowed_sink").unwrap_or_else(|| "?".into());
+            format!("egress widened: {target} → {sink}")
+        }
+        "egress.relabel" => {
+            let kind = field("kind").unwrap_or_else(|| "?".into());
+            let name = field("new_label_name").unwrap_or_else(|| "?".into());
+            format!("egress relabeled: {kind} → {name}")
+        }
+        "egress.provider_selected" => {
+            let batch = field("batch_label_name").unwrap_or_else(|| "?".into());
+            let no_eligible = p
+                .as_ref()
+                .and_then(|v| v.get("no_eligible_provider"))
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false);
+            if no_eligible {
+                format!("egress routing refused: no provider cleared for {batch}")
+            } else {
+                format!(
+                    "egress routing: {batch} → {}",
+                    field("chosen_preset").unwrap_or_else(|| "?".into())
+                )
+            }
+        }
         // Reserved — no emitter today (failures use `tool.completed` with
         // `ok:false`); kept so a future dedicated failure event renders sanely.
         "tool.failed" => {
@@ -1728,6 +1827,28 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         ),
         other => other.to_string(),
     }
+}
+
+/// Display name for a label value in an egress event payload: a named string
+/// (`local_only`, `no_remote_model`, `unrestricted`) or the wire shape of an
+/// `EgressLabel` — a sink-set array — delegated to the room's canonical
+/// `sinks_label_name` so summaries agree with the labels panel. Missing/null
+/// labels are "?" — an unknown payload must never render as fully cleared.
+fn egress_label_display(p: &Option<serde_json::Value>, key: &str) -> String {
+    let Some(v) = p.as_ref().and_then(|v| v.get(key)) else {
+        return "?".into();
+    };
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = v.as_array() {
+        let sinks_json = serde_json::to_string(arr).unwrap_or_default();
+        return super::tui::sinks_label_name(&sinks_json);
+    }
+    if v.is_null() {
+        return "?".into();
+    }
+    "?".into()
 }
 
 /// Map a `SessionRole` to the channel-neutral `ActorKind`.
@@ -2034,6 +2155,15 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 Some(cap_preview(&format!("⟵ after: {chain}"), 100))
             }
         }
+        "egress.envelope_withheld" => s("indication")
+            .filter(|i| !i.is_empty())
+            .map(|i| format!("replaced with: {i}")),
+        "egress.boundary_refused" => s("reason")
+            .filter(|r| !r.is_empty())
+            .map(|r| cap_preview(&r, 160)),
+        "egress.assertion_violation" => s("payload_digest")
+            .filter(|d| !d.is_empty())
+            .map(|d| format!("payload_sha256: {d}")),
         _ => None,
     }
 }
@@ -2506,6 +2636,12 @@ const SIGNIFICANT_EVENT_TYPES: &[&str] = &[
     // Operator egress-policy declarations (`/private`, `/taint`) — a change to
     // what may leave the machine is consciously kept individual (#977).
     "egress.session_policy",
+    // Egress enforcement outcomes — a withheld envelope, a refused boundary,
+    // a tripwire violation, or a widening grant is never folded (#972).
+    "egress.envelope_withheld",
+    "egress.assertion_violation",
+    "egress.boundary_refused",
+    "egress.declassified",
 ];
 
 /// Routine-tier event types (see [`EventTier::Routine`]).
@@ -2515,6 +2651,14 @@ const ROUTINE_EVENT_TYPES: &[&str] = &[
     "workflow.child_state", "workflow.join_satisfied", "workflow.signal",
     "workflow.started", "workflow.completed",
     "scheduled_job.triggered", "scheduled_job.completed", "scheduled_job.failed",
+    // High-volume egress metadata — per-envelope labelings, chokepoint
+    // summaries, routing audits, relabel bookkeeping (#972). Folded by
+    // default; surfaced on dial-down / investigation.
+    "egress.envelope_labeled",
+    "egress.request_filtered",
+    "egress.request_forwarded",
+    "egress.provider_selected",
+    "egress.relabel",
 ];
 
 /// `tool.completed` for these state-changing tools is Significant (shown
@@ -3458,6 +3602,8 @@ mod tests {
             "agent.message", "digest_annotate",
             "llm.request_failed", "llm.empty_response", "guard.tripped",
             "tool.failed", "session.emergency_stop", "security.sandbox_escape",
+            "egress.envelope_withheld", "egress.assertion_violation",
+            "egress.boundary_refused", "egress.declassified",
         ] {
             assert_eq!(
                 event_tier(&mk(et)),
@@ -3475,6 +3621,8 @@ mod tests {
         for et in [
             "turn.start", "turn.end", "llm.round", "agent.reasoning",
             "tool.requested", "workflow.child_state", "workflow.join_satisfied",
+            "egress.envelope_labeled", "egress.request_filtered",
+            "egress.request_forwarded", "egress.provider_selected", "egress.relabel",
         ] {
             assert_eq!(event_tier(&mk(et)), EventTier::Routine, "{et} should be routine");
         }
@@ -3541,6 +3689,169 @@ mod tests {
         let s2 = summarize(&cleared);
         assert!(s2.contains("cleared"), "{s2}");
         assert!(!s2.contains("email.*"), "{s2}");
+    }
+
+    #[test]
+    fn egress_enforcement_rows_summarize_operator_readable() {
+        // #972: each of the ten egress.* actions must read as a sentence in
+        // the room — metadata only, no content.
+        let mk = |et: &str, payload: serde_json::Value| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                payload,
+            )
+        };
+        let withheld = summarize(&mk(
+            "egress.envelope_withheld",
+            serde_json::json!({
+                "tool_call_id": "tc_1",
+                "target_sink": "remote_model",
+                "label": ["local_model", "local_agent", "user_reply", "memory_persist"],
+                "indication": "[withheld local_only content]",
+            }),
+        ));
+        assert!(withheld.contains("withheld from remote_model"), "{withheld}");
+        assert!(withheld.contains("tc_1"), "{withheld}");
+        assert!(withheld.contains("local_only"), "{withheld}");
+
+        let assertion = summarize(&mk(
+            "egress.assertion_violation",
+            serde_json::json!({
+                "tool_call_id": "tc_2",
+                "target_sink": "remote_model",
+                "payload_digest": "deadbeef",
+            }),
+        ));
+        assert!(assertion.contains("assertion violation"), "{assertion}");
+        assert!(assertion.contains("tc_2"), "{assertion}");
+
+        let refused = summarize(&mk(
+            "egress.boundary_refused",
+            serde_json::json!({
+                "surface": "sandbox.share_net",
+                "label_name": "local_only",
+                "reason": "network sink not cleared",
+            }),
+        ));
+        assert!(refused.contains("boundary refused: sandbox.share_net"), "{refused}");
+        assert!(refused.contains("local_only"), "{refused}");
+
+        // Payload built through the real serialization path (tagged enum) so
+        // the test can't drift from the emitter's shape again.
+        let declass_target = serde_json::to_value(
+            autonoetic_types::egress::EgressDeclassificationTarget::SourcePattern(
+                "session:root-1".to_string(),
+            ),
+        )
+        .expect("declass target serializes");
+        let mut declass_payload = serde_json::json!({
+            "allowed_sink": "network",
+            "source_approval_id": "apr-1",
+        });
+        declass_payload["target"] = declass_target;
+        let declassified = summarize(&mk("egress.declassified", declass_payload));
+        assert!(
+            declassified.contains("egress widened: source_pattern:session:root-1 → network"),
+            "{declassified}"
+        );
+
+        // High-volume metadata rows read sanely too (dial-down view).
+        let labeled = summarize(&mk(
+            "egress.envelope_labeled",
+            serde_json::json!({
+                "tool_name": "email.send",
+                "label": ["local_model", "local_agent", "user_reply", "memory_persist"],
+                "matched_rules": ["email.*"],
+            }),
+        ));
+        assert!(labeled.contains("email.send labeled → local_only"), "{labeled}");
+        assert!(labeled.contains("email.*"), "{labeled}");
+
+        let filtered = summarize(&mk(
+            "egress.request_filtered",
+            serde_json::json!({
+                "target_sink": "remote_model",
+                "withheld_count": 2,
+                "included_count": 3,
+            }),
+        ));
+        assert!(filtered.contains("2 withheld, 3 included"), "{filtered}");
+
+        let forwarded = summarize(&mk(
+            "egress.request_forwarded",
+            serde_json::json!({
+                "model": "claude",
+                "target_sink": "remote_model",
+                "withheld_count": 1,
+                "included_count": 4,
+            }),
+        ));
+        assert!(forwarded.contains("1 withheld, 4 included (remote_model)"), "{forwarded}");
+        assert!(forwarded.contains("claude"), "{forwarded}");
+
+        let routed = summarize(&mk(
+            "egress.provider_selected",
+            serde_json::json!({
+                "batch_label_name": "local_only",
+                "chosen_preset": "ollama",
+                "no_eligible_provider": false,
+            }),
+        ));
+        assert!(routed.contains("local_only → ollama"), "{routed}");
+
+        let refused_route = summarize(&mk(
+            "egress.provider_selected",
+            serde_json::json!({
+                "batch_label_name": "local_only",
+                "chosen_preset": null,
+                "no_eligible_provider": true,
+            }),
+        ));
+        assert!(refused_route.contains("no provider cleared for local_only"), "{refused_route}");
+
+        let relabeled = summarize(&mk(
+            "egress.relabel",
+            serde_json::json!({
+                "kind": "memory",
+                "count": 1,
+                "new_label_name": "local_only",
+            }),
+        ));
+        assert!(relabeled.contains("memory → local_only"), "{relabeled}");
+    }
+
+    #[test]
+    fn egress_label_display_stays_honest_on_empty_or_missing() {
+        // A missing/empty label must never render as fully cleared — "?" or
+        // "blocked", matching the labels panel's sinks_label_name.
+        let mk = |et: &str, payload: serde_json::Value| {
+            entry(
+                SessionRole::Planner,
+                Principal::agent("planner.default"),
+                et,
+                Altitude::Normal,
+                payload,
+            )
+        };
+        let empty = summarize(&mk(
+            "egress.envelope_withheld",
+            serde_json::json!({
+                "tool_call_id": "tc_1",
+                "target_sink": "remote_model",
+                "label": [],
+                "indication": "[withheld]",
+            }),
+        ));
+        assert!(empty.contains("blocked"), "{empty}");
+
+        let missing = summarize(&mk(
+            "egress.envelope_labeled",
+            serde_json::json!({ "tool_name": "email.send", "matched_rules": [] }),
+        ));
+        assert!(missing.contains("→ ?"), "{missing}");
     }
 
     #[test]
