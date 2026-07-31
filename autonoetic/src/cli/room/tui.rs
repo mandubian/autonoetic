@@ -59,6 +59,11 @@ const COMPOSE_PANEL_HEIGHT: u16 = 7;
 /// Height of the attention footer: mode hint, pending strip, selected detail.
 const FOOTER_HEIGHT: u16 = 3;
 
+/// Width of the egress-label marker column (#971). One cell, always present so
+/// labeled rows stay aligned with unlabeled ones; a `■` glyph renders only when
+/// the row's execution trace is labeled.
+const MARK_W: usize = 1;
+
 /// Seconds the operator has to press `q`/`Ctrl+C` again after arming quit.
 const QUIT_ARM_SECS: u64 = 3;
 const QUIT_ARM_STATUS: &str = "Quit? press q or Ctrl+C again within 3s — Esc cancels";
@@ -703,6 +708,7 @@ fn build_header(
     follow: bool,
     floor: Altitude,
     squash: bool,
+    taint: Option<&str>,
     width: u16,
 ) -> String {
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
@@ -712,6 +718,12 @@ fn build_header(
     }
     if gate_count > 0 {
         right_parts.push(format!("⚠{gate_count}"));
+    }
+    // Ambient egress badge (#971): a tainted room is distinguishable from an
+    // unrestricted one at a glance while composing. None ⇒ unrestricted ⇒ no
+    // chip (absence reads as "open", matching the label plane's convention).
+    if let Some(name) = taint.filter(|n| !n.is_empty()) {
+        right_parts.push(format!("🔒 {name}"));
     }
     // In-flight async tool calls: `⋯2 spawn,workflow_wait Δ3t`.
     if let Some(chip) = pending_chip(&stats.pending_calls, stats.pending_age_turns) {
@@ -2453,6 +2465,98 @@ fn fetch_label_rows(
     (rows, sections, taint)
 }
 
+/// Poll `labels.list` for the two ambient egress facts the room renders outside
+/// the panels (#971): the current root-session taint name and a
+/// `trace_id → label display name` map for tool-row markers. Only
+/// non-unrestricted traces are kept (marking tainted rows is the point; an
+/// unrestricted row gets no marker). Errors are swallowed — the caller keeps
+/// the last-known values rather than fabricating "unrestricted".
+fn fetch_taint_and_trace_labels(
+    client: &RoomClient,
+    root_session_id: &str,
+    prior_taint: Option<String>,
+    prior_trace_labels: HashMap<String, String>,
+) -> (Option<String>, HashMap<String, String>) {
+    let params = serde_json::json!({ "root_session_id": root_session_id });
+    let value = match rpc(client, "labels.list", params) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(target: "room", error = %e, "labels.list failed");
+            return (prior_taint, prior_trace_labels);
+        }
+    };
+    let taint = value.get("current_taint").and_then(|v| {
+        if v.is_null() {
+            None
+        } else if let Some(arr) = v.as_array() {
+            Some(sinks_label_name(&serde_json::to_string(arr).unwrap_or_default()))
+        } else {
+            Some("restricted".to_string())
+        }
+    });
+    let mut trace_labels: HashMap<String, String> = HashMap::new();
+    if let Some(arr) = value.get("execution_traces").and_then(|v| v.as_array()) {
+        for t in arr {
+            let id = match t.get("trace_id").and_then(|x| x.as_str()) {
+                Some(id) if !id.is_empty() => id,
+                _ => continue,
+            };
+            let label_val = t.get("label").cloned().unwrap_or(serde_json::Value::Null);
+            let sinks_json = serde_json::to_string(&label_val).unwrap_or_else(|_| "[]".to_string());
+            let name = sinks_label_name(&sinks_json);
+            if name != "unrestricted" {
+                trace_labels.insert(id.to_string(), name);
+            }
+        }
+    }
+    (taint, trace_labels)
+}
+
+/// Read the current session egress policy as a typed value. Returns
+/// `Some(empty policy)` when none is declared; `None` when the read itself
+/// fails — the caller must abort rather than `set` a degraded default, since
+/// `set` replaces wholesale and a default would drop existing rules
+/// (widening egress).
+fn current_egress_policy(
+    client: &RoomClient,
+    root_session_id: &str,
+) -> Option<autonoetic_types::egress::EgressSessionPolicy> {
+    use autonoetic_types::egress::EgressSessionPolicy;
+    match rpc(
+        client,
+        "session.egress_policy.get",
+        serde_json::json!({ "session_id": root_session_id }),
+    ) {
+        Ok(v) => Some(
+            v.get("policy")
+                .and_then(|p| serde_json::from_value(p.clone()).ok())
+                .unwrap_or_default(),
+        ),
+        Err(e) => {
+            tracing::debug!(target: "room", error = %e, "session.egress_policy.get failed");
+            None
+        }
+    }
+}
+
+/// Push a (modified) session egress policy. `set` replaces the stored policy
+/// wholesale, so callers get-then-modify-then-set. Attribution is the room.
+fn push_egress_policy(
+    client: &RoomClient,
+    root_session_id: &str,
+    policy: &autonoetic_types::egress::EgressSessionPolicy,
+) -> anyhow::Result<serde_json::Value> {
+    rpc(
+        client,
+        "session.egress_policy.set",
+        serde_json::json!({
+            "session_id": root_session_id,
+            "policy": policy,
+            "set_by": "operator:tui",
+        }),
+    )
+}
+
 fn gate_modal_kind(gate: &GateRef) -> bool {
     matches!(
         gate.kind,
@@ -3526,6 +3630,14 @@ pub fn run(
     let mut last_grants_poll = Instant::now();
     let mut labels_panel: Option<LabelsPanel> = None;
     let mut last_labels_poll = Instant::now();
+    // Ambient egress posture (#971): the current root-session taint name and a
+    // trace_id → label map for tool-row markers. Refreshed every poll tick
+    // regardless of panel state so the header badge + composer hint + row glyphs
+    // stay current.
+    let mut current_taint: Option<String> = None;
+    let mut current_trace_labels: HashMap<String, String> = HashMap::new();
+    let mut last_taint_poll = Instant::now();
+    let mut force_taint_refresh = false;
     let mut last_session_status_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
@@ -4048,6 +4160,111 @@ pub fn run(
                                         });
                                         follow = true;
                                         force_timeline_refresh = true;
+                                    }
+                                    SlashCommand::RoomPrivate => {
+                                        // RFC §5.4 rung 1 — toggle the room's
+                                        // provider constraint. get → modify → set
+                                        // (set replaces wholesale, so preserve the
+                                        // existing rules/default_label). Only the
+                                        // constraint flips; rules stay.
+                                        let mut policy =
+                                            match current_egress_policy(client, root_session_id) {
+                                                Some(p) => p,
+                                                None => {
+                                                    status = Some(
+                                                        "✗ could not read session egress policy — /private aborted, nothing changed"
+                                                            .to_string(),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                        let pinning = policy.provider_constraint
+                                            != Some(
+                                                autonoetic_types::egress::ProviderConstraint::
+                                                    LocalOnly,
+                                            );
+                                        policy.provider_constraint = if pinning {
+                                            Some(
+                                                autonoetic_types::egress::ProviderConstraint::
+                                                    LocalOnly,
+                                            )
+                                        } else {
+                                            None
+                                        };
+                                        match push_egress_policy(client, root_session_id, &policy)
+                                        {
+                                            Ok(_) => {
+                                                status = Some(if pinning {
+                                                    "✓ room pinned local_only — every completion routes to a local preset (/private again to lift)"
+                                                        .to_string()
+                                                } else {
+                                                    "✓ room private pin lifted — provider selection unconstrained"
+                                                        .to_string()
+                                                });
+                                                force_timeline_refresh = true;
+                                                force_taint_refresh = true;
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!("✗ /private failed: {e}"));
+                                            }
+                                        }
+                                    }
+                                    SlashCommand::Taint {
+                                        source,
+                                        path,
+                                        label,
+                                    } => {
+                                        // RFC §5.4 rung 2 — append a session rule.
+                                        // get → append → set; a duplicate
+                                        // (same source/path/label) is idempotent.
+                                        let mut policy =
+                                            match current_egress_policy(client, root_session_id) {
+                                                Some(p) => p,
+                                                None => {
+                                                    status = Some(
+                                                        "✗ could not read session egress policy — /taint aborted, nothing changed"
+                                                            .to_string(),
+                                                    );
+                                                    continue;
+                                                }
+                                            };
+                                        let rule = autonoetic_types::egress::EgressRule {
+                                            source: source.clone(),
+                                            path: path.clone(),
+                                            label: label.to_label(),
+                                        };
+                                        let dup = policy.rules.iter().any(|r| {
+                                            r.source == rule.source
+                                                && r.path == rule.path
+                                                && r.label == rule.label
+                                        });
+                                        if !dup {
+                                            policy.rules.push(rule);
+                                        }
+                                        match push_egress_policy(client, root_session_id, &policy)
+                                        {
+                                            Ok(_) => {
+                                                let scope = match &path {
+                                                    Some(p) => format!("{source}:{p}"),
+                                                    None => source.clone(),
+                                                };
+                                                let name = label.as_str();
+                                                status = Some(if dup {
+                                                    format!(
+                                                        "ℹ already declared: {scope} → {name}"
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "✓ taint declared: {scope} → {name} — only this root session"
+                                                    )
+                                                });
+                                                force_timeline_refresh = true;
+                                                force_taint_refresh = true;
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!("✗ /taint failed: {e}"));
+                                            }
+                                        }
                                     }
                                     SlashCommand::Unknown(verb) => {
                                         let v = if verb.is_empty() {
@@ -6118,6 +6335,7 @@ pub fn run(
                     &early_approval_rows,
                     grants_panel.as_ref(),
                     labels_panel.as_ref(),
+                    current_taint.as_deref(),
                 )
             })?;
         }
@@ -6166,6 +6384,7 @@ pub fn run(
                     &[],
                     grants_panel.as_ref(),
                     labels_panel.as_ref(),
+                    current_taint.as_deref(),
                 )
             })?;
         }
@@ -6369,6 +6588,28 @@ pub fn run(
             }
         }
 
+        // Ambient egress badge poll (#971) — every poll tick, not just when a
+        // panel is open, so the header chip, composer hint, and tool-row markers
+        // reflect the room's posture. `labels.list` is metadata-only and cheap;
+        // a failed poll keeps the last-known values (the badge goes stale, it
+        // never fabricates "unrestricted").
+        if force_taint_refresh
+            || last_taint_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
+        {
+            last_taint_poll = Instant::now();
+            force_taint_refresh = false;
+            let (taint, trace_labels) = fetch_taint_and_trace_labels(
+                client,
+                &root_session_id,
+                current_taint.clone(),
+                current_trace_labels.clone(),
+            );
+            if taint != current_taint || trace_labels != current_trace_labels {
+                current_taint = taint;
+                current_trace_labels = trace_labels;
+                needs_redraw = true;
+            }
+        }
         // Recompute open turns only when the timeline changed; otherwise reuse
         // the cached set to avoid scanning all entries every frame.
         // An emergency stop terminates every open turn, even if no matching
@@ -6454,7 +6695,17 @@ pub fn run(
                             &linked_escalation_approvals,
                         )
                     })
-                    .map(|(i, e)| (RenderedRow::Line(render::render_spec(e)), RowSource::Single(i)))
+                    .map(|(i, e)| {
+                        // Egress row marker (#971): stamp the label display name
+                        // onto tool rows whose execution trace is labeled.
+                        let mut spec = render::render_spec(e);
+                        if let Some(tid) = e.refs.execution_trace_id.as_deref() {
+                            if let Some(name) = current_trace_labels.get(tid) {
+                                spec.egress_label = Some(name.clone());
+                            }
+                        }
+                        (RenderedRow::Line(spec), RowSource::Single(i))
+                    })
                     .collect()
             };
             // Annotate each row with turn membership + the in-flight bit, and
@@ -6673,7 +6924,7 @@ pub fn run(
         let rail_w = 2usize;
         let glyph_w = 3usize;
         let label_w = 12usize.min(width / 4);
-        let content_w = width.saturating_sub(rail_w + glyph_w + label_w + 2);
+        let content_w = width.saturating_sub(rail_w + glyph_w + MARK_W + label_w + 2);
         let row_heights: Vec<usize> = if detail.is_some() && input.is_none() {
             vec![1; rows.len()]
         } else {
@@ -6761,6 +7012,7 @@ pub fn run(
                 &approval_rows,
                 grants_panel.as_ref(),
                 labels_panel.as_ref(),
+                current_taint.as_deref(),
             )
         })?;
 
@@ -7539,7 +7791,7 @@ fn build_rich_row_lines(
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(&forkable) = turn_boundaries.get(&row_index) {
-        let total_w = content_w + glyph_w + label_w + rail_w + 2;
+        let total_w = content_w + glyph_w + MARK_W + label_w + rail_w + 2;
         // Forkable turns (a runnable checkpoint exists) get a heavier rule, a
         // `⑂` marker, and a brighter colour so the operator can see at a glance
         // where `F` / `/fork --at-turn N` will actually work.
@@ -7574,12 +7826,21 @@ fn build_rich_row_lines(
     let head_style = row_headline_style(spec);
     let label_style = row_label_style(spec);
     let detail_style = row_detail_style(spec);
-    let cont_pad = " ".repeat(rail_w + glyph_w + label_w + 1);
+    let cont_pad = " ".repeat(rail_w + glyph_w + MARK_W + label_w + 1);
+    // Egress marker (#971): a colored glyph when this row's content is labeled.
+    // `■` is single-width so the reserved 1-cell column keeps labeled and
+    // unlabeled rows column-aligned (a double-width emoji would push the
+    // headline right and desync wrapped continuation lines).
+    let mark_span = match spec.egress_label.as_deref() {
+        Some(name) => Span::styled("■", Style::default().fg(label_color(name))),
+        None => Span::raw(" "),
+    };
     let first_prefix = vec![
         Span::styled(rail_block.clone(), rail_style),
         Span::raw(" "),
         Span::styled(format!("{glyph:<2}"), altitude_style(spec.altitude)),
         Span::styled(label_padded.clone(), label_style),
+        mark_span,
         Span::raw(" "),
     ];
 
@@ -8796,6 +9057,7 @@ fn draw(
     approval_rows: &[ApprovalRow],
     grants_panel: Option<&GrantsPanel>,
     labels_panel: Option<&LabelsPanel>,
+    taint: Option<&str>,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -8817,7 +9079,7 @@ fn draw(
     let footer_idx = if compose_open { 3 } else { 2 };
     let list_idx = 1usize;
 
-    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, chunks[0].width);
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
@@ -8883,7 +9145,7 @@ fn draw(
     let rail_w = 2usize;
     let glyph_w = 3usize;
     let label_w = 12usize.min(width / 4);
-    let content_w = width.saturating_sub(rail_w + glyph_w + label_w + 2);
+    let content_w = width.saturating_sub(rail_w + glyph_w + MARK_W + label_w + 2);
 
     // Custom viewport renderer. We don't use ratatui's `List` widget here
     // because it overwrites `state.offset` during render — that broke the
@@ -8986,7 +9248,7 @@ fn draw(
     }
 
     if let Some(c) = compose {
-        draw_compose_input(f, c, chunks[2]);
+        draw_compose_input(f, c, chunks[2], taint);
     }
 
     let turn_hint = rows.get(safe_selected).and_then(|r| match r {
@@ -10208,12 +10470,22 @@ fn draw_gate_modal(
 }
 
 /// Render the compose editor with wrapped lines and an inverted cursor cell.
-fn draw_compose_input(f: &mut Frame, compose: &ComposeInput, area: Rect) {
-    let prefix = Span::styled("MESSAGE: ", Style::default().fg(Color::Green));
+/// `taint` is the room's current egress posture; when Some, a 🔒 prefix tells
+/// the operator that this message is being typed under a restriction (#971).
+fn draw_compose_input(f: &mut Frame, compose: &ComposeInput, area: Rect, taint: Option<&str>) {
+    let mut prefix_spans = vec![Span::styled("MESSAGE:", Style::default().fg(Color::Green))];
+    if let Some(name) = taint.filter(|n| !n.is_empty()) {
+        prefix_spans.push(Span::styled(
+            format!(" 🔒{name}"),
+            Style::default().fg(label_color(name)),
+        ));
+    }
+    prefix_spans.push(Span::raw(" "));
+    let prefix = prefix_spans;
     let inner_width = area.width.saturating_sub(2) as usize;
 
     let text = if compose.buffer.is_empty() {
-        let mut lines = wrap_spans(&[prefix], inner_width);
+        let mut lines = wrap_spans(&prefix, inner_width);
         if let Some(last) = lines.last_mut() {
             let mut last_spans = std::mem::take(last);
             last_spans
@@ -10225,7 +10497,8 @@ fn draw_compose_input(f: &mut Frame, compose: &ComposeInput, area: Rect) {
     } else {
         let before = &compose.buffer[..compose.cursor_pos];
         let after = &compose.buffer[compose.cursor_pos..];
-        let mut spans = vec![prefix];
+        let mut spans = vec![];
+        spans.extend(prefix.iter().cloned());
         if !before.is_empty() {
             spans.push(Span::raw(before.to_string()));
         }
@@ -10595,6 +10868,7 @@ mod tests {
                 turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
+            egress_label: None,
             }),
             RowSource::Single(0),
         );
@@ -10793,6 +11067,7 @@ mod tests {
                 turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
+                egress_label: None,
             }),
             RowSource::Single(0),
         );
@@ -10836,6 +11111,7 @@ mod tests {
                 turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
+                egress_label: None,
             }),
             RowSource::Single(0),
         );
@@ -10883,6 +11159,7 @@ mod tests {
                 turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
+            egress_label: None,
             }),
             RowSource::Single(2),
         );
@@ -11274,6 +11551,7 @@ mod tests {
                 turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
+                egress_label: None,
             }),
             RowSource::Single(0),
         )
@@ -11298,6 +11576,7 @@ mod tests {
                 turn_label: None,
                 in_flight: false,
                 show_reasoning: true,
+                egress_label: None,
             }),
             RowSource::Single(0),
         )
@@ -11681,6 +11960,7 @@ mod tests {
                     turn_label: None,
                     in_flight: false,
                     show_reasoning: true,
+            egress_label: None,
                 }),
                 RowSource::Single(1),
             ),
@@ -12124,5 +12404,92 @@ mod tests {
             parse_line_hint("L14-12: oops"),
             (None, None, "L14-12: oops".to_string())
         );
+    }
+
+    // ---- ambient egress badge + row markers (#971) ----
+
+    fn test_stats() -> SessionStats {
+        SessionStats {
+            total_input: 0,
+            total_output: 0,
+            llm_calls: 0,
+            models: Vec::new(),
+            per_model: HashMap::new(),
+            context_total_pct: 0.0,
+            context_samples: 0,
+            context_window: None,
+            pending_calls: Vec::new(),
+            pending_age_turns: None,
+        }
+    }
+
+    #[test]
+    fn header_badge_shows_taint_but_not_unrestricted() {
+        let stats = test_stats();
+        let with_taint = build_header(
+            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            Some("local_only"), 120,
+        );
+        assert!(with_taint.contains("🔒 local_only"), "{with_taint}");
+
+        // Unrestricted (None) ⇒ no chip — absence reads as "open".
+        let open = build_header(
+            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            None, 120,
+        );
+        assert!(!open.contains("🔒"), "{open}");
+    }
+
+    #[test]
+    fn labeled_trace_rows_render_a_marker() {
+        let turn_boundaries = HashMap::new();
+        let spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Tool,
+            tone: RowTone::Default,
+            actor_label: "sandbox".into(),
+            headline: "sandbox_exec cat ~/mail/1".into(),
+            detail: None,
+            turn_id: None,
+            source_session_id: None,
+            turn_index: None,
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: Some("local_only".into()),
+        };
+        let lines = build_rich_row_lines(
+            &spec, 0, &turn_boundaries, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert!(joined.contains('■'), "labeled row must show a marker: {joined}");
+    }
+
+    #[test]
+    fn unlabeled_trace_rows_render_no_marker() {
+        let turn_boundaries = HashMap::new();
+        let mut spec = render::RowSpec {
+            altitude: Altitude::Normal,
+            actor: render::ActorKind::Tool,
+            tone: RowTone::Default,
+            actor_label: "sandbox".into(),
+            headline: "sandbox_exec ls".into(),
+            detail: None,
+            turn_id: None,
+            source_session_id: None,
+            turn_index: None,
+            turn_label: None,
+            in_flight: false,
+            show_reasoning: true,
+            egress_label: None,
+        };
+        let lines = build_rich_row_lines(
+            &spec, 0, &turn_boundaries, 40, 3, 2, 12, SPINNER_FRAMES[0], true,
+        );
+        let joined: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert!(!joined.contains('■'), "unlabeled row must not show a marker: {joined}");
+        // The marker column is still reserved (a plain space) so labeled and
+        // unlabeled rows stay column-aligned.
+        assert!(joined.contains("  "), "{joined}");
     }
 }

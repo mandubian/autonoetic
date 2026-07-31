@@ -476,6 +476,17 @@ pub enum NamedEgressLabel {
 }
 
 impl NamedEgressLabel {
+    /// The stable snake_case name (`local_only`, `no_remote_model`, …) — the
+    /// same string the label renders as via [`label_display_name`] when it maps
+    /// to a well-known shape.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NamedEgressLabel::Unrestricted => "unrestricted",
+            NamedEgressLabel::LocalOnly => "local_only",
+            NamedEgressLabel::NoRemoteModel => "no_remote_model",
+        }
+    }
+
     /// Materialize the named label into a concrete [`EgressLabel`].
     pub fn to_label(self) -> EgressLabel {
         match self {

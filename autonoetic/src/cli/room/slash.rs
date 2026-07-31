@@ -22,7 +22,9 @@
 //! - `/model` — show current inference profile
 //! - `/model <preset>` — set session-level model override
 //! - `/model clear` — clear the override
+//! - `/private` — toggle "this room is private" (provider constraint local_only)
 //! - `/private <message>` — send one message marked `local_only` (never leaves the machine)
+//! - `/taint <source>[:<path>] <label>` — declare a session-scoped egress rule
 //!
 //! See [`help_lines()`] for the complete key map and slash-command list.
 
@@ -82,13 +84,27 @@ pub enum SlashCommand {
     /// is private"). The gateway intersects the mark with the session policy
     /// default, so it can only restrict this turn's egress, never widen it.
     PrivateMessage { message: String },
+    /// Toggle the room's provider constraint (RFC §5.4 rung 1). A bare
+    /// `/private` pins the whole root session to `provider_constraint:
+    /// local_only` — "this room is private"; run it again to lift the pin.
+    /// Distinct from [`SlashCommand::PrivateMessage`], which marks one turn.
+    RoomPrivate,
+    /// Declare a session-scoped egress rule (RFC §5.4 rung 2):
+    /// `/taint <source>[:<path>] <label>`. Session rules are intersected into
+    /// the global set, so they can only restrict — a widening label is a usage
+    /// error rather than a no-op.
+    Taint {
+        source: String,
+        path: Option<String>,
+        label: autonoetic_types::egress::NamedEgressLabel,
+    },
     /// Anything else — the dispatcher surfaces a `✗` status.
     Unknown(String),
 }
 
 /// One-line hint while typing a slash command (full guide: `/help`).
 pub const HELP_TEXT: &str =
-    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /private · /quit · Esc cancel";
+    "/help all keys · /session · /fork · /plan · /return · /curate · /crystallize · /skills · /cron · /wiki · /test · /model · /private · /taint · /quit · Esc cancel";
 
 /// Full Session Room TUI reference — shown in the detail pane by `/help`.
 pub fn help_lines() -> Vec<String> {
@@ -170,10 +186,13 @@ pub fn help_lines() -> Vec<String> {
         "  /model                     show current inference profile".to_string(),
         "  /model <preset>            override model until cleared".to_string(),
         "  /model clear               remove the session override".to_string(),
-        "  /private <message>         send one message marked local_only — the gateway"
-            .to_string(),
-        "                             withholds it from any sink the label excludes"
-            .to_string(),
+        "  /private                   toggle \"this room is private\" — pin the whole".to_string(),
+        "                             session to local_only (rung 1); run again to lift".to_string(),
+        "  /private <message>         send one message marked local_only — the gateway".to_string(),
+        "                             withholds it from any sink the label excludes".to_string(),
+        "  /taint <source>[:<path>] <label>   declare a session egress rule (rung 2)".to_string(),
+        "                             e.g. /taint email.* local_only or".to_string(),
+        "                             /taint fs.read:~/mail/**.md no_remote_model".to_string(),
         String::new(),
         "  q / Ctrl+C   quit (press twice within 3s · Esc cancels)".to_string(),
         String::new(),
@@ -215,19 +234,23 @@ pub fn parse(input: &str) -> SlashCommand {
             SlashCommand::Test { name }
         }
         "model" => parse_model(tail),
-        // `/private <text>` — an empty tail is Unknown rather than an empty
-        // labeled message, so a bare `/private` reports the usage instead of
-        // silently sending nothing.
+        // `/private` — a bare `/private` toggles the room's provider constraint
+        // (rung 1: "this room is private"); `/private <text>` sends one
+        // local_only message (rung 3). Empty-tail is the toggle, never an empty
+        // labeled message, so a bare `/private` does something deliberate
+        // instead of silently sending nothing.
         "private" => {
             let msg = tail.trim();
             if msg.is_empty() {
-                SlashCommand::Unknown("private (usage: /private <message>)".to_string())
+                SlashCommand::RoomPrivate
             } else {
                 SlashCommand::PrivateMessage {
                     message: msg.to_string(),
                 }
             }
         }
+        // `/taint <source>[:<path>] <label>` — rung 2, a session-scoped rule.
+        "taint" => parse_taint(tail),
         "quit" | "q" | "exit" => SlashCommand::Quit,
         "help" | "?" => SlashCommand::Help,
         "estop" | "emergency-stop" => {
@@ -401,6 +424,43 @@ fn parse_model(tail: &str) -> SlashCommand {
     }
     SlashCommand::ModelSet {
         preset: trimmed.to_string(),
+    }
+}
+
+/// Parse `/taint <source>[:<path>] <label>` into a session-scoped rule.
+///
+/// The label is the last whitespace token (labels never contain spaces); the
+/// source/path split takes the *first* `:`, since tool names never contain one
+/// and paths may. The label spelling reuses the CLI's `parse_named_label`
+/// (accepts `local_only`/`local-only`, `no_remote_model`/`no-remote-model`,
+/// `unrestricted`). `unrestricted` is rejected as a usage error — a session
+/// rule can only restrict, so an unrestricted rule would be a no-op the
+/// operator typed expecting it to do something.
+fn parse_taint(tail: &str) -> SlashCommand {
+    use autonoetic_types::egress::NamedEgressLabel;
+    let trimmed = tail.trim();
+    let (spec, label_raw) = match trimmed.rsplit_once(char::is_whitespace) {
+        Some((s, l)) => (s, l.trim()),
+        None => (trimmed, ""),
+    };
+    let label = match crate::cli::session::parse_named_label(label_raw) {
+        Ok(l) => l,
+        Err(_) => return SlashCommand::Unknown(format!("taint {trimmed}")),
+    };
+    if label == NamedEgressLabel::Unrestricted {
+        return SlashCommand::Unknown(format!("taint {trimmed}"));
+    }
+    let (source, path) = match spec.split_once(':') {
+        Some((s, p)) => (s.trim(), Some(p.trim().to_string())),
+        None => (spec.trim(), None),
+    };
+    if source.is_empty() {
+        return SlashCommand::Unknown(format!("taint {trimmed}"));
+    }
+    SlashCommand::Taint {
+        source: source.to_string(),
+        path: path.filter(|p| !p.is_empty()),
+        label,
     }
 }
 
@@ -828,12 +888,62 @@ mod tests {
         );
     }
 
-    /// A bare `/private` reports usage rather than sending an empty labeled
-    /// message — an empty private turn would burn a turn and teach the operator
-    /// nothing.
+    /// A bare `/private` toggles the room's provider constraint (rung 1) — it is
+    /// deliberately NOT an empty labeled message (rung 3). `/private <text>`
+    /// keeps sending a one-turn local_only message.
     #[test]
-    fn bare_private_is_unknown_with_usage() {
-        assert!(matches!(parse("/private"), SlashCommand::Unknown(_)));
-        assert!(matches!(parse("/private   "), SlashCommand::Unknown(_)));
+    fn bare_private_is_room_toggle() {
+        assert_eq!(parse("/private"), SlashCommand::RoomPrivate);
+        assert_eq!(parse("/private   "), SlashCommand::RoomPrivate);
+    }
+
+    #[test]
+    fn parse_taint_variants() {
+        use autonoetic_types::egress::NamedEgressLabel;
+        assert_eq!(
+            parse("/taint email.* local_only"),
+            SlashCommand::Taint {
+                source: "email.*".into(),
+                path: None,
+                label: NamedEgressLabel::LocalOnly,
+            }
+        );
+        assert_eq!(
+            parse("/taint fs.read:~/mail/**.md no_remote_model"),
+            SlashCommand::Taint {
+                source: "fs.read".into(),
+                path: Some("~/mail/**.md".into()),
+                label: NamedEgressLabel::NoRemoteModel,
+            }
+        );
+        // `local-only` (hyphenated) is accepted like the CLI.
+        assert_eq!(
+            parse("/taint  mcp.gmail.*  local-only  "),
+            SlashCommand::Taint {
+                source: "mcp.gmail.*".into(),
+                path: None,
+                label: NamedEgressLabel::LocalOnly,
+            }
+        );
+    }
+
+    /// `/taint` with no rule, an empty source, an unknown label, or the
+    /// no-op `unrestricted` label is a usage error, never a silent no-op.
+    #[test]
+    fn malformed_taint_is_unknown() {
+        assert!(matches!(parse("/taint"), SlashCommand::Unknown(_)));
+        assert!(matches!(parse("/taint local_only"), SlashCommand::Unknown(_)));
+        assert!(matches!(
+            parse("/taint :path local_only"),
+            SlashCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            parse("/taint email.* bogus_label"),
+            SlashCommand::Unknown(_)
+        ));
+        assert!(matches!(
+            parse("/taint email.* unrestricted"),
+            SlashCommand::Unknown(_)
+        ));
     }
 }
