@@ -3691,6 +3691,7 @@ mod stuck_task_tests {
 
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![],
             turn_counter: 1,
             loop_guard_state: crate::runtime::guard::LoopGuard::default(),

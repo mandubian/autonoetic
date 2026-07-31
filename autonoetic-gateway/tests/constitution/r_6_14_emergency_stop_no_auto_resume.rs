@@ -9,6 +9,7 @@ use autonoetic_gateway::GatewayExecutionService;
 fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
     SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history: vec![Message::user("hello")],
         turn_counter: 1,
         loop_guard_state: LoopGuard {

@@ -41,6 +41,7 @@ fn make_checkpoint(
 ) -> SessionCheckpoint {
     SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history: vec![
             Message::system("You are a test agent"),
             Message::user("Hello, test"),

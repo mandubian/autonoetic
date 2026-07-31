@@ -152,6 +152,7 @@ fn egress_events_carry_their_section_15_clause() -> anyhow::Result<()> {
         &[],
         true,
         false,
+        None,
     );
 
     let events = store.search_causal_events(Some(session), None, 50)?;

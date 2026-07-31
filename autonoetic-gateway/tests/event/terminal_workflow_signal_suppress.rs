@@ -198,6 +198,7 @@ fn build_hibernation_checkpoint(
 
     Ok(SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history: vec![
             Message::system("system".to_string()),
             Message::user("initial task".to_string()),

@@ -160,6 +160,14 @@ pub struct SessionCheckpoint {
     /// predating this field deserialize with an empty map.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub egress_labels: std::collections::HashMap<String, autonoetic_types::egress::EgressLabel>,
+    /// A filed pin×taint conflict ask (RFC §5.3 / #968) whose answer still
+    /// shapes this turn's routing: carried across the suspension so the
+    /// resumed turn honors the operator's choice (declassify / run local /
+    /// abort) without re-deriving the already-consumed batch taint.
+    /// `#[serde(default)]` so checkpoints predating the field deserialize
+    /// with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_ask: Option<crate::runtime::egress_labeler::EgressAskState>,
     /// Session runtime state (Normal or Degraded).
     #[serde(default)]
     pub session_state: autonoetic_types::agent::SessionState,
@@ -288,6 +296,7 @@ impl SessionCheckpoint {
         // same labeled content the live session would (RFC data-envelopes §3.4).
         // `#[serde(default)]` on the field means old checkpoints restore empty.
         runtime.egress_labels = self.egress_labels.clone();
+        runtime.egress_ask_state = self.egress_ask.clone();
         runtime.session_state = self.session_state;
         runtime.tool_tier_escalated = self.tool_tier_escalated;
         runtime.discovered_tools = self.discovered_tools.clone();
@@ -1082,6 +1091,7 @@ mod tests {
 
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard {
@@ -1146,6 +1156,7 @@ mod tests {
     fn sample_checkpoint() -> SessionCheckpoint {
         SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),
@@ -1199,6 +1210,7 @@ mod tests {
 
         let checkpoint = SessionCheckpoint {
             egress_labels: egress_labels.clone(),
+            egress_ask: None,
             ..sample_checkpoint()
         };
 
@@ -1257,6 +1269,7 @@ mod tests {
         egress_labels.insert("tc_email_read_1".to_string(), EgressLabel::local_only());
         let source = SessionCheckpoint {
             egress_labels: egress_labels.clone(),
+            egress_ask: None,
             ..sample_checkpoint()
         };
 
@@ -1307,6 +1320,7 @@ mod tests {
 
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),
@@ -1365,6 +1379,7 @@ mod tests {
 
         let c1 = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![],
             turn_counter: 1,
             loop_guard_state: LoopGuard {
@@ -1438,6 +1453,7 @@ mod tests {
         for i in 1..=5 {
             let checkpoint = SessionCheckpoint {
                 egress_labels: Default::default(),
+                egress_ask: None,
                 history: vec![],
                 turn_counter: i,
                 loop_guard_state: LoopGuard {
@@ -1542,6 +1558,7 @@ mod tests {
         // Build and save a checkpoint.
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),
@@ -1625,6 +1642,7 @@ mod tests {
         for turn in [1u64, 2] {
             let checkpoint = SessionCheckpoint {
                 egress_labels: Default::default(),
+                egress_ask: None,
                 history: vec![Message::user("hello")],
                 turn_counter: turn,
                 loop_guard_state: LoopGuard::default(),
@@ -1687,6 +1705,7 @@ mod tests {
 
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 2,
             loop_guard_state: LoopGuard::default(),
@@ -1761,6 +1780,7 @@ mod tests {
         guard.current_loops = 3;
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 3,
             loop_guard_state: guard,
@@ -1823,6 +1843,7 @@ mod tests {
     fn checkpoint_without_constitution_pin_fields_deserializes_as_none() {
         let checkpoint = SessionCheckpoint {
             egress_labels: Default::default(),
+            egress_ask: None,
             history: vec![Message::user("hello")],
             turn_counter: 1,
             loop_guard_state: LoopGuard::default(),

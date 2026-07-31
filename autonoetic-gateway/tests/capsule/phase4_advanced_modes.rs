@@ -237,6 +237,7 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
     // Persist a synthetic checkpoint for a session.
     let ckpt = SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history: vec![Message::system("test")],
         turn_counter: 7,
         session_state: Default::default(),
@@ -638,6 +639,7 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
     // Save a checkpoint whose agent_id is somebody else's.
     let ckpt = SessionCheckpoint {
         egress_labels: Default::default(),
+        egress_ask: None,
         history: vec![Message::system("test")],
         turn_counter: 1,
         session_state: Default::default(),

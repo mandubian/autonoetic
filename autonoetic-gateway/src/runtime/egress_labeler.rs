@@ -27,12 +27,16 @@
 
 use std::sync::Arc;
 
+use autonoetic_types::background::{
+    GrantScope, UserInteraction, UserInteractionKind, UserInteractionOption, UserInteractionStatus,
+};
 use autonoetic_types::causal_chain::{default_enforced_rules, CausalEventRecord};
 use autonoetic_types::egress::{
     label_display_name, matches_simple_glob, source_pattern_matches, EgressClass, EgressConfig,
     EgressLabel, EgressRule, EgressSessionPolicy, Provenance, Sink,
 };
 use autonoetic_types::id_format::short_random_id;
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::egress_path_matcher::{
     collect_exec_dependency_sources, EgressPathMatcher, ExecSourceContext, LabeledPathPattern,
@@ -1293,6 +1297,207 @@ pub fn file_declassify_offer(
     Some(request_id)
 }
 
+// ── RFC §5.3 inline ask (pin × taint conflict, #968) ─────────────────────
+
+/// Option ids of the three-way inline ask filed when a pinned preset
+/// conflicts with a tainted batch (RFC §5.3 / #968).
+pub mod egress_ask_options {
+    pub const DECLASSIFY: &str = "declassify";
+    pub const RUN_LOCAL: &str = "run_local";
+    pub const ABORT: &str = "abort";
+}
+
+/// The routing state of a filed pin×taint conflict ask (RFC §5.3, #968),
+/// carried in the checkpoint so the resumed turn honors the operator's choice
+/// without re-deriving the (already consumed) batch taint.
+///
+/// `local_preset` is the deterministic reroute candidate the "run local once"
+/// option names; `None` when no buildable preset is cleared for the batch (the
+/// ask then offers only declassify / abort).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressAskState {
+    pub interaction_id: String,
+    pub turn_id: String,
+    pub batch: EgressLabel,
+    pub pinned_preset: String,
+    pub local_preset: Option<PresetCandidate>,
+}
+
+/// Whether an interaction is a gateway-filed egress pin×taint ask (tagged in
+/// its `context` payload).
+pub fn is_egress_pin_ask(interaction: &UserInteraction) -> bool {
+    interaction
+        .context
+        .as_deref()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+        .and_then(|v| v.get("egress_pin_ask").cloned())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// The option ids actually offered by an egress pin×taint ask, for the
+/// `egress.provider_selected` inline-ask payload: `run_local` exists only
+/// when a buildable local preset is cleared for the batch.
+pub fn egress_ask_options_payload(local_preset: Option<&PresetCandidate>) -> Vec<&'static str> {
+    match local_preset {
+        Some(_) => vec![
+            egress_ask_options::DECLASSIFY,
+            egress_ask_options::RUN_LOCAL,
+            egress_ask_options::ABORT,
+        ],
+        None => vec![egress_ask_options::DECLASSIFY, egress_ask_options::ABORT],
+    }
+}
+
+/// File (or reuse) the three-way inline ask for a pin × taint conflict
+/// (RFC §5.3 / #968): a pinned remote preset cannot take a tainted batch, and
+/// the gateway must neither silently downgrade (a discretion leak) nor
+/// hard-refuse without a path forward — the operator picks declassify / run
+/// this turn on local preset X / abort.
+///
+/// The choice is carried by a `Decision` `UserInteraction`; the suspended turn
+/// resumes on the answer and honors it at routing time (see
+/// [`EgressAskState`]). Dedup: a pending egress ask for the root session is
+/// reused so retried conflicts don't flood the pending list (same shape as
+/// [`file_declassify_offer`]).
+#[allow(clippy::too_many_arguments)]
+pub fn file_egress_pin_ask(
+    store: &GatewayStore,
+    session_id: &str,
+    root_session_id: &str,
+    agent_id: &str,
+    turn_id: &str,
+    batch: &EgressLabel,
+    pinned_preset: &str,
+    local_preset: Option<&PresetCandidate>,
+) -> Option<String> {
+    if let Ok(pending) = store.get_pending_interactions_for_root_session(root_session_id) {
+        for it in &pending {
+            if is_egress_pin_ask(it) {
+                return Some(it.interaction_id.clone());
+            }
+        }
+    }
+
+    let mut options = vec![UserInteractionOption {
+        id: egress_ask_options::DECLASSIFY.to_string(),
+        label: "Declassify this root session to the remote model".to_string(),
+        value: egress_ask_options::DECLASSIFY.to_string(),
+    }];
+    if let Some(local) = local_preset {
+        options.push(UserInteractionOption {
+            id: egress_ask_options::RUN_LOCAL.to_string(),
+            label: format!("Run this turn on the local preset '{}'", local.name),
+            value: egress_ask_options::RUN_LOCAL.to_string(),
+        });
+    }
+    options.push(UserInteractionOption {
+        id: egress_ask_options::ABORT.to_string(),
+        label: "Abort this turn".to_string(),
+        value: egress_ask_options::ABORT.to_string(),
+    });
+
+    let context = serde_json::json!({
+        "egress_pin_ask": true,
+        "batch": batch,
+        "pinned_preset": pinned_preset,
+        "local_preset": local_preset.map(|c| c.name.clone()),
+    })
+    .to_string();
+
+    let question = format!(
+        "The pinned preset '{}' is not cleared for this turn's new data (labeled {}). \
+         The gateway will not silently run it on another model. Choose: declassify this root \
+         session to the remote model, run this turn on a local preset{}, or abort this turn.",
+        pinned_preset,
+        label_display_name(batch),
+        local_preset
+            .map(|c| format!(" ('{}')", c.name))
+            .unwrap_or_default(),
+    );
+
+    let interaction = UserInteraction {
+        interaction_id: short_random_id("ui-"),
+        session_id: session_id.to_string(),
+        root_session_id: root_session_id.to_string(),
+        workflow_id: None,
+        task_id: None,
+        agent_id: agent_id.to_string(),
+        turn_id: turn_id.to_string(),
+        kind: UserInteractionKind::Decision,
+        question,
+        context: Some(context),
+        options,
+        allow_freeform: false,
+        status: UserInteractionStatus::Pending,
+        answer_option_id: None,
+        answer_text: None,
+        answered_by: None,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        answered_at: None,
+        expires_at: None,
+        checkpoint_turn_id: Some(turn_id.to_string()),
+    };
+    store.create_user_interaction(&interaction).ok()?;
+    Some(interaction.interaction_id)
+}
+
+/// Materialize the "declassify" choice of an answered egress pin×taint ask:
+/// the operator's explicit answer is the authorization (recorded in
+/// `answered_by`), so the session-wide `RemoteModel` declassification grant is
+/// inserted directly — the same grant an approved `EgressDeclassify` approval
+/// would produce (RFC §8), with the interaction as provenance. A no-op for
+/// any other interaction or option; the answer-side idempotency guard upstream
+/// (an already-answered interaction returns early) keeps this single-shot.
+pub fn apply_egress_ask_declassification(
+    store: &GatewayStore,
+    interaction: &UserInteraction,
+) -> anyhow::Result<()> {
+    if !is_egress_pin_ask(interaction)
+        || interaction.answer_option_id.as_deref() != Some(egress_ask_options::DECLASSIFY)
+    {
+        return Ok(());
+    }
+    let root: String = if interaction.root_session_id.is_empty() {
+        crate::runtime::content_store::root_session_id(&interaction.session_id).to_string()
+    } else {
+        interaction.root_session_id.clone()
+    };
+    let target = session_egress_declass_target(&root);
+    let reason = format!(
+        "operator answered egress pin×taint ask {}: declassify to remote model",
+        interaction.interaction_id
+    );
+    let answered_at = interaction
+        .answered_at
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    store.insert_egress_declassification_grant(
+        &root,
+        &interaction.session_id,
+        &interaction.agent_id,
+        &target,
+        Sink::RemoteModel,
+        &GrantScope::RootSession,
+        interaction.answered_by.as_deref().unwrap_or("gateway"),
+        &answered_at,
+        Some(&format!("interaction:{}", interaction.interaction_id)),
+        None,
+    )?;
+    emit_declassified(
+        store,
+        &interaction.session_id,
+        &interaction.agent_id,
+        &target,
+        Sink::RemoteModel,
+        GrantScope::RootSession,
+        None,
+        &reason,
+        None,
+    );
+    Ok(())
+}
+
 /// Whether an active (non-revoked, non-expired) declassification grant allows
 /// `Sink::Network` for this session. Lookup is always at use time — no cache.
 pub fn session_network_declassified(
@@ -1978,7 +2183,7 @@ pub fn preset_batch_eligible(batch: &EgressLabel, egress_class: Option<EgressCla
 }
 
 /// One preset considered for taint-following routing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PresetCandidate {
     pub name: String,
     pub egress_class: Option<EgressClass>,
@@ -2182,6 +2387,13 @@ pub fn emit_declassified(
 /// `chosen_preset` is `None` when the turn refused with
 /// `egress_no_eligible_provider`. Only meaningful for tainted batches — the
 /// lifecycle skips emission entirely for the unrestricted (clean) case.
+///
+/// `inline_ask` (RFC §9.1's "inline-ask outcome", #968) carries the
+/// pin×taint ask state for this completion: `{status: "filed", interaction_id,
+/// options: [...]}` when the completion suspended on a filed ask, or
+/// `{status: "answered", outcome: <option id>, interaction_id}` when the
+/// resumed completion ran (or refused) per the operator's choice. `None`
+/// when no ask was involved.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_provider_selected(
     store: &Arc<GatewayStore>,
@@ -2193,6 +2405,7 @@ pub fn emit_provider_selected(
     fallback_skipped: &[String],
     rerouted: bool,
     declassified_remote: bool,
+    inline_ask: Option<&serde_json::Value>,
 ) {
     let payload = serde_json::json!({
         "batch_label": serde_json::to_value(&plan.batch).unwrap_or(serde_json::Value::Null),
@@ -2205,6 +2418,7 @@ pub fn emit_provider_selected(
         "fallback_skipped": fallback_skipped,
         "no_eligible_provider": chosen_preset.is_none(),
         "declassified_remote": declassified_remote,
+        "inline_ask": inline_ask,
     });
     emit_egress_event(
         store,
