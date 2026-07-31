@@ -6002,8 +6002,10 @@ fn handle_egress_audit(execution: &GatewayExecutionService, req: JsonRpcRequest)
     struct Params {
         session_id: String,
         /// Cap on causal events scanned. Defaults to
-        /// `egress_audit::DEFAULT_AUDIT_LIMIT`; the response always echoes the
-        /// limit in force alongside `truncated`.
+        /// `egress_audit::DEFAULT_AUDIT_LIMIT` and is clamped to
+        /// `1..=MAX_AUDIT_LIMIT` — a remote caller can narrow the window but
+        /// cannot widen it into a memory-pressure lever. The response echoes the
+        /// limit actually applied, alongside `truncated`.
         #[serde(default)]
         limit: Option<i64>,
     }

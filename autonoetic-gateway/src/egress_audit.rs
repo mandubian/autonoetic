@@ -37,6 +37,17 @@ use crate::scheduler::gateway_store::GatewayStore;
 /// letting the report look complete.
 pub const DEFAULT_AUDIT_LIMIT: i64 = 50_000;
 
+/// Hard ceiling on the scan, whatever a caller asks for.
+///
+/// `search_causal_events` materializes full rows — payload strings included —
+/// so the requested `limit` is a direct handle on how much this endpoint
+/// allocates. Left unbounded, one remote operator passing a nine-digit limit
+/// turns a read-only introspection call into a memory-pressure lever on the
+/// gateway. Callers may narrow the window; they cannot widen it past the value
+/// already chosen as generous enough for long sessions, and the effective limit
+/// is echoed back so a clamped request is visible rather than silent.
+pub const MAX_AUDIT_LIMIT: i64 = DEFAULT_AUDIT_LIMIT;
+
 /// A report plus the honesty flags about how it was gathered. Both callers
 /// surface `truncated`, so it belongs with the report rather than being
 /// re-derived per caller.
@@ -46,6 +57,9 @@ pub struct EgressAudit {
     /// The event scan hit `limit`; early turns may be missing and the totals
     /// are for the returned window only.
     pub truncated: bool,
+    /// The limit actually applied — a requested value is clamped to
+    /// `1..=MAX_AUDIT_LIMIT`, so this is what the caller got, not what it asked
+    /// for.
     pub limit: i64,
 }
 
@@ -58,7 +72,9 @@ pub fn load_egress_audit(
     session_id: &str,
     limit: Option<i64>,
 ) -> Result<EgressAudit> {
-    let limit = limit.unwrap_or(DEFAULT_AUDIT_LIMIT).max(1);
+    let limit = limit
+        .unwrap_or(DEFAULT_AUDIT_LIMIT)
+        .clamp(1, MAX_AUDIT_LIMIT);
     let events = store.search_causal_events(Some(session_id), None, limit)?;
     let truncated = events.len() as i64 >= limit;
     let egress: Vec<CausalEventRecord> = events

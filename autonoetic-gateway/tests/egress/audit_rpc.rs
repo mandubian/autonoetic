@@ -209,6 +209,41 @@ async fn truncation_is_reported_when_the_scan_cap_is_hit() {
     assert_eq!(v["truncated"], false);
 }
 
+/// `limit` is a direct handle on how much this endpoint allocates
+/// (`search_causal_events` materializes full rows, payloads included), so a
+/// remote caller must not be able to widen it. It is clamped to
+/// `1..=MAX_AUDIT_LIMIT` and the applied value echoed back, so a clamped
+/// request is visible rather than silent. (PR #992 review.)
+#[tokio::test]
+async fn oversized_limit_is_clamped_to_the_ceiling() {
+    let sid = "sess-audit-clamp";
+    seed(
+        sid,
+        Some("t1"),
+        1,
+        "egress.request_filtered",
+        serde_json::json!({ "withheld_count": 0, "included_count": 1, "violation_count": 0 }),
+    );
+
+    let v = audit(serde_json::json!({ "session_id": sid, "limit": 900_000_000_i64 })).await;
+    assert_eq!(
+        v["limit"],
+        autonoetic_gateway::egress_audit::MAX_AUDIT_LIMIT,
+        "a limit above the ceiling must be clamped, and the applied value echoed"
+    );
+    assert_eq!(v["truncated"], false);
+
+    // Narrowing still works — the clamp is a ceiling, not a fixed value.
+    let v = audit(serde_json::json!({ "session_id": sid, "limit": 1 })).await;
+    assert_eq!(v["limit"], 1);
+
+    // Nonsense lower bounds land on 1 rather than reaching the store as <= 0.
+    for bad in [0_i64, -5] {
+        let v = audit(serde_json::json!({ "session_id": sid, "limit": bad })).await;
+        assert_eq!(v["limit"], 1, "limit {bad} must clamp to 1");
+    }
+}
+
 #[tokio::test]
 async fn empty_session_id_is_an_invalid_params_error() {
     let resp = rpc("egress.audit", serde_json::json!({ "session_id": "   " })).await;
