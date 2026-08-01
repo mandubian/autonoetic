@@ -3639,17 +3639,23 @@ impl JsonRpcRouter {
                 // taint is `current_taint` above; this is every *other*
                 // restrictive row under the tree (only restrictive taint is
                 // stored, so absence ⇒ unrestricted and there is nothing to
-                // show for a clean child). A store error surfaces as `-32000`
-                // rather than an empty list — "no child is tainted" and "the
-                // read failed" must not look alike (same fail-visible contract
-                // as the grant/taint queries above).
+                // show for a clean child). Sorted by session id for a stable,
+                // re-poll-deterministic order — the store returns `updated_at
+                // DESC`, which would reshuffle the panel every time a child's
+                // taint is touched, and an operator reads the list as "which
+                // children are tainted", not "which was tainted most recently".
+                // A store error surfaces as `-32000` rather than an empty list
+                // — "no child is tainted" and "the read failed" must not look
+                // alike (same fail-visible contract as the grant/taint queries
+                // above).
                 let child_taints = match store
                     .list_session_taints_for_root(&params.root_session_id)
                 {
-                    Ok(rows) => rows
-                        .into_iter()
-                        .filter(|r| r.session_id != params.root_session_id)
-                        .collect::<Vec<_>>(),
+                    Ok(mut rows) => {
+                        rows.retain(|r| r.session_id != params.root_session_id);
+                        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+                        rows
+                    }
                     Err(e) => {
                         return JsonRpcResponse::error(
                             req.id,

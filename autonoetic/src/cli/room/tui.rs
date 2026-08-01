@@ -2164,8 +2164,16 @@ fn fetch_grant_rows(
                 .filter_map(|row| {
                     let session_id =
                         row.get("session_id").and_then(|v| v.as_str())?.to_string();
-                    let label_val =
-                        row.get("label").cloned().unwrap_or(serde_json::Value::Null);
+                    // A present taint row always carries a populated label
+                    // (only restrictive taints are stored), but defend a
+                    // missing/non-array value as an empty sink set: `sinks_label_name`
+                    // renders that as "blocked" (fail-closed) rather than
+                    // miscounting `null` as a single sink.
+                    let label_val = row
+                        .get("label")
+                        .filter(|v| v.is_array())
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::Array(vec![]));
                     let sinks_json =
                         serde_json::to_string(&label_val).unwrap_or_else(|_| "[]".to_string());
                     Some(ChildTaintDisplay {
@@ -5024,7 +5032,25 @@ pub fn run(
                     // keys (ends in `continue;`) so they never reach the timeline.
                     if let Some(ref mut panel) = grants_panel {
                         if panel.rows.is_empty() {
-                            grants_panel = None;
+                            // Child-taints-only posture (#976): there is
+                            // nothing to navigate or revoke, so j/k/r and
+                            // PageUp/Down are no-ops and only the close keys
+                            // (Esc / G) act. q / Ctrl-C still fall through to
+                            // global quit. Keeps the panel mounted to show the
+                            // taints rather than auto-dismissing on the first
+                            // keypress — and avoids indexing `panel.rows` (and
+                            // the `row_count - 1` underflow on PageDown) when
+                            // there are no grant rows.
+                            let ctrl_c_empty = key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL);
+                            if matches!(key.code, KeyCode::Char('q')) || ctrl_c_empty {
+                                // fall through to global quit
+                            } else {
+                                if matches!(key.code, KeyCode::Esc | KeyCode::Char('G')) {
+                                    grants_panel = None;
+                                }
+                                continue;
+                            }
                         } else {
                             let ctrl_c = key.code == KeyCode::Char('c')
                                 && key.modifiers.contains(KeyModifiers::CONTROL);
@@ -5756,6 +5782,7 @@ pub fn run(
                                 if rows.is_empty() && child_taints.is_empty() {
                                     status = Some("no active grants in this session".to_string());
                                 } else {
+                                    let rows_empty = rows.is_empty();
                                     grants_panel = Some(GrantsPanel {
                                         selected: 0,
                                         rows,
@@ -5764,9 +5791,17 @@ pub fn run(
                                         pending_revoke: None,
                                     });
                                     last_grants_poll = Instant::now();
+                                    // When there are no grant rows the panel is
+                                    // showing child taints only: j/k/r are inert,
+                                    // so don't advertise them (#976 review).
                                     status = Some(
-                                        "grants: j/k navigate · r revoke (confirm) · G/Esc close"
-                                            .to_string(),
+                                        if rows_empty {
+                                            "grants: child taints only · G/Esc close"
+                                                .to_string()
+                                        } else {
+                                            "grants: j/k navigate · r revoke (confirm) · G/Esc close"
+                                                .to_string()
+                                        },
                                     );
                                 }
                             }
@@ -10481,7 +10516,15 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
     // section scrolls away correctly rather than pinning the first grant row.
     let inner_height = area.height.saturating_sub(2) as usize;
     let total_lines = child_section_len + rows.len();
-    let selected_line = child_section_len + panel.selected;
+    // With no grant rows (child-taints-only posture) there is nothing to pin
+    // the cursor to, so start at the top instead of scrolling the child
+    // section out of view — selection is grant-row-based and would otherwise
+    // point past the section with no way back up (#976 review).
+    let selected_line = if rows.is_empty() {
+        0
+    } else {
+        child_section_len + panel.selected
+    };
     let max_scroll = total_lines.saturating_sub(inner_height);
     let scroll = selected_line
         .saturating_sub(inner_height.saturating_sub(1))

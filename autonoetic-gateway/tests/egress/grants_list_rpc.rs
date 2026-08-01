@@ -149,14 +149,14 @@ async fn grants_list_surfaces_tainted_grandchildren() {
         .unwrap();
 
     let resp = grants_list(serde_json::json!({ "root_session_id": root })).await;
-    let mut sessions: Vec<&str> = resp["child_taints"]
+    // Deterministic session-id order: the store returns `updated_at DESC`, but
+    // grants.list re-sorts by session id so the panel doesn't reshuffle on
+    // every re-poll. "gl-gen/mid" sorts before "gl-gen/mid/leaf".
+    let sessions: Vec<&str> = resp["child_taints"]
         .as_array()
         .expect("child_taints")
         .iter()
         .map(|r| r["session_id"].as_str().expect("session_id"))
         .collect();
-    sessions.sort();
-    let mut expected = vec![child, grandchild];
-    expected.sort();
-    assert_eq!(sessions, expected);
+    assert_eq!(sessions, vec![child, grandchild]);
 }
