@@ -17,6 +17,8 @@ mod child_taint_propagation;
 mod chokepoint_canary;
 mod compartment;
 mod compression_eligibility;
+mod curator_gates;
+mod digest_local_preset;
 mod floor_and_taint;
 mod label_listing_rpc;
 mod mixed_session_e2e;
