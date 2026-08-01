@@ -585,6 +585,27 @@ pub fn apply_decision(
                             reason,
                             expires_at.as_deref(),
                         );
+                        // Workspace target (#1001): releasing the workspace is a
+                        // one-shot — the approved grant deletes the durable
+                        // label. A later exec that resolves restricted re-narrows
+                        // it, which is the ratchet the issue names: clearing
+                        // goes through operator approval only, never through a
+                        // later session's actions.
+                        if let autonoetic_types::egress::EgressDeclassificationTarget::Workspace(
+                            agent_id,
+                        ) = target
+                        {
+                            if let Err(e) = store.delete_workspace_egress_label(agent_id) {
+                                tracing::warn!(
+                                    target: "approval",
+                                    request_id = %decision.request_id,
+                                    error = %e,
+                                    agent_id = %agent_id,
+                                    "failed to clear workspace egress label after \
+                                     approved declassification"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2828,8 +2849,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_approval_signal_prompts_agent_retry() {
-        let dir = tempdir().unwrap();
+    fn sandbox_approval_signal_prompts_agent_retry() {        let dir = tempdir().unwrap();
         let agents_dir = dir.path().join("agents");
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();
@@ -2878,6 +2898,71 @@ mod tests {
 
         let pending = store.list_pending_notifications().unwrap();
         assert!(!pending.is_empty(), "should have created a notification");
+    }
+
+    #[test]
+    fn approved_workspace_declassification_clears_the_workspace_label() {
+        // #1001: releasing a workspace goes through the normal EgressDeclassify
+        // approval → grant machinery; the materialized grant deletes the
+        // durable label (the only widening path there is).
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir,
+            ..Default::default()
+        };
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        use autonoetic_types::background::ApprovalStatus;
+        use autonoetic_types::egress::{
+            EgressDeclassificationTarget, EgressLabel, Sink,
+        };
+
+        store
+            .restrict_workspace_egress_label("coder.abc", &EgressLabel::local_only())
+            .unwrap();
+        assert!(store.get_workspace_egress_label("coder.abc").unwrap().is_some());
+
+        let decision = ApprovalDecision {
+            request_id: "apr-ws1".to_string(),
+            agent_id: "operator".to_string(),
+            session_id: "demo-session/coder.default-6738ac56".to_string(),
+            action: ScheduledAction::EgressDeclassify {
+                target: EgressDeclassificationTarget::Workspace("coder.abc".to_string()),
+                allowed_sink: Sink::LocalModel,
+                reason: "operator releases the workspace".to_string(),
+                payload: None,
+            },
+            status: ApprovalStatus::Approved,
+            decided_at: chrono::Utc::now().to_rfc3339(),
+            decided_by: "operator".to_string(),
+            reason: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: Some("session-88f313bd".to_string()),
+            approval_level: ApprovalLevel::Operator,
+        };
+
+        super::apply_decision(
+            &cfg,
+            Some(store.as_ref()),
+            &decision,
+            &Default::default(),
+            &super::DecisionContext {
+                wiki_materialized_meta: None,
+                hook_executor: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            store.get_workspace_egress_label("coder.abc").unwrap().is_none(),
+            "an approved workspace declassification must clear the durable label"
+        );
     }
 
     #[test]

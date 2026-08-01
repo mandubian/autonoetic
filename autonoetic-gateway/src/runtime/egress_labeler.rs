@@ -127,6 +127,9 @@ pub struct Resolution {
     /// artifact when a round trip through the content-addressed store — not a
     /// rule — is what restricted the result.
     pub artifact_labels_applied: Vec<String>,
+    /// Agent ids whose workspace labels contributed to this resolution (RFC §11,
+    /// #1001). Empty for non-exec tools, which never run in a workspace.
+    pub workspace_labels_applied: Vec<String>,
 }
 
 impl Resolution {
@@ -326,6 +329,7 @@ impl EgressLabeler {
             bundle_floor_applied,
             taint_applied: false,
             artifact_labels_applied: Vec::new(),
+            workspace_labels_applied: Vec::new(),
         }
     }
 
@@ -359,7 +363,15 @@ impl EgressLabeler {
         store: Option<&Arc<GatewayStore>>,
         prior_labels: &std::collections::HashMap<String, PriorLabeledResult>,
     ) -> Option<LabelOutcome> {
-        if self.inert {
+        // Exec-shaped calls escape the inert fast-path (RFC §11, #1001): the
+        // workspace label is *dynamic* store state, invisible to the static
+        // `inert` computation, and an agent workspace can carry a taint long
+        // after the rules that created it are gone (or in a session that never
+        // had any). A rules-less session reading a laundered workspace path
+        // must still be labeled. The resolution still returns unrestricted —
+        // and `None` — when the workspace carries no label, so the cost is a
+        // cheap resolve per exec, not a behavior change for clean ones.
+        if self.inert && !is_exec_shaped(req.tool) {
             return None;
         }
 
@@ -413,6 +425,43 @@ impl EgressLabeler {
                 // which reads as a contradiction to anyone auditing the event.
                 // `artifact_labels_applied` carries this path's lineage instead.
                 resolution.artifact_labels_applied = applied;
+            }
+        }
+
+        // Workspace taint (RFC §11, #1001): the agent workspace is a durable
+        // object carrying a durable label. Content moved into it (unzip, cp,
+        // git clone …) cannot be followed by path rules — that is the whole
+        // laundering path #988 names — so any exec running in the workspace
+        // intersects its label, exactly like an artifact's. Only exec-shaped
+        // tools run in a workspace; structured tools stay rule-only.
+        let exec_shaped = is_exec_shaped(req.tool);
+        if exec_shaped {
+            if let Some(store) = store {
+                let (workspace_label, applied) = workspace_taint_from_store(agent_id, store.as_ref());
+                if !applied.is_empty() {
+                    resolution.label = resolution.label.restrict(&workspace_label);
+                    resolution.workspace_labels_applied = applied;
+                }
+            }
+        }
+
+        // Restrict the workspace when this exec resolved restricted: content
+        // tainted by rules, argument taint, an artifact, or the workspace's own
+        // prior label is now (or was already) in the workspace, so the durable
+        // label tightens. Coarse by design — the workspace is the labeled unit,
+        // not the paths inside it, which is what removes the evasion surface.
+        // Best-effort write: a failed restriction is logged, never fatal (the
+        // read side fails closed regardless).
+        if exec_shaped && !resolution.label.is_unrestricted() {
+            if let Some(store) = store {
+                if let Err(e) = store.restrict_workspace_egress_label(agent_id, &resolution.label) {
+                    tracing::warn!(
+                        target: "egress",
+                        error = %e,
+                        agent_id = %agent_id,
+                        "workspace egress label restrict failed"
+                    );
+                }
             }
         }
 
@@ -542,6 +591,7 @@ impl EgressLabeler {
             bundle_floor_applied,
             taint_applied: false,
             artifact_labels_applied: Vec::new(),
+            workspace_labels_applied: Vec::new(),
         }
     }
 
@@ -601,6 +651,11 @@ impl EgressLabeler {
             // content-addressed store, not a rule, may be the only reason this
             // result is labeled, and an operator asking "why?" needs to see it.
             "artifact_labels_applied": resolution.artifact_labels_applied,
+            // Workspace (RFC §11) — agent ids whose workspace labels were
+            // intersected in. The workspace is a durable object: content moved
+            // into it cannot be followed by path rules, so the label attaches to
+            // the workspace as a whole and this names it for "why?".
+            "workspace_labels_applied": resolution.workspace_labels_applied,
             // Explicitly name the resolution path so the audit answers "why?".
             "resolution": resolution.kind(),
         });
@@ -1844,6 +1899,32 @@ pub fn artifact_taint_from_store(
     (label, applied)
 }
 
+/// Read an agent workspace's stored label, failing closed to `local_only`.
+///
+/// The read half of RFC §11 (#1001): a workspace whose label could not be read
+/// might have been restricted, and treating it as clean is the one outcome §2.2
+/// forbids. Returns the label and the agent id (as provenance, mirroring the
+/// artifact path) when the workspace carries a restrictive label.
+pub fn workspace_taint_from_store(
+    agent_id: &str,
+    store: &GatewayStore,
+) -> (EgressLabel, Vec<String>) {
+    match store.get_workspace_egress_label(agent_id) {
+        Ok(Some(stored)) => (stored, vec![agent_id.to_string()]),
+        Ok(None) => (EgressLabel::unrestricted(), Vec::new()),
+        Err(e) => {
+            tracing::warn!(
+                target: "egress",
+                error = %e,
+                agent_id = %agent_id,
+                "workspace egress label read failed — failing closed to local_only \
+                 for this result (RFC §2.2)"
+            );
+            (EgressLabel::local_only(), vec![agent_id.to_string()])
+        }
+    }
+}
+
 /// Intersect argument-carried taint from prior labeled results in this turn.
 pub fn argument_taint_from_prior(
     arguments_json: &str,
@@ -2821,6 +2902,116 @@ mod tests {
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::no_remote_model());
+    }
+
+    // ── Agent workspace taint (RFC §11, #1001) ───────────────────────────
+
+    fn ws_store(
+    ) -> (tempfile::TempDir, std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(tmp.path()).unwrap(),
+        );
+        (tmp, store)
+    }
+
+    /// The narrow half of the workspace ratchet: an exec that resolves
+    /// restricted (here: a rule's static path match) tightens the agent's
+    /// durable workspace label.
+    #[test]
+    fn exec_resolving_restricted_narrows_the_workspace_label() {
+        let (_tmp, store) = ws_store();
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("sandbox.exec", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"unzip ~/mail/mail.zip -d /tmp/w && cat /tmp/w/inbox.mbox"}"#,
+            tool_call_id: "tc_ws",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "coder.abc", None, Some(&store), &no_prior())
+            .expect("rule-matched exec must be restricted");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert_eq!(
+            store.get_workspace_egress_label("coder.abc").unwrap(),
+            Some(EgressLabel::local_only()),
+            "a restricted exec narrows the workspace it ran in"
+        );
+    }
+
+    /// The apply half: a *clean* exec (no rule fires) running in a labeled
+    /// workspace inherits the workspace's label — this is what closes the
+    /// laundering path when the moved content is read back later.
+    #[test]
+    fn exec_in_a_labeled_workspace_inherits_the_label() {
+        let (_tmp, store) = ws_store();
+        store
+            .restrict_workspace_egress_label("coder.abc", &EgressLabel::local_only())
+            .unwrap();
+        // No rules at all: only the workspace label can restrict.
+        let l = EgressLabeler::from_config(&cfg(vec![]));
+        let req = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"cat /tmp/w/inbox.mbox"}"#,
+            tool_call_id: "tc_ws2",
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "coder.abc", None, Some(&store), &no_prior())
+            .expect("workspace label must carry the taint");
+        assert_eq!(out.label, EgressLabel::local_only());
+        // The workspace label was intersected in and names the agent.
+        let l2 = EgressLabeler::from_config(&cfg(vec![]));
+        let req2 = LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: r#"{"command":"cat /tmp/w/inbox.mbox"}"#,
+            tool_call_id: "tc_ws2b",
+        };
+        let out2 = l2
+            .label_tool_result(&req2, None, "sess", "coder.abc", None, Some(&store), &no_prior())
+            .expect("workspace label applies again");
+        // The apply is stable — the workspace label is not widened by use.
+        assert_eq!(out2.label, EgressLabel::local_only());
+    }
+
+    /// Structured tools do not run in a workspace: they neither inherit its
+    /// label nor narrow it.
+    #[test]
+    fn structured_tools_do_not_touch_the_workspace_label() {
+        let (_tmp, store) = ws_store();
+        store
+            .restrict_workspace_egress_label("coder.struct", &EgressLabel::no_remote_model())
+            .unwrap();
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("content.read", Some("~/mail/**"), NamedEgressLabel::LocalOnly),
+        ]));
+        // A structured read of a laundered path: no rule fires (path outside
+        // the pattern), and the workspace label must NOT apply.
+        let clean = LabelRequest {
+            tool: "content.read",
+            arguments_json: r#"{"path":"/tmp/w/inbox.mbox"}"#,
+            tool_call_id: "tc_ws3",
+        };
+        assert!(
+            l.label_tool_result(&clean, None, "sess", "coder.struct", None, Some(&store), &no_prior())
+                .is_none(),
+            "structured tools must not inherit workspace taint"
+        );
+        // A restricted structured result must NOT narrow the workspace either.
+        let restricted = LabelRequest {
+            tool: "content.read",
+            arguments_json: r#"{"path":"~/mail/inbox/1"}"#,
+            tool_call_id: "tc_ws4",
+        };
+        let out = l
+            .label_tool_result(&restricted, None, "sess", "coder.struct", None, Some(&store), &no_prior())
+            .expect("rule-matched structured read restricted");
+        assert_eq!(out.label, EgressLabel::local_only());
+        assert_eq!(
+            store.get_workspace_egress_label("coder.struct").unwrap(),
+            Some(EgressLabel::no_remote_model()),
+            "structured tools never write the workspace label"
+        );
     }
 
     // ── Compression-preset eligibility (RFC §5.7) ─────────────────────────

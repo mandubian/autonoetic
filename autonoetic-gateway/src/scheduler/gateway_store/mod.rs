@@ -10,6 +10,7 @@ mod channel_bindings;
 pub mod constitutional_proposals;
 mod credentials;
 pub mod egress_policy;
+mod workspace_taint;
 pub use egress_policy::StoredEgressSessionPolicy;
 mod egress_declassification;
 mod escalations;
@@ -497,6 +498,38 @@ impl GatewayStore {
     ) -> Result<Option<autonoetic_types::egress::EgressLabel>> {
         let conn = self.conn.lock().unwrap();
         artifact_taint::get_label(&conn, artifact_id)
+    }
+
+    // ---- Agent workspace egress labels (RFC data-envelopes §11, #1001) ----
+
+    /// Read an agent workspace's egress label (`None` ⇒ unrestricted).
+    pub fn get_workspace_egress_label(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<autonoetic_types::egress::EgressLabel>> {
+        let conn = self.conn.lock().unwrap();
+        workspace_taint::get_label(&conn, agent_id)
+    }
+
+    /// Intersect a label into an agent workspace's stored label, never widening
+    /// it, and return the result. Called when an exec in the workspace resolves
+    /// to a restricted label — content movement is not path-followable, so the
+    /// workspace as a whole tightens.
+    pub fn restrict_workspace_egress_label(
+        &self,
+        agent_id: &str,
+        label: &autonoetic_types::egress::EgressLabel,
+    ) -> Result<autonoetic_types::egress::EgressLabel> {
+        let conn = self.conn.lock().unwrap();
+        workspace_taint::restrict_label(&conn, agent_id, label)
+    }
+
+    /// Delete an agent workspace's label — the operator-approved clearing path
+    /// (`EgressDeclassificationTarget::Workspace` grant materialization).
+    /// Returns whether a row was removed.
+    pub fn delete_workspace_egress_label(&self, agent_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        workspace_taint::delete_label(&conn, agent_id)
     }
 
     // ---- `labels.list` read queries (#974, RFC §9.3) ----

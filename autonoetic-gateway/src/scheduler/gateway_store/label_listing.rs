@@ -128,6 +128,9 @@ fn envelope_row_from_payload(
     };
     // `artifact_labels_applied` is an array of artifact ids in the payload.
     let artifact_labels_applied = arr("artifact_labels_applied");
+    // `workspace_labels_applied` is an array of agent ids in the payload
+    // (RFC §11, #1001).
+    let workspace_labels_applied = arr("workspace_labels_applied");
     let envelope_id = s("envelope_id")
         .or_else(|| fallback_envelope_id.map(String::from))
         .unwrap_or_default();
@@ -152,6 +155,7 @@ fn envelope_row_from_payload(
         parent_envelope_ids: arr("parent_envelope_ids"),
         taint_applied: bool_or("taint_applied", false),
         artifact_labels_applied,
+        workspace_labels_applied,
         bundle_floor_applied: bool_or("bundle_floor_applied", false),
     })
 }

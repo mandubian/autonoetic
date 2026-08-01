@@ -1003,13 +1003,25 @@ view alone:
   destination where a per-message filter would not. Operator ways forward:
   thin/hermetic mode (neither carries history), a `local` destination, or
   declassification.
-- **Content written to a new path is not re-labeled.** A labeled read whose bytes
-  are written elsewhere launders the label: `unzip ~/mail/mail.zip -d /tmp/w`
-  followed by a *later* exec reading `/tmp/w/inbox.mbox` matches no rule, and
-  argument taint does not apply because the second call references a filesystem
-  path rather than the first call's result. Plain `cp` does the same. This is a
-  sibling of the static-analysis-evasion bullet above but a distinct class: the
-  path is named honestly, the content moved. Mitigation today is a compartment
+- **Content written to a new path is not re-labeled — except when the new path
+  is an agent workspace.** A labeled read whose bytes are written elsewhere
+  launders the label: `unzip ~/mail/mail.zip -d /tmp/w` followed by a *later*
+  exec reading `/tmp/w/inbox.mbox` matches no rule, and argument taint does not
+  apply because the second call references a filesystem path rather than the
+  first call's result. Plain `cp` does the same. #1001 closes the workspace
+  case, which is the durable-object case: the agent workspace (`agents_dir`
+  per agent, bind-mounted into the sandbox) carries its own label, any exec
+  running in it intersects that label, and an exec that resolves restricted
+  tightens the workspace label in turn — so content moved *into the workspace*
+  stays labeled across sessions, even after the tainted envelope is compressed
+  away. Coarse by design: the label attaches to the workspace as a whole, never
+  to paths inside it, so moving / unzipping / renaming within it changes
+  nothing and there is no per-file map to launder around. Clearing is
+  operator-only: a materialized `EgressDeclassificationTarget::Workspace` grant
+  (the normal `EgressDeclassify` approval flow) deletes the label. What remains
+  uncovered by the workspace label: structured tools and MCP servers do not run
+  in a workspace, so source rules remain the mechanism for those; and paths
+  outside the workspace (a shared `/tmp`, a host path) still need a compartment
   with `default_label: local_only`, which labels every envelope in the session
   regardless of which path produced it.
 - **Post-grant sandbox network** has no host-level enforcement today; labels

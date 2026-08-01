@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 78;
+const SCHEMA_VERSION_LATEST: i64 = 79;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -563,7 +563,51 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_stored_content_egress_labels_v76(conn)?;
     apply_egress_declassification_grants_v77(conn)?;
     apply_artifact_egress_labels_v78(conn)?;
+    apply_workspace_egress_labels_v79(conn)?;
 
+    Ok(())
+}
+
+/// v79 — `agent_workspace_egress_labels`: the egress label of an agent's
+/// persistent workspace (RFC data-envelopes §11, #1001).
+///
+/// The workspace (`agents_dir.join(agent_id)`, bind-mounted into the sandbox)
+/// is a durable object, and it carries a durable label. Source rules are a
+/// firewall over *named* paths and cannot survive content movement (`unzip
+/// ~/mail/mail.zip -d /tmp/w`, then reading `/tmp/w/inbox.mbox` matches no
+/// rule), so the workspace as a whole is the labeled unit instead — coarse by
+/// design, because there is no per-file map to launder around.
+///
+/// Same shape as v78 `artifact_egress_labels`: absence ⇒ unrestricted, writes
+/// only intersect, and the only widening path is an operator-approved
+/// `EgressDeclassificationTarget::Workspace` grant deleting the row.
+fn apply_workspace_egress_labels_v79(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 79 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_workspace_egress_labels (
+            agent_id TEXT PRIMARY KEY,
+            -- Serialized autonoetic_types::egress::EgressLabel (sink-set JSON).
+            label_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            79_i64,
+            "agent_workspace_egress_labels",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 
