@@ -3022,30 +3022,6 @@ mod tests {
         );
     }
 
-    /// The read side's failure contract (#1001, Copilot review): a store read
-    /// error fails closed to `local_only` for the result, and marks the read as
-    /// failed so the caller skips the write-back — a transient read failure must
-    /// not become a durable workspace restriction (only an exec that *actually*
-    /// resolved restricted may ratchet the workspace).
-    #[test]
-    fn workspace_read_error_fails_closed_and_marks_failure() {
-        let (tmp, store) = ws_store();
-        // Force a read error by dropping the table out from under the store.
-        let raw = rusqlite::Connection::open(tmp.path().join("gateway.db")).unwrap();
-        raw.execute_batch("DROP TABLE agent_workspace_egress_labels")
-            .unwrap();
-        let (label, applied, failed) = workspace_taint_from_store("coder.abc", store.as_ref());
-        assert_eq!(label, EgressLabel::local_only());
-        assert_eq!(applied, vec!["coder.abc".to_string()]);
-        assert!(failed, "the caller must be told the read failed");
-        // A healthy read marks no failure.
-        let (_tmp2, store2) = ws_store();
-        let (label, applied, failed) = workspace_taint_from_store("coder.xyz", store2.as_ref());
-        assert!(label.is_unrestricted());
-        assert!(applied.is_empty());
-        assert!(!failed);
-    }
-
     // ── Compression-preset eligibility (RFC §5.7) ─────────────────────────
 
     fn tool_msg(id: &str, content: &str) -> crate::llm::Message {

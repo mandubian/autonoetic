@@ -10,7 +10,10 @@
 
 use crate::rpc_env::{env, rpc_as};
 use autonoetic_gateway::router::JsonRpcResponse;
-use autonoetic_gateway::runtime::egress_labeler::{EgressLabeler, LabelRequest};
+use autonoetic_gateway::runtime::egress_labeler::{
+    workspace_taint_from_store, EgressLabeler, LabelRequest,
+};
+use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_types::egress::{EgressConfig, EgressLabel, EgressRule};
 use std::collections::HashMap;
 
@@ -208,4 +211,61 @@ async fn structured_tools_never_touch_workspace_labels() {
         Some(EgressLabel::no_remote_model()),
         "structured tools never write the workspace label"
     );
+}
+
+/// A store read failure must not become a durable workspace restriction: the
+/// result fails closed to `local_only` and names the agent, the read is
+/// reported as failed (so the caller knows), and nothing is written back —
+/// only an exec that *actually* resolved restricted may tighten the durable
+/// label. A transient read error is a per-result decision, not a ratchet.
+#[tokio::test]
+async fn store_read_failure_fails_closed_and_skips_the_write_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(GatewayStore::open(tmp.path()).unwrap());
+    // Force a read error by dropping the table out from under the store.
+    let raw = rusqlite::Connection::open(tmp.path().join("gateway.db")).unwrap();
+    raw.execute_batch("DROP TABLE agent_workspace_egress_labels")
+        .unwrap();
+
+    // The exec still fails closed…
+    let out = EgressLabeler::from_config(&EgressConfig::default())
+        .label_tool_result(
+            &LabelRequest {
+                tool: "sandbox_exec",
+                arguments_json: r#"{"command":"cat /tmp/w/inbox.mbox"}"#,
+                tool_call_id: "tc_ws_fail",
+            },
+            None,
+            "ws-root/coder.fail-1",
+            "coder.fail",
+            Some("turn-1"),
+            Some(&store),
+            &HashMap::new(),
+        )
+        .expect("fail-closed result");
+    assert_eq!(out.label, EgressLabel::local_only());
+
+    // …the read side reports the failure (no silent persistence),…
+    let (_label, applied, failed) = workspace_taint_from_store("coder.fail", store.as_ref());
+    assert_eq!(applied, vec!["coder.fail".to_string()]);
+    assert!(failed, "the read must be reported as failed");
+    // …and nothing was written back: with the table restored, the workspace
+    // still carries no label.
+    raw.execute_batch(
+        "CREATE TABLE agent_workspace_egress_labels (
+            agent_id TEXT PRIMARY KEY,
+            label_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );",
+    )
+    .unwrap();
+    assert_eq!(
+        store.get_workspace_egress_label("coder.fail").unwrap(),
+        None,
+        "a failed read must not ratchet the durable workspace label"
+    );
+    // A healthy read marks no failure.
+    let (_label, applied, failed) = workspace_taint_from_store("coder.fail", store.as_ref());
+    assert!(applied.is_empty());
+    assert!(!failed);
 }
