@@ -562,6 +562,12 @@ the single join already does that."
 
         let task_id = crate::scheduler::new_task_id();
         let target_agent_id = args.agent_id.clone();
+        // Resolve the target's declared egress output floor once (#971): it
+        // travels in every spawn result so the session room can mark the spawn
+        // row with the bundle's own output restriction. None ⇒ the bundle is
+        // unrestricted or its manifest couldn't be read.
+        let target_output_label =
+            resolve_target_output_label(agents_dir, &target_agent_id, args.revision_id.as_deref());
 
         let durable_operation = crate::scheduler::single_flight::durable_operation_for_spawn(
             &workflow_id,
@@ -605,6 +611,7 @@ the single join already does that."
                         "ok": true,
                         "accepted": true,
                         "status": "coalesced",
+                        "target_egress_output_label": target_output_label.map(|n| n.as_str()),
                         "workflow_id": workflow_id,
                         "existing_task_id": existing.existing_task_id,
                         "approval_request_id": existing.approval_request_id,
@@ -672,6 +679,7 @@ the single join already does that."
                 "ok": true,
                 "accepted": true,
                 "status": "deduplicated",
+                "target_egress_output_label": target_output_label.map(|n| n.as_str()),
                 "singleton": true,
                 "deduplicated": true,
                 "workflow_id": workflow_id,
@@ -941,6 +949,7 @@ the single join already does that."
                 "ok": true,
                 "accepted": true,
                 "status": "queued",
+                "target_egress_output_label": target_output_label.map(|n| n.as_str()),
                 "workflow_id": workflow_id,
                 "task_id": task_id,
                 "agent_id": target_agent_id,
@@ -1825,6 +1834,25 @@ pub(crate) fn spawn_target_skill_path(
     }
 }
 
+/// Resolve a spawn target's declared egress output floor (#971) — the bundle's
+/// own output restriction, surfaced on the session room's spawn row so an
+/// operator can see that a delegation went to a local-only bundle. Reads the
+/// same SKILL.md the schema-enforcement path resolves, so the floor matches the
+/// exact revision being spawned (candidate or active). `None` when the manifest
+/// is absent/unreadable or declares no floor — the floor is advisory operator
+/// legibility, not enforcement, so a load failure degrades to "unrestricted"
+/// rather than erroring.
+pub(crate) fn resolve_target_output_label(
+    agents_dir: &std::path::Path,
+    agent_id: &str,
+    revision_id: Option<&str>,
+) -> Option<autonoetic_types::egress::NamedEgressLabel> {
+    let path = spawn_target_skill_path(agents_dir, agent_id, revision_id)?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let (manifest, _body) = crate::runtime::parser::SkillParser::parse(&content).ok()?;
+    manifest.egress.and_then(|e| e.output_label)
+}
+
 /// Outcome of enforcing the target agent's `io.accepts` schema on a spawn message.
 pub(crate) enum SpawnSchemaOutcome {
     /// Message matches the schema — proceed unchanged.
@@ -2151,6 +2179,78 @@ mod spawn_schema_tests {
         assert!(
             spawn_target_skill_path(std::path::Path::new("/data/agents"), "a", Some("rev_.._x"))
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn resolve_target_output_label_reads_the_declared_floor() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = tmp.path();
+        let agent_dir = agents_dir.join("email.reader");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("SKILL.md"),
+            r#"---
+name: "email-reader"
+description: "reads mail"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "email.reader"
+      name: "Email"
+      description: "reads mail"
+    egress:
+      output_label: local_only
+---
+# Email
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_target_output_label(agents_dir, "email.reader", None),
+            Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly),
+            "the declared local_only floor resolves for the spawn-row marker (#971)"
+        );
+    }
+
+    #[test]
+    fn resolve_target_output_label_none_when_no_floor_or_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = tmp.path();
+        // No SKILL.md at all ⇒ None (advisory legibility, not an error).
+        assert_eq!(
+            resolve_target_output_label(agents_dir, "ghost.agent", None),
+            None
+        );
+        let agent_dir = agents_dir.join("plain.agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("SKILL.md"),
+            r#"---
+name: "plain"
+metadata:
+  autonoetic:
+    agent:
+      id: "plain.agent"
+      name: "Plain"
+      description: "no floor"
+---
+# Plain
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_target_output_label(agents_dir, "plain.agent", None),
+            None,
+            "a bundle declaring no floor is unrestricted ⇒ None"
         );
     }
 }

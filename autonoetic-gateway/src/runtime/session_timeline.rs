@@ -180,13 +180,32 @@ pub fn approval_timeline_extra_from_action(
             revision_id,
             added_capabilities,
             broadened_capabilities,
+            payload,
             ..
-        } => Some(serde_json::json!({
-            "agent_id": agent_id,
-            "revision_id": revision_id,
-            "added_capabilities": added_capabilities,
-            "broadened_capabilities": broadened_capabilities,
-        })),
+        } => {
+            let mut extra = serde_json::json!({
+                "agent_id": agent_id,
+                "revision_id": revision_id,
+                "added_capabilities": added_capabilities,
+                "broadened_capabilities": broadened_capabilities,
+            });
+            // Surface the candidate's declared egress output floor (#971) so
+            // the promotion-gate card can mark a local-only bundle. Lives in the
+            // action payload blob alongside the skill preview.
+            if let Some(obj) = extra.as_object_mut() {
+                if let Some(label) = payload
+                    .as_ref()
+                    .and_then(|p| p.get("output_label"))
+                    .and_then(|v| v.as_str())
+                {
+                    obj.insert(
+                        "output_label".into(),
+                        serde_json::Value::String(label.to_string()),
+                    );
+                }
+            }
+            Some(extra)
+        }
         ScheduledAction::ProfileShare { user_id, scope, .. } => Some(serde_json::json!({
             "user_id": user_id,
             "scope": scope,
@@ -1175,6 +1194,46 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("loop_pressure"));
+    }
+
+    #[test]
+    fn approval_timeline_extra_surfaces_revision_promote_output_label() {
+        use autonoetic_types::background::ScheduledAction;
+        // A candidate declaring a local_only floor (#971): the floor lives in
+        // the action payload blob and must surface top-level so the promotion
+        // gate card can mark the bundle.
+        let action = ScheduledAction::RevisionPromote {
+            agent_id: "email.reader".to_string(),
+            revision_id: "rev_sha256:abc".to_string(),
+            outgoing_revision_id: "rev_sha256:old".to_string(),
+            added_capabilities: vec!["NetworkAccess".to_string()],
+            broadened_capabilities: vec![],
+            payload: Some(serde_json::json!({
+                "added": ["NetworkAccess"],
+                "output_label": "local_only",
+            })),
+            federation_context: None,
+        };
+        let extra = approval_timeline_extra_from_action(&action).expect("extra payload");
+        assert_eq!(extra["agent_id"], "email.reader");
+        assert_eq!(
+            extra["output_label"].as_str(),
+            Some("local_only"),
+            "the candidate's declared output floor surfaces for the gate"
+        );
+
+        // Absent floor ⇒ no output_label key (absence is the unrestricted state).
+        let action2 = ScheduledAction::RevisionPromote {
+            agent_id: "plain.agent".to_string(),
+            revision_id: "rev_sha256:plain".to_string(),
+            outgoing_revision_id: String::new(),
+            added_capabilities: vec![],
+            broadened_capabilities: vec![],
+            payload: Some(serde_json::json!({ "added": [] })),
+            federation_context: None,
+        };
+        let extra2 = approval_timeline_extra_from_action(&action2).expect("extra payload");
+        assert!(extra2.get("output_label").is_none());
     }
 
     #[test]
