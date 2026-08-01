@@ -880,6 +880,17 @@ history (visible locally to Operator/Admin viewers, never in events).
   renders it for the watched session. Metadata only — the report is content-free
   by construction, which is what makes it safe on the wire; a store error
   surfaces as an error rather than as an empty "nothing left the machine".
+- **`egress.lineage` operator RPC (#975)** — answers "why is this tainted, since
+  when, and from what?" by walking `parent_envelope_ids` back from one envelope (or
+  from every restricted envelope in the session) to the hops that introduced the
+  restriction, reporting at each which path applied: operator rule, session rule,
+  bundle floor, argument taint, stored artifact label, session taint, or the
+  default. `from` accepts an `env_*` id **or** a tool-call id, since an operator
+  reading an audit row has one or the other and the two id spaces are not
+  interchangeable elsewhere. Hops with no reachable parent are reported as
+  `origins`; when the scan window fills, `truncated` says so, so a cut chain is
+  never mistaken for a true origin. The Session Room's `T` panel renders it on
+  `Enter` over an envelope row. Metadata only, like every other surface here.
 - **`labels.list` operator RPC (#974)** — live, root-tree-scoped view over the
   label plane, returning **metadata only** (never content): labeled envelopes
   (provenance + resolution kind from `egress.envelope_labeled`), per-session
