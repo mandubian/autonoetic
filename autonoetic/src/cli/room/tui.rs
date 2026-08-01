@@ -709,6 +709,7 @@ fn build_header(
     floor: Altitude,
     squash: bool,
     taint: Option<&str>,
+    pinned: bool,
     width: u16,
 ) -> String {
     let left = format!(" Session Room [{}] — {}", channel_kind, truncate_id(root, 28));
@@ -724,6 +725,12 @@ fn build_header(
     // chip (absence reads as "open", matching the label plane's convention).
     if let Some(name) = taint.filter(|n| !n.is_empty()) {
         right_parts.push(format!("🔒 {name}"));
+    }
+    // `/private` pin state (#977): the provider constraint applies from
+    // declaration, so a freshly pinned room with nothing labeled yet must
+    // still show the pin.
+    if pinned {
+        right_parts.push("📌 pinned".to_string());
     }
     // In-flight async tool calls: `⋯2 spawn,workflow_wait Δ3t`.
     if let Some(chip) = pending_chip(&stats.pending_calls, stats.pending_age_turns) {
@@ -2476,13 +2483,14 @@ fn fetch_taint_and_trace_labels(
     root_session_id: &str,
     prior_taint: Option<String>,
     prior_trace_labels: HashMap<String, String>,
-) -> (Option<String>, HashMap<String, String>) {
+    prior_pinned: bool,
+) -> (Option<String>, HashMap<String, String>, bool) {
     let params = serde_json::json!({ "root_session_id": root_session_id });
     let value = match rpc(client, "labels.list", params) {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!(target: "room", error = %e, "labels.list failed");
-            return (prior_taint, prior_trace_labels);
+            return (prior_taint, prior_trace_labels, prior_pinned);
         }
     };
     let taint = value.get("current_taint").and_then(|v| {
@@ -2494,6 +2502,12 @@ fn fetch_taint_and_trace_labels(
             Some("restricted".to_string())
         }
     });
+    // `/private` pin (RFC §5.4 rung 1) — the badge must show it from
+    // declaration, before any content gets labeled (#977).
+    let pinned = value
+        .get("provider_constraint")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "local_only");
     let mut trace_labels: HashMap<String, String> = HashMap::new();
     if let Some(arr) = value.get("execution_traces").and_then(|v| v.as_array()) {
         for t in arr {
@@ -2509,7 +2523,7 @@ fn fetch_taint_and_trace_labels(
             }
         }
     }
-    (taint, trace_labels)
+    (taint, trace_labels, pinned)
 }
 
 /// Read the current session egress policy as a typed value. Returns
@@ -3660,6 +3674,11 @@ pub fn run(
     let mut clipboard =
         std::panic::catch_unwind(|| arboard::Clipboard::new().ok()).unwrap_or(None);
     let mut slash: Option<String> = None; // in-flight slash-command buffer (no leading `/`)
+    // `/taint` Tab-completion state (#977): the source catalog fetched from
+    // `egress.sources` once per session, and the cycling cursor over prefix
+    // matches for repeated Tab presses.
+    let mut egress_source_cache: Option<super::slash::EgressSourceCatalog> = None;
+    let mut taint_cycle: usize = 0;
     let mut session_pick_list: Option<Vec<String>> = None; // ids from /session list for number-pick
     let mut wiki_request_ids: Option<Vec<String>> = None; // ids from /wiki proposals for number-detail
     let mut status: Option<String> = None; // last action / connection result
@@ -3695,6 +3714,7 @@ pub fn run(
     // stay current.
     let mut current_taint: Option<String> = None;
     let mut current_trace_labels: HashMap<String, String> = HashMap::new();
+    let mut current_pinned: bool = false;
     let mut last_taint_poll = Instant::now();
     let mut force_taint_refresh = false;
     // RFC §4.3 (#978): an in-flight `/local` proposal awaiting the operator's
@@ -4404,6 +4424,96 @@ pub fn run(
                                 buf.pop();
                             }
                             KeyCode::Char(c) => buf.push(c),
+                            KeyCode::Tab => {
+                                // RFC §5.4 rung-2 authoring aid (#977): complete
+                                // `/taint` sources from the live tool catalog +
+                                // MCP server list (fetched once per session via
+                                // `egress.sources`) and labels from the
+                                // restrictive spellings. Only the exact `taint`
+                                // verb fires (a `tainted` buffer must not
+                                // trigger the RPC or the "no match" hint).
+                                let trimmed = buf.trim_start();
+                                let taint_verb = trimmed == "taint"
+                                    || trimmed.strip_prefix("taint").is_some_and(|r| {
+                                        r.starts_with(char::is_whitespace)
+                                    });
+                                if taint_verb {
+                                    let catalog = match egress_source_cache.as_ref() {
+                                        Some(c) => Some(c.clone()),
+                                        None => match rpc(
+                                            client,
+                                            "egress.sources",
+                                            serde_json::json!({}),
+                                        ) {
+                                            Ok(v) => {
+                                                let arr = |k: &str| {
+                                                    v.get(k)
+                                                        .and_then(|x| x.as_array())
+                                                        .map(|a| {
+                                                            a.iter()
+                                                                .filter_map(|s| {
+                                                                    s.as_str()
+                                                                        .map(String::from)
+                                                                })
+                                                                .collect::<Vec<String>>()
+                                                        })
+                                                        .unwrap_or_default()
+                                                };
+                                                let cat = super::slash::EgressSourceCatalog {
+                                                    tools: arr("tools"),
+                                                    mcp_servers: arr("mcp_servers"),
+                                                    path_families: arr("path_families"),
+                                                    labels: arr("labels"),
+                                                };
+                                                egress_source_cache = Some(cat.clone());
+                                                Some(cat)
+                                            }
+                                            Err(e) => {
+                                                status = Some(format!(
+                                                    "✗ egress.sources failed: {e}"
+                                                ));
+                                                None
+                                            }
+                                        },
+                                    };
+                                    if let Some(cat) = catalog {
+                                        match super::slash::taint_tab_complete(
+                                            buf, &cat, taint_cycle,
+                                        ) {
+                                            Some(c) => {
+                                                *buf = c.buffer;
+                                                taint_cycle = c.next_cycle;
+                                                if c.matches > 1 {
+                                                    status = Some(format!(
+                                                        "{} matches — Tab cycles · Enter declares",
+                                                        c.matches
+                                                    ));
+                                                }
+                                            }
+                                            None => {
+                                                // Prefix miss or empty token:
+                                                // surface the spellings the
+                                                // operator is most likely
+                                                // guessing at (path families
+                                                // and MCP globs).
+                                                let mut hints: Vec<String> = Vec::new();
+                                                hints.extend(
+                                                    cat.path_families.iter().cloned(),
+                                                );
+                                                for s in &cat.mcp_servers {
+                                                    hints.push(format!("mcp.{s}.*"));
+                                                }
+                                                hints.sort();
+                                                hints.dedup();
+                                                status = Some(format!(
+                                                    "✗ no source/label match — try: {}",
+                                                    hints.join(", ")
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         continue;
@@ -6588,6 +6698,7 @@ pub fn run(
                     grants_panel.as_ref(),
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
+                    current_pinned,
                 )
             })?;
         }
@@ -6637,6 +6748,7 @@ pub fn run(
                     grants_panel.as_ref(),
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
+                    current_pinned,
                 )
             })?;
         }
@@ -6850,15 +6962,17 @@ pub fn run(
         {
             last_taint_poll = Instant::now();
             force_taint_refresh = false;
-            let (taint, trace_labels) = fetch_taint_and_trace_labels(
+            let (taint, trace_labels, pinned) = fetch_taint_and_trace_labels(
                 client,
                 &root_session_id,
                 current_taint.clone(),
                 current_trace_labels.clone(),
+                current_pinned,
             );
-            if taint != current_taint || trace_labels != current_trace_labels {
+            if taint != current_taint || trace_labels != current_trace_labels || pinned != current_pinned {
                 current_taint = taint;
                 current_trace_labels = trace_labels;
+                current_pinned = pinned;
                 needs_redraw = true;
             }
         }
@@ -7265,6 +7379,7 @@ pub fn run(
                 grants_panel.as_ref(),
                 labels_panel.as_ref(),
                 current_taint.as_deref(),
+                current_pinned,
             )
         })?;
 
@@ -9564,6 +9679,7 @@ fn draw(
     grants_panel: Option<&GrantsPanel>,
     labels_panel: Option<&LabelsPanel>,
     taint: Option<&str>,
+    pinned: bool,
 ) {
     let compose_open = compose.is_some() && detail.is_none();
     let chunks = if compose_open {
@@ -9585,7 +9701,7 @@ fn draw(
     let footer_idx = if compose_open { 3 } else { 2 };
     let list_idx = 1usize;
 
-    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, chunks[0].width);
+    let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, pinned, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
@@ -12971,16 +13087,33 @@ mod tests {
         let stats = test_stats();
         let with_taint = build_header(
             "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
-            Some("local_only"), 120,
+            Some("local_only"), false, 120,
         );
         assert!(with_taint.contains("🔒 local_only"), "{with_taint}");
 
         // Unrestricted (None) ⇒ no chip — absence reads as "open".
         let open = build_header(
             "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
-            None, 120,
+            None, false, 120,
         );
         assert!(!open.contains("🔒"), "{open}");
+    }
+
+    #[test]
+    fn header_badge_shows_pinned_state() {
+        let stats = test_stats();
+        let pinned = build_header(
+            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            None, true, 120,
+        );
+        assert!(pinned.contains("📌 pinned"), "{pinned}");
+
+        // Not pinned ⇒ no chip (even with a taint label from room data).
+        let unpinned = build_header(
+            "session-root-1", "tui", &stats, 0, true, Altitude::Normal, true,
+            Some("no_remote_model"), false, 120,
+        );
+        assert!(!unpinned.contains("📌"), "{unpinned}");
     }
 
     #[test]

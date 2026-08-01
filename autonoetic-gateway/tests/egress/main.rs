@@ -35,4 +35,5 @@ mod pin_ask;
 mod proposal_authoring;
 mod routing;
 mod source_rules;
+mod sources_rpc;
 mod stored_content;

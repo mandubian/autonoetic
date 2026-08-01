@@ -490,6 +490,132 @@ fn parse_taint(tail: &str) -> SlashCommand {
     }
 }
 
+/// Live source catalog for `/taint` Tab-completion (#977) — the room fills it
+/// from the `egress.sources` RPC (tool registry + MCP server list + path
+/// families). Completion itself is a pure function of the buffer so it is
+/// unit-testable without a gateway.
+#[derive(Debug, Clone, Default)]
+pub struct EgressSourceCatalog {
+    pub tools: Vec<String>,
+    pub mcp_servers: Vec<String>,
+    pub path_families: Vec<String>,
+    /// Restrictive label spellings `/taint` accepts (`unrestricted` is a
+    /// widening usage error and is never offered).
+    pub labels: Vec<String>,
+}
+
+impl EgressSourceCatalog {
+    /// Deduplicated, sorted completion candidates for the `source` slot:
+    /// tools + path families + one `mcp.<server>.*` glob per registered server.
+    pub fn source_candidates(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        out.extend(self.tools.iter().cloned());
+        out.extend(self.path_families.iter().cloned());
+        for s in &self.mcp_servers {
+            out.push(format!("mcp.{s}.*"));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// One Tab-completion result for `/taint`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaintCompletion {
+    /// The completed slash buffer (without the leading `/`).
+    pub buffer: String,
+    /// How many candidates matched the prefix (1 ⇒ unambiguous).
+    pub matches: usize,
+    /// Match index for the next Tab press (cycles over `matches`).
+    pub next_cycle: usize,
+}
+
+/// Tab-completion for the `/taint` command (RFC §5.4 rung 2, #977).
+///
+/// `buffer` is the in-flight slash buffer without its leading `/` (the room
+/// keeps it that way; `parse` tolerates either spelling). `cycle` is the match
+/// index selected by the previous Tab (0 = first). The last token is completed:
+/// the source slot from [`EgressSourceCatalog::source_candidates`] (preserving
+/// any `:path` suffix already typed), the label slot from the restrictive
+/// spellings. Returns `None` when the buffer is not a `/taint` command, the
+/// token is empty, or nothing matches the prefix.
+pub fn taint_tab_complete(
+    buffer: &str,
+    catalog: &EgressSourceCatalog,
+    cycle: usize,
+) -> Option<TaintCompletion> {
+    let body = buffer
+        .trim_start()
+        .strip_prefix('/')
+        .unwrap_or(buffer.trim_start());
+    let rest = body.strip_prefix("taint")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None; // some other `taint*` verb, e.g. /test
+    }
+    let tokens: Vec<&str> = rest.trim_start().split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    // A trailing space means the operator finished the previous token and is
+    // positioning on the next slot: with a single token, Tab then completes
+    // the (empty) label slot instead of re-completing the source — which
+    // would swallow the trailing space and strand the operator in the source
+    // slot.
+    let trailing_space = rest.ends_with(char::is_whitespace);
+    if tokens.len() == 1 && !trailing_space {
+        // Source slot: `src` or `src:path` — complete the source part only,
+        // preserving the path suffix the operator is still typing.
+        let token = tokens[0];
+        let (prefix, suffix) = match token.split_once(':') {
+            Some((p, s)) => (p, s),
+            None => (token, ""),
+        };
+        if prefix.is_empty() {
+            return None;
+        }
+        let candidates = catalog.source_candidates();
+        let matches: Vec<&str> = candidates
+            .iter()
+            .map(String::as_str)
+            .filter(|s| s.starts_with(prefix))
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+        let idx = cycle % matches.len();
+        let completed = if suffix.is_empty() {
+            matches[idx].to_string()
+        } else {
+            format!("{}:{}", matches[idx], suffix)
+        };
+        Some(TaintCompletion {
+            buffer: format!("taint {completed}"),
+            matches: matches.len(),
+            next_cycle: (cycle + 1) % matches.len(),
+        })
+    } else {
+        // Label slot (second token; empty when the operator just typed the
+        // trailing space — Tab then cycles the restrictive spellings).
+        let token = tokens.get(1).copied().unwrap_or("");
+        let matches: Vec<&str> = catalog
+            .labels
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.starts_with(token))
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+        let idx = cycle % matches.len();
+        Some(TaintCompletion {
+            buffer: format!("taint {} {}", tokens[0], matches[idx]),
+            matches: matches.len(),
+            next_cycle: (cycle + 1) % matches.len(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,4 +1145,136 @@ mod tests {
             SlashCommand::LocalIntent { intent } if intent.is_empty()
         ));
     }
+}
+
+/// Minimal realistic catalog for completion tests: a couple of registry
+/// tools, one MCP server, the path families, and the restrictive labels.
+fn sample_catalog() -> EgressSourceCatalog {
+    EgressSourceCatalog {
+        tools: vec![
+            "content.read".into(),
+            "fs.read".into(),
+            "sandbox.exec".into(),
+            "web.fetch".into(),
+        ],
+        mcp_servers: vec!["gmail".into()],
+        path_families: vec![
+            "content.read".into(),
+            "fs.read".into(),
+            "sandbox.exec".into(),
+            "artifact.exec".into(),
+        ],
+        labels: vec!["local_only".into(), "no_remote_model".into()],
+    }
+}
+
+#[test]
+fn taint_source_completes_tool_glob_and_family() {
+    let cat = sample_catalog();
+    // Tool prefix → the tool itself.
+    let c = taint_tab_complete("taint sand", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint sandbox.exec");
+    assert_eq!(c.matches, 1);
+    assert_eq!(c.next_cycle, 0);
+    // Path-family prefix → both the family and the tool match (sorted).
+    let c = taint_tab_complete("taint fs.", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint fs.read");
+    assert_eq!(c.matches, 1);
+    // MCP prefix → the glob spelling.
+    let c = taint_tab_complete("taint mcp.", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint mcp.gmail.*");
+    assert_eq!(c.matches, 1);
+}
+
+#[test]
+fn taint_source_path_suffix_is_preserved() {
+    let cat = sample_catalog();
+    let c = taint_tab_complete("taint sandbox.exec:~/mail/20", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint sandbox.exec:~/mail/20");
+    assert_eq!(c.matches, 1);
+}
+
+#[test]
+fn taint_source_cycling_rotates_over_matches() {
+    let mut cat = sample_catalog();
+    cat.tools = vec!["sandbox.exec".into(), "sandbox.clean".into()];
+    let first = taint_tab_complete("taint sandbox.", &cat, 0).unwrap();
+    assert_eq!(first.matches, 2);
+    assert_eq!(first.next_cycle, 1);
+    assert_eq!(first.buffer, "taint sandbox.clean");
+    let second = taint_tab_complete("taint sandbox.", &cat, first.next_cycle).unwrap();
+    assert_eq!(second.buffer, "taint sandbox.exec");
+    assert_eq!(second.next_cycle, 0);
+}
+
+#[test]
+fn taint_label_completes_restrictive_spellings_only() {
+    let cat = sample_catalog();
+    // `local_` → local_only; `unrestricted` is never offered.
+    let c = taint_tab_complete("taint mcp.gmail.* local_", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint mcp.gmail.* local_only");
+    assert_eq!(c.matches, 1);
+    let c = taint_tab_complete("taint sandbox.exec no_", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint sandbox.exec no_remote_model");
+    assert_eq!(c.matches, 1);
+}
+
+#[test]
+fn taint_completion_refuses_non_taint_and_empty_tokens() {
+    let cat = sample_catalog();
+    // Other `taint*` verbs are not completed.
+    assert_eq!(taint_tab_complete("test sand", &cat, 0), None);
+    // No token yet.
+    assert_eq!(taint_tab_complete("taint", &cat, 0), None);
+    // `:` with an empty source part.
+    assert_eq!(taint_tab_complete("taint :~/mail", &cat, 0), None);
+    // No prefix match.
+    assert_eq!(taint_tab_complete("taint zzz", &cat, 0), None);
+    // Leading `/` is tolerated.
+    let c = taint_tab_complete("/taint sand", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint sandbox.exec");
+}
+
+#[test]
+fn source_candidates_are_sorted_and_deduped() {
+    let cat = sample_catalog();
+    let cands = cat.source_candidates();
+    assert_eq!(
+        cands,
+        vec![
+            "artifact.exec",
+            "content.read",
+            "fs.read",
+            "mcp.gmail.*",
+            "sandbox.exec",
+            "web.fetch",
+        ]
+    );
+}
+
+#[test]
+fn taint_tab_after_complete_source_enters_label_slot() {
+    // `taint sandbox.exec ⟨Tab⟩`: the trailing space means the operator
+    // finished the source — Tab completes the (empty) label slot instead of
+    // re-completing the source and swallowing the trailing space.
+    let cat = sample_catalog();
+    let first = taint_tab_complete("taint sandbox.exec ", &cat, 0).unwrap();
+    assert_eq!(first.buffer, "taint sandbox.exec local_only");
+    assert_eq!(first.matches, 2, "both restrictive spellings offered");
+    assert_eq!(first.next_cycle, 1);
+    let second = taint_tab_complete("taint sandbox.exec ", &cat, first.next_cycle).unwrap();
+    assert_eq!(second.buffer, "taint sandbox.exec no_remote_model");
+    assert_eq!(second.next_cycle, 0);
+    // A typed label prefix still filters the same cycle.
+    let c = taint_tab_complete("taint sandbox.exec no_", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint sandbox.exec no_remote_model");
+}
+
+#[test]
+fn taint_tab_completion_refuses_tainted_lookalike_verbs() {
+    let cat = sample_catalog();
+    // `tainted`/`taintx` must never complete — the TUI gates on the exact
+    // verb, and the pure function must agree.
+    assert_eq!(taint_tab_complete("tainted sand", &cat, 0), None);
+    assert_eq!(taint_tab_complete("taintx mcp.gmail.* local_", &cat, 0), None);
 }

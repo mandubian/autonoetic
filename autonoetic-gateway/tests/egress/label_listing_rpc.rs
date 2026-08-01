@@ -190,6 +190,22 @@ async fn labels_list_returns_all_sections_root_scoped() {
     env.store
         .set_session_egress_taint(child, &EgressLabel::no_remote_model())
         .unwrap();
+    // `/private` pin state (#977): provider constraint surfaces alongside the
+    // taint sections so a freshly pinned room shows the pin even before any
+    // content has been labeled.
+    env.store
+        .set_egress_session_policy(
+            root,
+            &autonoetic_types::egress::EgressSessionPolicy {
+                rules: vec![],
+                default_label: None,
+                provider_constraint: Some(
+                    autonoetic_types::egress::ProviderConstraint::LocalOnly,
+                ),
+            },
+            "operator",
+        )
+        .unwrap();
 
     seed_labeled_memory(&env.store, "session:ll-root", "mem-1");
     seed_labeled_memory(&env.store, "session:other-root", "mem-other");
@@ -202,6 +218,9 @@ async fn labels_list_returns_all_sections_root_scoped() {
         resp["current_taint"],
         serde_json::to_value(EgressLabel::local_only()).unwrap()
     );
+
+    // ---- provider constraint (pinned via /private) ----
+    assert_eq!(resp["provider_constraint"], serde_json::json!("local_only"));
 
     // ---- envelopes: only the child's, with provenance fields round-tripped ----
     let envelopes = resp["envelopes"].as_array().unwrap();
@@ -534,6 +553,8 @@ async fn labels_list_unrestricted_envelopes_are_listed() {
         .map(|r| r["envelope_id"].as_str().unwrap())
         .collect();
     assert!(ids.contains(&"env_unr_list"));
+    // No /private policy ⇒ provider_constraint is absent.
+    assert!(resp.get("provider_constraint").is_none(), "{resp}");
     // And a cannot_reach filter drops it.
     let resp2 = labels_list(serde_json::json!({
         "root_session_id": root,
