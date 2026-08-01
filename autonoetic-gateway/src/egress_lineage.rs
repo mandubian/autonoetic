@@ -61,6 +61,9 @@ pub enum LineageOrigin {
     BundleFloor,
     /// A stored artifact's label was intersected in (the artifact read path).
     ArtifactLabel,
+    /// The agent workspace's durable label was intersected in (RFC §11, #1001)
+    /// — content movement, not a rule, is why this result is labeled.
+    WorkspaceLabel,
     /// A prior labeled result in this turn was referenced by the arguments.
     ArgumentTaint,
     /// Accumulated session taint was intersected in.
@@ -86,6 +89,9 @@ impl LineageOrigin {
         }
         if !row.artifact_labels_applied.is_empty() {
             return Self::ArtifactLabel;
+        }
+        if !row.workspace_labels_applied.is_empty() {
+            return Self::WorkspaceLabel;
         }
         if !row.parent_envelope_ids.is_empty() || row.taint_applied {
             // `taint_applied` means argument taint from prior envelopes
@@ -123,6 +129,10 @@ pub struct LineageNode {
     /// Stored artifacts whose labels were intersected in at this hop.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artifact_ids: Vec<String>,
+    /// Agent workspaces whose durable labels were intersected in at this hop
+    /// (RFC §11, #1001).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub workspace_agents: Vec<String>,
     /// Tool-call ids of the prior results this hop inherited from — the next
     /// hop back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -260,6 +270,7 @@ pub fn walk_taint_lineage(
             origin: LineageOrigin::classify(row),
             matched_rules: row.matched_rules.clone(),
             artifact_ids: row.artifact_labels_applied.clone(),
+            workspace_agents: row.workspace_labels_applied.clone(),
             parents: row.parent_envelope_ids.clone(),
             depth,
             is_origin,
@@ -308,6 +319,7 @@ mod tests {
             parent_envelope_ids: parents.iter().map(|s| s.to_string()).collect(),
             taint_applied: !parents.is_empty(),
             artifact_labels_applied: vec![],
+            workspace_labels_applied: vec![],
             bundle_floor_applied: false,
         }
     }
@@ -358,6 +370,12 @@ mod tests {
         let mut r = row("env_1", "tc_1", "t1", EgressLabel::local_only(), None, &[]);
         r.artifact_labels_applied = vec!["art_x".to_string()];
         assert_eq!(LineageOrigin::classify(&r), LineageOrigin::ArtifactLabel);
+
+        // The workspace label is its own origin: content movement, not a rule,
+        // is why this result is labeled (#1001).
+        let mut w = row("env_3", "tc_3", "t1", EgressLabel::local_only(), None, &[]);
+        w.workspace_labels_applied = vec!["coder.abc".to_string()];
+        assert_eq!(LineageOrigin::classify(&w), LineageOrigin::WorkspaceLabel);
 
         let mut f = row("env_2", "tc_2", "t1", EgressLabel::local_only(), None, &[]);
         f.bundle_floor_applied = true;

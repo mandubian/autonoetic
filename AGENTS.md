@@ -185,6 +185,15 @@ ports, use fixed paths, or spawn singleton daemons must stay in their own
 binary (or be refactored to `tempfile` + port-0 first) — cohabiting one
 process requires no cross-test external state.
 
+**Where a test lives (#1001):** pure module semantics stay as `#[cfg(test)]`
+unit tests next to the code (`scheduler/gateway_store/workspace_taint.rs::tests`,
+`runtime/egress_labeler.rs::tests` — in-memory stores, no injection). Contract
+tests — invariants that combine store + labeler + routing, and anything needing
+failure injection against a real store (dropped table, corrupted row, …) — go
+in the domain binary (`tests/egress/`, one module per subject, e.g.
+`tests/egress/workspace_taint.rs`), not the crate's unit modules. When in
+doubt, the domain binary is the default.
+
 **Enforcement-register citation coupling:** the constitution's enforcement
 register cites test files by name, and `enforcement_register.rs`'s
 `every_parseable_citation_resolves` test fails the build when a cited file

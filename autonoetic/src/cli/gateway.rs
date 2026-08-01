@@ -3218,7 +3218,7 @@ fn parse_egress_declass_target(
     use autonoetic_types::egress::EgressDeclassificationTarget;
     let (kind, value) = spec.split_once(':').ok_or_else(|| {
         anyhow::anyhow!(
-            "invalid --target '{spec}': expected `<kind>:<value>` where kind is envelope_id, source_pattern, or memory_id"
+            "invalid --target '{spec}': expected `<kind>:<value>` where kind is envelope_id, source_pattern, memory_id, or workspace"
         )
     })?;
     anyhow::ensure!(!value.is_empty(), "invalid --target '{spec}': empty value");
@@ -3226,8 +3226,9 @@ fn parse_egress_declass_target(
         "envelope_id" => Ok(EgressDeclassificationTarget::EnvelopeId(value.to_string())),
         "source_pattern" => Ok(EgressDeclassificationTarget::SourcePattern(value.to_string())),
         "memory_id" => Ok(EgressDeclassificationTarget::MemoryId(value.to_string())),
+        "workspace" => Ok(EgressDeclassificationTarget::Workspace(value.to_string())),
         other => anyhow::bail!(
-            "invalid --target kind '{other}': expected envelope_id, source_pattern, or memory_id"
+            "invalid --target kind '{other}': expected envelope_id, source_pattern, memory_id, or workspace"
         ),
     }
 }

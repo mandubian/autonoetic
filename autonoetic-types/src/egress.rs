@@ -508,6 +508,10 @@ pub enum EgressDeclassificationTarget {
     EnvelopeId(String),
     SourcePattern(String),
     MemoryId(String),
+    /// An agent's persistent workspace (RFC data-envelopes §11, #1001): the
+    /// durable object a declassification clears wholesale, so releasing it goes
+    /// through the same approval → grant machinery as every other widening.
+    Workspace(String),
 }
 
 impl EgressDeclassificationTarget {
@@ -516,12 +520,15 @@ impl EgressDeclassificationTarget {
             Self::EnvelopeId(_) => "envelope_id",
             Self::SourcePattern(_) => "source_pattern",
             Self::MemoryId(_) => "memory_id",
+            Self::Workspace(_) => "workspace",
         }
     }
 
     pub fn value(&self) -> &str {
         match self {
-            Self::EnvelopeId(v) | Self::SourcePattern(v) | Self::MemoryId(v) => v.as_str(),
+            Self::EnvelopeId(v) | Self::SourcePattern(v) | Self::MemoryId(v) | Self::Workspace(v) => {
+                v.as_str()
+            }
         }
     }
 }
@@ -764,6 +771,11 @@ pub struct LabeledEnvelopeRow {
     /// True when stored artifact labels were intersected into this label.
     #[serde(default)]
     pub artifact_labels_applied: Vec<String>,
+    /// Agent ids whose workspace labels were intersected into this label
+    /// (RFC data-envelopes §11, #1001). Empty for non-exec tools, which never
+    /// run in a workspace.
+    #[serde(default)]
+    pub workspace_labels_applied: Vec<String>,
     /// True when the bundle floor was intersected into this label.
     #[serde(default)]
     pub bundle_floor_applied: bool,

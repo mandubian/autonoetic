@@ -12,6 +12,7 @@ fn parse_target(kind: &str, value: &str) -> Option<EgressDeclassificationTarget>
         "envelope_id" => Some(EgressDeclassificationTarget::EnvelopeId(value.to_string())),
         "source_pattern" => Some(EgressDeclassificationTarget::SourcePattern(value.to_string())),
         "memory_id" => Some(EgressDeclassificationTarget::MemoryId(value.to_string())),
+        "workspace" => Some(EgressDeclassificationTarget::Workspace(value.to_string())),
         _ => None,
     }
 }

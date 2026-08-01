@@ -37,3 +37,4 @@ mod routing;
 mod source_rules;
 mod sources_rpc;
 mod stored_content;
+mod workspace_taint;
