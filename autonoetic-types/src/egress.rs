@@ -1047,6 +1047,7 @@ mod tests {
                 args_digest: Some("deadbeef".to_string()),
                 matched_rules: vec!["email.*".to_string()],
                 parent_envelope_ids: vec![],
+                artifact_id: None,
             },
             indication: Indication {
                 text: "[withheld: 1× email.read result — policy local_only]".to_string(),
