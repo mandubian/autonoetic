@@ -139,6 +139,9 @@ pub struct EgressAuditFields {
     pub preset_class: Option<String>,
     pub fallback: Option<String>,
     pub source_id_count: Option<u64>,
+    /// `egress.envelope_labeled` — the artifact this envelope's content became
+    /// (RFC §4.5 forward link, #986). Content-free: a store key.
+    pub artifact_id: Option<String>,
     /// `egress.declassified` grant metadata.
     pub allowed_sink: Option<String>,
     pub declass_scope: Option<String>,
@@ -248,6 +251,7 @@ pub fn build_egress_audit(
                 preset_class: get("preset_class"),
                 fallback: get("fallback"),
                 source_id_count: array_len("source_ids"),
+                artifact_id: get("artifact_id"),
                 allowed_sink,
                 declass_scope: get("scope"),
                 declass_target,

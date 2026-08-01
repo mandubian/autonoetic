@@ -227,6 +227,7 @@ async fn rfc_5_6_mixed_session_end_to_end_including_governor_fire() -> anyhow::R
                 tool: "sandbox_exec",
                 arguments_json: r#"{"command":"python3 parse_mail.py"}"#,
                 tool_call_id: "tc_mail_export",
+                artifact_id: None,
             },
             Some(&exec_ctx),
             SESSION,

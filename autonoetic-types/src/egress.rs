@@ -264,6 +264,13 @@ pub struct Provenance {
     /// (RFC §4.1 path 3). Populated in phase 2 (#907).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parent_envelope_ids: Vec<String>,
+    /// The artifact this envelope's content became (RFC §4.5 forward link,
+    /// #986): when a labeled result was written into an artifact
+    /// (`artifact_build`), this names the artifact that now carries the same
+    /// label. The reverse direction — artifact labels intersected *into* a
+    /// resolution — is recorded in `Resolution::artifact_labels_applied`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
 }
 
 /// Safe substitute for a withheld envelope (RFC §3.3).
@@ -1040,6 +1047,7 @@ mod tests {
                 args_digest: Some("deadbeef".to_string()),
                 matched_rules: vec!["email.*".to_string()],
                 parent_envelope_ids: vec![],
+                artifact_id: None,
             },
             indication: Indication {
                 text: "[withheld: 1× email.read result — policy local_only]".to_string(),
