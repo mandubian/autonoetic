@@ -91,7 +91,7 @@ pub struct SourceCatalog {
 /// Path-taking source families used for path subjects (RFC §4.2 example uses
 /// `fs.read:~/mail/**` and `sandbox.exec:~/mail/**`). The four families cover
 /// every path-shaped tool class the gateway has.
-const PATH_SOURCE_FAMILIES: &[&str] = &["fs.read", "content.read", "sandbox.exec", "artifact.exec"];
+pub const PATH_SOURCE_FAMILIES: &[&str] = &["fs.read", "content.read", "sandbox.exec", "artifact.exec"];
 
 /// Normalize an intent phrase for parsing: lowercase, collapse whitespace,
 /// trim trailing punctuation.

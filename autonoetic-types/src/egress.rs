@@ -849,6 +849,12 @@ pub struct LabelsListResponse {
     /// reuse either call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_taint: Option<EgressLabel>,
+    /// The root session's `provider_constraint` (RFC §5.4 rung 1) — `Some`
+    /// means `/private` pinned this room to local presets even before any
+    /// content was labeled. Rendered as the pin state in the room badge
+    /// (#977).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_constraint: Option<ProviderConstraint>,
     pub envelopes: Vec<LabeledEnvelopeRow>,
     pub session_taints: Vec<SessionTaintRow>,
     pub memories: Vec<LabeledMemoryRow>,

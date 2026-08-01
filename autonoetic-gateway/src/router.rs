@@ -3329,6 +3329,13 @@ impl JsonRpcRouter {
             // (I-14: the label plane stays gateway-only).
             "labels.list" => handle_labels_list(&self.execution, req),
 
+            // RFC §4.2/§4.3 source catalog for `/taint` completion (#977):
+            // the live tool registry + registered MCP server names + the
+            // path-taking source families. Read-only, pure data, no session
+            // state needed — the room fetches it to complete `source` names so
+            // the operator never has to remember `mcp.gmail.*` spellings.
+            "egress.sources" => handle_egress_sources(req),
+
             "egress.audit" => handle_egress_audit(&self.execution, req),
 
             "egress.lineage" => handle_egress_lineage(&self.execution, req),
@@ -3632,6 +3639,12 @@ impl JsonRpcRouter {
                         "session_approval_grants": session_approval_grants,
                         "egress_declassification_grants": egress_declassification_grants,
                         "current_taint": current_taint,
+                        "provider_constraint": match store
+                            .get_egress_session_policy(&params.root_session_id)
+                        {
+                            Ok(Some(p)) => p.policy.provider_constraint,
+                            _ => None,
+                        },
                     }),
                 )
             }
@@ -6023,6 +6036,47 @@ fn handle_egress_policy_propose(req: JsonRpcRequest) -> JsonRpcResponse {
     JsonRpcResponse::success(req.id, serde_json::to_value(&proposal).unwrap_or_default())
 }
 
+/// `egress.sources` — the live source catalog for `/taint` completion (#977).
+///
+/// Returns the same catalog the intent proposer matches against (RFC §4.3
+/// "known tool catalogs, MCP server list"), plus the restrictive label
+/// spellings the command accepts. Read-only and pure — the room caches it
+/// across Tab presses, so an operator who knows "the emails thing" can
+/// Tab-complete `mcp.gmail.*` without remembering the exact registration.
+#[inline(never)]
+fn handle_egress_sources(req: JsonRpcRequest) -> JsonRpcResponse {
+    // No parameters expected: the catalog is session-independent and pure.
+    let empty = req
+        .params
+        .as_object()
+        .map(|o| o.is_empty())
+        .unwrap_or(req.params.is_null());
+    if !empty {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for egress.sources: no parameters expected",
+        );
+    }
+    let mut tools: Vec<String> = crate::runtime::tools::default_registry()
+        .registered_tool_names()
+        .into_iter()
+        .collect();
+    tools.sort();
+    let mut path_families: Vec<&str> =
+        crate::runtime::egress_proposal::PATH_SOURCE_FAMILIES.to_vec();
+    path_families.sort();
+    JsonRpcResponse::success(
+        req.id,
+        serde_json::json!({
+            "tools": tools,
+            "mcp_servers": crate::runtime::egress_proposal::mcp_server_names_from_env(),
+            "path_families": path_families,
+            "labels": ["local_only", "no_remote_model"],
+        }),
+    )
+}
+
 /// `egress.audit` — the per-turn egress report for one session (RFC §9.3,
 /// #973).
 ///
@@ -6307,9 +6361,25 @@ fn handle_labels_list(execution: &GatewayExecutionService, req: JsonRpcRequest) 
         }
     };
 
+    // `/private` pin state (RFC §5.4 rung 1): the provider constraint applies
+    // from declaration, before any content is labeled — a freshly pinned room
+    // must still show its pin in the badge (#977).
+    let provider_constraint = match store.get_egress_session_policy(&params.root_session_id) {
+        Ok(Some(p)) => p.policy.provider_constraint,
+        Ok(None) => None,
+        Err(e) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("labels.list (session egress policy) failed: {}", e),
+            )
+        }
+    };
+
     let response = autonoetic_types::egress::LabelsListResponse {
         root_session_id: params.root_session_id,
         current_taint,
+        provider_constraint,
         envelopes,
         session_taints,
         memories,
