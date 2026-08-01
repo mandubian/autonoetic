@@ -29,6 +29,7 @@ const RESET_EPHIMERAL_PATHS: &[&str] = &[
     "scheduler",
     "sessions",
     "vault.key",
+    "vault.enc.json",
     "constitution",
     "sdk",
     "wiki",

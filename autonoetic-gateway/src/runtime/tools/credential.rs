@@ -1385,7 +1385,11 @@ impl SkillStep {
                 let var_name = self
                     .var
                     .ok_or_else(|| anyhow::anyhow!("user_input step missing 'var'"))?;
-                Ok(CredentialSetupStep::UserInput { question, var_name })
+                Ok(CredentialSetupStep::UserInput {
+                    question,
+                    var_name,
+                    secret_fields: self.secret_fields.unwrap_or_default(),
+                })
             }
             "user_prompt" => Ok(CredentialSetupStep::UserPrompt {
                 message: self.message.unwrap_or_default(),
@@ -1419,9 +1423,18 @@ impl NativeTool for CredentialSetupTool {
                 skill_url accepts an HTTPS URL (fetched remotely, subject to approval) or a \
                 gateway-local .md path such as 'github.md' / 'skills/github.md'; \
                 file:// URLs are accepted only when they resolve under the gateway skills/ directory. \
-                When a user_input step is reached the tool returns with `suspended_for_user_input: true` \
-                and a `question`. Call `user.ask` with that question, then call `credential.setup` \
-                again with `credential_id` + `resume_vars: { var_name: answer }` to continue. \
+                Step types: `api_call` (gateway HTTP call; `extract_secrets` pulls values \
+                server-side into the vault), `user_prompt` (the gateway prompts the OPERATOR through \
+                a secure popup for secret fields — use this for any secret the human must provide, \
+                e.g. an app password or API key; the secret never enters chat), \
+                `user_action` (human does something in their browser), and `user_input` \
+                (a NON-secret question; the tool returns `suspended_for_user_input: true` and a \
+                `question`, you call `user.ask` with it, then call `credential.setup` again with \
+                `credential_id` + `resume_vars: { var_name: answer }`). \
+                IMPORTANT: `user_input` must never be used for secrets — user.ask \
+                heuristically rejects secret-collection-shaped questions and the gateway \
+                rejects `user_input` steps carrying `secret_fields`; use `user_prompt` for \
+                secrets so they never enter chat. \
                 Alternatively supply `service` + `steps` directly for programmatic setup.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -2174,6 +2187,31 @@ fn execute_steps(
     run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     label: Option<&str>,
 ) -> anyhow::Result<String> {
+    // Mechanical guard: `user_input` answers flow through the LLM (`user.ask`),
+    // so a `user_input` step must never be used to collect secret material.
+    // Reject at entry (before any side effects) instead of silently dropping
+    // the fields the way tagged-enum deserialization would.
+    for step in steps {
+        if let CredentialSetupStep::UserInput { secret_fields, .. } = step {
+            if !secret_fields.is_empty() {
+                return Ok(
+                    autonoetic_types::tool_error::ToolError::validation(
+                        "user_input step cannot collect secrets (secret_fields would flow through \
+                         the LLM); use a user_prompt step instead",
+                        Some(
+                            "Replace the user_input step with {\"step_type\": \"user_prompt\", \
+                             \"message\": ..., \"secret_fields\": [{\"name\": ..., \"label\": ..., \
+                             \"masked\": true}]} — the gateway prompts the operator through a \
+                             secure popup and the secret never reaches the LLM."
+                                .to_string(),
+                        ),
+                    )
+                    .to_error_response(),
+                );
+            }
+        }
+    }
+
     let mut secret_names: Vec<String> = Vec::new();
     let mut step_results: Vec<serde_json::Value> = Vec::new();
 
@@ -2290,7 +2328,11 @@ fn execute_steps(
                 }));
             }
 
-            CredentialSetupStep::UserInput { question, var_name } => {
+            CredentialSetupStep::UserInput {
+                question,
+                var_name,
+                ..
+            } => {
                 // Resolve templates in the question (e.g. {{public.tweet_text}}).
                 let resolved_question =
                     resolve_template_str(question, &vars, &public_data, manifest, vault);
@@ -2494,6 +2536,61 @@ fn execute_steps(
                 secret_names.push(name.clone());
             }
         }
+    }
+
+    // Completeness gate (mechanical, no reasoning): a flow that declared an
+    // injectable secret (`inject_as`) or an `extract_secrets` mapping, yet ends
+    // with none stored, has failed to produce the credential it promised. Fail
+    // loudly instead of reporting a hollow `ok: true, secrets_stored: 0` — the
+    // agent would otherwise keep believing a credential is set. `inject_as` is
+    // the planner's structured declaration that a secret exists; `user_action`-
+    // only flows (no injectable secret) are left alone.
+    //
+    // Note on `vars.is_empty()`: by the time this gate runs, the block above has
+    // already converted every collected var into a vault secret for flows that
+    // used only `user_input` steps, so non-empty `secret_names` means the flow
+    // produced its secrets through that path. The gate therefore only trips when
+    // a flow *declared* an injectable secret and captured nothing — it is not a
+    // loophole for declared-but-not-captured secrets.
+    //
+    // `UserPrompt` steps are intentionally not part of the expected-capture
+    // accounting: that arm always returns early (suspending on the approval, or
+    // returning a repair hint when the prompt was already cleared but the secret
+    // is still missing), so a flow that reaches this gate has no pending prompt —
+    // and a prompt that was approved stored its secrets into the vault before the
+    // flow could complete.
+    let extract_declared = steps.iter().any(|s| {
+        matches!(
+            s,
+            CredentialSetupStep::ApiCall {
+                extract_secrets, ..
+            } if !extract_secrets.is_empty()
+        )
+    });
+    if (inject_as.is_some() || extract_declared)
+        && secret_names.is_empty()
+        && vars.is_empty()
+    {
+        let expected: Vec<&str> = [
+            inject_as.is_some().then_some("an injectable secret (inject_as)"),
+            extract_declared.then_some("extract_secrets response fields"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        return Ok(autonoetic_types::tool_error::ToolError::validation(
+            format!(
+                "credential.setup completed with no secrets stored, but the flow expected: {}",
+                expected.join(", ")
+            ),
+            Some(
+                "No onboarding step captured a secret. Add a user_prompt step (the operator is \
+                 prompted through a secure popup) or an api_call step with extract_secrets that \
+                 returns the secret; this is the planner's responsibility when authoring the skill."
+                    .to_string(),
+            ),
+        )
+        .to_error_response());
     }
 
     vault.persist_to_file(vault_path)?;
