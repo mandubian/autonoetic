@@ -172,7 +172,11 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
 
 /// When session taint excludes RemoteModel, force a local digest preset
 /// (RFC §6 / #908). Errors clearly if none is configured.
-fn resolve_digest_llm_for_session(
+///
+/// `pub` so the egress integration suite (`tests/egress/digest_local_preset.rs`)
+/// can pin the preset-selection branches; mirrors the `run_post_session_digest_with_driver`
+/// test hook below.
+pub fn resolve_digest_llm_for_session(
     config: &GatewayConfig,
     session_taint: Option<&autonoetic_types::egress::EgressLabel>,
 ) -> anyhow::Result<LlmConfig> {
