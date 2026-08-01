@@ -6468,6 +6468,11 @@ pub fn run(
                         // gate as acted, close the modal, and let the timeline
                         // show the turn's progress. Re-answering is idempotent
                         // gateway-side if the question ever re-appears.
+                        // `msg` here comes from `call_with_timeout` (client.rs),
+                        // whose timeout error template is "{method} timed out
+                        // after {n}s (gateway not responding)" — the
+                        // `contains("timed out")` test below is coupled to that
+                        // template and must be revisited if it ever changes.
                         let answer_timed_out =
                             gi.action == GateAction::Answer && msg.contains("timed out");
                         if answer_timed_out {

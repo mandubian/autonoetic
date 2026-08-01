@@ -2545,6 +2545,20 @@ fn execute_steps(
     // agent would otherwise keep believing a credential is set. `inject_as` is
     // the planner's structured declaration that a secret exists; `user_action`-
     // only flows (no injectable secret) are left alone.
+    //
+    // Note on `vars.is_empty()`: by the time this gate runs, the block above has
+    // already converted every collected var into a vault secret for flows that
+    // used only `user_input` steps, so non-empty `secret_names` means the flow
+    // produced its secrets through that path. The gate therefore only trips when
+    // a flow *declared* an injectable secret and captured nothing — it is not a
+    // loophole for declared-but-not-captured secrets.
+    //
+    // `UserPrompt` steps are intentionally not part of the expected-capture
+    // accounting: that arm always returns early (suspending on the approval, or
+    // returning a repair hint when the prompt was already cleared but the secret
+    // is still missing), so a flow that reaches this gate has no pending prompt —
+    // and a prompt that was approved stored its secrets into the vault before the
+    // flow could complete.
     let extract_declared = steps.iter().any(|s| {
         matches!(
             s,
