@@ -664,7 +664,17 @@ pub enum CredentialSetupStep {
     /// `suspended_for_user_input: true` and the question.  The agent should call
     /// `user.ask` with the question, collect the human's answer, then call
     /// `credential.setup` again with `credential_id` + `resume_vars: { var_name: answer }`.
-    UserInput { question: String, var_name: String },
+    ///
+    /// `secret_fields` is rejected at execution time: `user_input` answers flow
+    /// through the LLM (`user.ask`), so it must never be used to collect secret
+    /// material — use [`CredentialSetupStep::UserPrompt`] for secrets, which
+    /// prompts the operator through a secure out-of-band channel.
+    UserInput {
+        question: String,
+        var_name: String,
+        #[serde(default)]
+        secret_fields: Vec<SecretFieldSpec>,
+    },
 }
 
 /// Specification for a secret field in a UserPrompt step.

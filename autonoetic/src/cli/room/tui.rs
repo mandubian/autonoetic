@@ -6426,20 +6426,61 @@ pub fn run(
             if let Some(result) = poll_pending_gate(&mut pending) {
                 match result {
                     Ok(msg) => {
-                        acted.insert(pending.gi.as_ref().map(|g| g.id.clone()).unwrap_or_default());
-                        if gate_modal
+                        let resolved_gate_id = pending
+                            .gi
                             .as_ref()
-                            .is_some_and(|m| m.gate.id == pending.gi.as_ref().map(|g| g.id.clone()).unwrap_or_default())
-                        {
-                            gate_modal = None;
+                            .map(|g| g.id.clone())
+                            .unwrap_or_default();
+                        // Remember the event id that announced this gate so the
+                        // auto-open logic below does not immediately re-popup the
+                        // same gate before the refreshed timeline has a chance to
+                        // catch up (e.g. an agent turn that re-asks the same
+                        // interaction before the resolution event lands).
+                        let resolved_event_id = gate_modal
+                            .as_ref()
+                            .filter(|m| m.gate.id == resolved_gate_id)
+                            .and_then(|m| gate_entry_for_ref(&entries, &m.gate))
+                            .map(|e| e.event_id.clone());
+                        acted.insert(resolved_gate_id);
+                        // Dismiss the modal on any successful gate resolution: this
+                        // is the operator's most recent action, so any open gate
+                        // overlay should close rather than stay stuck. The operator
+                        // answers inside the modal (in-popup input panel), so the
+                        // resolved gate is the modal's gate; a follow-up gate opens
+                        // a fresh modal when it lands.
+                        gate_modal = None;
+                        if let Some(event_id) = resolved_event_id {
+                            last_announced_gate_event = Some(event_id);
                         }
                         status = Some(msg);
                         follow = true;
                         force_timeline_refresh = true;
                     }
                     Err((msg, gi)) => {
-                        status = Some(msg);
-                        input = Some(gi);
+                        // `interaction.resolve_and_answer` blocks on the gateway
+                        // until the resumed agent turn finishes (the answer is
+                        // persisted *before* the resume, so a timeout almost
+                        // always means the answer was recorded and the turn is
+                        // still running). Restoring the input on timeout makes
+                        // the popup look stuck even though the answer landed —
+                        // so for interaction answers that time out, treat the
+                        // gate as acted, close the modal, and let the timeline
+                        // show the turn's progress. Re-answering is idempotent
+                        // gateway-side if the question ever re-appears.
+                        let answer_timed_out =
+                            gi.action == GateAction::Answer && msg.contains("timed out");
+                        if answer_timed_out {
+                            acted.insert(gi.id.clone());
+                            gate_modal = None;
+                            status = Some(format!(
+                                "{msg} — answer accepted; the agent turn is still \
+                                 running (watch the timeline). If the question \
+                                 re-appears, press r to answer again."
+                            ));
+                        } else {
+                            status = Some(msg);
+                            input = Some(gi);
+                        }
                     }
                 }
                 needs_redraw = true;
@@ -7614,11 +7655,21 @@ fn resolve_gate(
     };
     let client = client.clone();
     let gate_id = gi.id.clone();
+    // `interaction.resolve_and_answer` awaits the full resumed agent turn
+    // gateway-side (LLM rounds + tool calls, often minutes), so the RPC can be
+    // far slower than the store-sync approval RPCs. Keep the cap generous —
+    // the call runs in a background task, so the TUI event loop never blocks
+    // on it; Esc on the modal remains available to close the overlay early.
+    let rpc_timeout = if gi.action == GateAction::Answer {
+        Duration::from_secs(600)
+    } else {
+        Duration::from_secs(30)
+    };
     let result: Arc<StdMutex<Option<Result<String, String>>>> = Arc::new(StdMutex::new(None));
     let result2 = Arc::clone(&result);
     tokio::spawn(async move {
         let outcome = match client
-            .call_with_timeout(method, params, Duration::from_secs(30))
+            .call_with_timeout(method, params, rpc_timeout)
             .await
         {
             Ok(_) => Ok(format!("✓ {verb} {gate_id}")),
@@ -11589,6 +11640,43 @@ mod tests {
             kind: GateKind::Plan,
             id: "plan-1".into(),
         }));
+    }
+
+    #[test]
+    fn answered_interaction_is_not_reannounced_as_blocking_gate() {
+        let mut ask = gate_entry("user.ask.pending");
+        ask.event_id = "ev-ask".into();
+        ask.payload = Some(
+            serde_json::json!({ "interaction_id": "int-1", "question": "Pick one?" }).to_string(),
+        );
+        let entries = vec![ask];
+        let empty = HashSet::new();
+        let mut acted = HashSet::new();
+        acted.insert("int-1".into());
+        assert!(
+            newest_blocking_gate_event(&entries, &empty, &acted).is_none(),
+            "an interaction in `acted` must not be re-offered as a blocking gate"
+        );
+    }
+
+    #[test]
+    fn gate_entry_for_ref_finds_interaction_by_payload_id() {
+        let mut ask = gate_entry("user.ask.pending");
+        ask.refs.interaction_id = None;
+        ask.payload = Some(
+            serde_json::json!({ "interaction_id": "int-from-payload", "question": "?" }).to_string(),
+        );
+        let entries = vec![ask];
+        let gate = GateRef {
+            kind: GateKind::Interaction,
+            id: "int-from-payload".into(),
+        };
+        let entry = gate_entry_for_ref(&entries, &gate);
+        assert!(
+            entry.is_some(),
+            "gate_entry_for_ref should resolve interaction id from payload"
+        );
+        assert_eq!(entry.unwrap().event_type, "user.ask.pending");
     }
 
     #[test]

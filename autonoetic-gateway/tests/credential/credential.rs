@@ -1447,3 +1447,159 @@ fn test_credential_setup_json_path_dollar_prefix() {
     let result = autonoetic_gateway::runtime::store::parse_json_path("$.user");
     assert_eq!(result, vec!["user"]);
 }
+
+#[test]
+fn test_credential_setup_user_input_with_secret_fields_rejected() {
+    let manifest = test_manifest(vec![Capability::CredentialAccess {
+        services: vec!["gmail".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // The agent improvised a `user_input` step carrying secret_fields (the
+    // pre-fix failure mode): the gateway must reject it mechanically instead
+    // of silently dropping the fields and dead-ending in a user.ask loop.
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "gmail",
+                "steps": [{
+                    "step_type": "user_input",
+                    "question": "Enter the app password generated in the previous step.",
+                    "var_name": "app_password",
+                    "secret_fields": [
+                        {"name": "app_password", "label": "App Password", "masked": true}
+                    ]
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential.setup should return a response");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error_type"], "validation");
+    let message = parsed["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("user_input step cannot collect secrets"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("user_prompt"),
+        "repair hint must point at user_prompt: {message}"
+    );
+    assert_eq!(
+        parsed["suspended_for_user_input"],
+        serde_json::Value::Null,
+        "must not suspend for user input — that path cannot carry secrets"
+    );
+}
+
+#[test]
+fn test_credential_setup_missing_secret_capture_fails_loudly() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["gmail".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let (_server_url, _server_handle) = spawn_one_shot_http_server(
+        "200 OK",
+        "application/json",
+        r#"{"status":"ok"}"#.to_string(),
+    );
+    std::fs::create_dir_all(temp.path().join("skills/gmail")).unwrap();
+    // Skill that declares an injectable secret (`inject_as`) but whose onboarding
+    // steps capture nothing (the broken-gmail-skill shape): the run must fail
+    // loudly with missing_secret_capture instead of reporting `ok: true,
+    // secrets_stored: 0`. No heuristic detection — the gate keys off the
+    // planner's own structured declaration (`inject_as`).
+    std::fs::write(
+        temp.path().join("skills/gmail/SKILL.md"),
+        format!(
+            r#"---
+autonoetic:
+  credential:
+    service: gmail
+    inject_as: GMAIL_SECRET
+    allowed_hosts:
+    - 127.0.0.1
+  onboarding:
+    steps:
+    - method: GET
+      url: {_server_url}/apppasswords
+      type: api_call
+---
+"#
+        ),
+    )
+    .expect("skill should write");
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            Some(temp.path()),
+            &serde_json::json!({
+                "skill_url": "skills/gmail/SKILL.md",
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential.setup should return a response");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error_type"], "validation");
+    let message = parsed["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("no secrets stored") && message.contains("injectable secret"),
+        "unexpected message: {message}"
+    );
+    let hint = parsed["repair_hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("user_prompt"),
+        "repair hint must point at user_prompt: {hint}"
+    );
+
+    // Nothing must be half-registered: no credential row, no vault secret.
+    let creds = store
+        .list_credentials_by_service("gmail")
+        .expect("list creds");
+    assert!(creds.is_empty(), "no credential record should exist");
+    let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").unwrap();
+    let vault = autonoetic_gateway::vault::Vault::load_from_file(std::path::Path::new(&vault_path))
+        .expect("load vault");
+    assert!(
+        vault.get_secret("app_password").is_none(),
+        "no secret should be stored"
+    );
+}
