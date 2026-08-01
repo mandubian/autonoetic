@@ -5054,6 +5054,17 @@ pub fn run(
                                             ];
                                             if row.kind == LabelKind::Envelope {
                                                 lines.push(format!("filter: {}", panel.filter.label()));
+                                                // Walk the taint back to what caused
+                                                // it (#975). The row already shows
+                                                // *that* it is labeled; only the
+                                                // lineage says since when and from
+                                                // what.
+                                                lines.push(String::new());
+                                                lines.extend(egress_lineage_lines(
+                                                    client,
+                                                    &root_session_id,
+                                                    &row.id,
+                                                ));
                                             }
                                             detail = Some(DetailPane {
                                                 rendered: render_detail_lines(&lines),
@@ -9039,6 +9050,82 @@ fn list_skills_detail(client: &RoomClient) -> Vec<String> {
 /// A turn with no egress events is a turn where nothing was labeled, so the
 /// empty report says exactly that rather than looking like a failed read; a
 /// failed read is a `✗` line, and the two must not be confusable.
+/// Taint lineage for one envelope (#975), rendered into the `T` panel's detail
+/// pane: from the selected envelope back to the rule, floor, or artifact that
+/// started the restriction.
+///
+/// Reads `egress.lineage`, the same walk `gateway` surfaces expose. Metadata
+/// only — ids, labels, rule names — never content. A failed read is a `✗` line,
+/// distinct from "no lineage recorded", so a broken call cannot read as a clean
+/// origin.
+fn egress_lineage_lines(
+    client: &RoomClient,
+    root_session_id: &str,
+    envelope_id: &str,
+) -> Vec<String> {
+    let params = serde_json::json!({
+        "root_session_id": root_session_id,
+        "from": envelope_id,
+    });
+    let value = match rpc(client, "egress.lineage", params) {
+        Ok(v) => v,
+        Err(e) => return vec![format!("✗ egress.lineage failed: {e}")],
+    };
+    let nodes = value
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if nodes.is_empty() {
+        return vec!["lineage: (no derivation recorded for this envelope)".to_string()];
+    }
+
+    let mut lines = vec!["lineage — why this is labeled:".to_string()];
+    for node in &nodes {
+        let s = |k: &str| node.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let depth = node.get("depth").and_then(|v| v.as_u64()).unwrap_or(0);
+        let origin = s("origin");
+        let turn = match s("turn_id") {
+            "" => "(session-level)".to_string(),
+            t => t.to_string(),
+        };
+        // Indent by depth so the chain reads as a chain.
+        let indent = "  ".repeat(depth as usize + 1);
+        let tool = match s("tool_name") {
+            "" => String::new(),
+            t => format!("{t} "),
+        };
+        lines.push(format!("{indent}{turn}  {tool}→ {origin}"));
+
+        let rules: Vec<&str> = node
+            .get("matched_rules")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|r| r.as_str()).collect())
+            .unwrap_or_default();
+        if !rules.is_empty() {
+            lines.push(format!("{indent}  rule {}", rules.join(", ")));
+        }
+        let arts: Vec<&str> = node
+            .get("artifact_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|r| r.as_str()).collect())
+            .unwrap_or_default();
+        if !arts.is_empty() {
+            lines.push(format!("{indent}  artifact {}", arts.join(", ")));
+        }
+        if node.get("is_origin").and_then(|v| v.as_bool()) == Some(true) {
+            lines.push(format!("{indent}  ↑ origin"));
+        }
+    }
+    if value.get("truncated").and_then(|v| v.as_bool()) == Some(true) {
+        lines.push(
+            "⚠ scan window filled — an `origin` above may have parents that were not read"
+                .to_string(),
+        );
+    }
+    lines
+}
+
 fn egress_audit_detail(client: &RoomClient, session_id: &str) -> Vec<String> {
     let params = serde_json::json!({ "session_id": session_id });
     let value = match rpc(client, "egress.audit", params) {

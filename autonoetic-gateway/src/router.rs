@@ -3331,6 +3331,8 @@ impl JsonRpcRouter {
 
             "egress.audit" => handle_egress_audit(&self.execution, req),
 
+            "egress.lineage" => handle_egress_lineage(&self.execution, req),
+
             "session.envelope.propose" => {
                 #[derive(Deserialize)]
                 struct EnvelopeProposeParams {
@@ -6078,6 +6080,73 @@ fn handle_egress_audit(execution: &GatewayExecutionService, req: JsonRpcRequest)
             ),
         },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("egress.audit failed: {}", e)),
+    }
+}
+
+/// `egress.lineage` — walk a taint back to what caused it (RFC §9.1, #975).
+///
+/// The label plane could always show *that* something is tainted and never
+/// *why*. Every `egress.envelope_labeled` event records its resolution inputs,
+/// and monotonic intersection gives each taint an exact causal origin — so the
+/// derivation was fully recorded and simply unwalked. This walks it.
+///
+/// `from` accepts either an `env_*` id or a tool-call id: an operator reading an
+/// audit row has one or the other and should not need to know which space it
+/// lives in. Omitting it asks the session-level question ("why is this room
+/// tainted?") by starting from every restricted envelope in the window.
+///
+/// Operator-facing, read-only, metadata-only — the properties that make
+/// `egress.audit` safe on the wire. A store error is `-32000`, never an empty
+/// lineage: "no origin recorded" and "the read failed" must not look alike.
+#[inline(never)]
+fn handle_egress_lineage(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        root_session_id: String,
+        /// Envelope id (`env_*`) or tool-call id to start from. Omit for the
+        /// whole session's lineage.
+        #[serde(default)]
+        from: Option<String>,
+        #[serde(default)]
+        limit: Option<i64>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "egress.lineage", e),
+    };
+    if params.root_session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "egress.lineage: root_session_id must not be empty".to_string(),
+        );
+    }
+
+    let store = match execution.gateway_store() {
+        Some(s) => s,
+        None => {
+            return JsonRpcResponse::error(req.id, -32000, "Gateway store not available".to_string())
+        }
+    };
+
+    match crate::egress_lineage::walk_taint_lineage(
+        store.as_ref(),
+        &params.root_session_id,
+        params.from.as_deref(),
+        params.limit,
+    ) {
+        Ok(lineage) => match serde_json::to_value(&lineage) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(
+                req.id,
+                -32000,
+                format!("egress.lineage serialization failed: {}", e),
+            ),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("egress.lineage failed: {}", e)),
     }
 }
 
