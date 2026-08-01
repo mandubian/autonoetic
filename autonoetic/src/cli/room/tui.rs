@@ -6429,8 +6429,9 @@ pub fn run(
                         let resolved_gate_id = pending
                             .gi
                             .as_ref()
-                            .map(|g| g.id.clone())
-                            .unwrap_or_default();
+                            .expect("resolved gate must still carry its input (only the error path consumes it)")
+                            .id
+                            .clone();
                         // Remember the event id that announced this gate so the
                         // auto-open logic below does not immediately re-popup the
                         // same gate before the refreshed timeline has a chance to

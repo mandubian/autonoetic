@@ -1431,9 +1431,10 @@ impl NativeTool for CredentialSetupTool {
                 (a NON-secret question; the tool returns `suspended_for_user_input: true` and a \
                 `question`, you call `user.ask` with it, then call `credential.setup` again with \
                 `credential_id` + `resume_vars: { var_name: answer }`). \
-                IMPORTANT: `user_input` must never be used for secrets — user.ask is rejected for \
-                secret collection and `user_input` steps carrying `secret_fields` are rejected by \
-                the gateway; use `user_prompt` for secrets. \
+                IMPORTANT: `user_input` must never be used for secrets — user.ask \
+                heuristically rejects secret-collection-shaped questions and the gateway \
+                rejects `user_input` steps carrying `secret_fields`; use `user_prompt` for \
+                secrets so they never enter chat. \
                 Alternatively supply `service` + `steps` directly for programmatic setup.".to_string(),
             input_schema: json!({
                 "type": "object",
