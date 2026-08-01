@@ -1935,11 +1935,30 @@ impl GrantRow {
     }
 }
 
+/// One child session's egress taint, for the grants panel's child-sessions
+/// section (#976). RFC §5.5 makes a spawned child the intended taint
+/// firebreak, so a tainted child is exactly the posture the operator must see
+/// — and before this it was invisible (only the root's taint was surfaced).
+/// Read-only: a taint is not a grant and is not revocable from this panel, so
+/// these rows are an info section, not part of the selectable grant list.
+#[derive(Clone, PartialEq, Eq)]
+struct ChildTaintDisplay {
+    /// Full child session id (e.g. `root/coder-abc`).
+    session_id: String,
+    /// Display name resolved from the sink-set (`local_only`,
+    /// `no_remote_model`, `blocked`, `restricted(N sinks)`).
+    taint: String,
+}
+
 struct GrantsPanel {
     selected: usize,
     rows: Vec<GrantRow>,
     /// Current root-session egress taint display name (None ⇒ unrestricted).
     taint: Option<String>,
+    /// Per-session taint for the root's tainted children (#976). Only
+    /// restrictive taints are stored, so this is every child that actually
+    /// carries a label — the firebreaks the operator could not previously see.
+    child_taints: Vec<ChildTaintDisplay>,
     /// When Some, THAT grant — by identity, not by row position — is armed for
     /// a confirm-revoke (`r` again). Identity-keyed so the confirm can only
     /// ever fire at the grant the operator actually saw when they armed it.
@@ -2059,17 +2078,20 @@ fn format_grant_detail(g: &serde_json::Value) -> String {
     s
 }
 
-/// Poll `grants.list` and fold into display rows + the taint label. Returns
-/// `(rows, taint)`. Errors are swallowed (empty rows) — the caller surfaces a
-/// status message — so a gateway blip never crashes the UI. Mirrors
-/// `fetch_approval_rows`.
-fn fetch_grant_rows(client: &RoomClient, root_session_id: &str) -> (Vec<GrantRow>, Option<String>) {
+/// Poll `grants.list` and fold into display rows, the root taint label, and
+/// the child-session taints. Returns `(rows, taint, child_taints)`. Errors are
+/// swallowed (empty rows) — the caller surfaces a status message — so a
+/// gateway blip never crashes the UI. Mirrors `fetch_approval_rows`.
+fn fetch_grant_rows(
+    client: &RoomClient,
+    root_session_id: &str,
+) -> (Vec<GrantRow>, Option<String>, Vec<ChildTaintDisplay>) {
     let params = serde_json::json!({ "root_session_id": root_session_id });
     let value = match rpc(client, "grants.list", params) {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!(target: "room", error = %e, "grants.list failed");
-            return (Vec::new(), None);
+            return (Vec::new(), None, Vec::new());
         }
     };
 
@@ -2130,7 +2152,32 @@ fn fetch_grant_rows(client: &RoomClient, root_session_id: &str) -> (Vec<GrantRow
         }
     });
 
-    (rows, taint)
+    // Child-session taints (#976): every restrictive child row the gateway
+    // surfaced. The label is the same serde-transparent sink-set array as
+    // `current_taint`, so reuse `sinks_label_name` to get the named display
+    // (local_only / no_remote_model / blocked / restricted(N sinks)).
+    let child_taints = value
+        .get("child_taints")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| {
+                    let session_id =
+                        row.get("session_id").and_then(|v| v.as_str())?.to_string();
+                    let label_val =
+                        row.get("label").cloned().unwrap_or(serde_json::Value::Null);
+                    let sinks_json =
+                        serde_json::to_string(&label_val).unwrap_or_else(|_| "[]".to_string());
+                    Some(ChildTaintDisplay {
+                        session_id,
+                        taint: sinks_label_name(&sinks_json),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    (rows, taint, child_taints)
 }
 
 // Labels panel (`T`) — operator live view of every labeled thing in the root
@@ -5060,10 +5107,11 @@ pub fn run(
                                                     // grant is gone, so keep the
                                                     // cursor on its neighbour by
                                                     // falling back to the index.
-                                                    let (rows, taint) =
+                                                    let (rows, taint, child_taints) =
                                                         fetch_grant_rows(client, &root_session_id);
                                                     panel.rows = rows;
                                                     panel.taint = taint;
+                                                    panel.child_taints = child_taints;
                                                     panel.pending_revoke = None;
                                                     panel.clamp_selection();
                                                     needs_redraw = true;
@@ -5703,14 +5751,16 @@ pub fn run(
                             } else if grants_panel.is_some() {
                                 grants_panel = None;
                             } else {
-                                let (rows, taint) = fetch_grant_rows(client, &root_session_id);
-                                if rows.is_empty() {
+                                let (rows, taint, child_taints) =
+                                    fetch_grant_rows(client, &root_session_id);
+                                if rows.is_empty() && child_taints.is_empty() {
                                     status = Some("no active grants in this session".to_string());
                                 } else {
                                     grants_panel = Some(GrantsPanel {
                                         selected: 0,
                                         rows,
                                         taint,
+                                        child_taints,
                                         pending_revoke: None,
                                     });
                                     last_grants_poll = Instant::now();
@@ -6897,7 +6947,7 @@ pub fn run(
             && last_grants_poll.elapsed() >= Duration::from_millis(SESSION_STATUS_POLL_MS)
         {
             last_grants_poll = Instant::now();
-            let (rows, taint) = fetch_grant_rows(client, &root_session_id);
+            let (rows, taint, child_taints) = fetch_grant_rows(client, &root_session_id);
             if let Some(panel) = grants_panel.as_mut() {
                 let rows_changed = rows.len() != panel.rows.len()
                     || rows
@@ -6905,6 +6955,7 @@ pub fn run(
                         .zip(panel.rows.iter())
                         .any(|(a, b)| a.id != b.id || a.kind != b.kind);
                 let taint_changed = taint != panel.taint;
+                let child_taints_changed = child_taints != panel.child_taints;
                 if rows_changed {
                     let prev_ident = panel.selected_ident();
                     panel.rows = rows;
@@ -6914,7 +6965,10 @@ pub fn run(
                 if taint_changed {
                     panel.taint = taint;
                 }
-                if rows_changed || taint_changed {
+                if child_taints_changed {
+                    panel.child_taints = child_taints;
+                }
+                if rows_changed || taint_changed || child_taints_changed {
                     needs_redraw = true;
                 }
             }
@@ -10379,25 +10433,61 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
         .taint
         .clone()
         .unwrap_or_else(|| "unrestricted".to_string());
-    let title = format!(
-        " Grants — {} approval · {} declass · taint {} [G/Esc close · j/k nav · r revoke] ",
+    // The child count only appears when there IS a tainted child, so an
+    // untainted room pays no clutter cost — the segment is the signal
+    // ("a child is carrying a label the root isn't") rather than a counter.
+    let mut title = format!(
+        " Grants — {} approval · {} declass · taint {}",
         n_approval, n_declass, taint_str,
     );
+    if !panel.child_taints.is_empty() {
+        title.push_str(&format!(" · {} child tainted", panel.child_taints.len()));
+    }
+    title.push_str(" [G/Esc close · j/k nav · r revoke] ");
     let area = centered_rect(82, 78, f.area());
     f.render_widget(Clear, area);
+
+    // The read-only child-sessions section: a tainted child is exactly the
+    // RFC §5.5 firebreak the operator couldn't see before (#976). It is NOT
+    // part of the selectable grant list, so it sits above the rows and the
+    // cursor never lands on it. Only restrictive taints are stored, so every
+    // row here is a real compartmented label.
+    let mut lines: Vec<Line> = Vec::new();
+    if !panel.child_taints.is_empty() {
+        lines.push(
+            Line::from(format!(
+                "── Child sessions ({}) ",
+                panel.child_taints.len()
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+        );
+        for ct in &panel.child_taints {
+            lines.push(Line::from(vec![
+                Span::raw("   ◦ "),
+                Span::raw(ct.session_id.clone()),
+                Span::raw("  "),
+                Span::styled(ct.taint.clone(), Style::default().fg(Color::Red)),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    let child_section_len = lines.len();
 
     // Scroll is DERIVED from the selection rather than held as state, so the
     // selected row is always on screen — there is no scroll offset that can go
     // stale or drift out of sync with `selected`. Keeps the cursor pinned to the
-    // bottom visible line once it scrolls past the first page.
+    // bottom visible line once it scrolls past the first page. The offset is in
+    // *line* units (child section + grant rows together), so a tall child
+    // section scrolls away correctly rather than pinning the first grant row.
     let inner_height = area.height.saturating_sub(2) as usize;
-    let max_scroll = rows.len().saturating_sub(inner_height);
-    let scroll = panel
-        .selected
+    let total_lines = child_section_len + rows.len();
+    let selected_line = child_section_len + panel.selected;
+    let max_scroll = total_lines.saturating_sub(inner_height);
+    let scroll = selected_line
         .saturating_sub(inner_height.saturating_sub(1))
         .min(max_scroll) as u16;
 
-    let lines: Vec<Line> = rows
+    let grant_lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .map(|(i, r)| {
@@ -10434,6 +10524,7 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
             Line::from(spans).style(style)
         })
         .collect();
+    lines.extend(grant_lines);
 
     f.render_widget(
         Paragraph::new(lines)

@@ -3565,11 +3565,14 @@ impl JsonRpcRouter {
             }
 
             // Operator-facing grant enumeration for live views (TUI / audit).
-            // Returns both grant kinds for a root session plus the root's
-            // current egress taint. Read-only; the TUI polls this on its idle
-            // cadence to render a grants panel. The store methods are the
-            // single source of truth (Separation of Powers: the TUI never
-            // opens SQLite directly).
+            // Returns both grant kinds for a root session, the root's current
+            // egress taint, AND every child session's restrictive taint — RFC
+            // §5.5 makes session boundaries the intended taint firebreak, so a
+            // child is exactly the session expected to carry a taint, and
+            // surfacing only the root left that compartment invisible (#976).
+            // Read-only; the TUI polls this on its idle cadence to render a
+            // grants panel. The store methods are the single source of truth
+            // (Separation of Powers: the TUI never opens SQLite directly).
             "grants.list" => {
                 #[derive(Deserialize)]
                 struct GrantsListParams {
@@ -3632,6 +3635,29 @@ impl JsonRpcRouter {
                         );
                     }
                 };
+                // Per-session taint for the root's children. The root's own
+                // taint is `current_taint` above; this is every *other*
+                // restrictive row under the tree (only restrictive taint is
+                // stored, so absence ⇒ unrestricted and there is nothing to
+                // show for a clean child). A store error surfaces as `-32000`
+                // rather than an empty list — "no child is tainted" and "the
+                // read failed" must not look alike (same fail-visible contract
+                // as the grant/taint queries above).
+                let child_taints = match store
+                    .list_session_taints_for_root(&params.root_session_id)
+                {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .filter(|r| r.session_id != params.root_session_id)
+                        .collect::<Vec<_>>(),
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            format!("grants.list (child taints) failed: {}", e),
+                        );
+                    }
+                };
                 JsonRpcResponse::success(
                     req.id,
                     serde_json::json!({
@@ -3639,6 +3665,7 @@ impl JsonRpcRouter {
                         "session_approval_grants": session_approval_grants,
                         "egress_declassification_grants": egress_declassification_grants,
                         "current_taint": current_taint,
+                        "child_taints": child_taints,
                         "provider_constraint": match store
                             .get_egress_session_policy(&params.root_session_id)
                         {
