@@ -56,6 +56,13 @@ pub struct LabelRequest<'a> {
     /// The tool-call id. Until message ids land (RFC §3.4, phase 2 #907) this
     /// is the join key between an envelope and the content it labels.
     pub tool_call_id: &'a str,
+    /// The artifact this call *produced* (RFC §4.5 forward link, #986):
+    /// `artifact_build`'s result names the artifact its content became, and the
+    /// chokepoint carries it here so the envelope's provenance maps to the
+    /// artifact. `None` for every other call — and for this field to stay
+    /// trustworthy it must come from the tool *result*, never the arguments
+    /// (which may name only *consumed* artifacts, the reverse direction).
+    pub artifact_id: Option<&'a str>,
 }
 
 /// A prior labeled result held by the session for argument-taint detection
@@ -485,6 +492,7 @@ impl EgressLabeler {
             args_digest: Some(args_digest),
             matched_rules: resolution.rule_keys(),
             parent_envelope_ids,
+            artifact_id: req.artifact_id.map(str::to_string),
         };
 
         // Best-effort causal event — the durable record of this labeling
@@ -661,6 +669,12 @@ impl EgressLabeler {
             // into it cannot be followed by path rules, so the label attaches to
             // the workspace as a whole and this names it for "why?".
             "workspace_labels_applied": resolution.workspace_labels_applied,
+            // Artifact forward link (RFC §4.5, #986) — the artifact this
+            // envelope's content became. The reverse direction (labels read
+            // *from* artifacts) is `artifact_labels_applied` above; an operator
+            // following a tainted envelope to the durable bytes it left behind
+            // lands here.
+            "artifact_id": provenance.artifact_id,
             // Explicitly name the resolution path so the audit answers "why?".
             "resolution": resolution.kind(),
         });
@@ -1120,6 +1134,7 @@ pub fn synthesized_band_label(band: &LabelBand) -> (EgressLabel, Provenance) {
         args_digest: None,
         matched_rules: vec![],
         parent_envelope_ids: band.source_ids.clone(),
+        artifact_id: None,
     };
     (band.label.clone(), provenance)
 }
@@ -1864,6 +1879,23 @@ pub fn artifact_ids_in_arguments(arguments_json: &str) -> Vec<String> {
     }
     out.sort();
     out
+}
+
+/// The artifact id a tool *result* names as produced (RFC §4.5 forward link,
+/// #986) — the artifact whose content a labeled result became.
+///
+/// The reverse direction ([`artifact_ids_in_arguments`]) scans the *arguments*
+/// for ids the call consumed; this reads the id the call created from the
+/// *result* payload. `artifact_build` is the only artifact-birth tool today,
+/// and its result names `artifact_id` top-level. An unparsable or non-JSON
+/// result yields `None` — sandbox output is not JSON, so no exec result can
+/// accidentally name an artifact. The source is the tool's own result, not
+/// agent-supplied arguments, so no shape validation is needed.
+pub fn produced_artifact_id_in_result(result_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
+    v.get("artifact_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Intersect the stored labels of every artifact named in `arguments_json`.
@@ -2799,6 +2831,7 @@ mod tests {
             tool: "fs_read",
             arguments_json: "{}",
             tool_call_id: "tc_1",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         assert!(out.is_none());
@@ -2812,6 +2845,7 @@ mod tests {
             tool: "fs_read",
             arguments_json: "{}",
             tool_call_id: "tc_1",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         assert!(out.is_none());
@@ -2824,6 +2858,7 @@ mod tests {
             tool: "email.read",
             arguments_json: r#"{"box":"inbox"}"#,
             tool_call_id: "tc_42",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert!(out.is_restricted());
@@ -2856,6 +2891,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::local_only());
@@ -2871,6 +2907,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         assert!(out.is_none(), "clean exec should not be labeled");
@@ -2891,6 +2928,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"cat ~/mail/inbox/1"}"#,
             tool_call_id: "tc_exec",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior());
         // The fs.read rule does not apply to sandbox.exec → unrestricted → no label.
@@ -2907,6 +2945,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"echo hello"}"#,
             tool_call_id: "tc_exec",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::no_remote_model());
@@ -2936,6 +2975,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"unzip ~/mail/mail.zip -d /tmp/w && cat /tmp/w/inbox.mbox"}"#,
             tool_call_id: "tc_ws",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "coder.abc", None, Some(&store), &no_prior())
@@ -2963,6 +3003,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"cat /tmp/w/inbox.mbox"}"#,
             tool_call_id: "tc_ws2",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "coder.abc", None, Some(&store), &no_prior())
@@ -2974,6 +3015,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"cat /tmp/w/inbox.mbox"}"#,
             tool_call_id: "tc_ws2b",
+            artifact_id: None,
         };
         let out2 = l2
             .label_tool_result(&req2, None, "sess", "coder.abc", None, Some(&store), &no_prior())
@@ -2999,6 +3041,7 @@ mod tests {
             tool: "content.read",
             arguments_json: r#"{"path":"/tmp/w/inbox.mbox"}"#,
             tool_call_id: "tc_ws3",
+            artifact_id: None,
         };
         assert!(
             l.label_tool_result(&clean, None, "sess", "coder.struct", None, Some(&store), &no_prior())
@@ -3010,6 +3053,7 @@ mod tests {
             tool: "content.read",
             arguments_json: r#"{"path":"~/mail/inbox/1"}"#,
             tool_call_id: "tc_ws4",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&restricted, None, "sess", "coder.struct", None, Some(&store), &no_prior())
@@ -3194,9 +3238,64 @@ mod tests {
             tool: "artifact_exec",
             arguments_json: r#"{"command":"python3 read.py ~/mail/archive.mbox"}"#,
             tool_call_id: "tc_exec",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &no_prior()).expect("restricted");
         assert_eq!(out.label, EgressLabel::local_only());
+    }
+
+    // ── Produced-artifact forward link (RFC §4.5, #986) ───────────────
+
+    #[test]
+    fn produced_artifact_id_in_result_parses_the_build_result() {
+        // The artifact_build result shape (artifact.rs): the canonical id sits
+        // top-level next to the digests and the agent-usable read handle.
+        assert_eq!(
+            produced_artifact_id_in_result(
+                r#"{"ok":true,"artifact_id":"art_deadbeef","artifact_canonical_digest":"sha256:…","artifact_ref":"ar.test"}"#
+            ),
+            Some("art_deadbeef".to_string())
+        );
+    }
+
+    #[test]
+    fn produced_artifact_id_in_result_is_none_for_non_artifact_results() {
+        // Sandbox output is not JSON — the guard against an exec result
+        // accidentally naming an artifact.
+        assert_eq!(
+            produced_artifact_id_in_result("unzip: done\ncopied 12 files"),
+            None
+        );
+        // A JSON result that names no artifact.
+        assert_eq!(
+            produced_artifact_id_in_result(r#"{"ok":true,"files":["a.py"]}"#),
+            None
+        );
+        // An artifact_id that is not a string.
+        assert_eq!(
+            produced_artifact_id_in_result(r#"{"ok":true,"artifact_id":42}"#),
+            None
+        );
+    }
+
+    /// The forward link survives the round trip: the envelope's provenance
+    /// carries the artifact this result became, and the audit payload names it.
+    #[test]
+    fn envelope_provenance_carries_the_produced_artifact_id() {
+        let (_tmp, store) = ws_store();
+        let l = EgressLabeler::from_config(&cfg(vec![
+            rule("artifact.build", None, NamedEgressLabel::LocalOnly),
+        ]));
+        let req = LabelRequest {
+            tool: "artifact_build",
+            arguments_json: r#"{"inputs":["main.py"],"entrypoints":["main.py"]}"#,
+            tool_call_id: "tc_build",
+            artifact_id: Some("art_deadbeef"),
+        };
+        let out = l
+            .label_tool_result(&req, None, "sess", "agent", None, Some(&store), &no_prior())
+            .expect("artifact_build under a local_only rule must label");
+        assert_eq!(out.provenance.artifact_id.as_deref(), Some("art_deadbeef"));
     }
 
     /// The dependency read (RFC §4.2, §5.6 step 3): the labeled path is only in
@@ -3218,6 +3317,7 @@ mod tests {
             tool: "sandbox_exec",
             arguments_json: r#"{"command":"python3 parse_mail.py"}"#,
             tool_call_id: "tc_exec",
+            artifact_id: None,
         };
 
         // Without the context the script is invisible → nothing labeled.
@@ -3325,6 +3425,7 @@ mod tests {
             tool: "custom_tool",
             arguments_json: "{}",
             tool_call_id: "tc_floor",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "agent", None, None, &no_prior())
@@ -3347,6 +3448,7 @@ mod tests {
             tool: "content_write",
             arguments_json: r#"{"source_ref":"tc_prior_secret","content":"derived"}"#,
             tool_call_id: "tc_derived",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
@@ -3374,6 +3476,7 @@ mod tests {
             tool: "content_write",
             arguments_json: &format!(r#"{{"content":"Here is the data: {prior_content}"}}"#),
             tool_call_id: "tc_copy",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
@@ -3400,6 +3503,7 @@ mod tests {
             tool: "content_write",
             arguments_json: r#"{"content":"completely unrelated clean content"}"#,
             tool_call_id: "tc_clean",
+            artifact_id: None,
         };
         // Unrestricted label → label_tool_result returns None (no envelope).
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &taint);
@@ -3420,6 +3524,7 @@ mod tests {
             tool: "content_write",
             arguments_json: r#"{"refs":["tc_a","tc_b"]}"#,
             tool_call_id: "tc_combined",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
@@ -3443,6 +3548,7 @@ mod tests {
             tool: "content_write",
             arguments_json: r#"{"ref":"tc_secret"}"#,
             tool_call_id: "tc_out",
+            artifact_id: None,
         };
         let out = l
             .label_tool_result(&req, None, "sess", "agent", None, None, &taint)
@@ -3460,6 +3566,7 @@ mod tests {
             tool: "content_write",
             arguments_json: r#"{"content":"anything"}"#,
             tool_call_id: "tc_test",
+            artifact_id: None,
         };
         let out = l.label_tool_result(&req, None, "sess", "agent", None, None, &taint);
         // No handle match (tc_empty not in args), no verbatim match (empty

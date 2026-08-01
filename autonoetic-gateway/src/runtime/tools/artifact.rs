@@ -460,6 +460,12 @@ impl NativeTool for ArtifactBuildTool {
 
         let mut out = serde_json::json!({
             "ok": true,
+            // The canonical content-addressed id (RFC §4.5 forward link, #986):
+            // named here so the tool result — and, through the chokepoint, the
+            // envelope labeling this result — maps to the artifact its content
+            // became. `artifact_ref` below stays the agent-usable read handle;
+            // this is the store key the operator audit follows.
+            "artifact_id": bundle.artifact_id,
             "artifact_canonical_digest": bundle.artifact_canonical_digest,
             "artifact_manifest_digest": bundle.artifact_manifest_digest,
             "kind": serde_json::to_value(&bundle.kind)

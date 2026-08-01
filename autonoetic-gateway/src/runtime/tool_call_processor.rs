@@ -306,11 +306,25 @@ impl<'a> ToolCallProcessor<'a> {
         // path 3): the labeler scans the arguments for handle references
         // (tool_call_id) and bounded verbatim content matches. Empty on the
         // first tool call of a turn — no scan runs.
+        //
+        // The forward artifact link (RFC §4.5, #986): artifact_build is the
+        // only tool that writes content into the artifact store, and its result
+        // names the artifact it created. Carried into the envelope's provenance
+        // so an operator can follow a labeled result to the durable bytes it
+        // left behind. Parsed from the RESULT — never the arguments, which name
+        // only consumed artifacts (the reverse direction, handled by the
+        // labeler itself).
+        let produced_artifact_id = if canonical_tool == "artifact_build" {
+            crate::runtime::egress_labeler::produced_artifact_id_in_result(res)
+        } else {
+            None
+        };
         if let Some(outcome) = egress_labeler.label_tool_result(
             &crate::runtime::egress_labeler::LabelRequest {
                 tool: canonical_tool,
                 arguments_json: &tc.arguments,
                 tool_call_id: &tc.id,
+                artifact_id: produced_artifact_id.as_deref(),
             },
             Some(&exec_ctx),
             self.session_id.as_deref().unwrap_or(""),
