@@ -504,6 +504,46 @@ pub fn agent_spawn_agent_id(entry: &SessionTimelineEntry) -> Option<String> {
     }
 }
 
+/// The declared egress output floor of a spawn's target agent (#971), when the
+/// spawn has completed and the gateway surfaced it in the result payload. Used
+/// to mark the spawn row with the bundle's own output restriction (e.g.
+/// `local_only`) so an operator sees that a delegation went to a local-only
+/// bundle. `None` for a pending spawn (`tool.requested`) or an unrestricted /
+/// unreadable bundle — distinct from the runtime taint marker (■), which is the
+/// spawn *result's* live label, not the bundle's declaration.
+pub fn agent_spawn_output_label(entry: &SessionTimelineEntry) -> Option<String> {
+    let p = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(v)
+            } else {
+                v
+            }
+        })?;
+    let tool = p
+        .get("tool_name")
+        .or_else(|| p.get("tool"))
+        .and_then(|v| v.as_str())?;
+    if tool != "agent_spawn" || entry.event_type != "tool.completed" {
+        return None;
+    }
+    let result = p
+        .get("result")
+        .or_else(|| p.get("message"))
+        .or_else(|| p.get("summary"))?;
+    let obj = if let Some(s) = result.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).ok()?
+    } else {
+        result.clone()
+    };
+    obj.get("target_egress_output_label")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 fn agent_id_from_spawn_result(value: Option<&serde_json::Value>) -> Option<String> {
     let value = value?;
     let parsed = if let Some(s) = value.as_str() {
@@ -781,6 +821,13 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
         }
         if let Some(rev) = field("revision_id") {
             lines.push(format!("  revision: {}", one_line(&rev, 120)));
+        }
+        // Declared egress output floor of the candidate (#971): the bundle's own
+        // output restriction, surfaced so an operator can see they are admitting
+        // a local-only bundle (the case the issue calls out as invisible). Absent
+        // ⇒ unrestricted / not declared.
+        if let Some(label) = field("output_label") {
+            lines.push(format!("  output floor: {label}"));
         }
         if let Some(summary) = field("summary") {
             lines.push("  about:".to_string());
@@ -1312,11 +1359,20 @@ fn extract_tool_key_param(p: &Option<serde_json::Value>, tool_name: &str) -> Opt
 /// child agent is launched), so they get a distinctive `⑂ spawn → <id>` line
 /// instead of the generic `tool agent_spawn (<id>)` — the fork glyph and arrow
 /// read as "delegated to a child" at a glance, and the child's task goes on the
-/// `↳` detail line (see `detail_preview`).
-fn spawn_headline(agent_id: Option<&str>) -> String {
-    match agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+/// `↳` detail line (see `detail_preview`). When the target declares an egress
+/// output floor (#971) it is appended (`· local_only`) so an operator sees that
+/// the delegation went to a local-only bundle.
+fn spawn_headline(agent_id: Option<&str>, output_label: Option<&str>) -> String {
+    let base = match agent_id.map(str::trim).filter(|s| !s.is_empty()) {
         Some(id) => format!("⑂ spawn → {id}"),
         None => "⑂ spawn child agent".to_string(),
+    };
+    match output_label
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "unrestricted")
+    {
+        Some(label) => format!("{base} · {label}"),
+        None => base,
     }
 }
 
@@ -1433,6 +1489,7 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                     agent_spawn_agent_id(entry)
                         .or_else(|| extract_tool_key_param(&p, &tool_name))
                         .as_deref(),
+                    agent_spawn_output_label(entry).as_deref(),
                 );
             }
             let kp = extract_tool_key_param(&p, &tool_name);
@@ -1458,6 +1515,7 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                     agent_spawn_agent_id(entry)
                         .or_else(|| extract_tool_key_param(&p, &tool_name))
                         .as_deref(),
+                    agent_spawn_output_label(entry).as_deref(),
                 );
             }
             let key_param = extract_tool_key_param(&p, &tool_name);
@@ -4819,6 +4877,7 @@ mod tests {
                 "revision_id": "rev_sha256:abc123",
                 "summary": "Promote after federation pass",
                 "added_capabilities": ["NetworkAccess(hosts=[api.open-meteo.com])"],
+                "output_label": "local_only",
                 "confirm_phrase": "promote weather-lookup rev_sha256:abc123",
             }),
         );
@@ -4830,7 +4889,71 @@ mod tests {
         assert!(detail.contains("rev_sha256"));
         assert!(detail.contains("federation pass"));
         assert!(detail.contains("NetworkAccess"));
+        // The candidate's declared output floor surfaces so an operator can see
+        // they are admitting a local-only bundle (#971).
+        assert!(detail.contains("output floor"));
+        assert!(detail.contains("local_only"));
         assert!(detail.contains("Esc peek timeline"));
+    }
+
+    /// A spawn whose completed result carries the target's declared output floor
+    /// marks the spawn row headline with it (#971) — an operator sees that a
+    /// delegation went to a local-only bundle. Distinct from the runtime taint
+    /// marker (■), which is the spawn *result's* live label.
+    #[test]
+    fn render_spec_spawn_row_marks_the_target_output_floor() {
+        let spawn = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": {
+                    "ok": true,
+                    "status": "queued",
+                    "agent_id": "email.reader",
+                    "target_egress_output_label": "local_only"
+                }
+            }),
+        );
+        assert_eq!(
+            agent_spawn_output_label(&spawn).as_deref(),
+            Some("local_only"),
+            "the floor is extracted from the completed result"
+        );
+        let spec = render_spec(&spawn);
+        assert!(
+            spec.headline.contains("spawn → email.reader"),
+            "headline names the target: {}",
+            spec.headline
+        );
+        assert!(
+            spec.headline.contains("local_only"),
+            "headline marks the declared floor: {}",
+            spec.headline
+        );
+    }
+
+    /// A spawn to an unrestricted bundle (no floor) shows no floor tag — absence
+    /// is the unrestricted state, not a missing marker.
+    #[test]
+    fn render_spec_spawn_row_without_a_floor_has_no_tag() {
+        let spawn = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "agent_spawn",
+                "result": {"ok": true, "status": "queued", "agent_id": "planner.default"}
+            }),
+        );
+        assert_eq!(agent_spawn_output_label(&spawn), None);
+        let spec = render_spec(&spawn);
+        assert!(spec.headline.contains("spawn → planner.default"));
+        assert!(!spec.headline.contains("unrestricted"));
+        assert!(!spec.headline.contains("· "));
     }
 
     #[test]

@@ -3273,11 +3273,20 @@ do not re-issue."
                 // behaviour with those capabilities, so it belongs in front of
                 // the person granting them.
                 let skill_preview = skill_body_preview(&skill_text);
+                // Declared egress output floor of the candidate (#971): the
+                // bundle's own output restriction, surfaced in the promotion
+                // approval so an operator can see they are admitting a
+                // local-only bundle. Parsed from the same SKILL.md whose body is
+                // previewed above.
+                let output_label = crate::runtime::parser::SkillParser::parse(&skill_text)
+                    .ok()
+                    .and_then(|(m, _)| m.egress.and_then(|e| e.output_label));
                 let payload = serde_json::json!({
                     "added": added_capabilities,
                     "broadened": broadened_structured,
                     "reassignment": reassignment_payload,
                     "skill_preview": skill_preview,
+                    "output_label": output_label.map(|n| n.as_str()),
                 });
 
                 let reass_suffix = reassignment_signal
