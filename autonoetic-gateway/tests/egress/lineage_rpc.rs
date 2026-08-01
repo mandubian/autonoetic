@@ -281,3 +281,89 @@ async fn lineage_carries_no_content_keys() {
         assert!(!wire.contains(key), "lineage leaked a content key {key}");
     }
 }
+
+// ── PR #998 review: an unresolvable parent is not an origin ────────────────
+//
+// `egress.envelope_labeled` writes are best-effort (the emitter logs and
+// continues on a store failure) and P-8.6 retention prunes old causal events, so
+// a parent can be permanently absent while the scan window had room to spare.
+// Treating that node as an origin would answer "where did this come from?"
+// confidently and wrongly — the exact failure this walk exists to prevent.
+
+/// A hop naming a parent that was never recorded must be flagged, not crowned.
+#[tokio::test]
+async fn an_unresolvable_parent_is_reported_not_treated_as_an_origin() {
+    let sid = "sess-lineage-missing";
+    // Only the child is seeded; `tc_ghost` is never written.
+    seed_envelope(
+        sid,
+        1,
+        "env_orphan",
+        "tc_orphan",
+        "turn-000002",
+        "default",
+        &[],
+        &["tc_ghost"],
+    );
+
+    let v = lineage(serde_json::json!({ "root_session_id": sid, "from": "env_orphan" })).await;
+    let node = &v["nodes"][0];
+
+    assert_eq!(
+        node["is_origin"], false,
+        "a hop that names an unresolved parent is a cut chain, not an origin"
+    );
+    assert_eq!(node["unresolved_parents"][0], "tc_ghost");
+    assert!(
+        v["origins"].as_array().unwrap().is_empty(),
+        "nothing here is a genuine origin"
+    );
+
+    // …and `incomplete` says so even though the window was nowhere near full.
+    assert_eq!(v["incomplete"], true);
+    assert_eq!(
+        v["truncated"], false,
+        "the window had room — this is a missing record, not a small limit"
+    );
+}
+
+/// The two partial-answer kinds must stay distinguishable: one is worth
+/// retrying with a bigger window, the other is not recoverable at all.
+#[tokio::test]
+async fn truncated_and_incomplete_are_independent_signals() {
+    let sid = "sess-lineage-signals";
+    seed_email_chain(sid);
+
+    // A complete chain read in a full window: truncated, but nothing missing.
+    let v = lineage(serde_json::json!({ "root_session_id": sid, "limit": 1 })).await;
+    assert_eq!(v["truncated"], true);
+
+    // A complete chain with room to spare: neither flag.
+    let v = lineage(serde_json::json!({ "root_session_id": sid })).await;
+    assert_eq!(v["truncated"], false);
+    assert_eq!(
+        v["incomplete"], false,
+        "a fully-resolved chain must not be labeled incomplete"
+    );
+}
+
+/// A genuine origin — one that claims no parents at all — still reports as such.
+/// Without this the previous test could pass by never crowning anything.
+#[tokio::test]
+async fn a_parentless_hop_is_still_a_genuine_origin() {
+    let sid = "sess-lineage-true-origin";
+    seed_envelope(
+        sid,
+        1,
+        "env_root",
+        "tc_root",
+        "turn-000001",
+        "operator_rule",
+        &["sandbox.exec:~/mail/**"],
+        &[],
+    );
+    let v = lineage(serde_json::json!({ "root_session_id": sid, "from": "env_root" })).await;
+    assert_eq!(v["nodes"][0]["is_origin"], true);
+    assert_eq!(v["incomplete"], false);
+    assert_eq!(v["origins"][0], "env_root");
+}

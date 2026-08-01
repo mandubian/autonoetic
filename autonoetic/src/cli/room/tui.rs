@@ -9089,13 +9089,23 @@ fn egress_lineage_lines(
             "" => "(session-level)".to_string(),
             t => t.to_string(),
         };
-        // Indent by depth so the chain reads as a chain.
-        let indent = "  ".repeat(depth as usize + 1);
+        // Indent by depth so the chain reads as a chain — but clamped. `depth`
+        // comes off the wire and the scan window is 5 000 rows, so an unclamped
+        // `repeat` is O(n²) in total characters and would stall the TUI on a
+        // pathological chain. Past the clamp the depth is printed instead, which
+        // conveys the structure without the allocation.
+        const MAX_INDENT_DEPTH: u64 = 8;
+        let indent = "  ".repeat(depth.min(MAX_INDENT_DEPTH) as usize + 1);
+        let deep_marker = if depth > MAX_INDENT_DEPTH {
+            format!("[+{}] ", depth - MAX_INDENT_DEPTH)
+        } else {
+            String::new()
+        };
         let tool = match s("tool_name") {
             "" => String::new(),
             t => format!("{t} "),
         };
-        lines.push(format!("{indent}{turn}  {tool}→ {origin}"));
+        lines.push(format!("{indent}{deep_marker}{turn}  {tool}→ {origin}"));
 
         let rules: Vec<&str> = node
             .get("matched_rules")
@@ -9116,10 +9126,29 @@ fn egress_lineage_lines(
         if node.get("is_origin").and_then(|v| v.as_bool()) == Some(true) {
             lines.push(format!("{indent}  ↑ origin"));
         }
+        let unresolved: Vec<&str> = node
+            .get("unresolved_parents")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|r| r.as_str()).collect())
+            .unwrap_or_default();
+        if !unresolved.is_empty() {
+            lines.push(format!(
+                "{indent}  ⚠ chain cut here — parent(s) not on record: {}",
+                unresolved.join(", ")
+            ));
+        }
     }
+    // Two different kinds of partial answer, and the operator's next move
+    // differs: a filled window is worth retrying wider, a missing record is not.
     if value.get("truncated").and_then(|v| v.as_bool()) == Some(true) {
         lines.push(
-            "⚠ scan window filled — an `origin` above may have parents that were not read"
+            "⚠ scan window filled — widen the limit to see further back".to_string(),
+        );
+    }
+    if value.get("incomplete").and_then(|v| v.as_bool()) == Some(true) {
+        lines.push(
+            "⚠ some parents are not on record (dropped best-effort write, or pruned by \
+             retention) — this chain is partial and a wider scan will not recover it"
                 .to_string(),
         );
     }

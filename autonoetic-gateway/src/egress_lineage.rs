@@ -129,9 +129,23 @@ pub struct LineageNode {
     pub parents: Vec<String>,
     /// Hops from the queried envelope. `0` is the envelope asked about.
     pub depth: u32,
-    /// No parent is present in the scanned window — either a true origin, or
-    /// the window cut the chain (see [`TaintLineage::truncated`]).
+    /// This hop claims **no** parents — a genuine origin of the restriction.
+    ///
+    /// Deliberately *not* "no parent was found": a hop that names parents the
+    /// walk could not resolve is reported with
+    /// [`LineageNode::unresolved_parents`] instead, because calling it an origin
+    /// would answer "where did this come from?" confidently and wrongly.
     pub is_origin: bool,
+    /// Parent ids this hop names that were **not** present in the scanned rows.
+    ///
+    /// Non-empty means the chain is cut here, and not necessarily because the
+    /// window filled: `egress.envelope_labeled` writes are best-effort (the
+    /// emitter logs and continues on a store failure), and P-8.6 retention
+    /// prunes old causal events. So a parent can be permanently absent while the
+    /// scan had room to spare — a different situation from a full window, and
+    /// one a bigger `limit` will not fix.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_parents: Vec<String>,
 }
 
 /// The walk's result: the chain(s) behind a taint, and the origins that explain
@@ -143,12 +157,18 @@ pub struct TaintLineage {
     pub roots: Vec<String>,
     /// Every hop reached, nearest-first.
     pub nodes: Vec<LineageNode>,
-    /// Envelope ids of the hops with no reachable parent — the answer to
-    /// "where did this come from".
+    /// Envelope ids of the hops that claim no parents — the answer to "where did
+    /// this come from". Excludes hops whose parents merely went unresolved.
     pub origins: Vec<String>,
-    /// The event scan filled its window; a chain may be cut short and an
-    /// `is_origin` node may not be a true origin.
+    /// The event scan filled its window, so widening `limit` may reveal more.
     pub truncated: bool,
+    /// Some hop named a parent that is not in the scanned rows. Distinct from
+    /// [`Self::truncated`] on purpose: `truncated` means "retry with a bigger
+    /// window", this means "the record itself is incomplete" (a dropped
+    /// best-effort write, or retention pruning) and retrying will not help.
+    /// Either way the chain shown is partial, which is what the operator needs
+    /// to know before trusting an origin.
+    pub incomplete: bool,
     pub limit: i64,
 }
 
@@ -200,6 +220,7 @@ pub fn walk_taint_lineage(
 
     let mut nodes: Vec<LineageNode> = Vec::new();
     let mut origins: Vec<String> = Vec::new();
+    let mut incomplete = false;
     // Guard against a repeated id forming a cycle: argument taint is derived
     // from ids the gateway mints, but a walk must terminate regardless.
     let mut seen: HashSet<String> = HashSet::new();
@@ -210,14 +231,23 @@ pub fn walk_taint_lineage(
         if !seen.insert(row.envelope_id.clone()) {
             continue;
         }
-        let reachable_parents: Vec<&LabeledEnvelopeRow> = row
-            .parent_envelope_ids
-            .iter()
-            .filter_map(|p| by_tool_call.get(p.as_str()).copied())
-            .collect();
-        let is_origin = reachable_parents.is_empty();
+        let mut reachable_parents: Vec<&LabeledEnvelopeRow> = Vec::new();
+        let mut unresolved_parents: Vec<String> = Vec::new();
+        for p in &row.parent_envelope_ids {
+            match by_tool_call.get(p.as_str()) {
+                Some(parent) => reachable_parents.push(parent),
+                None => unresolved_parents.push(p.clone()),
+            }
+        }
+        // An origin *claims* no parents. A hop whose named parents could not be
+        // resolved is not an origin — it is a cut chain, and saying otherwise
+        // invents provenance.
+        let is_origin = row.parent_envelope_ids.is_empty();
         if is_origin {
             origins.push(row.envelope_id.clone());
+        }
+        if !unresolved_parents.is_empty() {
+            incomplete = true;
         }
         nodes.push(LineageNode {
             envelope_id: row.envelope_id.clone(),
@@ -233,6 +263,7 @@ pub fn walk_taint_lineage(
             parents: row.parent_envelope_ids.clone(),
             depth,
             is_origin,
+            unresolved_parents,
         });
         for parent in reachable_parents {
             queue.push_back((parent, depth + 1));
@@ -245,6 +276,7 @@ pub fn walk_taint_lineage(
         nodes,
         origins,
         truncated,
+        incomplete,
         limit,
     })
 }
