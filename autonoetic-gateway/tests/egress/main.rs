@@ -20,6 +20,7 @@ mod compression_eligibility;
 mod curator_gates;
 mod digest_local_preset;
 mod floor_and_taint;
+mod grants_list_rpc;
 mod label_listing_rpc;
 mod lineage_rpc;
 mod mixed_session_e2e;
