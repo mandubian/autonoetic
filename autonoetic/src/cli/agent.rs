@@ -7,11 +7,13 @@ use crate::cli::common::{AgentAliasCommands, AgentCredentialCommands, AgentRevis
 use autonoetic_gateway::llm::Message;
 use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::tools::NativeTool;
+use autonoetic_gateway::AgentRepository;
 use autonoetic_types::agent::LlmExchangeUsage;
 use autonoetic_types::agent::{AgentIdentity, AgentManifest, ExecutionMode, RuntimeDeclaration};
 use autonoetic_types::agent_revision::PromotionKind;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
+use autonoetic_types::egress::NamedEgressLabel;
 use autonoetic_types::session_outcome::SessionCloseOutcome;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -498,18 +500,27 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
 
 pub async fn handle_agent_list(config_path: &Path) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let aliases = list_alias_rows_from_registry(&config)?;
+    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let aliases = list_alias_rows_from_registry(&config, &store)?;
     if aliases.is_empty() {
         println!("No aliases found in {}", config.agents_dir.display());
     } else {
+        // The OUTPUT column surfaces each alias's declared egress output floor
+        // (#971): without it an operator cannot tell an email-reading,
+        // local-only bundle from an unrestricted one. `—` covers both "no floor
+        // declared" (the normal unrestricted case) and "manifest unreadable"
+        // (a candidate not materialized on disk) — the floor is advisory
+        // legibility, not enforcement.
         println!(
-            "{:<28} {:<28} {:<30} {:<10} UPDATED AT",
-            "ALIAS ID", "AGENT ID", "ACTIVE REVISION", "STATUS"
+            "{:<24} {:<24} {:<26} {:<10} {:<15} UPDATED AT",
+            "ALIAS ID", "AGENT ID", "ACTIVE REVISION", "STATUS", "OUTPUT"
         );
         for row in aliases {
+            let floor = row.output_floor.as_deref().unwrap_or("—");
             println!(
-                "{:<28} {:<28} {:<30} {:<10} {}",
-                row.alias_id, row.agent_id, row.active_revision, row.status, row.updated_at
+                "{:<24} {:<24} {:<26} {:<10} {:<15} {}",
+                row.alias_id, row.agent_id, row.active_revision, row.status, floor, row.updated_at
             );
         }
     }
@@ -523,11 +534,38 @@ struct AliasListRow {
     active_revision: String,
     status: String,
     updated_at: String,
+    /// Declared egress output floor of the active revision (#971), or `None`
+    /// when the bundle declares no floor or its manifest can't be loaded.
+    output_floor: Option<String>,
 }
 
-fn list_alias_rows_from_registry(config: &GatewayConfig) -> anyhow::Result<Vec<AliasListRow>> {
+/// Resolve an alias's active-revision declared egress output floor (#971).
+///
+/// Reads the revision-pinned manifest (`gateway_dir/revisions/.../SKILL.md`)
+/// rather than the generic `agents_dir/<id>/` SKILL.md, so the floor matches
+/// the exact revision the alias points at — including a freshly-promoted
+/// candidate whose bundle hasn't been (re)installed to the agent dir yet.
+///
+/// `None` covers both "no floor declared" (the normal unrestricted bundle) and
+/// "manifest unreadable" (e.g. a candidate revision not materialized on disk):
+/// the floor is operator-facing legibility, not enforcement, so a load failure
+/// must not crash a listing or inspection.
+fn resolve_alias_output_floor(
+    config: &GatewayConfig,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+) -> Option<NamedEgressLabel> {
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config);
-    let store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let repo = AgentRepository::from_config(config);
+    repo.get_sync_from_store(agent_id, &gateway_dir, Some(store))
+        .ok()
+        .and_then(|loaded| loaded.manifest.egress.and_then(|e| e.output_label))
+}
+
+fn list_alias_rows_from_registry(
+    config: &GatewayConfig,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+) -> anyhow::Result<Vec<AliasListRow>> {
     let mut rows = Vec::new();
     for alias in store.list_agent_aliases(None)? {
         let revision = store
@@ -544,12 +582,15 @@ fn list_alias_rows_from_registry(config: &GatewayConfig) -> anyhow::Result<Vec<A
         } else {
             format!("rev_{}", revision.short_id)
         };
+        let output_floor = resolve_alias_output_floor(config, store, &alias.agent_id)
+            .map(|named| named.as_str().to_string());
         rows.push(AliasListRow {
             alias_id: alias.alias_id,
             agent_id: alias.agent_id,
             active_revision,
             status: format!("{:?}", revision.status),
             updated_at: alias.updated_at,
+            output_floor,
         });
     }
     Ok(rows)
@@ -908,12 +949,18 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
                         alias.revision_id
                     )
                 })?;
+            // Declared egress output floor of the active revision (#971): the
+            // bundle's own output restriction, surfaced so an operator can tell
+            // a local-only bundle from an unrestricted one at inspection time.
+            let output_floor = resolve_alias_output_floor(&config, &store, &alias.agent_id)
+                .map(|named| named.as_str().to_string());
             let payload = serde_json::json!({
                 "alias_id": alias.alias_id,
                 "agent_id": alias.agent_id,
                 "active_revision_id": alias.revision_id,
                 "active_revision_short_id": revision.short_id,
                 "active_revision_status": format!("{:?}", revision.status),
+                "output_floor": output_floor,
                 "updated_at": alias.updated_at,
                 "updated_by_type": alias.updated_by_type,
                 "updated_by_id": alias.updated_by_id,
@@ -933,6 +980,10 @@ pub fn handle_agent_alias(config_path: &Path, command: &AgentAliasCommands) -> a
                 println!(
                     "status: {}",
                     payload["active_revision_status"].as_str().unwrap_or("")
+                );
+                println!(
+                    "egress output floor: {}",
+                    payload["output_floor"].as_str().unwrap_or("— (unrestricted / unreadable)")
                 );
                 println!(
                     "updated_at: {}",
@@ -3156,12 +3207,138 @@ Use tools when needed.
             })
             .expect("alias insert should succeed");
 
-        let rows = list_alias_rows_from_registry(&config).expect("rows should load from registry");
+        let rows =
+            list_alias_rows_from_registry(&config, &store).expect("rows should load from registry");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].alias_id, "list.agent");
         assert_eq!(rows[0].agent_id, "list.agent");
         assert_eq!(rows[0].active_revision, "rev_list1234");
         assert_eq!(rows[0].status, "Ready");
+        // No revision dir materialized on disk ⇒ floor is None (advisory
+        // legibility, not enforcement: a missing manifest is unrestricted/unknown
+        // rather than an error).
+        assert_eq!(rows[0].output_floor, None);
+    }
+
+    /// The active revision's declared egress output floor surfaces in
+    /// `agent list` and `agent alias inspect` (#971). An operator cannot
+    /// otherwise tell an email-reading, local-only bundle from an unrestricted
+    /// one. The floor is read from the revision-pinned manifest, so it matches
+    /// the exact revision the alias points at.
+    #[test]
+    fn test_alias_output_floor_reads_the_active_revision_manifest() {
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("runtime_agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4000\nofp_port: 4200\ntls: false\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+        let config = autonoetic_gateway::config::load_config(&config_path).expect("config loads");
+        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+        let store = GatewayStore::open(&gateway_dir).expect("gateway store opens");
+
+        let revision_id = "rev_sha256:floor1";
+        let agent_id = "floor.agent";
+
+        // Materialize the active revision's SKILL.md with a declared local_only
+        // output floor — the exact path load_from_revision_dir reads. A
+        // local-only bundle is precisely the case the issue calls out as
+        // invisible today.
+        let rev_dir = gateway_dir
+            .join("revisions")
+            .join("agents")
+            .join(agent_id)
+            .join(revision_id);
+        std::fs::create_dir_all(&rev_dir).expect("revision dir creates");
+        std::fs::write(
+            rev_dir.join("SKILL.md"),
+            r#"---
+name: "floor-agent"
+description: "declares a local_only output floor"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "floor.agent"
+      name: "Floor Agent"
+      description: "declares a floor"
+    egress:
+      output_label: local_only
+---
+# Floor Agent
+"#,
+        )
+        .expect("skill writes");
+
+        store
+            .insert_agent_revision(&AgentRevisionRecord {
+                revision_id: revision_id.to_string(),
+                agent_id: agent_id.to_string(),
+                base_revision_id: None,
+                artifact_id: Some("art_floor".to_string()),
+                content_digest: "sha256:floor1".to_string(),
+                runtime_lock_hash: "sha256:lock_floor".to_string(),
+                manifest_hash: "sha256:man_floor".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                created_by_type: "human".to_string(),
+                created_by_id: "operator".to_string(),
+                requested_by_type: None,
+                requested_by_id: None,
+                source_kind: "artifact".to_string(),
+                source_ref: Some("art_floor".to_string()),
+                origin_node_id: "gateway".to_string(),
+                trust_domain: "local".to_string(),
+                status: AgentRevisionStatus::Ready,
+                metadata_json: serde_json::json!({}),
+                short_id: "floor1234".to_string(),
+                detected_network_hosts: None,
+                signature: None,
+                signer_id: None,
+            })
+            .expect("revision insert should succeed");
+        store
+            .upsert_agent_alias(&AgentAliasRecord {
+                alias_id: agent_id.to_string(),
+                agent_id: agent_id.to_string(),
+                revision_id: revision_id.to_string(),
+                updated_at: "2026-01-01T00:00:01Z".to_string(),
+                updated_by_type:
+                    autonoetic_types::principal::PrincipalKind::Human.tag().to_string(),
+                updated_by_id: "operator".to_string(),
+                reason: Some("seed".to_string()),
+                suspended_at: None,
+                suspended_reason: None,
+                suspended_by: None,
+            })
+            .expect("alias insert should succeed");
+
+        // agent list surfaces the floor as a display string.
+        let rows =
+            list_alias_rows_from_registry(&config, &store).expect("rows should load from registry");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].output_floor.as_deref(),
+            Some("local_only"),
+            "the active revision's declared output floor surfaces in agent list"
+        );
+
+        // alias inspect resolves the same floor as the typed enum.
+        assert_eq!(
+            resolve_alias_output_floor(&config, &store, agent_id),
+            Some(NamedEgressLabel::LocalOnly)
+        );
     }
 
     #[test]
