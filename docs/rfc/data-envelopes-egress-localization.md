@@ -968,13 +968,30 @@ view alone:
   turns still go remote), per-band compression (§5.7 — without it, the first
   governor fire guarantees the cascade), compartments (§5.5), declassification
   (§8), and the relabel sweep (§6.7).
-- **Artifact labels are not consulted at the off-machine boundaries yet.** #980
-  closed the birth point — an artifact carries the builder's taint, and reading it
-  re-applies that label — so the session-level path (a later session reads the
-  artifact, gets tainted, and P-15.2 gates its sends) is covered. What is *not*
-  covered is a boundary consulting an artifact's own label directly: OFP send and
-  capsule export have no artifact-label awareness, so they gate on session taint
-  alone. Tracked separately.
+- **Artifact labels are not consulted at the off-machine boundaries — and today
+  cannot be reached there.** #980 closed the birth point (an artifact carries the
+  builder's taint; reading it re-applies that label), so the session-level path is
+  covered. A boundary consulting an artifact's own label directly is *not*
+  implemented — but neither named boundary currently has an artifact-carrying path
+  to gate: the OFP wire protocol has no artifact field of any kind (`AgentMessage`
+  carries text; `artifact` appears nowhere in `autonoetic-ofp/src/wire.rs`), and
+  `capsule/export.rs` hardcodes `included_artifacts: vec![]`. So this is a gap that
+  opens the day either boundary learns to ship artifact bytes, not a hole today
+  (#987) — whoever adds that capability owns the gate.
+- **Replay-capsule history is gated at session granularity, not per message.** A
+  Replay capsule embeds `SessionCheckpoint`, whose `history` is every tool result
+  verbatim. It was previously exported unchecked while the `memory_snapshot` beside
+  it *was* label-filtered — which made the capsule look label-aware while the
+  larger payload went ungated (#987). It now refuses when the intersection of
+  allowed sinks across the session's taint and the checkpoint's own
+  `egress_labels` sidecar (`restrict` over both — each can only narrow) excludes
+  the capsule's destination sink. It **refuses rather than filters**: a Replay capsule
+  exists to replay, and a history with holes punched in it is not replayable, so a
+  silently-partial capsule would be a worse artifact than an absent one. The cost
+  is granularity — one labeled result blocks the whole Replay export to that
+  destination where a per-message filter would not. Operator ways forward:
+  thin/hermetic mode (neither carries history), a `local` destination, or
+  declassification.
 - **Content written to a new path is not re-labeled.** A labeled read whose bytes
   are written elsewhere launders the label: `unzip ~/mail/mail.zip -d /tmp/w`
   followed by a *later* exec reading `/tmp/w/inbox.mbox` matches no rule, and

@@ -187,6 +187,13 @@ pub fn export(req: ExportRequest, ctx: ExportContext<'_>) -> Result<ExportOutcom
                         revision.agent_id
                     );
                 }
+                // A checkpoint carries `history: Vec<Message>` — every tool
+                // result verbatim, including content the LLM chokepoint
+                // withholds from remote providers. It is the most sensitive
+                // payload a capsule can hold and, unlike `memory_snapshot`
+                // above, nothing filtered it. Gate it on the session's taint
+                // against the capsule's destination sink (RFC §7 / P-15.2).
+                guard_replay_checkpoint_egress(&ctx, session_id, &ckpt, destination_sink)?;
                 let bytes = serde_json::to_vec_pretty(&ckpt)?;
                 archive::write_entry(staging_path, crate::capsule::paths::CHECKPOINT_PATH, &bytes)?;
                 Some(crate::capsule::paths::CHECKPOINT_PATH.to_string())
@@ -444,6 +451,79 @@ fn collect_skill_names(revision_dir: &Path) -> Vec<String> {
     } else {
         Vec::new()
     }
+}
+
+/// Refuse a Replay export whose checkpoint history is not cleared for the
+/// capsule's destination sink (RFC §7 / P-15.2, #987).
+///
+/// The label consulted is the **intersection of allowed sinks** across two
+/// sources — `restrict` applied over both, the lattice meet, so each source can
+/// only narrow what the export may reach. (Deliberately not "union": that reads
+/// as widening, which is the inverted-lattice slip the RFC bans by name in its
+/// terminology note.) Both are needed because either alone can miss:
+///
+/// - the session's accumulated taint (`session_egress_taint`), which is what
+///   every other off-machine boundary gates on; and
+/// - the checkpoint's own `egress_labels` sidecar, which records the label of
+///   each tool result actually present in `history`. A checkpoint can outlive
+///   the taint row — a forked or restored session carries the sidecar with it —
+///   so the sidecar is authoritative about what these bytes contain even when
+///   the session row says nothing.
+///
+/// **Refuse rather than filter.** A Replay capsule exists to replay; a history
+/// with holes punched in it is not replayable, so a silently-partial capsule
+/// would be a worse artifact than an absent one. The operator's ways forward are
+/// a non-Replay mode (thin/hermetic carry no history), a `local` trust domain,
+/// or declassifying the session.
+fn guard_replay_checkpoint_egress(
+    ctx: &ExportContext<'_>,
+    session_id: &str,
+    ckpt: &crate::runtime::checkpoint::SessionCheckpoint,
+    destination_sink: Sink,
+) -> Result<()> {
+    use crate::runtime::egress_labeler as el;
+
+    // Fail closed: an unreadable taint must not export as if it were clean.
+    let mut effective = el::require_boundary_session_taint(
+        None,
+        Some(ctx.gateway_store.as_ref()),
+        Some(session_id),
+    )
+    .with_context(|| {
+        format!(
+            "Replay-mode export: cannot confirm the egress taint of session {session_id}; \
+             refusing to bundle its history"
+        )
+    })?;
+    // Each sidecar label narrows further (lattice meet) — never widens.
+    for label in ckpt.egress_labels.values() {
+        effective = effective.restrict(label);
+    }
+
+    if effective.allows(destination_sink) {
+        return Ok(());
+    }
+
+    el::emit_surface_boundary_refused(
+        ctx.gateway_store,
+        session_id,
+        &ckpt.agent_id,
+        None,
+        "capsule",
+        &effective,
+        &[],
+        "capsule_replay_checkpoint_egress_refused",
+    );
+
+    anyhow::bail!(
+        "capsule_replay_checkpoint_egress_refused: this session's history is labeled {} and \
+         the capsule's destination sink is {}. A Replay capsule embeds the full conversation \
+         history, so exporting it would move that content off this machine. Export in thin or \
+         hermetic mode (neither carries history), target a `local` trust domain, or declassify \
+         the session first.",
+        autonoetic_types::egress::label_display_name(&effective),
+        sink_wire_name(destination_sink),
+    )
 }
 
 fn stage_memory_snapshot(
