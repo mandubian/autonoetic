@@ -2849,7 +2849,8 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_approval_signal_prompts_agent_retry() {        let dir = tempdir().unwrap();
+    fn sandbox_approval_signal_prompts_agent_retry() {
+        let dir = tempdir().unwrap();
         let agents_dir = dir.path().join("agents");
         let gateway_dir = agents_dir.join(".gateway");
         std::fs::create_dir_all(&gateway_dir).unwrap();

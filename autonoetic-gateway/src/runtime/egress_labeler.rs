@@ -435,9 +435,12 @@ impl EgressLabeler {
         // intersects its label, exactly like an artifact's. Only exec-shaped
         // tools run in a workspace; structured tools stay rule-only.
         let exec_shaped = is_exec_shaped(req.tool);
+        let mut workspace_read_failed = false;
         if exec_shaped {
             if let Some(store) = store {
-                let (workspace_label, applied) = workspace_taint_from_store(agent_id, store.as_ref());
+                let (workspace_label, applied, read_failed) =
+                    workspace_taint_from_store(agent_id, store.as_ref());
+                workspace_read_failed = read_failed;
                 if !applied.is_empty() {
                     resolution.label = resolution.label.restrict(&workspace_label);
                     resolution.workspace_labels_applied = applied;
@@ -451,8 +454,10 @@ impl EgressLabeler {
         // label tightens. Coarse by design — the workspace is the labeled unit,
         // not the paths inside it, which is what removes the evasion surface.
         // Best-effort write: a failed restriction is logged, never fatal (the
-        // read side fails closed regardless).
-        if exec_shaped && !resolution.label.is_unrestricted() {
+        // read side fails closed regardless). A read error that failed closed
+        // is NOT written back — a transient read failure must not become a
+        // durable workspace restriction.
+        if exec_shaped && !workspace_read_failed && !resolution.label.is_unrestricted() {
             if let Some(store) = store {
                 if let Err(e) = store.restrict_workspace_egress_label(agent_id, &resolution.label) {
                     tracing::warn!(
@@ -1903,24 +1908,27 @@ pub fn artifact_taint_from_store(
 ///
 /// The read half of RFC §11 (#1001): a workspace whose label could not be read
 /// might have been restricted, and treating it as clean is the one outcome §2.2
-/// forbids. Returns the label and the agent id (as provenance, mirroring the
-/// artifact path) when the workspace carries a restrictive label.
+/// forbids. Returns the label, the agent id (as provenance, mirroring the
+/// artifact path) when the workspace carries a restrictive label, and whether
+/// the read failed. Callers must NOT write back on a failed read — failing
+/// closed is a per-result decision, and a transient read failure must not
+/// ratchet the durable workspace label.
 pub fn workspace_taint_from_store(
     agent_id: &str,
     store: &GatewayStore,
-) -> (EgressLabel, Vec<String>) {
+) -> (EgressLabel, Vec<String>, bool) {
     match store.get_workspace_egress_label(agent_id) {
-        Ok(Some(stored)) => (stored, vec![agent_id.to_string()]),
-        Ok(None) => (EgressLabel::unrestricted(), Vec::new()),
+        Ok(Some(stored)) => (stored, vec![agent_id.to_string()], false),
+        Ok(None) => (EgressLabel::unrestricted(), Vec::new(), false),
         Err(e) => {
             tracing::warn!(
                 target: "egress",
                 error = %e,
                 agent_id = %agent_id,
                 "workspace egress label read failed — failing closed to local_only \
-                 for this result (RFC §2.2)"
+                 for this result, not persisting to the workspace (RFC §2.2)"
             );
-            (EgressLabel::local_only(), vec![agent_id.to_string()])
+            (EgressLabel::local_only(), vec![agent_id.to_string()], true)
         }
     }
 }
@@ -3012,6 +3020,30 @@ mod tests {
             Some(EgressLabel::no_remote_model()),
             "structured tools never write the workspace label"
         );
+    }
+
+    /// The read side's failure contract (#1001, Copilot review): a store read
+    /// error fails closed to `local_only` for the result, and marks the read as
+    /// failed so the caller skips the write-back — a transient read failure must
+    /// not become a durable workspace restriction (only an exec that *actually*
+    /// resolved restricted may ratchet the workspace).
+    #[test]
+    fn workspace_read_error_fails_closed_and_marks_failure() {
+        let (tmp, store) = ws_store();
+        // Force a read error by dropping the table out from under the store.
+        let raw = rusqlite::Connection::open(tmp.path().join("gateway.db")).unwrap();
+        raw.execute_batch("DROP TABLE agent_workspace_egress_labels")
+            .unwrap();
+        let (label, applied, failed) = workspace_taint_from_store("coder.abc", store.as_ref());
+        assert_eq!(label, EgressLabel::local_only());
+        assert_eq!(applied, vec!["coder.abc".to_string()]);
+        assert!(failed, "the caller must be told the read failed");
+        // A healthy read marks no failure.
+        let (_tmp2, store2) = ws_store();
+        let (label, applied, failed) = workspace_taint_from_store("coder.xyz", store2.as_ref());
+        assert!(label.is_unrestricted());
+        assert!(applied.is_empty());
+        assert!(!failed);
     }
 
     // ── Compression-preset eligibility (RFC §5.7) ─────────────────────────
