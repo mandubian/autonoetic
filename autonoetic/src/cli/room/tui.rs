@@ -2538,14 +2538,20 @@ fn fetch_taint_and_trace_labels(
     root_session_id: &str,
     prior_taint: Option<String>,
     prior_trace_labels: HashMap<String, String>,
+    prior_message_labels: HashMap<String, String>,
     prior_pinned: bool,
-) -> (Option<String>, HashMap<String, String>, bool) {
+) -> (
+    Option<String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+    bool,
+) {
     let params = serde_json::json!({ "root_session_id": root_session_id });
     let value = match rpc(client, "labels.list", params) {
         Ok(v) => v,
         Err(e) => {
             tracing::debug!(target: "room", error = %e, "labels.list failed");
-            return (prior_taint, prior_trace_labels, prior_pinned);
+            return (prior_taint, prior_trace_labels, prior_message_labels, prior_pinned);
         }
     };
     let taint = value.get("current_taint").and_then(|v| {
@@ -2578,7 +2584,24 @@ fn fetch_taint_and_trace_labels(
             }
         }
     }
-    (taint, trace_labels, pinned)
+    // message_id → label for `agent.peer_message` rows (#971 proposal 2): the
+    // same map shape as trace labels, keyed on the payload message_id.
+    let mut message_labels: HashMap<String, String> = HashMap::new();
+    if let Some(arr) = value.get("agent_messages").and_then(|v| v.as_array()) {
+        for m in arr {
+            let id = match m.get("message_id").and_then(|x| x.as_str()) {
+                Some(id) if !id.is_empty() => id,
+                _ => continue,
+            };
+            let label_val = m.get("label").cloned().unwrap_or(serde_json::Value::Null);
+            let sinks_json = serde_json::to_string(&label_val).unwrap_or_else(|_| "[]".to_string());
+            let name = sinks_label_name(&sinks_json);
+            if name != "unrestricted" {
+                message_labels.insert(id.to_string(), name);
+            }
+        }
+    }
+    (taint, trace_labels, message_labels, pinned)
 }
 
 /// Read the current session egress policy as a typed value. Returns
@@ -3769,6 +3792,7 @@ pub fn run(
     // stay current.
     let mut current_taint: Option<String> = None;
     let mut current_trace_labels: HashMap<String, String> = HashMap::new();
+    let mut current_message_labels: HashMap<String, String> = HashMap::new();
     let mut current_pinned: bool = false;
     let mut last_taint_poll = Instant::now();
     let mut force_taint_refresh = false;
@@ -7051,16 +7075,22 @@ pub fn run(
         {
             last_taint_poll = Instant::now();
             force_taint_refresh = false;
-            let (taint, trace_labels, pinned) = fetch_taint_and_trace_labels(
+            let (taint, trace_labels, message_labels, pinned) = fetch_taint_and_trace_labels(
                 client,
                 &root_session_id,
                 current_taint.clone(),
                 current_trace_labels.clone(),
+                current_message_labels.clone(),
                 current_pinned,
             );
-            if taint != current_taint || trace_labels != current_trace_labels || pinned != current_pinned {
+            if taint != current_taint
+                || trace_labels != current_trace_labels
+                || message_labels != current_message_labels
+                || pinned != current_pinned
+            {
                 current_taint = taint;
                 current_trace_labels = trace_labels;
+                current_message_labels = message_labels;
                 current_pinned = pinned;
                 needs_redraw = true;
             }
@@ -7151,11 +7181,18 @@ pub fn run(
                         )
                     })
                     .map(|(i, e)| {
-                        // Egress row marker (#971): stamp the label display name
-                        // onto tool rows whose execution trace is labeled.
+                        // Egress row markers (#971 proposal 2): stamp the label
+                        // display name onto tool rows whose execution trace is
+                        // labeled AND onto `agent.peer_message` rows whose
+                        // message carries the sender's accumulated taint.
                         let mut spec = render::render_spec(e);
                         if let Some(tid) = e.refs.execution_trace_id.as_deref() {
                             if let Some(name) = current_trace_labels.get(tid) {
+                                spec.egress_label = Some(name.clone());
+                            }
+                        }
+                        if let Some(mid) = render::agent_message_id(e) {
+                            if let Some(name) = current_message_labels.get(&mid) {
                                 spec.egress_label = Some(name.clone());
                             }
                         }
