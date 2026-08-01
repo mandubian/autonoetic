@@ -4429,8 +4429,15 @@ pub fn run(
                                 // `/taint` sources from the live tool catalog +
                                 // MCP server list (fetched once per session via
                                 // `egress.sources`) and labels from the
-                                // restrictive spellings. No-op for other verbs.
-                                if buf.trim_start().starts_with("taint") {
+                                // restrictive spellings. Only the exact `taint`
+                                // verb fires (a `tainted` buffer must not
+                                // trigger the RPC or the "no match" hint).
+                                let trimmed = buf.trim_start();
+                                let taint_verb = trimmed == "taint"
+                                    || trimmed.strip_prefix("taint").is_some_and(|r| {
+                                        r.starts_with(char::is_whitespace)
+                                    });
+                                if taint_verb {
                                     let catalog = match egress_source_cache.as_ref() {
                                         Some(c) => Some(c.clone()),
                                         None => match rpc(

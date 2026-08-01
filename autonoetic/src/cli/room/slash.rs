@@ -545,7 +545,10 @@ pub fn taint_tab_complete(
     catalog: &EgressSourceCatalog,
     cycle: usize,
 ) -> Option<TaintCompletion> {
-    let body = buffer.trim().strip_prefix('/').unwrap_or(buffer.trim());
+    let body = buffer
+        .trim_start()
+        .strip_prefix('/')
+        .unwrap_or(buffer.trim_start());
     let rest = body.strip_prefix("taint")?;
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None; // some other `taint*` verb, e.g. /test
@@ -554,7 +557,13 @@ pub fn taint_tab_complete(
     if tokens.is_empty() {
         return None;
     }
-    if tokens.len() == 1 {
+    // A trailing space means the operator finished the previous token and is
+    // positioning on the next slot: with a single token, Tab then completes
+    // the (empty) label slot instead of re-completing the source — which
+    // would swallow the trailing space and strand the operator in the source
+    // slot.
+    let trailing_space = rest.ends_with(char::is_whitespace);
+    if tokens.len() == 1 && !trailing_space {
         // Source slot: `src` or `src:path` — complete the source part only,
         // preserving the path suffix the operator is still typing.
         let token = tokens[0];
@@ -586,8 +595,9 @@ pub fn taint_tab_complete(
             next_cycle: (cycle + 1) % matches.len(),
         })
     } else {
-        // Label slot (second token).
-        let token = tokens[1];
+        // Label slot (second token; empty when the operator just typed the
+        // trailing space — Tab then cycles the restrictive spellings).
+        let token = tokens.get(1).copied().unwrap_or("");
         let matches: Vec<&str> = catalog
             .labels
             .iter()
@@ -1240,4 +1250,31 @@ fn source_candidates_are_sorted_and_deduped() {
             "web.fetch",
         ]
     );
+}
+
+#[test]
+fn taint_tab_after_complete_source_enters_label_slot() {
+    // `taint sandbox.exec ⟨Tab⟩`: the trailing space means the operator
+    // finished the source — Tab completes the (empty) label slot instead of
+    // re-completing the source and swallowing the trailing space.
+    let cat = sample_catalog();
+    let first = taint_tab_complete("taint sandbox.exec ", &cat, 0).unwrap();
+    assert_eq!(first.buffer, "taint sandbox.exec local_only");
+    assert_eq!(first.matches, 2, "both restrictive spellings offered");
+    assert_eq!(first.next_cycle, 1);
+    let second = taint_tab_complete("taint sandbox.exec ", &cat, first.next_cycle).unwrap();
+    assert_eq!(second.buffer, "taint sandbox.exec no_remote_model");
+    assert_eq!(second.next_cycle, 0);
+    // A typed label prefix still filters the same cycle.
+    let c = taint_tab_complete("taint sandbox.exec no_", &cat, 0).unwrap();
+    assert_eq!(c.buffer, "taint sandbox.exec no_remote_model");
+}
+
+#[test]
+fn taint_tab_completion_refuses_tainted_lookalike_verbs() {
+    let cat = sample_catalog();
+    // `tainted`/`taintx` must never complete — the TUI gates on the exact
+    // verb, and the pure function must agree.
+    assert_eq!(taint_tab_complete("tainted sand", &cat, 0), None);
+    assert_eq!(taint_tab_complete("taintx mcp.gmail.* local_", &cat, 0), None);
 }

@@ -21,9 +21,15 @@ async fn egress_sources_lists_tools_families_and_labels() {
     let resp = sources(serde_json::json!({})).await;
 
     let tools = resp["tools"].as_array().expect("tools array");
+    // Operator-facing dotted spellings (`sandbox_exec` → `sandbox.exec`) —
+    // the documented `/taint` source form (path families, RFC examples).
     assert!(
-        tools.iter().any(|t| t == "sandbox_exec"),
-        "registered tools expected, got: {tools:?}"
+        tools.iter().any(|t| t == "sandbox.exec"),
+        "dotted tool spelling expected, got: {tools:?}"
+    );
+    assert!(
+        tools.iter().all(|t| !t.as_str().unwrap_or_default().contains('_')),
+        "no snake_case spellings may leak into the catalog: {tools:?}"
     );
     let names: Vec<&str> = tools
         .iter()

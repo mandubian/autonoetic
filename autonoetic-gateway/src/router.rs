@@ -6043,6 +6043,13 @@ fn handle_egress_policy_propose(req: JsonRpcRequest) -> JsonRpcResponse {
 /// spellings the command accepts. Read-only and pure — the room caches it
 /// across Tab presses, so an operator who knows "the emails thing" can
 /// Tab-complete `mcp.gmail.*` without remembering the exact registration.
+///
+/// Tool names are re-spelled in the operator-facing dotted form
+/// (`sandbox_exec` → `sandbox.exec`): `/taint` sources are matched via
+/// [`autonoetic_types::egress::normalize_source_key`] (`.` → `_`), so the
+/// dotted spelling is the documented one (path families, RFC examples), and
+/// completing to it is lossless for matching. Mixed spellings would make
+/// `sandbox.` fail to complete the `sandbox_exec` tool.
 #[inline(never)]
 fn handle_egress_sources(req: JsonRpcRequest) -> JsonRpcResponse {
     // No parameters expected: the catalog is session-independent and pure.
@@ -6061,6 +6068,7 @@ fn handle_egress_sources(req: JsonRpcRequest) -> JsonRpcResponse {
     let mut tools: Vec<String> = crate::runtime::tools::default_registry()
         .registered_tool_names()
         .into_iter()
+        .map(|t| t.replace('_', "."))
         .collect();
     tools.sort();
     let mut path_families: Vec<&str> =
