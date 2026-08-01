@@ -456,8 +456,11 @@ fn collect_skill_names(revision_dir: &Path) -> Vec<String> {
 /// Refuse a Replay export whose checkpoint history is not cleared for the
 /// capsule's destination sink (RFC §7 / P-15.2, #987).
 ///
-/// The label consulted is the **union** of two sources, because either alone
-/// can miss:
+/// The label consulted is the **intersection of allowed sinks** across two
+/// sources — `restrict` applied over both, the lattice meet, so each source can
+/// only narrow what the export may reach. (Deliberately not "union": that reads
+/// as widening, which is the inverted-lattice slip the RFC bans by name in its
+/// terminology note.) Both are needed because either alone can miss:
 ///
 /// - the session's accumulated taint (`session_egress_taint`), which is what
 ///   every other off-machine boundary gates on; and
@@ -492,6 +495,7 @@ fn guard_replay_checkpoint_egress(
              refusing to bundle its history"
         )
     })?;
+    // Each sidecar label narrows further (lattice meet) — never widens.
     for label in ckpt.egress_labels.values() {
         effective = effective.restrict(label);
     }

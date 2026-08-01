@@ -982,9 +982,10 @@ view alone:
   Replay capsule embeds `SessionCheckpoint`, whose `history` is every tool result
   verbatim. It was previously exported unchecked while the `memory_snapshot` beside
   it *was* label-filtered — which made the capsule look label-aware while the
-  larger payload went ungated (#987). It now refuses when the union of the
-  session's taint and the checkpoint's own `egress_labels` sidecar excludes the
-  capsule's destination sink. It **refuses rather than filters**: a Replay capsule
+  larger payload went ungated (#987). It now refuses when the intersection of
+  allowed sinks across the session's taint and the checkpoint's own
+  `egress_labels` sidecar (`restrict` over both — each can only narrow) excludes
+  the capsule's destination sink. It **refuses rather than filters**: a Replay capsule
   exists to replay, and a history with holes punched in it is not replayable, so a
   silently-partial capsule would be a worse artifact than an absent one. The cost
   is granularity — one labeled result blocks the whole Replay export to that
