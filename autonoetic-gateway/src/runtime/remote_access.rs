@@ -218,6 +218,10 @@ impl ImportLanguageDetector for PythonImportDetector {
             ("aiohttp", "Async HTTP client library"),
             ("socket", "Low-level networking library"),
             ("ftplib", "FTP client library"),
+            ("imaplib", "IMAP client library"),
+            ("poplib", "POP3 client library"),
+            ("nntplib", "NNTP client library"),
+            ("telnetlib", "Telnet client library"),
             ("smtplib", "SMTP client library"),
             ("paramiko", "SSH client library"),
             ("fabric", "SSH execution library"),
@@ -551,7 +555,6 @@ impl RemoteAccessAnalyzer {
             ),
             (r"\.get\s*\(.*http", "HTTP GET request"),
             (r"\.post\s*\(.*http", "HTTP POST request"),
-            (r"fetch\s*\(", "Fetch API call"),
             (
                 r"axios\.(get|post|put|delete|patch|head|options)\s*\(",
                 "Axios HTTP request",
@@ -592,6 +595,40 @@ impl RemoteAccessAnalyzer {
                             reason: reason.to_string(),
                         });
                     }
+                }
+            }
+        }
+
+        // `fetch(` is the JavaScript global HTTP API. Disambiguate it from
+        // same-named *method* calls on other objects — `imaplib`'s
+        // `IMAP4.fetch()`, DBAPI cursor `.fetch()`, collection `.fetch()` —
+        // which are either not HTTP or are already covered by import-level
+        // detection. Only flag a `fetch(` that is NOT preceded by `.`, a word
+        // char, `]`, or `)`, i.e. a standalone/global call. (The `regex` crate
+        // has no lookbehind, so this boundary check is byte-based.)
+        if let Ok(re) = Regex::new(r"fetch\s*\(") {
+            let bytes = code.as_bytes();
+            for mat in re.find_iter(code) {
+                let prev_is_method_context = match mat.start().checked_sub(1) {
+                    Some(i) => matches!(bytes[i], b'.' | b']' | b')')
+                        || bytes[i].is_ascii_alphanumeric()
+                        || bytes[i] == b'_',
+                    None => false,
+                };
+                if prev_is_method_context {
+                    continue;
+                }
+                let line_num = code[..mat.start()].matches('\n').count() + 1;
+                let pat_str = mat.as_str().trim().to_string();
+                if !patterns.iter().any(|p: &DetectedPattern| {
+                    p.pattern == pat_str && p.line_number == Some(line_num)
+                }) {
+                    patterns.push(DetectedPattern {
+                        category: "function_call".to_string(),
+                        pattern: pat_str,
+                        line_number: Some(line_num),
+                        reason: "Fetch API call".to_string(),
+                    });
                 }
             }
         }
@@ -1034,6 +1071,75 @@ response = requests.get("https://api.example.com/data")
         assert!(analysis.requires_approval);
         // Should have both import and function_call detections
         assert!(analysis.detected_patterns.len() >= 2);
+    }
+
+    #[test]
+    fn test_imaplib_and_stdlib_mail_imports_detected() {
+        // imaplib (and poplib/nntplib/telnetlib) were missing from
+        // PythonImportDetector — session-912c7791's fetch_gmail.py had no
+        // import-level network signal, so no declaration could cover it.
+        for (lib, needle) in [
+            ("imaplib", "IMAP"),
+            ("poplib", "POP3"),
+            ("nntplib", "NNTP"),
+            ("telnetlib", "Telnet"),
+        ] {
+            let code = format!("import {lib}\nconn = {lib}.IMAP4_SSL('imap.gmail.com')\n");
+            let analysis = RemoteAccessAnalyzer::analyze_code(&code);
+            assert!(
+                analysis
+                    .detected_patterns
+                    .iter()
+                    .any(|p| p.category == "import" && p.reason.contains(needle)),
+                "expected {lib} import detection ({needle}) for code:\n{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_imaplib_fetch_method_not_flagged_as_fetch_api() {
+        // `IMAP4.fetch()` collided with the generic `fetch(` heuristic.
+        // The boundary disambiguation must NOT flag the method-call form.
+        let code = r#"
+import imaplib
+mail = imaplib.IMAP4_SSL("imap.gmail.com")
+typ, data = mail.fetch(b"1", "(RFC822)")
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        let fetch_api_count = analysis
+            .detected_patterns
+            .iter()
+            .filter(|p| p.reason == "Fetch API call")
+            .count();
+        assert_eq!(
+            fetch_api_count, 0,
+            "imaplib mail.fetch() must not be flagged as a Fetch API call: {:?}",
+            analysis.detected_patterns
+        );
+        // The imaplib import is still detected (so a declaration can cover it).
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "import" && p.reason.contains("IMAP")));
+    }
+
+    #[test]
+    fn test_global_fetch_still_flagged() {
+        // Standalone/global `fetch(` (the JS HTTP API) must still be detected.
+        for code in [
+            r#"const r = fetch("https://example.com")"#,
+            r#"await fetch(url)"#,
+            "\nfetch(\n  'https://x')",
+        ] {
+            let analysis = RemoteAccessAnalyzer::analyze_code(code);
+            assert!(
+                analysis
+                    .detected_patterns
+                    .iter()
+                    .any(|p| p.reason == "Fetch API call"),
+                "global fetch( must be flagged for code:\n{code}"
+            );
+        }
     }
 
     #[test]

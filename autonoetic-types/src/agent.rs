@@ -296,7 +296,15 @@ fn is_default_sandbox_network_policy(p: &SandboxNetworkPolicy) -> bool {
 }
 
 /// Agent-declared remote-access patterns used for deterministic gateway checks.
+///
+/// `deny_unknown_fields` is intentional: a misspelled or invented field (e.g.
+/// `hosts:`/`patterns:` instead of `targets:`/`function_calls:`) must FAIL to
+/// parse loudly rather than silently becoming an empty declaration — a silent
+/// no-op leaves the agent's sandbox exec blocked at runtime with no actionable
+/// signal (the root cause of the session-912c7791 imaplib thrash). Install-time
+/// validation surfaces the precise error.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteAccessDeclaration {
     /// How remote signals are handled by sandbox approval flow.
     /// `required` means operator approval is required for remote execution.

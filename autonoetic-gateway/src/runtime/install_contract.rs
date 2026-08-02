@@ -9,7 +9,7 @@
 //! Design rule: This is deterministic infrastructure, not a policy engine.
 //! No inference from code meaning, no guessing agent intent.
 
-use autonoetic_types::agent::{AgentManifest, RuntimeDeclaration};
+use autonoetic_types::agent::{AgentManifest, RemoteAccessDeclaration, RuntimeDeclaration};
 use autonoetic_types::capability::Capability;
 use autonoetic_types::layer::ArtifactLayer;
 use autonoetic_types::runtime_lock::{
@@ -538,6 +538,32 @@ pub fn validate_skill_frontmatter_shape(frontmatter: &serde_yaml::Value) -> Vec<
         missing.push("agent (must be a mapping)".to_string());
     } else if !missing.iter().any(|m| m == "metadata.autonoetic") {
         missing.push("agent (or metadata.autonoetic.agent)".to_string());
+    }
+
+    // Validate the optional `remote_access` declaration strictly. A block that
+    // doesn't match `RemoteAccessDeclaration`'s schema (e.g. invented `hosts`/
+    // `patterns` keys) would otherwise be silently dropped to an empty
+    // declaration at runtime — leaving sandbox exec blocked with no actionable
+    // signal (root cause of the session-912c7791 imaplib thrash).
+    // `RemoteAccessDeclaration` carries `#[serde(deny_unknown_fields)]`, so
+    // this surfaces the precise unknown-field error at install time.
+    let ra_key = serde_yaml::Value::String("remote_access".into());
+    let remote_access_value = obj.get(&ra_key).cloned().or_else(|| {
+        obj.get(&serde_yaml::Value::String("metadata".into()))
+            .and_then(|m| m.as_mapping())
+            .and_then(|m| m.get(&serde_yaml::Value::String("autonoetic".into())))
+            .and_then(|a| a.as_mapping())
+            .and_then(|a| a.get(&ra_key))
+            .cloned()
+    });
+    if let Some(ra) = remote_access_value {
+        if let Err(e) = serde_yaml::from_value::<RemoteAccessDeclaration>(ra) {
+            missing.push(format!(
+                "remote_access (invalid declaration: {e}. Valid fields: approval_mode, targets, \
+                 enabled_languages, python_imports, js_imports, rust_imports, go_imports, \
+                 function_calls, shell_commands, package_manager_commands)"
+            ));
+        }
     }
 
     missing
@@ -1267,6 +1293,89 @@ agent:
         .unwrap();
         let missing = validate_skill_frontmatter_shape(&yaml);
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn test_validate_skill_frontmatter_shape_rejects_unknown_remote_access_fields() {
+        // session-912c7791: the coder invented a `remote_access:` block using
+        // `hosts:`/`patterns:`, which don't exist on `RemoteAccessDeclaration`.
+        // Without `deny_unknown_fields` serde silently dropped them → empty
+        // declaration → runtime sandbox-exec block with no actionable signal.
+        // Install validation must now surface the precise error.
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "my.agent"
+  name: "My Agent"
+  description: "Desc"
+remote_access:
+  hosts:
+    - host: imap.gmail.com
+      port: 993
+  patterns:
+    - category: function_call
+      pattern: "imaplib.fetch("
+"#,
+        )
+        .unwrap();
+        let missing = validate_skill_frontmatter_shape(&yaml);
+        assert_eq!(missing.len(), 1, "expected exactly the remote_access error");
+        let msg = &missing[0];
+        assert!(
+            msg.starts_with("remote_access (invalid declaration:"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("Valid fields:"),
+            "error must list valid fields: {msg}"
+        );
+        assert!(
+            msg.contains("function_calls") && msg.contains("targets"),
+            "error must name the real fields: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_skill_frontmatter_shape_accepts_valid_remote_access() {
+        // The CORRECT shape (targets + python_imports + function_calls) must
+        // still pass validation, including when nested under
+        // metadata.autonoetic.
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+name: "gmail-imap-reader"
+description: "Reads Gmail over IMAP"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "gmail-imap-reader"
+    remote_access:
+      approval_mode: "preapproved"
+      targets:
+        - kind: host_and_port
+          value:
+            host: imap.gmail.com
+            port: 993
+      python_imports: ["imaplib"]
+      function_calls: ["imaplib.fetch("]
+"#,
+        )
+        .unwrap();
+        let missing = validate_skill_frontmatter_shape(&yaml);
+        assert!(missing.is_empty(), "valid remote_access rejected: {missing:?}");
     }
 
     #[test]
