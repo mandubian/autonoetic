@@ -3963,6 +3963,8 @@ impl AgentExecutor {
                 context_window_tokens,
                 input_context_pct,
                 response.reasoning_content.as_deref(),
+                response.usage.cached_tokens,
+                response.usage.reasoning_tokens,
             )?;
 
             let _ = tracer.record_digest_llm_round(
