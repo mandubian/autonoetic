@@ -685,10 +685,14 @@ impl SessionTracer {
         context_window_tokens: Option<u32>,
         input_context_pct: Option<f32>,
         reasoning_content: Option<&str>,
+        cached_tokens: u64,
+        reasoning_tokens: u64,
     ) -> anyhow::Result<()> {
         let mut usage = serde_json::json!({
             "input_tokens": input_tokens,
-            "output_tokens": output_tokens
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "reasoning_tokens": reasoning_tokens,
         });
         if let Some(w) = context_window_tokens {
             usage["context_window_tokens"] = serde_json::json!(w);

@@ -240,6 +240,8 @@ fn ri_0_13b_reasoning_hash_in_causal_event() -> anyhow::Result<()> {
         None,
         None,
         Some("I considered multiple approaches before responding."),
+        0,
+        0,
     )?;
 
     let events = store.search_causal_events(Some("sess-ri-0-13b"), Some("test.agent"), 50)?;
@@ -300,6 +302,8 @@ fn ri_0_13b_reasoning_force_captured_even_in_off_mode() -> anyhow::Result<()> {
         None,
         None,
         Some("My reasoning content here."),
+        0,
+        0,
     )?;
 
     let events = store.search_causal_events(Some("sess-ri-0-13b-force"), Some("test.agent"), 50)?;
@@ -368,6 +372,8 @@ fn ri_0_13b_no_reasoning_hash_when_absent() -> anyhow::Result<()> {
         None,
         None,
         None,
+        0,
+        0,
     )?;
 
     let events = store.search_causal_events(Some("sess-ri-0-13b-no"), Some("test.agent"), 50)?;

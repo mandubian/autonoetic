@@ -689,7 +689,10 @@ prompt_budget:
   # your tokenizer behaves materially differently (e.g. quantized local
   # models with aggressive BPE splitting). Out-of-range values are clamped
   # to [0.5, 16.0]; non-finite values fall back to the default.
-  # chars_per_token: 3.0
+  # Measured densities (prompt-size-audit-2026-08-02.md):
+  #   deepseek-v4-flash: 4.27 (prose), 3.90 (JSON schemas)
+  #   qwen3/llama3/gpt-4o on code: 2.2–3.5
+  # chars_per_token: 3.0  # set to 4.0 for deepseek, leave at 3.0 for denser tokenizers
 #
 # ── Tool Tier Registry (Constitution 4.7) ──────────────────────────────
 # Tier assignments are declarative in config/tools.yaml and loaded at gateway start.
