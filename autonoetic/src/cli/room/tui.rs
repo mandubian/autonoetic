@@ -17,11 +17,11 @@ use autonoetic_types::session_timeline::{
 };
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        self, EnableBracketedPaste, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseEvent, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 use ratatui::{
     prelude::*,
@@ -3685,12 +3685,16 @@ fn interaction_choices(entries: &[SessionTimelineEntry], interaction_id: &str) -
     (options, allow_freeform)
 }
 
-/// Restores the terminal on drop, even on early return / panic-unwind.
+/// Restores the terminal on drop, even on early return / panic-unwind. The
+/// same restore is also triggered from a signal-handler thread on SIGTERM /
+/// SIGHUP / external SIGINT (see `terminal::install_signal_terminal_restore`)
+/// — a killed process never runs this destructor, which is what previously
+/// left the terminal in mouse-reporting mode and spewed `CSI <b;x;yM` garbage
+/// on every mouse move after a kill.
 struct TerminalRestore;
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste, LeaveAlternateScreen);
+        let _ = crate::cli::terminal::restore_terminal();
     }
 }
 
@@ -3713,6 +3717,11 @@ pub fn run(
     presets: &[String],
 ) -> anyhow::Result<()> {
     crate::cli::terminal::require_interactive_terminal("Session Room")?;
+    // Wire SIGTERM/SIGHUP/external-SIGINT to a terminal restore + clean exit
+    // *before* perturbing the terminal, so a killed TUI cannot leave mouse
+    // reporting on (the garbage-chars-on-kill bug). SIGKILL stays uncatchable.
+    #[cfg(unix)]
+    crate::cli::terminal::install_signal_terminal_restore()?;
     enable_raw_mode()?;
     // Guard constructed before entering the alternate screen, so raw mode is
     // restored even if `EnterAlternateScreen` (or anything after) fails.

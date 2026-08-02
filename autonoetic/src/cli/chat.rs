@@ -10,9 +10,9 @@ use tokio::net::TcpStream;
 
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -67,15 +67,14 @@ const PROMPT_HISTORY_MAX: usize = 500;
 
 /// If `handle_chat` enables raw mode / alternate screen then exits early (missing env, I/O error,
 /// `run_loop` failure), the tty stays raw with echo off unless we restore it—keyboard input looks
-/// "invisible" until `reset`.
+/// "invisible" until `reset`. Same restore runs from the signal-handler thread
+/// (`terminal::install_signal_terminal_restore`) when the TUI is killed, so a
+/// dead chat TUI cannot leave mouse reporting on either.
 struct ChatTerminalRestore;
 
 impl Drop for ChatTerminalRestore {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let mut out = std::io::stdout();
-        let _ = execute!(out, LeaveAlternateScreen, DisableMouseCapture);
-        let _ = execute!(out, Show);
+        let _ = crate::cli::terminal::restore_terminal();
     }
 }
 
@@ -6063,6 +6062,11 @@ pub async fn handle_chat(config_path: &Path, args: &super::common::ChatArgs) -> 
     }
 
     // Setup terminal (only after prerequisites—early `?` must not leave raw mode / alt screen on)
+    // Wire SIGTERM/SIGHUP/external-SIGINT to a terminal restore + clean exit
+    // *before* perturbing the terminal, so a killed chat TUI cannot leave mouse
+    // reporting on (the garbage-chars-on-kill bug). SIGKILL stays uncatchable.
+    #[cfg(unix)]
+    crate::cli::terminal::install_signal_terminal_restore()?;
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)?;
