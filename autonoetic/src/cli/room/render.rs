@@ -544,6 +544,29 @@ pub fn agent_spawn_output_label(entry: &SessionTimelineEntry) -> Option<String> 
         .map(str::to_string)
 }
 
+/// The `message_id` of an agent message row, for correlating it with the label
+/// `labels.list`'s `agent_messages` section reports (#971 proposal 2). Message
+/// rows are `agent.peer_message` events (agent-to-agent traffic, which is what
+/// carries the sender's accumulated egress taint at send time — RFC §5.5);
+/// their `message_id` is in the payload, matching `LabeledMessageRow.message_id`.
+pub fn agent_message_id(entry: &SessionTimelineEntry) -> Option<String> {
+    if entry.event_type != "agent.peer_message" {
+        return None;
+    }
+    let p = entry
+        .payload
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                serde_json::from_str::<serde_json::Value>(s).unwrap_or(v)
+            } else {
+                v
+            }
+        })?;
+    p.get("message_id").and_then(|v| v.as_str()).map(str::to_string)
+}
+
 fn agent_id_from_spawn_result(value: Option<&serde_json::Value>) -> Option<String> {
     let value = value?;
     let parsed = if let Some(s) = value.as_str() {
@@ -1471,6 +1494,18 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                     msg
                 };
                 one_line(&plain, 80)
+            }
+        }
+        // Agent-to-agent direct message (#971 proposal 2). The actor label
+        // already names the sender; this renders the (redacted) body, prefixed
+        // with a glyph so peer traffic reads as traffic, and the row's
+        // message_id keys the egress label marker.
+        "agent.peer_message" => {
+            let msg = one_line(&field("message").unwrap_or_default(), 80);
+            if msg.is_empty() {
+                "⇄ peer message".to_string()
+            } else {
+                format!("⇄ {msg}")
             }
         }
         "agent.reasoning" => format!("💭 {}", one_line(&field("reasoning").unwrap_or_default(), 160)),
@@ -2416,7 +2451,7 @@ pub enum RowTone {
 /// Map a gateway event type to the row's visual tone.
 pub fn row_tone(event_type: &str) -> RowTone {
     match event_type {
-        "agent.message" | "operator.message" => RowTone::AgentNarrative,
+        "agent.message" | "operator.message" | "agent.peer_message" => RowTone::AgentNarrative,
         "tool.completed" => RowTone::ToolCall,
         "agent.reasoning" => RowTone::Reasoning,
         _ => RowTone::Default,
@@ -4572,6 +4607,45 @@ mod tests {
         assert!(spec.headline.is_empty(), "body lives in detail for wrapping");
         assert_eq!(spec.detail.as_deref(), Some(greeting));
         assert_eq!(spec.tone, RowTone::AgentNarrative);
+    }
+
+    /// `agent.peer_message` rows render a readable headline (they used to fall
+    /// through to the raw event type), expose their `message_id` for the egress
+    /// label marker, and read as narrative rows (#971 proposal 2).
+    #[test]
+    fn render_spec_peer_message_renders_body_and_exposes_message_id() {
+        let e = entry(
+            SessionRole::Specialist { kind: "coder".into() },
+            Principal::agent("email.reader"),
+            "agent.peer_message",
+            Altitude::Normal,
+            serde_json::json!({
+                "message_id": "msg-peer-1",
+                "sender_agent_id": "email.reader",
+                "message": "Summarized 3 unread threads — all local_only"
+            }),
+        );
+        assert_eq!(
+            agent_message_id(&e).as_deref(),
+            Some("msg-peer-1"),
+            "the payload message_id keys the label lookup"
+        );
+        let spec = render_spec(&e);
+        assert!(spec.headline.contains("Summarized 3 unread threads"));
+        assert!(spec.headline.contains("⇄"), "peer traffic is visually distinct");
+        assert_eq!(spec.tone, RowTone::AgentNarrative);
+    }
+
+    #[test]
+    fn agent_message_id_is_none_for_non_peer_message_events() {
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("planner.default"),
+            "agent.message",
+            Altitude::Normal,
+            serde_json::json!({ "message_id": "msg-1", "message": "hi" }),
+        );
+        assert_eq!(agent_message_id(&e), None);
     }
 
     #[test]
