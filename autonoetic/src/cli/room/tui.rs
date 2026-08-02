@@ -832,6 +832,18 @@ fn record_timeline_resolution(resolved: &mut HashSet<String>, e: &SessionTimelin
                 resolved.insert(key);
             }
         }
+        // `user.ask` gate lifecycle (#363): the gateway now emits a paired
+        // resolution row when an interaction is answered/cancelled/expired.
+        // Folding it here lets a reloaded Room stop re-offering an already-
+        // answered ask — the same pattern approvals use, and the fix for the
+        // reload-replays-popups bug (previously only the in-process `acted`
+        // set suppressed interaction gates, so every session switch resurrected
+        // historical `user.ask.pending` rows as fresh popups).
+        "user.ask.resolved" | "user.ask.cancelled" | "user.ask.expired" => {
+            if let Some(id) = interaction_id_for(e) {
+                resolved.insert(id);
+            }
+        }
         _ => {}
     }
 }
@@ -3737,9 +3749,11 @@ pub fn run(
     let mut session_pick_list: Option<Vec<String>> = None; // ids from /session list for number-pick
     let mut wiki_request_ids: Option<Vec<String>> = None; // ids from /wiki proposals for number-detail
     let mut status: Option<String> = None; // last action / connection result
-    // Gates no longer offerable: approvals resolved on the timeline, plus
-    // anything the operator just acted on (covers interactions, which have no
-    // timeline resolution event yet).
+    // Gates no longer offerable: approvals/plans/interactions resolved on the
+    // timeline (`approval.*`, `plan.*`, `user.ask.resolved`/`.cancelled`/
+    // `.expired`), plus anything the operator just acted on. `acted` also
+    // covers the in-process window between answering an interaction and its
+    // `user.ask.resolved` row landing on the next timeline fetch.
     let mut resolved: HashSet<String> = HashSet::new();
     let mut acted: HashSet<String> = HashSet::new();
     // Display toggles + spinner state for the in-flight row indicator.
@@ -7720,7 +7734,12 @@ fn gate_for_entry(
         }
         "user.ask.pending" => {
             let id = interaction_id_for(e)?;
-            (!acted.contains(&id)).then_some(GateRef {
+            // A prior `user.ask.resolved`/`.cancelled`/`.expired` row folds the
+            // interaction id into `resolved`, so a reloaded Room does not
+            // re-popup an already-answered ask. `acted` still covers the
+            // in-process window between answering and the resolution row
+            // landing on the next timeline fetch.
+            (!resolved.contains(&id) && !acted.contains(&id)).then_some(GateRef {
                 kind: GateKind::Interaction,
                 id,
             })
@@ -11733,6 +11752,52 @@ mod tests {
         let mut resolved = HashSet::new();
         record_timeline_resolution(&mut resolved, &entries[1]);
         assert!(find_active_gate(&entries, &resolved, &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn answered_user_ask_does_not_re_offer_after_reload() {
+        // Regression: the Room TUI rebuilds its `resolved` set from the
+        // timeline on every reload (initial attach, `/session`, fork).
+        // `user.ask.pending` is now paired with a `user.ask.resolved` row, so
+        // a previously-answered ask must not re-popup as a fresh gate —
+        // exactly like approvals already work. Before the gateway emitted the
+        // resolution row, `resolved` never learned the interaction was answered
+        // and the blocking GateModal replayed on every reload.
+        let ask = gate_entry("user.ask.pending");
+        let resolved_evt = gate_entry("user.ask.resolved");
+        let entries = vec![ask, resolved_evt];
+
+        // Fresh reload: empty `resolved`, empty `acted` — then fold the whole
+        // timeline, the way the page loop does.
+        let mut resolved = HashSet::new();
+        for e in &entries {
+            record_timeline_resolution(&mut resolved, e);
+        }
+        assert!(resolved.contains("int-1"));
+        assert!(
+            find_active_gate(&entries, &resolved, &HashSet::new()).is_none(),
+            "an answered user.ask must not be offered as a gate after reload"
+        );
+        assert_eq!(count_active_gates(&entries, &resolved, &HashSet::new()), 0);
+    }
+
+    #[test]
+    fn cancelled_or_expired_user_ask_does_not_re_offer_after_reload() {
+        // Abandonments (cancelled/expired) close the gate the same way.
+        for event_type in ["user.ask.cancelled", "user.ask.expired"] {
+            let ask = gate_entry("user.ask.pending");
+            let mut close = gate_entry(event_type);
+            close.event_type = event_type.into();
+            let entries = vec![ask, close];
+            let mut resolved = HashSet::new();
+            for e in &entries {
+                record_timeline_resolution(&mut resolved, e);
+            }
+            assert!(
+                find_active_gate(&entries, &resolved, &HashSet::new()).is_none(),
+                "a {event_type} user.ask must not be offered as a gate after reload"
+            );
+        }
     }
 
     #[test]

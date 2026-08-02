@@ -450,6 +450,115 @@ pub fn emit_user_ask_pending_timeline_event(
     }
 }
 
+/// Emit the resolution event for a `user.ask` interaction onto the canonical
+/// timeline — `user.ask.resolved` (answered), `user.ask.cancelled`, or
+/// `user.ask.expired`. This closes the loop the `user.ask.pending` event opens:
+/// channels rebuild their gate state from the timeline, so without a paired
+/// resolution row an answered ask stays *offerable* forever and the Room TUI
+/// re-pops its interaction modal on every session reload (#363).
+///
+/// Mirrors the approval gate lifecycle (`approval.pending` →
+/// `approval.approved/rejected/cancelled`): a decision (`resolved`) lands at
+/// `Attention` so it reads paired with its ask; abandonments (`cancelled`,
+/// `expired`) are `Normal` — not decisions. Authored by the decider's seat
+/// (operator for an answered/cancelled-by-operator ask, the hidable Runtime
+/// seat for mechanical expiry). Best-effort: a failure here never affects the
+/// recorded answer.
+///
+/// `status` is `"resolved"` | `"cancelled"` | `"expired"`. `decided_by` is the
+/// `answered_by`/canceller attribution string (may be `None` for mechanical
+/// expiry → Runtime seat). `answer` carries the answer payload for `resolved`
+/// (free-text and/or option id); `reason` carries the cancellation note for
+/// `cancelled`.
+pub fn emit_user_ask_resolution_timeline_event(
+    store: &crate::scheduler::gateway_store::GatewayStore,
+    interaction: &autonoetic_types::background::UserInteraction,
+    status: &str,
+    decided_by: Option<&str>,
+    answer: Option<&autonoetic_types::background::UserInteractionAnswer>,
+    reason: Option<&str>,
+) {
+    let event_type = match status {
+        "resolved" => "user.ask.resolved",
+        "cancelled" => "user.ask.cancelled",
+        "expired" => "user.ask.expired",
+        _ => return,
+    };
+    let root = if interaction.root_session_id.is_empty() {
+        crate::runtime::content_store::root_session_id(&interaction.session_id).to_string()
+    } else {
+        interaction.root_session_id.clone()
+    };
+    let (principal, role) = match decided_by {
+        Some(s) => decider_seat(s),
+        // Mechanical expiry: the Runtime seat (hidable, Detail floor) so the
+        // `Normal`-base abandon row stays out of the operator's way.
+        None => (
+            autonoetic_types::principal::Principal {
+                kind: autonoetic_types::principal::PrincipalKind::Script,
+                id: "gateway".to_string(),
+            },
+            SessionRole::Runtime,
+        ),
+    };
+    let refs = TimelineRefs {
+        interaction_id: Some(interaction.interaction_id.clone()),
+        ..Default::default()
+    };
+    let mut payload = serde_json::json!({
+        "interaction_id": interaction.interaction_id,
+    });
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(by) = decided_by {
+            obj.insert("decided_by".into(), serde_json::Value::String(by.to_string()));
+        }
+        if status == "resolved" {
+            if let Some(a) = answer {
+                if let Some(opt) = a.answer_option_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                    obj.insert("answer_option_id".into(), serde_json::Value::String(opt.to_string()));
+                }
+                if let Some(text) = a
+                    .answer_text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    obj.insert(
+                        "answer_text".into(),
+                        serde_json::Value::String(
+                            crate::log_redaction::redact_text_for_logs(text),
+                        ),
+                    );
+                }
+            }
+        } else if let Some(r) = reason.map(str::trim).filter(|s| !s.is_empty()) {
+            obj.insert(
+                "reason".into(),
+                serde_json::Value::String(crate::log_redaction::redact_text_for_logs(r)),
+            );
+        }
+    }
+    let event = build_timeline_event(
+        root,
+        interaction.session_id.clone(),
+        Some(interaction.turn_id.clone()).filter(|t| !t.is_empty() && t != "unknown"),
+        &principal,
+        &role,
+        event_type,
+        None,
+        Some(payload),
+        refs,
+    );
+    if let Err(e) = store.create_live_digest_event(&event) {
+        tracing::debug!(
+            target: "session_timeline",
+            error = %e,
+            interaction_id = %interaction.interaction_id,
+            "user.ask.{status} timeline emit failed"
+        );
+    }
+}
+
 /// Build the `operator.message` timeline event for an operator-originated chat
 /// message into a session (#405) — so channels show both sides of the
 /// conversation, not just agent replies. Attribution: a human chat (no
@@ -718,8 +827,9 @@ pub fn operator_comment_event(
 /// | `plan.pending` / `plan.approved` | Attention | plan gate lifecycle (request + decision) |
 /// | `approval.pending` / `approval.approved` / `approval.rejected` | Attention | approval gate lifecycle |
 /// | `approval.cancelled` | Normal | abandonment, not a decision |
+/// | `user.ask.cancelled` / `user.ask.expired` | Normal | interaction abandonment, not a decision |
 /// | `escalation.pending` | Attention | escalation gate request |
-/// | `user.ask.pending` | Attention | conversational clarification gate |
+/// | `user.ask.pending` / `user.ask.resolved` | Attention | conversational clarification gate lifecycle |
 /// | `operator.comment` | Attention | operator comment anchored to a live file — an issue the agent should address |
 /// | `wiki.proposed` / `wiki.promoted` / `wiki.rejected` | Attention | wiki-contribution gate lifecycle |
 /// | `wiki.withdrawn` | Normal | abandonment, not a decision |
@@ -769,6 +879,7 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         | "approval.rejected"
         | "escalation.pending"
         | "user.ask.pending"
+        | "user.ask.resolved"
         | "operator.comment"
         | "wiki.proposed"
         | "wiki.promoted"
@@ -791,6 +902,8 @@ pub fn base_altitude(event_type: &str) -> Altitude {
         "agent.message" | "operator.message" | "agent.peer_message" | "session.start"
         | "session.end" | "workbench.created" | "digest_annotate" | "llm.retry"
         | "approval.cancelled" | "wiki.withdrawn"
+        | "user.ask.cancelled"
+        | "user.ask.expired"
         // Operator egress-policy declarations (`egress.session_policy`) and
         // enforcement outcomes are visible progress, not plumbing (#977 #972):
         // a `/taint`/`/private` change, a withheld envelope, a refused
@@ -1519,5 +1632,173 @@ mod tests {
             role_floor_with_config(&SessionRole::Planner, None),
             Altitude::Detail
         );
+    }
+
+    #[test]
+    fn user_ask_resolution_events_pair_the_lifecycle_and_classify_altitude() {
+        // A decision (resolved) shares the gate's Attention altitude so it reads
+        // paired with its ask; abandonments (cancelled/expired) are Normal.
+        assert_eq!(base_altitude("user.ask.resolved"), Altitude::Attention);
+        assert_eq!(base_altitude("user.ask.cancelled"), Altitude::Normal);
+        assert_eq!(base_altitude("user.ask.expired"), Altitude::Normal);
+    }
+
+    #[test]
+    fn answering_a_user_interaction_emits_user_ask_resolved_timeline_event() {
+        use autonoetic_types::background::{
+            UserInteraction, UserInteractionAnswer, UserInteractionKind,
+            UserInteractionStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let interaction = UserInteraction {
+            interaction_id: "ui-ans-01".to_string(),
+            session_id: "root/planner-abc".to_string(),
+            root_session_id: "root".to_string(),
+            agent_id: "planner.default".to_string(),
+            turn_id: "turn-000001".to_string(),
+            kind: UserInteractionKind::Clarification,
+            question: "flat or normalized?".to_string(),
+            options: vec![],
+            allow_freeform: true,
+            status: UserInteractionStatus::Pending,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            checkpoint_turn_id: None,
+            workflow_id: None,
+            task_id: None,
+            context: None,
+            answer_option_id: None,
+            answer_text: None,
+            answered_by: None,
+            answered_at: None,
+            expires_at: None,
+        };
+        store.create_user_interaction(&interaction).unwrap();
+        store
+            .answer_user_interaction(&UserInteractionAnswer {
+                interaction_id: "ui-ans-01".to_string(),
+                answer_text: Some("normalized relational".to_string()),
+                answer_option_id: None,
+                answered_by: "operator".to_string(),
+            })
+            .unwrap();
+
+        let page = store
+            .list_session_timeline("root", None, 10, None, None)
+            .unwrap();
+        let types: Vec<&str> =
+            page.entries.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(types, vec!["user.ask.pending", "user.ask.resolved"]);
+        let resolved = page.entries.last().unwrap();
+        assert_eq!(
+            resolved.refs.interaction_id.as_deref(),
+            Some("ui-ans-01")
+        );
+        // Authored by the operator's decider seat, at the gate's altitude.
+        assert_eq!(resolved.role, SessionRole::Operator);
+        assert_eq!(resolved.altitude, Altitude::Attention);
+        let payload: serde_json::Value =
+            serde_json::from_str(resolved.payload.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(payload["interaction_id"], "ui-ans-01");
+        assert_eq!(payload["decided_by"], "operator");
+        assert_eq!(payload["answer_text"], "normalized relational");
+    }
+
+    #[test]
+    fn cancelling_a_user_interaction_emits_user_ask_cancelled_timeline_event() {
+        use autonoetic_types::background::{
+            UserInteraction, UserInteractionKind, UserInteractionStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        store
+            .create_user_interaction(&UserInteraction {
+                interaction_id: "ui-can-01".to_string(),
+                session_id: "root/planner-abc".to_string(),
+                root_session_id: "root".to_string(),
+                agent_id: "planner.default".to_string(),
+                turn_id: "turn-000001".to_string(),
+                kind: UserInteractionKind::Clarification,
+                question: "flat or normalized?".to_string(),
+                options: vec![],
+                allow_freeform: true,
+                status: UserInteractionStatus::Pending,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                checkpoint_turn_id: None,
+                workflow_id: None,
+                task_id: None,
+                context: None,
+                answer_option_id: None,
+                answer_text: None,
+                answered_by: None,
+                answered_at: None,
+                expires_at: None,
+            })
+            .unwrap();
+        store
+            .cancel_user_interaction("ui-can-01", "session abandoned")
+            .unwrap();
+
+        let page = store
+            .list_session_timeline("root", None, 10, None, None)
+            .unwrap();
+        let types: Vec<&str> =
+            page.entries.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(types, vec!["user.ask.pending", "user.ask.cancelled"]);
+        let cancelled = page.entries.last().unwrap();
+        // Abandonment ⇒ Normal altitude, authored by the Runtime seat.
+        assert_eq!(cancelled.altitude, Altitude::Normal);
+        let payload: serde_json::Value =
+            serde_json::from_str(cancelled.payload.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(payload["reason"], "session abandoned");
+    }
+
+    #[test]
+    fn expiring_a_user_interaction_emits_user_ask_expired_timeline_event() {
+        use autonoetic_types::background::{
+            UserInteraction, UserInteractionKind, UserInteractionStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        // An interaction already in the past relative to now → expires on the
+        // next sweep. `expires_at` one second before the call guarantees it.
+        let past = (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+        store
+            .create_user_interaction(&UserInteraction {
+                interaction_id: "ui-exp-01".to_string(),
+                session_id: "root/planner-abc".to_string(),
+                root_session_id: "root".to_string(),
+                agent_id: "planner.default".to_string(),
+                turn_id: "turn-000001".to_string(),
+                kind: UserInteractionKind::Clarification,
+                question: "flat or normalized?".to_string(),
+                options: vec![],
+                allow_freeform: true,
+                status: UserInteractionStatus::Pending,
+                created_at: (chrono::Utc::now() - chrono::Duration::seconds(2)).to_rfc3339(),
+                expires_at: Some(past),
+                checkpoint_turn_id: None,
+                workflow_id: None,
+                task_id: None,
+                context: None,
+                answer_option_id: None,
+                answer_text: None,
+                answered_by: None,
+                answered_at: None,
+            })
+            .unwrap();
+        let expired = store.expire_timed_out_interactions().unwrap();
+        assert_eq!(expired, vec!["ui-exp-01".to_string()]);
+
+        let page = store
+            .list_session_timeline("root", None, 10, None, None)
+            .unwrap();
+        let types: Vec<&str> =
+            page.entries.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(types, vec!["user.ask.pending", "user.ask.expired"]);
+        assert_eq!(page.entries.last().unwrap().altitude, Altitude::Normal);
     }
 }

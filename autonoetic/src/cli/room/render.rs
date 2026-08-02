@@ -1426,6 +1426,24 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
         "approval.approved" => format!("approval granted ({})", field("request_id").unwrap_or_default()),
         "approval.rejected" => format!("approval denied ({})", field("request_id").unwrap_or_default()),
         "approval.cancelled" => format!("approval cancelled ({})", field("request_id").unwrap_or_default()),
+        // `user.ask` gate lifecycle (#363): paired resolution rows for the
+        // `user.ask.pending` clarification gate. The Room stops re-offering the
+        // ask once it sees these (folded into `resolved` in `record_timeline_resolution`).
+        "user.ask.resolved" => {
+            let answer = field("answer_text")
+                .or_else(|| field("answer_option_id"))
+                .unwrap_or_default();
+            format!("✓ answered ask ({}): {}", field("interaction_id").unwrap_or_default(), one_line(&answer, 60))
+        }
+        "user.ask.cancelled" => format!(
+            "✗ ask cancelled ({}){}",
+            field("interaction_id").unwrap_or_default(),
+            field("reason").map(|r| format!(": {}", one_line(&r, 60))).unwrap_or_default()
+        ),
+        "user.ask.expired" => format!(
+            "⌛ ask expired ({})",
+            field("interaction_id").unwrap_or_default()
+        ),
         "plan.pending" => format!("plan proposed: {}", field("title").unwrap_or_default()),
         "plan.approved" => format!("plan approved ({})", field("plan_id").unwrap_or_default()),
         "plan.withdrawn" => format!(
