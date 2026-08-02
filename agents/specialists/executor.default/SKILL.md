@@ -30,7 +30,6 @@ metadata:
       - type: "CredentialAccess"
         services: ["*"]
     excluded_tools:
-      - "workbench_*"
       - "planframe_*"
       - "scheduler_*"
       - "eval_*"
@@ -54,7 +53,6 @@ metadata:
       - "quality_trend_*"
       - "agent_revision_*"
       - "artifact_build"
-      - "artifact_project"
       - "promotion_*"
       - "approval_*"
       - "digest_*"
