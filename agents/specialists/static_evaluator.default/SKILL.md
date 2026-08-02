@@ -26,7 +26,6 @@ metadata:
       - type: "ReadAccess"
         scopes: ["self.*", "skills/*"]
     excluded_tools:
-      - "workbench_*"
       - "planframe_*"
       - "scheduler_*"
       - "workflow_*"

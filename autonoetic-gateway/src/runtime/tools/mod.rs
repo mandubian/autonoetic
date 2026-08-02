@@ -248,25 +248,44 @@ pub trait NativeTool: Send + Sync {
     }
 }
 
-/// Check if a tool name matches any exclusion pattern from the agent manifest.
+/// Registry-level default exclusions: tools that no reasoning agent should
+/// ever see, regardless of manifest. The workbench console feature
+/// (`workbench_*` + `artifact_project`) is operator-side — every agent SKILL
+/// already excludes it, and hiding it here keeps it out of *all* agents
+/// (including future/custom ones) and out of tier-based discovery catalogs.
+///
+/// There is intentionally NO per-agent override: `tool_discover` cannot
+/// re-enable excluded tools (`available_definitions_filtered` applies
+/// exclusion before discovery patterns match), so this list must only ever
+/// contain tools with zero legitimate users. Agents that legitimately need a
+/// tool keep it visible by not listing it — never by overriding this list.
+const DEFAULT_EXCLUDED_TOOLS: &[&str] = &["workbench_*", "artifact_project"];
+
+/// Check if a tool name matches any exclusion pattern from the agent manifest
+/// or the registry-level default list.
 /// Patterns support glob wildcards (`*` and `?`) via simple prefix/suffix matching.
 pub(crate) fn is_tool_excluded_public(tool_name: &str, manifest: &AgentManifest) -> bool {
     is_tool_excluded(tool_name, manifest)
 }
 
-fn is_tool_excluded(tool_name: &str, manifest: &AgentManifest) -> bool {
-    if manifest.excluded_tools.is_empty() {
-        return false;
+fn matches_exclusion_pattern(pattern: &str, tool_name: &str) -> bool {
+    if pattern == tool_name {
+        return true;
     }
-    manifest.excluded_tools.iter().any(|pattern| {
-        if pattern == tool_name {
-            return true;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return tool_name.starts_with(prefix);
-        }
-        false
-    })
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return tool_name.starts_with(prefix);
+    }
+    false
+}
+
+fn is_tool_excluded(tool_name: &str, manifest: &AgentManifest) -> bool {
+    DEFAULT_EXCLUDED_TOOLS
+        .iter()
+        .any(|pattern| matches_exclusion_pattern(pattern, tool_name))
+        || manifest
+            .excluded_tools
+            .iter()
+            .any(|pattern| matches_exclusion_pattern(pattern, tool_name))
 }
 
 pub struct NativeToolRegistry {
@@ -1600,6 +1619,52 @@ mod tests {
         let unfiltered = registry.available_definitions(&manifest);
         let filtered = registry.available_definitions_filtered(&manifest, None);
         assert_eq!(unfiltered.len(), filtered.len());
+    }
+
+    #[test]
+    fn test_registry_default_exclusions_apply_with_empty_manifest() {
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities("bare", vec![]);
+        let names = registry.available_tool_names(&manifest);
+
+        assert!(
+            !names.iter().any(|n| n.starts_with("workbench_")),
+            "workbench tools must be registry-default excluded"
+        );
+        assert!(!names.contains("artifact_project"));
+        assert!(names.contains("tool_discover"));
+        assert!(names.contains("session_escalate"));
+    }
+
+    #[test]
+    fn test_registry_default_exclusions_compose_with_per_agent_patterns() {
+        let registry = default_registry();
+        let manifest = AgentManifest {
+            excluded_tools: vec!["session_*".to_string()],
+            ..manifest_with_capabilities("scoped", vec![])
+        };
+        let names = registry.available_tool_names(&manifest);
+
+        assert!(!names.iter().any(|n| n.starts_with("session_")));
+        assert!(!names.iter().any(|n| n.starts_with("workbench_")));
+        assert!(!names.contains("artifact_project"));
+    }
+
+    #[test]
+    fn test_registry_default_exclusions_cover_every_registered_workbench_tool() {
+        let registry = default_registry();
+        let manifest = manifest_with_capabilities("bare", vec![]);
+        let names = registry.available_tool_names(&manifest);
+        let registered = registry.registered_tool_names();
+
+        for name in &registered {
+            if name.starts_with("workbench_") {
+                assert!(
+                    !names.contains(name),
+                    "workbench tool '{name}' must be default-excluded"
+                );
+            }
+        }
     }
 
     #[test]
