@@ -456,8 +456,6 @@ Inform user. If they want to continue, respawn (creates a new approval).
 
 ## Failure Handling
 
-## Failure Handling
-
 **Root-cause before retry (mandatory).** Read the error, identify the root cause, fix it, retry **once**. If it fails again, escalate — don't loop. Each blind retry burns a full LLM round-trip.
 
 **Tool errors → routing:**
