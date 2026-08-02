@@ -1409,6 +1409,123 @@ impl SkillStep {
     }
 }
 
+/// JSON schema for one `secret_fields` entry — mirrors
+/// `autonoetic_types::agent::SecretFieldSpec`.
+///
+/// The schema previously declared `secret_fields` as a bare `{"type": "array"}`
+/// with no item shape, so the model had to guess the entry structure blind —
+/// the observed cost was an eight-failure retry ladder on a Gmail onboarding
+/// (`invalid type: string "client_id"` → `missing field name` → `label` → …),
+/// each attempt fixing exactly one field. Declaring the item shape upfront
+/// kills the blind-guess loop.
+fn secret_field_spec_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Vault secret name (e.g. 'client_secret')"},
+            "label": {"type": "string", "description": "Human-readable prompt label (e.g. 'Client Secret')"},
+            "masked": {"type": "boolean", "description": "Password-style masked input; default false"}
+        },
+        "required": ["name", "label"],
+        "additionalProperties": false
+    })
+}
+
+/// JSON Schema `oneOf` branches for the `steps` items, mirroring
+/// `#[serde(tag = "step_type", rename_all = "snake_case")]` on
+/// `autonoetic_types::agent::CredentialSetupStep`.
+///
+/// The schema previously exposed one flat property bag for all four step
+/// types, so a model could mix fields across variants and only discovered the
+/// per-variant required fields one serde error at a time (the
+/// `missing field instruction` failures). Each branch carries its own
+/// `required` + `additionalProperties: false`, so the shape is enforced at
+/// authoring time, not learned from errors. Same pattern as
+/// `capability_oneof_schema()` in agent_revision.rs.
+///
+/// Kept in sync with the enum — the `credential_step_oneof_schema_*` tests
+/// guard against drift.
+fn credential_step_oneof_schema() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "type": "object",
+            "description": "Gateway HTTP call; extract_secrets pulls values server-side into the vault, extract_public returns non-secret fields to the agent.",
+            "properties": {
+                "step_type": {"const": "api_call"},
+                "method": {"type": "string", "description": "HTTP method (default GET)"},
+                "url": {"type": "string", "description": "Absolute URL, or path resolved against the skill base_url"},
+                "headers": {"type": "object"},
+                "body": {"type": "object"},
+                "extract_secrets": {"type": "object", "description": "secret_name → JSONPath"},
+                "extract_public": {"type": "object", "description": "field_name → JSONPath"}
+            },
+            "required": ["step_type", "url"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Gateway prompts the OPERATOR through a secure out-of-band channel for secrets — use this for any secret the human must provide. The secret never enters chat.",
+            "properties": {
+                "step_type": {"const": "user_prompt"},
+                "message": {"type": "string", "description": "Instruction shown to the operator"},
+                "secret_fields": {
+                    "type": "array",
+                    "description": "Entries are OBJECTS {name, label, masked?} — not plain strings.",
+                    "items": secret_field_spec_schema()
+                }
+            },
+            "required": ["step_type", "message", "secret_fields"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "Human does something in their browser (e.g. visit a consent URL).",
+            "properties": {
+                "step_type": {"const": "user_action"},
+                "instruction": {"type": "string", "description": "What the operator must do"},
+                "data_refs": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["step_type", "instruction"],
+            "additionalProperties": false
+        },
+        {
+            "type": "object",
+            "description": "NON-secret question: the tool suspends, you call user.ask with the question, then credential_setup again with credential_id + resume_vars. NEVER for secrets — use user_prompt.",
+            "properties": {
+                "step_type": {"const": "user_input"},
+                "question": {"type": "string", "description": "The question to ask (non-secret)"},
+                "var_name": {"type": "string", "description": "Resume variable name"},
+                "secret_fields": {
+                    "type": "array",
+                    "description": "Rejected at execution time — user_input answers flow through the LLM.",
+                    "items": secret_field_spec_schema()
+                }
+            },
+            "required": ["step_type", "question", "var_name"],
+            "additionalProperties": false
+        }
+    ])
+}
+
+/// Parse `credential_setup` arguments, surfacing the expected shape on failure
+/// instead of the raw serde column message — the model sees this error and
+/// retries, and a bare "expected struct SecretFieldSpec at line 1 column 679"
+/// taught it nothing (the observed cost was an eight-failure ladder on Gmail
+/// onboarding). The hint names both failure shapes that actually bite: string
+/// secret_fields entries and missing per-variant step fields.
+fn parse_setup_args(arguments_json: &str) -> anyhow::Result<CredentialSetupArgs> {
+    serde_json::from_str(arguments_json).map_err(|e| {
+        anyhow::anyhow!(
+            "invalid credential_setup arguments: {e}. \
+             Shapes: steps[] must match one step_type variant — api_call{{url,method?}}, \
+             user_prompt{{message, secret_fields}}, user_action{{instruction}}, \
+             user_input{{question, var_name}}; \
+             secret_fields entries are OBJECTS {{\"name\": ..., \"label\": ..., \"masked\": bool}}, \
+             not plain strings."
+        )
+    })
+}
+
 impl NativeTool for CredentialSetupTool {
     fn name(&self) -> &'static str {
         "credential_setup"
@@ -1449,28 +1566,8 @@ impl NativeTool for CredentialSetupTool {
                     },
                     "steps": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "step_type": {
-                                    "type": "string",
-                                    "enum": ["api_call", "user_prompt", "user_action", "user_input"]
-                                },
-                                "method": {"type": "string"},
-                                "url": {"type": "string"},
-                                "headers": {"type": "object"},
-                                "body": {"type": "object"},
-                                "extract_secrets": {"type": "object"},
-                                "extract_public": {"type": "object"},
-                                "question": {"type": "string"},
-                                "var_name": {"type": "string"},
-                                "message": {"type": "string"},
-                                "secret_fields": {"type": "array"},
-                                "instruction": {"type": "string"},
-                                "data_refs": {"type": "array"}
-                            }
-                        },
-                        "description": "Ordered setup steps. Required when not using skill_url."
+                        "items": {"oneOf": credential_step_oneof_schema()},
+                        "description": "Ordered setup steps. Required when not using skill_url. Each step must match exactly one step_type variant (api_call/user_prompt/user_action/user_input) — fields do not mix across variants."
                     },
                     "credential_id": {
                         "type": "string",
@@ -1526,7 +1623,7 @@ impl NativeTool for CredentialSetupTool {
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     ) -> anyhow::Result<String> {
-        let args: CredentialSetupArgs = serde_json::from_str(arguments_json)?;
+        let args = parse_setup_args(arguments_json)?;
         let setup_label = args.label.clone();
 
         let Some(store) = gateway_store else {
@@ -2775,7 +2872,195 @@ fn extract_base_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_allowed_host, skills_dir, validate_local_skill_path};
+    use super::{
+        credential_step_oneof_schema, normalize_allowed_host, skills_dir, validate_local_skill_path,
+    };
+    use autonoetic_types::agent::CredentialSetupStep;
+
+    /// Drift guard: the `credential_step_oneof_schema()` branches must cover
+    /// every `CredentialSetupStep` variant — mirror of
+    /// `capability_oneof_schema_covers_all_variants` (agent_revision.rs).
+    #[test]
+    fn credential_step_oneof_schema_covers_all_variants() {
+        use autonoetic_types::agent::SecretFieldSpec;
+        use std::collections::BTreeSet;
+
+        let representatives: Vec<CredentialSetupStep> = vec![
+            CredentialSetupStep::ApiCall {
+                method: None,
+                url: String::new(),
+                headers: Default::default(),
+                body: None,
+                extract_secrets: Default::default(),
+                extract_public: Default::default(),
+            },
+            CredentialSetupStep::UserPrompt {
+                message: String::new(),
+                secret_fields: vec![],
+            },
+            CredentialSetupStep::UserAction {
+                instruction: String::new(),
+                data_refs: vec![],
+            },
+            CredentialSetupStep::UserInput {
+                question: String::new(),
+                var_name: String::new(),
+                secret_fields: vec![SecretFieldSpec {
+                    name: String::new(),
+                    label: String::new(),
+                    masked: false,
+                }],
+            },
+        ];
+
+        let expected: BTreeSet<String> = representatives
+            .iter()
+            .map(|s| {
+                let v = serde_json::to_value(s).unwrap();
+                v["step_type"].as_str().unwrap().to_string()
+            })
+            .collect();
+
+        let schema = credential_step_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        let actual: BTreeSet<String> = branches
+            .iter()
+            .map(|b| {
+                b["properties"]["step_type"]["const"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("branch missing step_type const: {b}"))
+                    .to_string()
+            })
+            .collect();
+
+        let missing: Vec<_> = expected.difference(&actual).cloned().collect();
+        let extra: Vec<_> = actual.difference(&expected).cloned().collect();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "schema/enum drift — missing from schema: {missing:?}, extra in schema: {extra:?}"
+        );
+    }
+
+    /// Every branch must require `step_type` plus the fields that have no
+    /// `#[serde(default)]` in the enum — the failure this guards is the schema
+    /// letting the model omit a field serde then rejects (the
+    /// `missing field instruction` loop).
+    #[test]
+    fn credential_step_oneof_schema_enforces_required_fields() {
+        use std::collections::BTreeSet;
+
+        let schema = credential_step_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        assert_eq!(branches.len(), 4);
+
+        let must_require: Vec<(&str, BTreeSet<&str>)> = vec![
+            ("api_call", BTreeSet::from(["step_type", "url"])),
+            (
+                "user_prompt",
+                BTreeSet::from(["step_type", "message", "secret_fields"]),
+            ),
+            ("user_action", BTreeSet::from(["step_type", "instruction"])),
+            (
+                "user_input",
+                BTreeSet::from(["step_type", "question", "var_name"]),
+            ),
+        ];
+
+        for (variant, required) in must_require {
+            let branch = branches
+                .iter()
+                .find(|b| b["properties"]["step_type"]["const"] == variant)
+                .unwrap_or_else(|| panic!("no branch for {variant}"));
+            let actual: BTreeSet<&str> = branch["required"]
+                .as_array()
+                .expect("branch has required")
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert_eq!(actual, required, "{variant} required fields drifted");
+            assert_eq!(
+                branch["additionalProperties"], false,
+                "{variant} must not accept cross-variant fields"
+            );
+        }
+    }
+
+    /// The schema must name the secret_fields item shape — this is the guard
+    /// against the eight-failure retry ladder (the model previously had to
+    /// guess SecretFieldSpec blind from serde errors).
+    #[test]
+    fn credential_setup_schema_declares_secret_field_shape() {
+        let schema = credential_step_oneof_schema();
+        let branches = schema.as_array().expect("oneOf schema is an array");
+        for variant in ["user_prompt", "user_input"] {
+            let branch = branches
+                .iter()
+                .find(|b| b["properties"]["step_type"]["const"] == variant)
+                .unwrap_or_else(|| panic!("no branch for {variant}"));
+            let item = &branch["properties"]["secret_fields"]["items"];
+            assert_eq!(item["type"], "object", "{variant} secret_fields items");
+            let required: Vec<&str> = item["required"]
+                .as_array()
+                .expect("secret_fields item has required")
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert!(
+                required.contains(&"name") && required.contains(&"label"),
+                "{variant} secret_fields items must require name + label"
+            );
+        }
+    }
+
+    /// Replays the observed eight-failure ladder (Gmail onboarding, session
+    /// `session-6fc5a14e`): string secret_fields entries and mixed-variant step
+    /// fields must both produce an error whose text names the expected shapes,
+    /// so the model's next retry is informed rather than blind.
+    #[test]
+    fn parse_setup_args_hint_names_the_expected_shapes() {
+        use super::parse_setup_args;
+
+        // Attempt 1 from the session log: string secret_fields entries.
+        let string_fields = r#"{
+            "service": "gmail",
+            "steps": [{
+                "step_type": "user_prompt",
+                "message": "Enter the Gmail OAuth secrets",
+                "secret_fields": ["client_id", "client_secret"]
+            }]
+        }"#;
+        let err = parse_setup_args(string_fields).unwrap_err().to_string();
+        assert!(
+            err.contains("secret_fields entries are OBJECTS"),
+            "string secret_fields must name the object shape: {err}"
+        );
+
+        // The second failure shape: a user_action step missing instruction.
+        let missing_instruction = r#"{
+            "service": "gmail",
+            "steps": [{"step_type": "user_action", "data_refs": []}]
+        }"#;
+        let err = parse_setup_args(missing_instruction).unwrap_err().to_string();
+        assert!(
+            err.contains("user_action{instruction}"),
+            "mixed-variant steps must name the per-variant required fields: {err}"
+        );
+
+        // The correct shape still parses.
+        let good = r#"{
+            "service": "gmail",
+            "steps": [{
+                "step_type": "user_prompt",
+                "message": "Enter the Gmail OAuth secrets",
+                "secret_fields": [
+                    {"name": "client_id", "label": "Client ID"},
+                    {"name": "client_secret", "label": "Client Secret", "masked": true}
+                ]
+            }]
+        }"#;
+        let args = parse_setup_args(good).expect("valid payload parses");
+        assert_eq!(args.service.as_deref(), Some("gmail"));
+    }
 
     #[test]
     fn normalize_allowed_host_strips_port() {
