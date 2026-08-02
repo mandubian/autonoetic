@@ -96,7 +96,8 @@ columns: `principal_kind`, `principal_id`, `role`, `altitude`, `refs_json`.
 | `agent.reasoning` | session tracer (extended thinking) | Detail |
 | `operator.message` | router (`event.ingest` chat path) | Normal |
 | `operator.comment` | router (`content.comment`) — operator comment anchored to a live content file | Attention |
-| `user.ask.pending` | `user_ask` tool | Attention |
+| `user.ask.pending` / `user.ask.resolved` | `user_ask` tool / interactions store (decision chokepoint) | Attention |
+| `user.ask.{cancelled,expired}` | interactions store (abandonment) | Normal |
 | `approval.pending` | human gate | Attention |
 | `approval.{approved,rejected,cancelled}` | approvals store (decision chokepoint) | Normal |
 | `plan.pending` / `plan.approved` | plan-frame tool | Attention / Normal |

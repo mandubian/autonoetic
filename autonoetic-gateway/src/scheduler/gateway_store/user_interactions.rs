@@ -138,130 +138,198 @@ impl GatewayStore {
     }
 
     pub fn answer_user_interaction(&self, answer: &UserInteractionAnswer) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        anyhow::ensure!(
-            !answer.interaction_id.trim().is_empty(),
-            "interaction_id must not be empty"
-        );
-        let interaction = Self::get_user_interaction_with_conn(&conn, &answer.interaction_id)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("User interaction '{}' not found", answer.interaction_id)
-            })?;
-        anyhow::ensure!(
-            interaction.status == UserInteractionStatus::Pending,
-            "User interaction '{}' is {:?}; only pending interactions can be answered",
-            answer.interaction_id,
-            interaction.status
-        );
-
-        let answer_option_id = answer
-            .answer_option_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned);
-        let answer_text = answer
-            .answer_text
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .cloned();
-        anyhow::ensure!(
-            answer_option_id.is_some() || answer_text.is_some(),
-            "Must provide either answer_option_id or non-empty answer_text"
-        );
-        anyhow::ensure!(
-            !(answer_option_id.is_some() && answer_text.is_some()),
-            "Provide exactly one of answer_option_id or answer_text"
-        );
-
-        if let Some(ref oid) = answer_option_id {
-            let valid = interaction.options.iter().any(|opt| opt.id == *oid);
+        let interaction = {
+            let conn = self.conn.lock().unwrap();
             anyhow::ensure!(
-                valid,
-                "Invalid answer_option_id '{}' for interaction '{}'",
-                oid,
-                answer.interaction_id
+                !answer.interaction_id.trim().is_empty(),
+                "interaction_id must not be empty"
             );
-        }
-        if answer_text.is_some() {
+            let interaction = Self::get_user_interaction_with_conn(&conn, &answer.interaction_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("User interaction '{}' not found", answer.interaction_id)
+                })?;
             anyhow::ensure!(
-                interaction.allow_freeform,
-                "Interaction '{}' does not allow freeform answers",
-                answer.interaction_id
-            );
-        }
-
-        let now = chrono::Utc::now().to_rfc3339();
-        let changed = conn.execute(
-            "UPDATE user_interactions SET
-                status = 'answered', answer_option_id = ?1, answer_text = ?2,
-                answered_by = ?3, answered_at = ?4
-             WHERE interaction_id = ?5 AND status = 'pending'",
-            params![
-                answer_option_id,
-                answer_text,
-                answer.answered_by,
-                now,
+                interaction.status == UserInteractionStatus::Pending,
+                "User interaction '{}' is {:?}; only pending interactions can be answered",
                 answer.interaction_id,
-            ],
-        )?;
-        anyhow::ensure!(
-            changed == 1,
-            "User interaction '{}' was not updated (status changed concurrently)",
-            answer.interaction_id
+                interaction.status
+            );
+
+            let answer_option_id = answer
+                .answer_option_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned);
+            let answer_text = answer
+                .answer_text
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .cloned();
+            anyhow::ensure!(
+                answer_option_id.is_some() || answer_text.is_some(),
+                "Must provide either answer_option_id or non-empty answer_text"
+            );
+            anyhow::ensure!(
+                !(answer_option_id.is_some() && answer_text.is_some()),
+                "Provide exactly one of answer_option_id or answer_text"
+            );
+
+            if let Some(ref oid) = answer_option_id {
+                let valid = interaction.options.iter().any(|opt| opt.id == *oid);
+                anyhow::ensure!(
+                    valid,
+                    "Invalid answer_option_id '{}' for interaction '{}'",
+                    oid,
+                    answer.interaction_id
+                );
+            }
+            if answer_text.is_some() {
+                anyhow::ensure!(
+                    interaction.allow_freeform,
+                    "Interaction '{}' does not allow freeform answers",
+                    answer.interaction_id
+                );
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let changed = conn.execute(
+                "UPDATE user_interactions SET
+                    status = 'answered', answer_option_id = ?1, answer_text = ?2,
+                    answered_by = ?3, answered_at = ?4
+                 WHERE interaction_id = ?5 AND status = 'pending'",
+                params![
+                    answer_option_id,
+                    answer_text,
+                    answer.answered_by,
+                    now,
+                    answer.interaction_id,
+                ],
+            )?;
+            anyhow::ensure!(
+                changed == 1,
+                "User interaction '{}' was not updated (status changed concurrently)",
+                answer.interaction_id
+            );
+            interaction
+        };
+        // Session Room: the gate *closes* on the canonical timeline (#363) —
+        // paired with the `user.ask.pending` row so channels stop re-offering an
+        // answered ask on reload. Authored by the decider's seat. Best-effort.
+        crate::runtime::session_timeline::emit_user_ask_resolution_timeline_event(
+            self,
+            &interaction,
+            "resolved",
+            Some(&answer.answered_by),
+            Some(answer),
+            None,
         );
         Ok(())
     }
 
     pub fn cancel_user_interaction(&self, interaction_id: &str, reason: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        anyhow::ensure!(
-            !interaction_id.trim().is_empty(),
-            "interaction_id must not be empty"
-        );
-        anyhow::ensure!(!reason.trim().is_empty(), "reason must not be empty");
+        let interaction = {
+            let conn = self.conn.lock().unwrap();
+            anyhow::ensure!(
+                !interaction_id.trim().is_empty(),
+                "interaction_id must not be empty"
+            );
+            anyhow::ensure!(!reason.trim().is_empty(), "reason must not be empty");
 
-        let interaction = Self::get_user_interaction_with_conn(&conn, interaction_id)?
-            .ok_or_else(|| anyhow::anyhow!("User interaction '{}' not found", interaction_id))?;
-        anyhow::ensure!(
-            interaction.status == UserInteractionStatus::Pending,
-            "User interaction '{}' is {:?}; only pending interactions can be cancelled",
-            interaction_id,
-            interaction.status
-        );
+            let interaction = Self::get_user_interaction_with_conn(&conn, interaction_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("User interaction '{}' not found", interaction_id)
+                })?;
+            anyhow::ensure!(
+                interaction.status == UserInteractionStatus::Pending,
+                "User interaction '{}' is {:?}; only pending interactions can be cancelled",
+                interaction_id,
+                interaction.status
+            );
 
-        let changed = conn.execute(
-            "UPDATE user_interactions SET status = 'cancelled', answer_text = ?1 WHERE interaction_id = ?2 AND status = 'pending'",
-            params![reason, interaction_id],
-        )?;
-        anyhow::ensure!(
-            changed == 1,
-            "User interaction '{}' was not cancelled (status changed concurrently)",
-            interaction_id
+            let changed = conn.execute(
+                "UPDATE user_interactions SET status = 'cancelled', answer_text = ?1 WHERE interaction_id = ?2 AND status = 'pending'",
+                params![reason, interaction_id],
+            )?;
+            anyhow::ensure!(
+                changed == 1,
+                "User interaction '{}' was not cancelled (status changed concurrently)",
+                interaction_id
+            );
+            interaction
+        };
+        // Session Room: close the `user.ask` gate on the timeline (#363) so a
+        // cancelled ask stops re-popping on reload. Best-effort.
+        crate::runtime::session_timeline::emit_user_ask_resolution_timeline_event(
+            self,
+            &interaction,
+            "cancelled",
+            None,
+            None,
+            Some(reason),
         );
         Ok(())
     }
 
     pub fn expire_timed_out_interactions(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        let mut stmt = conn.prepare(
-            "SELECT interaction_id FROM user_interactions
-             WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
-        )?;
-        let rows = stmt.query_map(params![now], |row| {
-            let id: String = row.get(0)?;
-            Ok(id)
-        })?;
-
-        let mut expired_ids = Vec::new();
-        for row in rows {
-            let id = row?;
-            conn.execute(
-                "UPDATE user_interactions SET status = 'expired' WHERE interaction_id = ?1",
-                params![id],
+        // Load the soon-to-expire interactions (identity needed for the
+        // timeline event) under the lock, flip their status, then release the
+        // lock before emitting — `create_live_digest_event` re-takes it.
+        let expired = {
+            let conn = self.conn.lock().unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut stmt = conn.prepare(
+                "SELECT interaction_id FROM user_interactions
+                 WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
             )?;
-            expired_ids.push(id);
+            // Propagate row/decode errors (don't silently drop them): a dropped
+            // row here means an interaction flipped to `expired` below without
+            // its paired `user.ask.expired` timeline event, leaving the gate
+            // re-offerable on Room reload (#363).
+            let ids: Vec<String> = stmt
+                .query_map(params![now], |row| {
+                    let id: String = row.get(0)?;
+                    Ok(id)
+                })?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+
+            let mut expired: Vec<UserInteraction> = Vec::new();
+            for id in &ids {
+                conn.execute(
+                    "UPDATE user_interactions SET status = 'expired' WHERE interaction_id = ?1",
+                    params![id],
+                )?;
+                // We just selected this id by the same query and updated its
+                // row, so a `None` here is an invariant violation — surface it
+                // as an error rather than silently skipping the timeline close.
+                let interaction = Self::get_user_interaction_with_conn(&conn, id)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "User interaction '{}' missing after expiring — \
+                             cannot emit user.ask.expired timeline event",
+                            id
+                        )
+                    })?;
+                expired.push(interaction);
+            }
+            expired
+        };
+        // Session Room: close each expired `user.ask` gate on the timeline so
+        // it stops re-popping on reload (#363). Mechanical expiry → Runtime
+        // seat. Best-effort per row; one emit failure doesn't abort the batch.
+        let expired_ids: Vec<String> = expired
+            .iter()
+            .map(|i| i.interaction_id.clone())
+            .collect();
+        for interaction in &expired {
+            crate::runtime::session_timeline::emit_user_ask_resolution_timeline_event(
+                self,
+                interaction,
+                "expired",
+                None,
+                None,
+                None,
+            );
         }
         Ok(expired_ids)
     }

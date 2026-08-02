@@ -17,6 +17,10 @@ const TIMELINE_COVERAGE: &[(&str, Altitude)] = &[
     ("escalation.pending", Altitude::Attention),
     ("approval.pending", Altitude::Attention),
     ("user.ask.pending", Altitude::Attention),
+    // The answer pairs with its ask (#363) — shares the gate's Attention
+    // altitude. Abandonments (cancelled/expired) are Normal and intentionally
+    // excluded, mirroring `approval.cancelled`.
+    ("user.ask.resolved", Altitude::Attention),
     ("plan.pending", Altitude::Attention),
     ("divergence.intervention", Altitude::Attention),
     ("runtime.lock_drift", Altitude::Attention),
