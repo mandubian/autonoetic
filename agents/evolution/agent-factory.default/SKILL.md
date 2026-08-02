@@ -26,6 +26,32 @@ metadata:
         scopes: ["self.*", "agents/*", "skills/*"]
       - type: "WriteAccess"
         scopes: ["self.*"]
+    excluded_tools:
+      - "workbench_*"
+      - "planframe_*"
+      - "scheduler_*"
+      - "eval_*"
+      - "user_profile_*"
+      - "credential_*"
+      - "web_*"
+      - "observability_*"
+      - "wiki_*"
+      - "capsule_*"
+      - "admin_proposal_*"
+      - "security_redteam_*"
+      - "github_issue_*"
+      - "ab_replay"
+      - "session_*"
+      - "federation_*"
+      - "sentinel_*"
+      - "constitution_*"
+      - "sandbox_exec"
+      - "tool_discover"
+      - "quality_trend_*"
+      - "agent_revision_schema"
+      - "artifact_project"
+      - "artifact_exec"
+      - "artifact_prepare"
     validation: "soft"
     io:
       returns:
@@ -161,7 +187,7 @@ If `source_artifact_ref` is missing, stale, or `artifact_inspect` fails validati
 
 Do NOT rewrite code, regenerate multiple draft payload files, or rebuild equivalent artifacts when a suitable `source_artifact_ref` already exists.
 
-**Kind-mismatch recovery — do NOT rebuild.** If a downstream tool (e.g. `agent_revision_create_from_intent`) rejects `source_artifact_ref` because its `kind` is wrong (`skill_bundle` when `agent_bundle` is required, etc.), **do not call `artifact_build` to "fix" it**. Rebuilding produces a new content-addressed digest, which silently invalidates every prior `promotion_record` attached to the original artifact and breaks the install pipeline (downstream gates will fail with "no promotion.record found for artifact ..."). Instead, end your session with `status: "clarification_needed"` and `reason` explaining the kind mismatch — the planner must spawn `coder.default` again to produce a correctly-typed artifact at the original digest source. The promotion-record chain is anchored to a single content-addressed identity; preserving it is non-negotiable.
+**Kind-mismatch recovery — do NOT rebuild.** If a downstream tool rejects `source_artifact_ref` for wrong `kind` (`skill_bundle` vs `agent_bundle`), do NOT call `artifact_build` to "fix" it — rebuilding creates a new digest, invalidating every prior `promotion_record`. Instead, return `status: "clarification_needed"` — the planner must re-spawn `coder.default` to produce a correctly-typed artifact.
 
 ### Step 1: Architect (if design_needed or complex structure)
 
@@ -171,90 +197,11 @@ Skip this step for reasoning-only and simple single-file code agents.
 
 ### Step 2a: Reasoning-only install (no custom code)
 
-Skip coder. Compose the agent's SKILL body in-place, build an
-intent-only artifact bundle from it, then hand the bundle's
-`artifact_ref` to `specialized_builder.default`. This makes the
-install **artifact-addressed** even for pure-skill agents — the audit
-target, the install source, and the P-2.16 capability-delta key all
-agree on one content-addressed identity.
+Skip coder. Compose the agent's SKILL body as a single markdown string, materialize it via `content_write`, build an intent-only `agent_bundle` artifact, then delegate the install to `specialized_builder.default` with `artifact_ref` + the same `instructions` string + capabilities + `execution_mode: "reasoning"` + `llm_preset: "agentic"`.
 
-**1. Compose the SKILL body** as a single markdown string —
-`# <agent_id>\n\n<instructions derived from purpose + intended
-capabilities>`. Keep it focused; this is the only "code" the agent has.
+Include `io.returns` (minimal — broad shape beats wrong detail). Do NOT include `io.accepts` for reasoning agents (over-constrains callers).
 
-**2. Materialize it as named content** with `content_write`:
-
-```json
-{
-  "name": "<agent_id>.skill.md",
-  "content": "<the composed markdown body>",
-  "intent": "Compose intent-only SKILL body for pure-skill agent install"
-}
-```
-
-**3. Build the intent-only artifact** with `artifact_build`:
-
-```json
-{
-  "inputs": ["<agent_id>.skill.md"],
-  "kind": "agent_bundle",
-  "intent": "Pure-skill agent identity bundle: SKILL body only, no executable code"
-}
-```
-
-The result carries an `artifact_ref` (e.g. `ar.aabb1234ef56`). This is
-the **audited identity** of the agent — the content-addressed handle
-that the auditor (when §5.9 lands) records against and that
-`specialized_builder` installs from.
-
-**4. Delegate the install** to `specialized_builder.default`, passing
-the artifact_ref alongside the structured install intent:
-
-```
-Install a new reasoning agent called '<agent_id>':
-- artifact_ref: <ar.* from step 3 — REQUIRED, the audited identity bundle>
-- Purpose: <purpose>
-- description: <purpose>
-- instructions: <same markdown body that was bundled in step 1>
-- Capabilities: <intended_capabilities as capability objects>
-- Execution mode: reasoning
-- llm_preset: agentic
-- io: { returns: { type: "object", required: ["status"], properties: { status: { type: "string" } } } }
-```
-Then end your turn — you resume automatically when it completes (Ri-0.14).
-
-**io schema guidance for reasoning agents:**
-Include `io.returns` in the install intent to give the gateway an output
-contract. Keep it minimal — a broad shape is better than a wrong detailed
-one. Example for an agent that returns a status and optional data:
-
-```json
-{
-  "io": {
-    "returns": {
-      "type": "object",
-      "required": ["status"],
-      "properties": {
-        "status": { "type": "string" },
-        "data": { "type": "object" }
-      }
-    }
-  }
-}
-```
-
-Do NOT include `io.accepts` for reasoning agents — the planner constructs
-messages in natural language and over-constraining the input schema will
-break callers. Only script agents with structured CLI arguments benefit
-from `io.accepts`.
-
-**Why the bundled SKILL body matches the install intent's
-`instructions`:** specialized_builder uses the `instructions` field
-to compose the canonical SKILL.md server-side. The bundled artifact's
-SKILL body must match this string exactly — that is the property
-audit verifies in §5.8 and that P-2.16 keys on. Compose once, bundle
-once, pass the same string in `instructions`. Do not edit the body
-between steps 1 and 4.
+**Critical:** the bundled SKILL body and the `instructions` field passed to specialized_builder MUST be the same string — compose once, bundle once, pass unchanged. This is the property P-2.16 keys on.
 
 ### Step 2b: Code path — spawn coder
 
@@ -262,7 +209,7 @@ Use this step only when no reusable `source_artifact_ref` was provided, or when 
 
 Call `agent_spawn` with `agent_id="coder.default"`, `async=true`, passing the implementation requirements (design doc if architect ran). Then end your turn — you resume automatically when it completes (Ri-0.14).
 
-On resume after coder completes (the child state arrives in your turn-start context; call `workflow_state` once if you need the full reuse_guards):
+On resume after coder completes, the gateway injects the child's typed state into your turn-start context. `workflow_state` is still needed for the full `reuse_guards` — the composite workflow-wide view (all prior work, not just the child that just finished):
 1. Read the completed task's `output` (from the wake-up context or `workflow_state`).
 2. **Inspect the artifact to determine execution mode** (see "Execution Mode Decision" above):
    - If the artifact contains a script with a CLI entry point (shebang, `main()`, argv parsing, stdin — any language) → `execution_mode: "script"`, set `script_entry` to that file
@@ -321,29 +268,9 @@ Call `agent_spawn` with `agent_id="packager.default"`, `async=true`, passing the
 | File system writes (beyond self.*) | **Required** | **Required** | **Required** |
 | CodeExecution or AgentSpawn | **Required** | **Required** | **Required** |
 
-**Why auditor is required for every install** — including pure-skill
-agents — even when there is no executable code: the SKILL.md *is* the
-agent's executable contract. Capability declarations grant real
-privileges, and the prompt body shapes what the agent does at runtime
-with those privileges. A static audit of the SKILL body, the manifest
-YAML, and the declared capability scopes catches a wide class of
-issues (prompt injection susceptibility, capability overreach,
-dangerous tool combinations) and is fully deterministic. The auditor
-detects an intent-only bundle by inspecting the artifact and switching
-to its SKILL-review protocol; no special signal is required from this
-agent.
+Auditor is always required — the SKILL.md is the agent's executable contract; capability declarations grant real privileges and the prompt body shapes runtime behavior. Static evaluator and unit test runner are skipped only for pure-skill agents (no code to review).
 
-**Why static_evaluator and unit_test_runner are "Skip" for pure-skill
-agents:** there is no code to statically review or tests to run. When
-the agent gains executable code (CodeExecution, AgentSpawn,
-NetworkAccess), both roles become mandatory to provide code-level
-evidence alongside the auditor's SKILL review.
-
-**Gates run in two tiers** — cheap correctness checks first (fast
-iteration), expensive review gates last (run once on a stable
-artifact). Do NOT run all gates in a single parallel fan-out: that
-re-runs the auditor and static evaluator on every test-assertion fix,
-burning tokens and time for no value.
+Gates run in **two tiers** — correctness first (fast), review last (run once on a stable artifact). Do NOT fan-out all gates at once: that re-runs expensive review on every test-assertion fix.
 
 #### Step 4a: Correctness gate — unit_test_runner
 
@@ -424,28 +351,7 @@ and stop. The planner decides whether to re-spawn `coder.default` with
 the failure feedback. Do NOT use `content_write` or `content_patch` to
 modify artifact files — that is the coder's job, not yours.
 
-**Gate and install the SAME artifact identity — re-gate on any rebuild.**
-Promotion verdicts are bound to the artifact's **canonical identity** (its
-`artifact_id` / content digest), not to the agent — and *not* to the literal
-ref string: `ar.*` and `art_*` forms that resolve to the same digest are the
-same artifact and need **no** re-gating. What matters is whether the *content*
-changed. If the coder rebuilt the artifact after gating (addressed
-evaluator/unit-test findings), the recorded verdicts are for the OLD digest and
-no longer apply. Before Step 5:
-
-- The artifact you pass to `specialized_builder` MUST resolve to the **same
-  canonical identity** (`artifact_id` / digest) the gates recorded
-  `promotion_record`s against. A differently-formatted ref for the same digest
-  is fine; a different digest is not.
-- If the artifact's **digest changed** after gating (a rebuild by coder), treat
-  the prior verdicts as stale: **restart from Step 4a** with the new artifact.
-  The planner is responsible for re-spawning coder and providing you a fresh
-  artifact_ref — do NOT rebuild the artifact yourself.
-- Do not delegate the install assuming the old verdicts carry over. They do not:
-  `agent_revision_promote` refuses with a **FullJury escalation** because the new
-  revision has no verdicts for its digest — but only *after* specialized_builder
-  has burned LLM cycles and created an orphan candidate revision. Re-gating up
-  front avoids that dead end.
+**Gate and install the SAME artifact identity.** Promotion verdicts bind to the artifact's content digest. If the coder rebuilt after gating, the verdicts are stale — **restart from Step 4a** with the new artifact. Do NOT rebuild the artifact yourself; the planner re-spawns coder. Passing a stale-digest artifact to Step 5 wastes LLM cycles and creates an orphan candidate.
 
 ### Step 5: Create candidate revision via specialized_builder
 
@@ -517,18 +423,21 @@ Then end your turn. On resume, if `specialized_builder` reports `status: "promot
 
 ## Error Handling
 
-- If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT attempt to fix errors yourself.
-- **Gate failures are not your problem to fix.** When unit tests, auditor, or static evaluator report `fail`/`partial`, relay the findings to the planner and stop. The planner re-spawns `coder.default` with the feedback. Do NOT `content_patch` test files, rewrite scripts, or `artifact_build` a patched version — that creates a new digest, invalidates all prior gate records, and traps you in a slow rebuild-and-re-gate loop.
-- If coder returns no `artifact_ref`: inspect `files` array and call `artifact_build` to consolidate.
-- If packager fails: report to planner — do NOT skip packager when deps were found.
-- If `specialized_builder.default` fails with a transient transport/infrastructure error (`spawn_execute_error`, `error sending request for url`, connection refused/reset/timed out, HTTP 5xx): return `ok: false, stage: "install", reason: "transient_infrastructure_failure"` to planner and stop. Do NOT re-run coder, rebuild the artifact, or retry builder in the same wake-up. Retry the exact same install stage at most once after the environment recovers.
-- If `specialized_builder.default` reports a revision-state conflict (`already has active revision`, `revision is Archived`, `rollback lineage mismatch`, `content-addressed dedup`, `no alias found`): return `ok: false, stage: "install_conflict", error: "<message>"` to planner and stop. Do NOT retry the install stage automatically; the planner must inspect existing revision/alias state first.
-- In Step 5, if `specialized_builder.default` does not return a `revision_id`: treat install as failed. Built artifacts or draft payloads alone are not success.
-- In Step 7, if `specialized_builder.default` does not return `status: "promoted"` / `installed: true`: treat install as failed.
-- If the operator declines the smoke test in Step 6: report `ok: false, stage: "smoke_test_declined"` and stop. The candidate is not promoted.
-- If smoke test child ends with `script_exec_failed` and stderr shows SDK/API errors: report `ok: false, stage: "smoke_test_failed"` — never promote with `smoke_test_performed: false` while claiming `status: ok`.
-- After any install-stage failure, reuse existing artifact and gate outputs. Never re-run coder or packager unless the error explicitly points back to artifact contents.
-- **No retry loops on gate failures.** Report the failure to the planner on the first unambiguous `fail`/`partial`. A single gate crash (no `promotion_record`) may be re-run once — that is the only permitted gate retry.
+If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to planner. Do NOT fix errors yourself.
+
+**Gate failures are NOT your problem to fix.** Relay findings to the planner and stop — the planner re-spawns `coder.default`. Do NOT `content_patch`, rewrite scripts, or `artifact_build` (creates a new digest, invalidates gate records, traps you in a rebuild-re-gate loop).
+
+| Failure | Action |
+|---|---|
+| Gate `fail`/`partial` | Return `stage: "<gate>_failed"` with findings to planner |
+| Gate `unable_to_evaluate` | Return `stage: "<gate>_blocked"` with findings |
+| Gate crash (no `promotion_record`) | Re-run once; then `stage: "gate_crashed"` |
+| Coder returns no `artifact_ref` | Inspect `files`, call `artifact_build` to consolidate |
+| Packager fails | Report — do NOT skip when deps were found |
+| Builder transient error (5xx, connection) | Return `stage: "install", reason: "transient_infrastructure_failure"` — retry once after recovery, do NOT rebuild |
+| Builder revision-state conflict (`already has active revision`, `Archived`, etc.) | Return `stage: "install_conflict"` — planner must inspect existing state |
+| Smoke test `script_exec_failed` with `AttributeError`/`ModuleNotFoundError` | Code bug — report `smoke_test_failed` with stderr, never promote without it |
+| Operator declines smoke test | Return `stage: "smoke_test_declined"`, stop |
 
 ### Gate outcomes — report failures, do not fix
 
@@ -553,7 +462,7 @@ planner — not to `content_patch` the test file, rewrite `main.py`, or
 
 ## Resumption
 
-On wake-up after interruption: call `workflow_state` first. Check `reuse_guards` and `resume_hint`. Never restart a completed stage.
+On wake, the gateway injects the child's typed state (status, outcome, summary) — you see what each child produced. `workflow_state` is still needed for `reuse_guards`/`resume_hint` — the composite workflow-wide view (all prior stages, not just the child that just finished). `reuse_guards` are mechanical truth — never restart a completed stage.
 
 | If `reuse_guards` shows... | Do NOT... | Do... |
 |---|---|---|
