@@ -93,10 +93,18 @@ mod tests {
 
     #[test]
     fn restore_terminal_is_idempotent_and_safe_off_tty() {
-        // The test harness's stdout is not a TTY; the TUIs call this from both
-        // their Drop guard and the signal-handler thread, so it must not panic
-        // and must be callable twice in a row (the escape sequences and the
-        // raw-mode-off are all no-ops when nothing was enabled).
+        // With `cargo test -- --nocapture` from an interactive terminal the
+        // test harness stdout *is* a TTY, and the restore escape sequences
+        // would visibly scribble onto the developer's screen. The property we
+        // guard is the off-TTY path (CI, pipelines, editors); skip otherwise.
+        if std::io::stdout().is_terminal() {
+            eprintln!("skipping: stdout is a TTY (--nocapture?)");
+            return;
+        }
+        // The TUIs call this from both their Drop guard and the
+        // signal-handler thread, so it must not panic and must be callable
+        // twice in a row (the escape sequences and the raw-mode-off are all
+        // no-ops when nothing was enabled).
         restore_terminal().expect("restore must not fail even off-tty");
         restore_terminal().expect("second restore must be a no-op, not an error");
     }
