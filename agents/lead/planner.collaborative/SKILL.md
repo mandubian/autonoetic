@@ -35,7 +35,6 @@ metadata:
       - type: "PlanFrameAccess"
         patterns: ["*"]
     excluded_tools:
-      - "workbench_*"
       - "scheduler_*"
       - "eval_*"
       - "user_profile_*"

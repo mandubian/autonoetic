@@ -27,7 +27,6 @@ metadata:
       - type: "WriteAccess"
         scopes: ["self.*"]
     excluded_tools:
-      - "workbench_*"
       - "planframe_*"
       - "scheduler_*"
       - "eval_*"
@@ -49,7 +48,6 @@ metadata:
       - "tool_discover"
       - "quality_trend_*"
       - "agent_revision_schema"
-      - "artifact_project"
       - "artifact_exec"
       - "artifact_prepare"
     validation: "soft"

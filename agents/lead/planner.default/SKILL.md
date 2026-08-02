@@ -33,7 +33,6 @@ metadata:
       - type: "AgentMessage"
         patterns: ["*"]
     excluded_tools:
-      - "workbench_*"
       - "scheduler_*"
       - "eval_*"
       - "user_profile_*"
@@ -45,12 +44,10 @@ metadata:
       - "security_redteam_*"
       - "github_issue_*"
       - "ab_replay"
-      - "sentinel_*"
       - "quality_trend_*"
       - "tool_discover"
       - "session_peek"
       - "session_search"
-      - "artifact_project"
       - "agent_revision_schema"
       - "user_interaction_status"
       - "approval_list"

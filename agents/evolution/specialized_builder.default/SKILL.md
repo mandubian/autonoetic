@@ -28,7 +28,6 @@ metadata:
       - type: "WriteAccess"
         scopes: ["self.*", "skills/*", "agents/*"]
     excluded_tools:
-      - "workbench_*"
       - "planframe_*"
       - "scheduler_*"
       - "eval_*"

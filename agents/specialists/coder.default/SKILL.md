@@ -27,7 +27,6 @@ metadata:
       - type: "AgentMessage"
         patterns: ["*"]
     excluded_tools:
-      - "workbench_*"
       - "planframe_*"
       - "scheduler_*"
       - "eval_*"
@@ -49,7 +48,6 @@ metadata:
       - "tool_discover"
       - "quality_trend_*"
       - "agent_revision_schema"
-      - "artifact_project"
       - "approval_*"
       - "promotion_*"
     validation: "soft"

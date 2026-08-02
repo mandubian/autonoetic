@@ -133,6 +133,7 @@ agents/                  Agent bundles (SKILL.md manifests)
 2. Implement the `Tool` trait from `runtime/tools/mod.rs`
 3. Register in `runtime/tools/mod.rs` — add to the registry builder
 4. Add capability gating in `policy.rs` if the tool is privileged
+5. If the tool is universal inert weight — no agent should ever call it (e.g. the workbench console feature) — add its name/prefix to `DEFAULT_EXCLUDED_TOOLS` in `runtime/tools/mod.rs` instead of every agent's `excluded_tools`. There is no per-agent override: `tool_discover` cannot re-enable excluded tools, so the default list must only contain tools with zero legitimate users.
 
 ### Adding a new ScheduledAction variant
 1. Add the variant to `ScheduledAction` in `autonoetic-types/src/background.rs`
