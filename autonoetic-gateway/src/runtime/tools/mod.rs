@@ -263,7 +263,7 @@ const DEFAULT_EXCLUDED_TOOLS: &[&str] = &["workbench_*", "artifact_project"];
 
 /// Check if a tool name matches any exclusion pattern from the agent manifest
 /// or the registry-level default list.
-/// Patterns support glob wildcards (`*` and `?`) via simple prefix/suffix matching.
+/// Patterns support a trailing `*` wildcard (prefix match) or exact match.
 pub(crate) fn is_tool_excluded_public(tool_name: &str, manifest: &AgentManifest) -> bool {
     is_tool_excluded(tool_name, manifest)
 }
