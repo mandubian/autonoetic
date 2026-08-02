@@ -45,6 +45,16 @@ metadata:
       - "security_redteam_*"
       - "github_issue_*"
       - "ab_replay"
+      - "sentinel_*"
+      - "quality_trend_*"
+      - "tool_discover"
+      - "session_peek"
+      - "session_search"
+      - "artifact_project"
+      - "agent_revision_schema"
+      - "user_interaction_status"
+      - "approval_list"
+      - "approval_withdraw"
     io:
       returns_enforcement: advisory
       returns:
