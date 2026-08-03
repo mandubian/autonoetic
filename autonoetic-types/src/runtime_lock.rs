@@ -25,8 +25,10 @@ pub fn inject_as_for_service(service: &str) -> String {
 }
 
 /// A credential requirement declared in the runtime lock.
-/// At spawn time the gateway resolves credentials by service name
-/// and injects the secret as the env var derived by [`inject_as_for_service`].
+/// At spawn time the gateway resolves credentials by service name (or by the
+/// pinned `credential_id`) and injects each secret under its own env-var
+/// name: the credential's `inject_as` when it holds a valid env-var
+/// identifier, otherwise the name derived by [`inject_as_for_service`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedCredentialMount {
     /// Service name matching the `credential.service` value in the store.
@@ -110,7 +112,8 @@ pub struct RuntimeLock {
     #[serde(default)]
     pub layers: Vec<LockedLayerMount>,
     /// Credential services this agent requires at spawn time.
-    /// The env-var name is derived deterministically via [`inject_as_for_service`].
+    /// Each resolved credential is injected under its own `inject_as` env-var
+    /// name, falling back to [`inject_as_for_service`] when unset.
     #[serde(default)]
     pub credentials: Vec<LockedCredentialMount>,
 }

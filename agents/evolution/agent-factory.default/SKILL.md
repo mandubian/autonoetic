@@ -442,7 +442,7 @@ If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to pl
 | Builder transient error (5xx, connection) | Return `stage: "install", reason: "transient_infrastructure_failure"` — retry once after recovery, do NOT rebuild |
 | Builder revision-state conflict (`already has active revision`, `Archived`, etc.) | Return `stage: "install_conflict"` — planner must inspect existing state |
 | Smoke test `script_exec_failed` with `AttributeError`/`ModuleNotFoundError` | Code bug — report `smoke_test_failed` with stderr, never promote without it |
-| Smoke test fails with missing credentials (stderr reports unset credential env vars, or the gateway logs `No credential found`) | NOT a code bug — finish credential onboarding first (Step 6.2), then re-run the smoke test once |
+| Smoke test fails with missing credentials (stderr reports unset credential env vars), or the smoke spawn itself fails with `credential_injection_failed` | NOT a code bug — finish credential onboarding first (Step 6.2), then pin the onboarded `credential_id`(s) in the smoke test's `credential_bindings` and re-run the smoke test once |
 | Operator declines smoke test | Return `stage: "smoke_test_declined"`, stop |
 | `user_ask` returns `secret_collection_not_allowed` | You tried to collect a secret through `user_ask` — forbidden. Secrets flow only through `credential_setup` `user_prompt` steps (operator approval popup). Delegate to `credential_onboarding.default`; never retry the question. |
 

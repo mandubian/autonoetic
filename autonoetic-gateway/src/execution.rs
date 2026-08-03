@@ -3398,7 +3398,7 @@ impl GatewayExecutionService {
                         &gw_dir,
                         gs,
                         &cred_bindings,
-                    )
+                    )?
                 } else {
                     vec![]
                 };

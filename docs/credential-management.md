@@ -183,6 +183,17 @@ api_key = os.environ.get("OPENWEATHER_API_KEY")
 
 The `artifact_prepare` tool eliminates the multi-suspend problem where execution first needs approval, then credential resolution, then re-approval. It does everything in a single pass: static analysis for remote access, credential verification, and a single approval request covering all domains + credential injection.
 
+### 7. Script-agent spawn — runtime.lock credential mounts
+
+Script-mode agents declare `CredentialAccess` in SKILL.md and carry a `credentials` section in their pinned `runtime.lock` (`[{service, credential_id?}]`). At spawn the gateway resolves each declared mount and injects the secrets as env vars into the sandbox:
+
+- **Env-var name**: the credential's own `inject_as` when it holds a valid env-var identifier (e.g. `GMAIL_EMAIL`). `inject_as` values that are HTTP injection styles (`bearer`, `Authorization`, `header:X-…` — those belong to `credential_request`) or unsafe names (`PATH`, `LD_*`, …) are not env names: injection falls back to the service-derived `<SERVICE>_SECRET` (e.g. `github` → `GITHUB_SECRET`). `credential_setup` defaults `inject_as` to that derived name when a flow passes none.
+- **Multi-secret services**: every credential stored for the declared service is injected under its own name — e.g. gmail with credentials stored as `GMAIL_EMAIL` + `GMAIL_APP_PASSWORD` yields both env vars. If two credentials map to the same env var, an explicit `inject_as` shadows the service-derived fallback (logged loudly); pin a `credential_id` to disambiguate.
+- **Spawn-time bindings**: `agent_spawn(credential_bindings=[{service, credential_id}])` pins exact credentials for the child, overriding service-level resolution for that spawn.
+- **Fail closed**: a declared mount that resolves to zero env vars (no credential record, or the vault secret missing) fails the spawn with `credential_injection_failed` naming the service — a script never runs silently without its declared credentials.
+
+`credential_check` reports `secret_present` per credential (vault presence, without exposing the value) so onboarding flows can distinguish "no credential record" from "record exists but vault secret missing".
+
 ## Token Refresh (OAuth / Expiring Credentials)
 
 When credentials have expiring access tokens (e.g. OAuth2), the gateway can automatically refresh them without human intervention.

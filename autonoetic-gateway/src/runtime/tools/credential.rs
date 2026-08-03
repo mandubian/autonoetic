@@ -140,6 +140,20 @@ impl NativeTool for CredentialCheckTool {
 
         let credentials = store.list_credentials_by_service(&args.service)?;
 
+        // Best-effort vault presence check per credential — credential rows
+        // and vault secrets can drift (e.g. a record whose secret was never
+        // stored), and agents diagnosing onboarding need the distinction
+        // without ever seeing the secret value. Null when the vault cannot
+        // be read; never creates vault state (read-only check).
+        let vault = {
+            let vdir = vault_dir(_gateway_dir, _agent_dir);
+            let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+                .ok()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| crate::vault::default_vault_path(&vdir));
+            crate::vault::Vault::load_from_file(&vault_path).ok()
+        };
+
         let results: Vec<serde_json::Value> = credentials
             .iter()
             .map(|c| {
@@ -148,6 +162,9 @@ impl NativeTool for CredentialCheckTool {
                     "service": c.service,
                     "inject_as": c.inject_as,
                     "created_by_agent": c.created_by_agent,
+                    "secret_present": vault
+                        .as_ref()
+                        .map(|v| v.get_secret(&c.secret_name).is_some()),
                 });
                 // Check expiry using proper DateTime parsing
                 if let Some(ref exp_str) = c.expires_at {
@@ -2695,11 +2712,12 @@ fn execute_steps(
 
     if !secret_names.is_empty() {
         // Default `inject_as` to the service-derived env var when the flow did
-        // not pass one explicitly: `resolve_credential_env` matches stored
-        // `inject_as` against `inject_as_for_service(service)`, so a NULL would
-        // never resolve by service at spawn time (silent "No credential
-        // found"). `credential_request` is unaffected — non-bearer/non-header
-        // values fall through to the default Bearer style.
+        // not pass one explicitly: at spawn time `resolve_credential_env`
+        // injects each credential under its stored `inject_as` name (falling
+        // back to the derived name for NULL), so storing the derived name
+        // keeps single-secret services working under either path.
+        // `credential_request` is unaffected — non-bearer/non-header values
+        // fall through to the default Bearer style.
         let effective_inject_as = inject_as
             .map(str::to_string)
             .unwrap_or_else(|| {
