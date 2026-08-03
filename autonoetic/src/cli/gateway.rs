@@ -172,6 +172,12 @@ pub async fn handle_gateway_start(
     }
 
     let server = autonoetic_gateway::GatewayServer::new(config);
+    // Stopgap for #1002: hide the operator config file from the bubblewrap
+    // sandbox (the host `/` is ro-bind-mounted, so without this a sandboxed
+    // agent could read provider/endpoint config, `continuation_key`, etc.).
+    // The gateway dir's own secrets are masked unconditionally inside the
+    // sandbox builder; this covers the config file at its actual load path.
+    autonoetic_gateway::sandbox::init_sandbox_host_deny_paths(vec![config_path.to_path_buf()]);
     let _mcp_runtime = mcp_runtime;
     if let Err(e) = server.run().await {
         tracing::error!("Gateway server error: {:?}", e);

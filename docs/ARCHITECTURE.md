@@ -289,6 +289,42 @@ capabilities:
     hosts: ["api.open-meteo.com"]   # Can only reach specific hosts
 ```
 
+### Sandbox Filesystem Isolation
+
+The sandbox boundary is **capability-driven for network** (`NetworkAccess` →
+`--share-net`; no capability → `--unshare-all`, netns off) but, for the default
+**bubblewrap** driver, the **filesystem boundary is currently read-only over the
+whole host** (`--ro-bind / /`). Docker and wasm tiers mount only the agent
+workspace; microvm is operator-dependent. The ro-bind of `/` means a sandboxed
+process running with `CodeExecution`/`SandboxFunctions` can *read* any host file
+readable by the gateway's UID — including, in principle, the gateway config and
+gateway directory.
+
+As a **stopgap** (tracked by #1002, which will replace it with an explicit mount
+allow-set), the gateway masks gateway-internal secrets inside every bubblewrap
+sandbox (`sandbox.rs::bwrap_deny_path_flags`), layered over the ro-bind of `/`:
+
+| Masked path (under `<agents_dir>/.gateway`) | Mechanism | Why |
+|---|---|---|
+| `vault.key`, `vault.enc.json` | `/dev/null` overlay | credential vault master key + encrypted blob |
+| `gateway.db`, `gateway.db-shm`, `gateway.db-wal` | `/dev/null` overlay | session/approval/causal SQLite DB |
+| `state_attestation.ed25519` | `/dev/null` overlay | Ed25519 identity signing key |
+| `sessions/`, `scheduler/`, `checkpoints/`, `history/`, `logs/`, `revisions/` | empty `--tmpfs` | transcripts, approvals, runtime state |
+
+The operator **config file** is likewise masked at its actual load path
+(registered via `sandbox::init_sandbox_host_deny_paths` at gateway startup), so
+provider/endpoint config, `continuation_key`, and trusted-signer material are
+not readable from inside the sandbox. The `sdk/` subtree is deliberately *left
+accessible* because the sandbox resolves its `PYTHONPATH` from
+`<gateway_dir>/sdk`; the constitution is public agent-readable law and is not
+masked.
+
+This closes the worst read paths today, but it is a **deny-list**, not an
+allow-list — #1002 is the durable fix (curated mount allow-set + declared custom
+mounts). New secrets added under `.gateway` must be added to
+`BWRAP_GATEWAY_SENSITIVE_FILES`/`_DIRS` or they will be reachable until #1002
+lands.
+
 ### Secret Injection
 
 Secrets are never exposed to agents directly:
