@@ -244,6 +244,7 @@ fn replay_mode_bundles_checkpoint_and_import_lays_it_down() {
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,
@@ -646,6 +647,7 @@ fn replay_export_refuses_checkpoint_for_other_agent() {
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         loop_guard_state: LoopGuard {
             max_loops_without_progress: 10,
             max_tool_failures: 5,

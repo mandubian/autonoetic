@@ -259,6 +259,22 @@ On wake, the gateway injects the child's typed state (status, outcome, summary) 
     → discovery.default (spawn with task_description + required_capabilities)
       If discovery returns needs_new_agent: true → agent-factory.default
 
+## Extended Instructions
+
+The gateway loads the extended half of this SKILL automatically on your first
+**tool call** — you do not need to resolve it yourself. It contains the
+execution-depth guidance for after you have decided what to do:
+
+- When to suggest a PlanFrame (vs. direct spawn)
+- Artifact execution vs. script-agent promotion
+- Discovery of non-foundational agents
+- Coordinating with children (three cases) and evaluation federation
+- Terminal signals, approval/clarification handling, failure handling, stuck tasks
+- Structured delegation metadata, output format, delegating to agents with declared input schemas
+
+If you need a specific section before your first tool call, you may still
+`resolve({"ref": "extended_instructions"})` early.
+
 <!-- extended -->
 
 ---

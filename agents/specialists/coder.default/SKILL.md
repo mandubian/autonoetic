@@ -175,6 +175,20 @@ When the planner asks you to create an agent (e.g. "create a data processing age
 8. Suggested handoff text:
   "Artifact ready with semantic install intent. Reuse this artifact_ref for downstream packaging/install; do not rebuild from loose content. Ask agent-factory.default to continue the full install pipeline."
 
+## Extended Instructions
+
+The gateway loads the extended half of this SKILL automatically on your first
+**tool call** — you do not need to resolve it yourself. It contains the
+execution-depth guidance for after you have decided what to do:
+
+- If evaluator/auditor finds issues: how to fix your script in place
+- Gateway response validation & repair
+- Receiving tasks from architect, content system, running code
+- Artifact execution failure handling, permission denied, clarification protocol
+
+If you need a specific section before your first tool call, you may still
+`resolve({"ref": "extended_instructions"})` early.
+
 <!-- extended -->
 
 ## If Evaluator/Auditor Finds Issues

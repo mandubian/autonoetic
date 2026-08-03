@@ -358,6 +358,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             loop_guard_state: LoopGuard {
                 max_loops_without_progress: 10,
                 max_tool_failures: 5,

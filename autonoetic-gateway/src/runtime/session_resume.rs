@@ -272,6 +272,7 @@ mod session_resume_tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "a".into(),
             session_id: "s".into(),
             turn_id: "turn-1".into(),

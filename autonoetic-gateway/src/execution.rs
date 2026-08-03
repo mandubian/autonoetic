@@ -1899,6 +1899,9 @@ impl GatewayExecutionService {
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
+                // Emergency-stop checkpoint: no extended instructions were
+                // ever loaded in this stub session, so stay unloaded (#1015).
+                extended_loaded: false,
                 agent_id: lead.to_string(),
                 session_id: root_session_id.to_string(),
                 turn_id: format!("emergency-{stop_id}"),
@@ -5960,6 +5963,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: "turn-001".to_string(),
