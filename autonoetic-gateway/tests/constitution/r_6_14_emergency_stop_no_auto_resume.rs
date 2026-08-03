@@ -83,3 +83,70 @@ async fn r_6_14_emergency_stop_checkpoint_cannot_auto_resume() -> anyhow::Result
 
     Ok(())
 }
+
+/// The generic dispatch path (`spawn_agent_once` — used by every automatic
+/// wake: signals, queued-task spawns, event.ingest) must refuse an
+/// EmergencyStop checkpoint just like `respawn_from_checkpoint` and the
+/// resume-trigger coherence gate. Regression for session-d1d8c2bb
+/// post-emergency-stop churn: the removed "continuing with preserved context
+/// and fresh LoopGuard" branch (125485f5) resumed the stopped session on every
+/// queued dispatch, re-saved the checkpoint with an incremented turn counter,
+/// closed the root session with an error, and re-fired the workflow-failure
+/// cascade repeatedly.
+#[tokio::test]
+#[serial_test::serial]
+async fn r_6_14_dispatch_path_refuses_emergency_stop_checkpoint() -> anyhow::Result<()> {
+    use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+    use crate::support::{seed_agent_revision};
+
+    let base_dir = std::env::temp_dir().join(format!("at-r614-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let agents_dir = base_dir.join("a");
+    std::fs::create_dir_all(&agents_dir)?;
+    let agent_id = "r6-14-dispatch";
+    crate::support::agents::install_content_agent(&agents_dir.join(agent_id), agent_id)?;
+
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        ..Default::default()
+    };
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+    seed_agent_revision(&store, &config, agent_id, &agents_dir.join(agent_id))?;
+
+    let session_id = "session-r6-14-dispatch";
+    save_checkpoint(&config, &checkpoint_with_emergency_stop(session_id))?;
+
+    // Driver construction needs LLM env vars; the refusal happens before any
+    // LLM exchange, so a stub base URL is enough.
+    let _base_url = crate::support::EnvGuard::set("AUTONOETIC_LLM_BASE_URL", "http://127.0.0.1:9");
+    let _api_key = crate::support::EnvGuard::set("AUTONOETIC_LLM_API_KEY", "test-key");
+    let _openai_key = crate::support::EnvGuard::set("OPENAI_API_KEY", "test-key");
+
+    let execution = GatewayExecutionService::new(config, Some(store));
+    let err = execution
+        .spawn_agent_once(
+            agent_id,
+            "continue?",
+            session_id,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect_err("dispatch path must refuse an EmergencyStop checkpoint");
+
+    assert!(
+        err.to_string()
+            .contains("Cannot auto-resume session"),
+        "unexpected error: {err}"
+    );
+
+    Ok(())
+}

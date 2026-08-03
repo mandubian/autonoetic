@@ -6,8 +6,8 @@ use autonoetic_gateway::execution::GatewayExecutionService;
 use autonoetic_gateway::runtime::checkpoint::{load_latest_checkpoint, YieldReason};
 use autonoetic_gateway::scheduler::gateway_store::{ActiveExecutionRecord, GatewayStore};
 use autonoetic_gateway::scheduler::workflow_store::{
-    ensure_workflow_for_root_session, list_task_runs_for_workflow, load_workflow_run,
-    save_task_run, save_workflow_run,
+    ensure_workflow_for_root_session, fail_workflow_for_root_session, list_task_runs_for_workflow,
+    load_workflow_run, save_task_run, save_workflow_run,
 };
 use autonoetic_types::background::{
     ApprovalLevel, ApprovalRequest, ScheduledAction, UserInteraction, UserInteractionKind,
@@ -901,6 +901,107 @@ async fn emergency_stop_cancels_active_scheduled_jobs() -> anyhow::Result<()> {
         ScheduledJobStatus::Active,
         "other-root job should be untouched"
     );
+
+    Ok(())
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn emergency_stop_then_root_error_keeps_workflow_emergency_stopped() -> anyhow::Result<()> {
+    // A root-session error racing the stop (the in-flight turn's error landing
+    // after the stop handler ran) must not flip the workflow status from
+    // EmergencyStopped to Failed — the stop already aborted every task and set
+    // the terminal status. Regression for session-d1d8c2bb churn: repeated
+    // "Workflow failed — root session terminated with error" events after the
+    // operator's emergency stop.
+    let workspace = TestWorkspace::new()?;
+    let config = workspace.gateway_config();
+    write_planner_agent(&workspace.agents_dir)?;
+
+    let gateway_dir = workspace.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+
+    let root_session = "root-2c-emstop-error";
+    let mut wf = ensure_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_session,
+        Some("planner.default"),
+    )?;
+    wf.status = WorkflowRunStatus::WaitingChildren;
+    wf.updated_at = Utc::now().to_rfc3339();
+    save_workflow_run(&config, Some(store.as_ref()), &wf)?;
+
+    let ts = Utc::now().to_rfc3339();
+    let task = TaskRun {
+        task_id: "task-a".to_string(),
+        workflow_id: wf.workflow_id.clone(),
+        agent_id: "coder.default".to_string(),
+        session_id: format!("{root_session}/child-a"),
+        parent_session_id: root_session.to_string(),
+        status: TaskRunStatus::Running,
+        created_at: ts.clone(),
+        updated_at: ts.clone(),
+        source_agent_id: Some("planner.default".to_string()),
+        result_summary: None,
+        join_group: None,
+        message: None,
+        metadata: None,
+        retry_count: 0,
+        last_failure_class: None,
+        retry_policy: None,
+        side_effect_state: None,
+        dedupe_key: None,
+    };
+    save_task_run(&config, Some(store.as_ref()), &task)?;
+
+    let out = execution
+        .emergency_stop_root_session(
+            root_session,
+            "integration test",
+            "user",
+            "tester",
+            "manual",
+            None,
+        )
+        .await?;
+    assert_eq!(out["ok"], true);
+
+    let run =
+        load_workflow_run(&config, Some(store.as_ref()), &wf.workflow_id)?.expect("workflow");
+    assert_eq!(run.status, WorkflowRunStatus::EmergencyStopped);
+
+    // Simulate the racing root-session error after the stop.
+    fail_workflow_for_root_session(
+        &config,
+        Some(store.as_ref()),
+        root_session,
+        "root session terminated with error (post-stop race)",
+        true,
+    )?;
+
+    let run =
+        load_workflow_run(&config, Some(store.as_ref()), &wf.workflow_id)?.expect("workflow");
+    assert_eq!(
+        run.status,
+        WorkflowRunStatus::EmergencyStopped,
+        "emergency stop must win over a racing root-session error"
+    );
+
+    let tasks = list_task_runs_for_workflow(&config, Some(store.as_ref()), &wf.workflow_id)?;
+    for t in tasks {
+        assert_eq!(
+            t.status,
+            TaskRunStatus::Aborted,
+            "task must stay aborted after the racing error"
+        );
+    }
 
     Ok(())
 }
