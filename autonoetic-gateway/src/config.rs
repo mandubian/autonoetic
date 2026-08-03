@@ -202,4 +202,88 @@ mod tests {
         config.apply_profile_defaults();
         assert_eq!(config.evidence_mode, "off");
     }
+
+    /// The uncommented (active) values in `config/config-template.yaml` must
+    /// match `GatewayConfig::default()` — the template is documentation of the
+    /// defaults, not a second source of truth. If this test fails, either the
+    /// template drifted from the code or a default changed without the template
+    /// being updated; fix the mismatch, don't relax the assertion.
+    ///
+    /// Excluded by design: `llm_presets` and `llm_preset_mapping` are
+    /// documented *examples* (concrete provider/model names the operator must
+    /// replace), not defaults — the built-in default is an empty map.
+    #[test]
+    fn config_template_uncommented_values_match_builtin_defaults() {
+        let template = include_str!("../../config/config-template.yaml");
+        let template_value: serde_yaml::Value = serde_yaml::from_str(template)
+            .expect("config-template.yaml must be parseable YAML");
+        let defaults_value = serde_yaml::to_value(GatewayConfig::default())
+            .expect("GatewayConfig::default() must serialize");
+
+        let template_map = template_value.as_mapping().expect("template must be a map");
+        let defaults_map = defaults_value.as_mapping().expect("defaults must be a map");
+
+        let mut mismatches: Vec<String> = Vec::new();
+        for (key, template_val) in template_map {
+            let key_str = key.as_str().unwrap_or_default().to_string();
+            // Documented examples — the operator replaces these; not defaults.
+            if matches!(key_str.as_str(), "llm_presets" | "llm_preset_mapping") {
+                continue;
+            }
+            match defaults_map.get(key) {
+                None => mismatches.push(format!(
+                    "template key `{key_str}` has no built-in default (unknown field?)"
+                )),
+                Some(default_val) => {
+                    collect_value_mismatches(
+                        &format!("{key_str}"),
+                        default_val,
+                        template_val,
+                        &mut mismatches,
+                    );
+                }
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "config-template.yaml drifted from GatewayConfig::default() — update the template to match the code:\n  {}",
+            mismatches.join("\n  ")
+        );
+    }
+
+    /// Recursively compare a defaults subtree against the template's uncommented
+    /// values, recording every differing leaf path.
+    fn collect_value_mismatches(
+        path: &str,
+        default_val: &serde_yaml::Value,
+        template_val: &serde_yaml::Value,
+        out: &mut Vec<String>,
+    ) {
+        match (default_val, template_val) {
+            (serde_yaml::Value::Mapping(dm), serde_yaml::Value::Mapping(tm)) => {
+                for (tkey, tval) in tm {
+                    let tkey_str = tkey.as_str().unwrap_or_default();
+                    match dm.get(tkey) {
+                        None => out.push(format!(
+                            "{path}.{tkey_str}: in template but not in built-in defaults"
+                        )),
+                        Some(dval) => {
+                            collect_value_mismatches(
+                                &format!("{path}.{tkey_str}"),
+                                dval,
+                                tval,
+                                out,
+                            );
+                        }
+                    }
+                }
+            }
+            (d, t) => {
+                if d != t {
+                    out.push(format!("{path}: template={t:?} default={d:?}"));
+                }
+            }
+        }
+    }
 }

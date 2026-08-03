@@ -11,6 +11,28 @@ autonoetic agent init-config --output config.yaml
 All fields have serde defaults — omitting a field uses the documented default.
 Fields marked **required** must be present or the gateway will fail to start.
 
+### Seeing what is actually active
+
+The template documents every field, but the *effective* configuration is the
+merge of three layers: your `config.yaml` overrides, the built-in serde
+defaults, and profile-derived values (`profile: starter` sets
+`evidence_mode: errors`; large context windows derive a
+`prompt_budget.soft_budget_tokens`). To see exactly what the gateway would run
+with — no source reading required — use:
+
+```bash
+autonoetic agent effective-config            # merged YAML (default)
+autonoetic agent effective-config --json     # machine-readable
+autonoetic agent effective-config --redact   # redact continuation_key (CI-safe)
+```
+
+With no `--config`, the command uses the same default path resolution as the
+gateway. An absent config file prints pure built-in defaults. The
+`config/config-template.yaml` uncommented values are guarded to match the
+built-in defaults by `config_template_uncommented_values_match_builtin_defaults`
+in `autonoetic-gateway/src/config.rs` — if that test fails, the template has
+drifted from the code and must be updated.
+
 ---
 
 ## Top-Level Fields
