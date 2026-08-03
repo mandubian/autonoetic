@@ -159,7 +159,7 @@ explains what the planner must supply).
    the value never reaches chat. A `user_prompt` step returns
    `suspended: true, approval_required: true`; wait for the approval, then resume
    `credential_setup` with `credential_id` (plus `resume_vars` for any `user_input` steps).
-   Do not attempt to collect a secret via `user.ask` or `user_input` — both are rejected.
+   Do not attempt to collect a secret via `user_ask` or `user_input` — both are rejected.
 
 5. **Completion gate before handoff** (do not skip):
    - Onboarding is complete only when `credential_setup` returned `ok: true`,

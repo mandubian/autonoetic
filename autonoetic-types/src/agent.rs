@@ -679,11 +679,11 @@ pub enum CredentialSetupStep {
     ///
     /// When the gateway encounters this step it returns early with
     /// `suspended_for_user_input: true` and the question.  The agent should call
-    /// `user.ask` with the question, collect the human's answer, then call
+    /// `user_ask` with the question, collect the human's answer, then call
     /// `credential_setup` again with `credential_id` + `resume_vars: { var_name: answer }`.
     ///
     /// `secret_fields` is rejected at execution time: `user_input` answers flow
-    /// through the LLM (`user.ask`), so it must never be used to collect secret
+    /// through the LLM (`user_ask`), so it must never be used to collect secret
     /// material — use [`CredentialSetupStep::UserPrompt`] for secrets, which
     /// prompts the operator through a secure out-of-band channel.
     UserInput {

@@ -920,7 +920,7 @@ pub struct UserInteractionOption {
     pub value: String,
 }
 
-/// An interaction created by `user.ask`.
+/// An interaction created by `user_ask`.
 ///
 /// Stored in `user_interactions` table. When a user interaction is created,
 /// the agent's turn is suspended and a checkpoint is saved.
