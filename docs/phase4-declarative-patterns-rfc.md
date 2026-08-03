@@ -65,14 +65,22 @@ remote_access:
 Two-pass, fail-shut:
 
 1. **Observed signals**: analyzer extracts import/function/url/ip/command signals
-   from code and command text.
+   from code and command text, plus **network sinks** (#1021) — calls resolved
+   through the code's own import bindings to the closed stdlib/builtin primitive
+   set (`socket`, `http.client`, `urllib.request`, `imaplib`, … / `net`, `tls`,
+   `http(s)`, `dgram`, …). Sinks are structural: an unlisted or brand-new client
+   library is detected because it bottoms out on a primitive, with no code change.
+   See `docs/network-sink-detection.md`.
 2. **Declared coverage check**:
    - if a signal maps to a declared pattern category and is covered -> allowed
    - if a signal is not covered by declared patterns -> `undeclared_remote_pattern`
      deny (structured tool error)
   - concrete URL/IP targets must match `remote_access.targets` (typed target rules)
-3. **Language scoping** (`enabled_languages`) — applies to import detectors *and*
-   language-tagged function-call heuristics:
+  - the `network_sink` category is **detection-only**: it raises the approval gate
+    but is not part of the declared-coverage check, so sinks add nothing an agent
+    must enumerate (what must be declared is #1023's decision)
+3. **Language scoping** (`enabled_languages`) — applies to import detectors,
+   language-tagged function-call heuristics, *and* sink resolution:
    - if `enabled_languages` is empty -> all registered import detectors run, and
      the function-call scope is inferred from the code's own import signals
      (no signal -> language unknown -> every tagged pattern runs)
