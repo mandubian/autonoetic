@@ -1932,6 +1932,12 @@ struct GrantIdent {
 struct GrantRow {
     kind: GrantKind,
     id: i64,
+    /// Envelope lock this grant was materialized from, when any
+    /// (`source_approval_id == "session-envelope:{id}"`). Envelope-lock grants
+    /// are session-approval grants created by locking a network envelope; the
+    /// panel labels them distinctly so an operator can tell a locked host
+    /// (auto-granted at envelope lock) from a one-off approval grant.
+    envelope_id: Option<i64>,
     /// Short summary of WHAT the grant widens (hosts / target / sink).
     summary: String,
     /// Provenance line: scope · by <granted_by> [exp <expires>].
@@ -2081,13 +2087,29 @@ fn format_grant_detail(g: &serde_json::Value) -> String {
         .get("granted_by")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    let mut s = format!("{scope} · by {granted_by}");
+    let mut s = match envelope_id_from_source(
+        g.get("source_approval_id").and_then(|v| v.as_str()),
+    ) {
+        Some(env_id) => format!("envelope #{env_id} · {scope} · by {granted_by}"),
+        None => format!("{scope} · by {granted_by}"),
+    };
     if let Some(exp) = g.get("expires_at").and_then(|v| v.as_str()) {
         if !exp.is_empty() {
             s.push_str(&format!(" · exp {exp}"));
         }
     }
     s
+}
+
+/// Extract the envelope lock id from a session-approval grant's
+/// `source_approval_id` when the grant was materialized from a locked network
+/// envelope (`session-envelope:{id}`). One-off approval grants carry the
+/// approval request id instead and return `None`.
+fn envelope_id_from_source(source_approval_id: Option<&str>) -> Option<i64> {
+    source_approval_id?
+        .strip_prefix("session-envelope:")?
+        .parse::<i64>()
+        .ok()
 }
 
 /// Poll `grants.list` and fold into display rows, the root taint label, and
@@ -2120,9 +2142,12 @@ fn fetch_grant_rows(
                 .unwrap_or_default();
             let summary = render_grant_targets(&targets);
             let detail = format_grant_detail(g);
+            let envelope_id =
+                envelope_id_from_source(g.get("source_approval_id").and_then(|v| v.as_str()));
             rows.push(GrantRow {
                 kind: GrantKind::SessionApproval,
                 id,
+                envelope_id,
                 summary,
                 detail,
             });
@@ -2146,6 +2171,7 @@ fn fetch_grant_rows(
             rows.push(GrantRow {
                 kind: GrantKind::EgressDeclassification,
                 id,
+                envelope_id: None,
                 summary,
                 detail,
             });
@@ -5170,11 +5196,28 @@ pub fn run(
                                                 }),
                                             ) {
                                                 Ok(_) => {
-                                                    status = Some(format!(
-                                                        "✓ revoked {} grant #{}",
-                                                        kind.label(),
-                                                        grant_id
-                                                    ));
+                                                    // Envelope-lock grants are
+                                                    // revoked by grant id — the
+                                                    // envelope record stays
+                                                    // locked, so the host is NOT
+                                                    // re-proposed/auto-locked on
+                                                    // the next discovery. That is
+                                                    // the point: revoking a
+                                                    // dangerous host lock must
+                                                    // stick (fail-shut on next
+                                                    // use) rather than being
+                                                    // silently restored.
+                                                    status = Some(match row.envelope_id {
+                                                        Some(env_id) => format!(
+                                                            "✓ revoked envelope lock #{} (host will prompt again)",
+                                                            env_id
+                                                        ),
+                                                        None => format!(
+                                                            "✓ revoked {} grant #{}",
+                                                            kind.label(),
+                                                            grant_id
+                                                        ),
+                                                    });
                                                     // Re-fetch so the list updates
                                                     // immediately. The revoked
                                                     // grant is gone, so keep the
@@ -5196,11 +5239,17 @@ pub fn run(
                                             }
                                         } else {
                                             panel.pending_revoke = Some(ident);
-                                            status = Some(format!(
-                                                "press r again to revoke {} grant #{}",
-                                                row.kind.label(),
-                                                row.id
-                                            ));
+                                            status = Some(match row.envelope_id {
+                                                Some(env_id) => format!(
+                                                    "press r again to revoke envelope lock #{} (hosts: {})",
+                                                    env_id, row.summary
+                                                ),
+                                                None => format!(
+                                                    "press r again to revoke {} grant #{}",
+                                                    row.kind.label(),
+                                                    row.id
+                                                ),
+                                            });
                                         }
                                     }
                                     _ => {
@@ -10524,11 +10573,16 @@ fn draw_approvals_popup(f: &mut Frame, popup: &ApprovalsPopup) {
 
 fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
     let rows = &panel.rows;
+    // Envelope-lock grants are session-approval grants materialized from a
+    // locked network envelope; they are counted and labelled separately so an
+    // operator can see at a glance which hosts are locked by envelope vs.
+    // granted by a one-off approval.
+    let n_envelope = rows.iter().filter(|r| r.envelope_id.is_some()).count();
     let n_approval = rows
         .iter()
-        .filter(|r| r.kind == GrantKind::SessionApproval)
+        .filter(|r| r.kind == GrantKind::SessionApproval && r.envelope_id.is_none())
         .count();
-    let n_declass = rows.len() - n_approval;
+    let n_declass = rows.len() - n_approval - n_envelope;
     let taint_str = panel
         .taint
         .clone()
@@ -10537,8 +10591,8 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
     // untainted room pays no clutter cost — the segment is the signal
     // ("a child is carrying a label the root isn't") rather than a counter.
     let mut title = format!(
-        " Grants — {} approval · {} declass · taint {}",
-        n_approval, n_declass, taint_str,
+        " Grants — {} approval · {} envelope lock · {} declass · taint {}",
+        n_approval, n_envelope, n_declass, taint_str,
     );
     if !panel.child_taints.is_empty() {
         title.push_str(&format!(" · {} child tainted", panel.child_taints.len()));
@@ -10601,8 +10655,17 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
         .map(|(i, r)| {
             let selected = i == panel.selected;
             let marker = if selected { "▸" } else { " " };
-            let kind_str = r.kind.label();
-            let kind_style = if r.kind == GrantKind::EgressDeclassification {
+            // Envelope-lock grants are labelled `env` (distinct from one-off
+            // `approval` grants) so the operator sees which hosts are locked
+            // by a network envelope.
+            let kind_str = if r.envelope_id.is_some() {
+                "env"
+            } else {
+                r.kind.label()
+            };
+            let kind_style = if r.envelope_id.is_some() {
+                Color::Green
+            } else if r.kind == GrantKind::EgressDeclassification {
                 Color::Magenta
             } else {
                 Color::Cyan
@@ -11398,6 +11461,84 @@ mod tests {
         assert!(is_system_session("system"));
         assert!(!is_system_session("session-abc123"));
         assert!(!is_system_session("systematic-session"));
+    }
+
+    // ---- grants panel: envelope-lock visibility ----
+
+    #[test]
+    fn envelope_id_from_source_parses_session_envelope_prefix() {
+        // Envelope-lock grants carry `source_approval_id = session-envelope:{id}`.
+        assert_eq!(
+            envelope_id_from_source(Some("session-envelope:12")),
+            Some(12)
+        );
+        // One-off approval grants carry the approval request id — not an envelope.
+        assert_eq!(envelope_id_from_source(Some("approval-abc123")), None);
+        assert_eq!(
+            envelope_id_from_source(Some("session-envelope:not-a-number")),
+            None
+        );
+        assert_eq!(envelope_id_from_source(None), None);
+    }
+
+    #[test]
+    fn format_grant_detail_prefixes_envelope_lock_provenance() {
+        let envelope_grant = serde_json::json!({
+            "scope": "root",
+            "granted_by": "auto-lock",
+            "source_approval_id": "session-envelope:7",
+            "expires_at": ""
+        });
+        assert_eq!(
+            format_grant_detail(&envelope_grant),
+            "envelope #7 · root · by auto-lock"
+        );
+
+        let approval_grant = serde_json::json!({
+            "scope": "root",
+            "granted_by": "operator",
+            "source_approval_id": "approval-xyz",
+            "expires_at": ""
+        });
+        assert_eq!(format_grant_detail(&approval_grant), "root · by operator");
+    }
+
+    #[test]
+    fn grants_panel_counts_envelope_locks_separately() {
+        // `draw_grants_panel` splits session-approval grants into one-off
+        // approvals vs. envelope-lock grants in the title. The count logic is
+        // inline, so exercise the classification rule it encodes: an envelope
+        // grant is a SessionApproval row with `envelope_id` set.
+        let rows = vec![
+            GrantRow {
+                kind: GrantKind::SessionApproval,
+                id: 1,
+                envelope_id: Some(11),
+                summary: "imap.gmail.com".into(),
+                detail: "envelope #11 · root · by auto-lock".into(),
+            },
+            GrantRow {
+                kind: GrantKind::SessionApproval,
+                id: 2,
+                envelope_id: None,
+                summary: "api.example.com".into(),
+                detail: "root · by operator".into(),
+            },
+            GrantRow {
+                kind: GrantKind::EgressDeclassification,
+                id: 3,
+                envelope_id: None,
+                summary: "sink:http → network".into(),
+                detail: "root · by operator".into(),
+            },
+        ];
+        let n_envelope = rows.iter().filter(|r| r.envelope_id.is_some()).count();
+        let n_approval = rows
+            .iter()
+            .filter(|r| r.kind == GrantKind::SessionApproval && r.envelope_id.is_none())
+            .count();
+        let n_declass = rows.len() - n_approval - n_envelope;
+        assert_eq!((n_envelope, n_approval, n_declass), (1, 1, 1));
     }
 
     // ---- labels panel (#974) — pure helpers only ----
