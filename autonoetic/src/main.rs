@@ -245,6 +245,9 @@ async fn async_main() -> anyhow::Result<()> {
             cli::common::AgentCommands::InitConfig { output, overwrite } => {
                 cli::agent::handle_init_config(output.as_deref(), *overwrite)?;
             }
+            cli::common::AgentCommands::EffectiveConfig { json, redact } => {
+                cli::agent::handle_effective_config(&config_path, *json, *redact)?;
+            }
             cli::common::AgentCommands::Run {
                 agent_id,
                 message,

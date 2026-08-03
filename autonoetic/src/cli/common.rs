@@ -1138,6 +1138,17 @@ pub enum AgentCommands {
         #[arg(long)]
         overwrite: bool,
     },
+    /// Print the effective configuration: your file merged over built-in
+    /// defaults, profile-derived values, and env overrides — exactly what the
+    /// gateway would run with. An absent config file prints pure defaults.
+    EffectiveConfig {
+        /// Emit machine-readable JSON instead of YAML
+        #[arg(long)]
+        json: bool,
+        /// Redact true secrets (continuation_key) from the output — CI-safe
+        #[arg(long)]
+        redact: bool,
+    },
     /// Imports an external AgentSkills.io skill into Autonoetic
     ImportSkill {
         /// Path to the external skill directory (must contain SKILL.md)

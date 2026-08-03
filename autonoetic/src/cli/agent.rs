@@ -498,6 +498,79 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
     Ok(())
 }
 
+/// Print the effective configuration: the loaded config (file merged over
+/// built-in serde defaults, profile-derived values, and env overrides) —
+/// exactly what the gateway would run with. With no config file present,
+/// this prints pure defaults, so "what is actually activated" is answerable
+/// without reading Rust source or diffing against the template.
+pub fn handle_effective_config(config_path: &Path, json: bool, redact: bool) -> anyhow::Result<()> {
+    let mut config = autonoetic_gateway::config::load_config(config_path)?;
+
+    // Mirror the runtime env-var overrides the gateway applies at startup
+    // (server/mod.rs `GatewayServer::run`) so this print matches what the
+    // daemon actually runs with — not just the file + serde defaults.
+    if let Ok(node_id) = std::env::var("AUTONOETIC_NODE_ID") {
+        config.node_id = node_id;
+    }
+    if let Ok(node_name) = std::env::var("AUTONOETIC_NODE_NAME") {
+        config.node_name = node_name;
+    }
+
+    // Round-trip through serde_json::Value so redaction works uniformly for
+    // both output formats (serde_yaml can serialize a serde_json::Value).
+    let mut val = serde_json::to_value(&config)?;
+    if redact {
+        redact_config_value(&mut val);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&val)?);
+        return Ok(());
+    }
+
+    let yaml = serde_yaml::to_string(&val)?;
+    let source = if config_path.exists() {
+        config_path.display().to_string()
+    } else {
+        "(no config file — built-in defaults)".to_string()
+    };
+    println!("# Effective configuration (source: {})", source);
+    println!("# Values shown are the merged result: file overrides + built-in defaults");
+    println!("# + profile-derived + env overrides. This is what the gateway runs with.");
+    println!("#");
+    println!("# Redacted: {}", if redact { "yes" } else { "no" });
+    println!("{}", yaml);
+    Ok(())
+}
+
+/// Redact true secrets from a serialized config value so the output is safe
+/// to paste into CI logs or issues.
+///
+/// The config never stores raw API keys (only `api_key_env` env-var *names*),
+/// so the one secret that can live here is `continuation_key` (the HMAC key
+/// for turn-continuation signing). Redact that wherever it appears.
+fn redact_config_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("continuation_key") {
+                map.insert(
+                    "continuation_key".into(),
+                    serde_json::Value::String("<redacted>".into()),
+                );
+            }
+            for (_, child) in map.iter_mut() {
+                redact_config_value(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_config_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub async fn handle_agent_list(config_path: &Path) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
@@ -3050,6 +3123,46 @@ Use tools when needed.
         )
         .expect_err("missing config should fail fast");
         assert!(err.to_string().contains("Config file not found"));
+    }
+
+    #[test]
+    fn test_effective_config_reflects_file_override_and_redacts() {
+        let temp = tempdir().expect("tempdir should create");
+        let config_path = temp.path().join("config.yaml");
+        let agents_dir = temp.path().join("agents");
+        std::fs::write(
+            &config_path,
+            format!(
+                "agents_dir: \"{}\"\nport: 4001\nevidence_mode: errors\ncontinuation_key: \"super-secret-hmac\"\n",
+                agents_dir.display()
+            ),
+        )
+        .expect("config should write");
+
+        // The merged config the handler prints is exactly load_config's result:
+        // an explicit file value (port 4001, evidence errors) wins over the
+        // built-in defaults the drift guard keeps in sync with the template.
+        let config = autonoetic_gateway::config::load_config(&config_path).expect("load");
+        assert_eq!(config.port, 4001);
+        assert_eq!(config.evidence_mode, "errors");
+        assert_eq!(
+            config.continuation_key.as_deref(),
+            Some("super-secret-hmac"),
+            "test fixture must set the real secret so redaction is exercised"
+        );
+
+        // Directly assert the redaction helper masks the secret.
+        let mut val = serde_json::to_value(&config).expect("config serializes");
+        redact_config_value(&mut val);
+        assert_eq!(
+            val.pointer("/continuation_key").and_then(|v| v.as_str()),
+            Some("<redacted>")
+        );
+
+        // And both output modes complete without error (stdout is the sink; the
+        // value-level contract is asserted above via load_config + redaction).
+        handle_effective_config(&config_path, true, false).expect("json mode ok");
+        handle_effective_config(&config_path, false, true).expect("yaml redact mode ok");
     }
 
     #[test]

@@ -106,8 +106,8 @@ max_background_due_per_tick: 32
 # repair_enabled allows auto-repair only for agents that explicitly opt in
 # via io.output_policy.repair.auto.
 response_validation:
-  enabled: true
-  repair_enabled: true
+  enabled: false
+  repair_enabled: false
   max_repair_attempts_ceiling: 2
 
 # ── Validation Waivers ────────────────────────────────────────────────
@@ -121,7 +121,7 @@ validation_waivers:
 
 # ── Approval Timeout ──────────────────────────────────────────────────
 # Max seconds a task can stay in AwaitingApproval before auto-fail. 0 = no timeout.
-approval_timeout_secs: 3600
+approval_timeout_secs: 600
 # Maximum concurrent pending approvals per root session (R+5). Default: 50.
 # Excess requests are rejected immediately with approval_flood.
 # max_pending_approvals_per_root: 50
@@ -630,7 +630,7 @@ max_session_turns: 25
 prompt_budget:
   system_prompt_max_tokens: 0
   tool_definitions_max_tokens: 0
-  warn_at_pct: 75.0
+  warn_at_pct: 80.0
   margin_tokens: 4096
   # DEPRECATED (no-op). Tool schemas are never compressed; stripping them to
   # {"type": "object"} corrupted tool-calling on turn 1+. Tool tokens are now
@@ -638,10 +638,12 @@ prompt_budget:
   compress_tool_schemas_after_turn_0: false
   # Maximum number of tool definitions sent per turn (0 = unlimited).
   # Excess tools are dropped from lowest tier first (Specialized → Workflow → Core).
-  max_tool_definitions: 40
+  # Default: 0 (unlimited). Set to ~40 to keep the prompt lean.
+  # max_tool_definitions: 40
   # Root sessions start with Core + Workflow tools only (~40 for planner.default).
   # After the first Specialized tool call, all tiers unlock (~10 more; total ~50).
-  progressive_tool_disclosure: true
+  # Default: false (backward compat). Set true for the lean prompt surface.
+  # progressive_tool_disclosure: true
   # Soft token budget that triggers the context governor proactively, before
   # the hard context-window limit is reached. Useful for large context-window
   # models (e.g. 200K tokens) where waiting for the hard limit wastes tokens
@@ -705,14 +707,15 @@ prompt_budget:
 #       tier: core
 
 # ── Cross-cutting Routing Concerns ────────────────────────────────────
-# Agent overrides and approval gates. Model definitions live in llm_presets.
-llm_routing:
-  agent_overrides:
-    planner.default:
-      min_tier: standard                      # economy | standard | premium
-  approval_gates:
-    premium_model_first_use: false            # require approval before first premium model use
-    budget_threshold_crossed: 0.75            # 0.0–1.0, require approval when budget exceeds this
+# Off by default (llm_routing: null). Uncomment to enable per-agent overrides
+# and approval gates. Model definitions live in llm_presets.
+# llm_routing:
+#   agent_overrides:
+#     planner.default:
+#       min_tier: standard                      # economy | standard | premium
+#   approval_gates:
+#     premium_model_first_use: false            # require approval before first premium model use
+#     budget_threshold_crossed: 0.75            # 0.0–1.0, require approval when budget exceeds this
 
 # ── LLM Presets ───────────────────────────────────────────────────────
 # Unified registry: fixed presets (concrete provider/model) and routing
@@ -875,7 +878,7 @@ llm_preset_mapping:
 # the context governor pipeline.
 context_compression:
   enabled: true
-  llm_preset: haiku            # use a preset name, or set provider+model inline
+  # llm_preset: haiku            # use a preset name, or set provider+model inline
   # provider: anthropic         # inline provider (when not using llm_preset)
   # model: claude-haiku-3-20250307  # inline model (when not using llm_preset)
   threshold_pct: 60.0
