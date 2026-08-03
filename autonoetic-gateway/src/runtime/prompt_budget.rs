@@ -103,9 +103,13 @@ pub fn sanitize_history_for_request(
             if opts.max_tool_result_chars > 0 && m.role == Role::Tool && !m.content.is_empty() {
                 // Safety-net truncation only — tool results are already
                 // JSON-aware truncated at push time (see
-                // `handle_tool_batch`). This catches any legacy/untruncated
-                // results with a fast string operation.
-                m.content = truncate_middle(&m.content, opts.max_tool_result_chars);
+                // `handle_tool_batch`). `truncate_tool_result` early-returns
+                // under budget (same fast path as `truncate_middle`), and for
+                // over-budget messages it is JSON-aware: it keeps the JSON
+                // parseable and preserves exempt content (e.g. a `gateway_note`
+                // carrying the extended SKILL half, #1015) instead of
+                // whole-string splitting the result.
+                m.content = truncate_tool_result(&m.content, opts.max_tool_result_chars);
             }
 
             m
@@ -209,13 +213,8 @@ pub(crate) fn truncate_tool_result(s: &str, max_chars: usize) -> String {
         return s.to_string();
     }
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(s) {
-        let was_truncated = {
-            let total_string_chars: usize = collect_string_values(&value)
-                .iter()
-                .map(|s| s.chars().count())
-                .sum();
-            total_string_chars > max_chars
-        };
+        let (total_string_chars, _) = non_exempt_string_metrics(&value);
+        let was_truncated = total_string_chars > max_chars;
         truncate_json_strings_in_place(&mut value, max_chars);
         if was_truncated {
             mark_json_truncated(&mut value);
@@ -224,8 +223,14 @@ pub(crate) fn truncate_tool_result(s: &str, max_chars: usize) -> String {
         if serialized.chars().count() <= max_chars {
             return serialized;
         }
-        // Many medium fields pushed the total over even after per-field
-        // truncation — fall through to whole-string truncation.
+        // If the serialized result is over budget ONLY because of exempt
+        // content (e.g. a `gateway_note` carrying the extended SKILL half),
+        // keep it intact — whole-string truncation would destroy the payload
+        // being delivered and split the JSON. Otherwise fall through to
+        // whole-string truncation for many-medium-fields results.
+        if has_exempt_content(&value) {
+            return serialized;
+        }
         return truncate_middle(&serialized, max_chars);
     }
     truncate_middle(s, max_chars)
@@ -261,10 +266,11 @@ fn mark_json_truncated(value: &mut serde_json::Value) {
 /// The budget is split evenly across all string values, after reserving
 /// overhead for the JSON structure itself.
 fn truncate_json_strings_in_place(value: &mut serde_json::Value, max_chars: usize) {
-    let total_string_chars: usize = collect_string_values(value)
-        .iter()
-        .map(|s| s.chars().count())
-        .sum();
+    // Budget only the NON-exempt strings: exempt content (routing directives,
+    // `gateway_note`) is delivered verbatim and must not starve the fields it
+    // shares the result with. A 4k-token `gateway_note` next to a 100-char
+    // output would otherwise shrink the per-field budget to nothing.
+    let (total_string_chars, string_count) = non_exempt_string_metrics(value);
     if total_string_chars <= max_chars {
         return;
     }
@@ -274,8 +280,7 @@ fn truncate_json_strings_in_place(value: &mut serde_json::Value, max_chars: usiz
     // capped so we never starve the string budget below ~25%.
     let struct_overhead = (max_chars * 2 / 5).min(max_chars * 3 / 4);
     let string_budget = max_chars.saturating_sub(struct_overhead);
-    let string_count = count_string_values(value).max(1);
-    let per_field_budget = string_budget / string_count;
+    let per_field_budget = string_budget / string_count.max(1);
 
     truncate_json_strings_iterative(value, per_field_budget);
 }
@@ -295,6 +300,10 @@ const TRUNCATION_EXEMPT_KEYS: &[&str] = &[
     "repair_class",
     "available_actions",
     "enforced_rules",
+    // #1015: the extended SKILL.md half rides on the first tool result under
+    // this key. It is the payload being delivered (not a field to budget), so
+    // it must survive the JSON-aware truncator verbatim.
+    "gateway_note",
 ];
 
 fn truncate_json_strings_iterative(value: &mut serde_json::Value, per_field_budget: usize) {
@@ -322,40 +331,79 @@ fn truncate_json_strings_iterative(value: &mut serde_json::Value, per_field_budg
     }
 }
 
-fn collect_string_values(value: &serde_json::Value) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut stack: Vec<&serde_json::Value> = vec![value];
-    while let Some(v) = stack.pop() {
+/// (total chars, string count) over the NON-exempt portion of a JSON value.
+/// Exempt subtrees (rooted at a key in `TRUNCATION_EXEMPT_KEYS`) are skipped
+/// entirely: their content is delivered verbatim, so it neither triggers
+/// truncation nor shrinks the per-field budget of the fields that ARE subject
+/// to truncation.
+fn non_exempt_string_metrics(value: &serde_json::Value) -> (usize, usize) {
+    let mut total = 0usize;
+    let mut count = 0usize;
+    // `exempt` propagates down subtrees rooted at an exempt top-level key.
+    let mut stack: Vec<(&serde_json::Value, bool)> = vec![(value, false)];
+    while let Some((v, exempt)) = stack.pop() {
         match v {
-            serde_json::Value::String(s) => out.push(s.as_str()),
+            serde_json::Value::String(s) => {
+                if !exempt {
+                    total += s.chars().count();
+                    count += 1;
+                }
+            }
             serde_json::Value::Object(map) => {
-                stack.extend(map.values());
+                stack.extend(map.iter().map(|(k, v)| {
+                    let child_exempt = exempt || TRUNCATION_EXEMPT_KEYS.contains(&k.as_str());
+                    (v, child_exempt)
+                }));
             }
             serde_json::Value::Array(arr) => {
-                stack.extend(arr.iter());
+                stack.extend(arr.iter().map(|v| (v, exempt)));
             }
             _ => {}
         }
     }
-    out
+    (total, count)
 }
 
-fn count_string_values(value: &serde_json::Value) -> usize {
-    let mut count = 0;
-    let mut stack: Vec<&serde_json::Value> = vec![value];
-    while let Some(v) = stack.pop() {
+/// Whether the value contains any exempt content (a subtree rooted at an
+/// exempt key). Used by `truncate_tool_result` to decide whether an
+/// over-budget serialized result must be kept intact rather than falling
+/// through to whole-string truncation.
+fn has_exempt_content(value: &serde_json::Value) -> bool {
+    let mut stack: Vec<(&serde_json::Value, bool)> = vec![(value, false)];
+    while let Some((v, exempt)) = stack.pop() {
         match v {
-            serde_json::Value::String(_) => count += 1,
+            serde_json::Value::String(_) => {
+                if exempt {
+                    return true;
+                }
+            }
             serde_json::Value::Object(map) => {
-                stack.extend(map.values());
+                for (k, child) in map {
+                    let child_exempt = exempt || TRUNCATION_EXEMPT_KEYS.contains(&k.as_str());
+                    if child_exempt && is_non_empty_subtree(child) {
+                        return true;
+                    }
+                    stack.push((child, child_exempt));
+                }
             }
             serde_json::Value::Array(arr) => {
-                stack.extend(arr.iter());
+                stack.extend(arr.iter().map(|v| (v, exempt)));
             }
             _ => {}
         }
     }
-    count
+    false
+}
+
+/// Whether a subtree contains at least one string value (i.e. is not an empty
+/// object/array/null placeholder under an exempt key).
+fn is_non_empty_subtree(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Object(map) => !map.is_empty(),
+        serde_json::Value::Array(arr) => !arr.is_empty(),
+        _ => false,
+    }
 }
 
 fn truncate_middle(s: &str, max_chars: usize) -> String {
@@ -1839,6 +1887,99 @@ mod tests {
             pattern_reason.len() < long_reason.len(),
             "non-exempt pattern strings should still be truncated"
         );
+    }
+
+    #[test]
+    fn truncate_tool_result_preserves_gateway_note_verbatim() {
+        // #1015: the extended SKILL half rides on the first tool result under
+        // `gateway_note`. It is far larger than max_tool_result_chars by
+        // design — truncating it would defeat the mechanical load. It must
+        // survive the JSON-aware truncator verbatim while the result stays
+        // valid JSON and the OTHER fields stay within budget.
+        let note = "EXTENDED SKILL CONTENT ".repeat(500); // ~12.5k chars
+        let content = serde_json::json!({
+            "ok": true,
+            "output": "done",
+            "gateway_note": note,
+        })
+        .to_string();
+
+        let result = truncate_tool_result(&content, 1000);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result must stay valid JSON");
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(
+            parsed["gateway_note"].as_str().unwrap(),
+            note,
+            "gateway_note must survive truncation verbatim"
+        );
+        // The non-exempt output field is small; it must not be starved by the
+        // huge note (budget math excludes exempt strings).
+        assert_eq!(parsed["output"].as_str().unwrap(), "done");
+    }
+
+    #[test]
+    fn truncate_tool_result_over_budget_note_still_valid_json() {
+        // Even when the note ALONE exceeds max_chars, the result must not fall
+        // through to whole-string truncate_middle (which would split the JSON
+        // and destroy the note): exempt content keeps the serialized result
+        // intact.
+        let note = "X".repeat(5000);
+        let content = serde_json::json!({
+            "ok": true,
+            "output": "done",
+            "gateway_note": note,
+        })
+        .to_string();
+
+        let result = truncate_tool_result(&content, 100);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("result must stay valid JSON");
+        assert_eq!(parsed["gateway_note"].as_str().unwrap(), note);
+        assert_eq!(parsed["output"].as_str().unwrap(), "done");
+    }
+
+    #[test]
+    fn sanitize_history_preserves_gateway_note_verbatim() {
+        // The sanitize safety-net must not whole-string-truncate a tool result
+        // carrying a `gateway_note` (that would split the JSON and drop the
+        // extended SKILL half on every subsequent request).
+        let note = "EXTENDED SKILL CONTENT ".repeat(300); // ~7.5k chars
+        let tool_result = serde_json::json!({
+            "ok": true,
+            "output": "done",
+            "gateway_note": note,
+        })
+        .to_string();
+
+        let history = vec![Message {
+            id: None,
+            role: Role::Tool,
+            content: tool_result,
+            tool_calls: vec![],
+            tool_call_id: Some("tc_1".to_string()),
+            reasoning_content: None,
+            reasoning_details: None,
+        }];
+
+        let sanitized = sanitize_history_for_request(
+            &history,
+            &HistorySanitizeOptions {
+                strip_reasoning: false,
+                max_tool_result_chars: 100,
+                dedup_tool_results: false,
+                collapse_repeated_errors: false,
+            },
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&sanitized[0].content)
+            .expect("sanitized tool result must stay valid JSON");
+        assert_eq!(
+            parsed["gateway_note"].as_str().unwrap(),
+            note,
+            "gateway_note must survive the sanitize safety-net verbatim"
+        );
+        assert_eq!(parsed["output"].as_str().unwrap(), "done");
     }
 
     #[test]

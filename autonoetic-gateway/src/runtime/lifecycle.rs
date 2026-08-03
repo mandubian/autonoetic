@@ -4959,12 +4959,15 @@ impl AgentExecutor {
 
                 history.push(assistant_msg);
                 for (id, name, result) in &completed_results {
-                    let mut content = self.truncate_result(result);
+                    let mut content = result.clone();
                     // First tool result of the session carries the extended
-                    // SKILL.md content as a `gateway_note` (#1015).
+                    // SKILL.md content as a `gateway_note` (#1015); attached
+                    // BEFORE truncation so the note survives the JSON-aware
+                    // truncator (see the main push site comment).
                     if let Some(note) = first_tool_extended_note.take() {
                         content = attach_extended_gateway_note(content, &note);
                     }
+                    let content = self.truncate_result(&content);
                     history.push(Message::tool_result(id.clone(), name.clone(), content));
                 }
 
@@ -5149,12 +5152,21 @@ impl AgentExecutor {
             history.push(assistant_msg);
             let mut tool_feedback_events: Vec<FeedbackEvent> = Vec::new();
             for (id, _name, result) in &results {
-                let mut content = self.truncate_result(result);
+                let mut content = result.clone();
                 // First tool result of the session carries the extended
-                // SKILL.md content as a `gateway_note` (#1015).
+                // SKILL.md content as a `gateway_note` (#1015). The note is
+                // attached BEFORE truncation: truncate_result is JSON-aware
+                // and exempts `gateway_note` (and its siblings in
+                // TRUNCATION_EXEMPT_KEYS) from the per-field budget, so the
+                // stored result stays within `max_tool_result_chars` while the
+                // extended content survives verbatim. Attaching after
+                // truncation would leave an oversized message that
+                // `sanitize_history_for_request` later whole-string-truncates
+                // (non-JSON-aware `truncate_middle`) — invalid JSON risk.
                 if let Some(note) = first_tool_extended_note.take() {
                     content = attach_extended_gateway_note(content, &note);
                 }
+                let content = self.truncate_result(&content);
                 history.push(Message::tool_result(id.clone(), _name.clone(), content));
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                     // Recurring-error detector (#703): feed every result — the
@@ -6522,12 +6534,58 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&attached).expect("result stays valid JSON");
         assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
-        assert_eq!(parsed["gateway_note"], serde_json::Value::String("EXT".to_string()));
+        assert_eq!(
+            parsed["gateway_note"],
+            serde_json::Value::String("EXT".to_string())
+        );
 
         // Non-JSON result (defensive): note appended as a text suffix.
         let plain = attach_extended_gateway_note("raw output".to_string(), "EXT");
         assert!(plain.contains("raw output"));
         assert!(plain.contains("EXT"));
+    }
+
+    #[test]
+    fn truncate_after_attach_keeps_note_and_budget() {
+        // Review feedback on #1032: the note must be attached BEFORE
+        // truncation so the stored tool result stays within
+        // max_tool_result_chars (JSON-aware) instead of being whole-string
+        // truncated later by the sanitize safety-net. The truncator exempts
+        // `gateway_note`, so the extended content survives verbatim while a
+        // bulky non-exempt output field is still cut.
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let runtime = AgentExecutor::new(
+            manifest,
+            "core".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+
+        // Build the full result (note attached), then truncate once — mirroring
+        // the push-site ordering in handle_tool_batch.
+        let big_output = "O".repeat(8000);
+        let result = serde_json::json!({
+            "ok": true,
+            "output": big_output,
+        })
+        .to_string();
+        let with_note = attach_extended_gateway_note(result, "EXTENDED SKILL TEXT");
+        let truncated = runtime.truncate_result(&with_note);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&truncated).expect("truncated result stays valid JSON");
+        assert_eq!(
+            parsed["gateway_note"].as_str().unwrap(),
+            "EXTENDED SKILL TEXT"
+        );
+        let out = parsed["output"].as_str().unwrap();
+        assert!(
+            out.chars().count() < 8000,
+            "non-exempt output field should still be truncated"
+        );
     }
 
     #[tokio::test]
