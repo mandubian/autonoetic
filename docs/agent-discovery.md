@@ -138,7 +138,7 @@ Discovery is wasted overhead when the intent clearly maps to a foundational agen
 - "fetch this URL" → `researcher.default` (not discovery)
 - "run this quick shell command or one-off script" → `executor.default` (not discovery)
 - "write a reusable Python script" → `coder.default` (not discovery)
-- "register with Moltbook" → `registration.default` (not discovery)
+- "register with Moltbook" → `credential_onboarding.default` (not discovery)
 - "build a new agent" → `agent-factory.default` (not discovery)
 - "debug this failure" → `debugger.default` (not discovery)
 

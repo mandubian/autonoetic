@@ -170,7 +170,7 @@ This returns a `deployment_ticket`. If credentials are missing, it fails immedia
 If `artifact_prepare` fails with `credential reference not found in store` (or any credential-resolution error):
 - Stop and report that exact error to planner.
 - Do **not** bypass the failure by switching to ad-hoc retries, random file writes, or repeated `artifact_exec`/`sandbox_exec` attempts.
-- Ask planner to route back to `registration.default` (credential readiness/persistence issue).
+- Ask planner to route back to `credential_onboarding.default` (credential readiness/persistence issue).
 
 Once you have the ticket, execute:
 

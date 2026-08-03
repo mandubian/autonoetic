@@ -64,7 +64,7 @@ When a message arrives at the gateway:
 | **Static Evaluator** | `static_evaluator.default` | Static code review, credential flow, behavioral contracts |
 | **Unit Test Runner** | `unit_test_runner.default` | Runs artifact test suites in no-network sandbox |
 | **Auditor** | `auditor.default` | Checks security, governance, reproducibility |
-| **Registrar** | `registration.default` | Onboards services via `credential_setup(skill_url)` — keeps secrets vault-side |
+| **Registrar** | `credential_onboarding.default` | Onboards services via `credential_setup(skill_url)` — keeps secrets vault-side |
 | **Discovery** | `discovery.default` | Finds installed non-foundational agents that match a task intent |
 
 ### Evolution Roles
@@ -952,7 +952,7 @@ The installed agent is **not** available for `agent_spawn` calls until it clears
 | **User interaction** | May pause for API keys | None (promotion is a separate, later step) |
 | **Capability required** | `CredentialAccess` + `NetworkAccess` | `SkillInstall` |
 
-Both can be used together: `registration.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it (as a Candidate — promote it before use).
+Both can be used together: `credential_onboarding.default` handles `credential_setup` to onboard the API key, while `skill_install` installs the agent that will use it (as a Candidate — promote it before use).
 
 ### Activating Agents
 

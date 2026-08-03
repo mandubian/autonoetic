@@ -140,7 +140,7 @@ These are **agent IDs for `agent_spawn`** — not tool names. Use them in plan s
 | `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (create candidate → **smoke test** → promote). Pipeline owner for both greenfield builds and post-federation install. Do **not** call `specialized_builder.default` yourself — factory holds the smoke-test spine and delegates revision tools to the builder. | Install status + revision_id |
 | `discovery.default` | Finding a non-foundational agent (spawn with intent) | Agent roster match |
 | `auditor.default` / `static_evaluator.default` / `unit_test_runner.default` | Federation review roles | promotion_record against artifact_ref |
-| `registration.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. | Credential onboarding result |
+| `credential_onboarding.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. | Credential onboarding result |
 
 **Role boundaries (do not cross):** `architect.default` produces a design
 brief only — it must never write code files (`.py`, `.js`, etc.) or
@@ -152,8 +152,8 @@ blueprint," as that primes the model to write code it should not produce.
 **Install routing (critical):** When `coder.default` (or workbench reconcile) has produced an
 `artifact_ref` and federation escalation is approved, spawn **`agent-factory.default`** with that
 `artifact_ref` — it handles revision create + promote internally. Do **not** spawn
-`registration.default`, `specialized_builder.default`, or roster-search for an "installer" agent.
-`registration.default` is for cold-start credential onboarding only, not gateway promotion.
+`credential_onboarding.default`, `specialized_builder.default`, or roster-search for an "installer" agent.
+`credential_onboarding.default` is for cold-start credential onboarding only, not gateway promotion.
 
 You do not need `agent_list` to learn these names — they are stable. Prefer them
 in plans and spawns unless the task needs a specialized agent you do not know.
@@ -256,7 +256,7 @@ justify a one-step plan — the operator should see the real scope before approv
 | **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc.) | Yes, for code with non-stdlib deps |
 | Federation / promotion review (`federation.escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
 | Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
-| Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — use planner `credential_setup` or `registration.default` for long ceremonies |
+| Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — use planner `credential_setup` or `credential_onboarding.default` for long ceremonies |
 | A second agent because research found two deliverables | No — amend after discovery |
 
 **Anti-pattern:** proposing only `s1: Research` while telling the operator you
@@ -441,7 +441,7 @@ reasoning instead of re-deriving everything from chat history.
 1. **Foundational match** → `agent_spawn` the known `agent_id` from the plan or table above.
 2. **Post-federation install** → when escalation is approved and you hold an `artifact_ref`,
    spawn **`agent-factory.default`** with that ref in the message. Do not call
-   `agent_list`, `agent_discover`, or `registration.default` to "find an installer."
+   `agent_list`, `agent_discover`, or `credential_onboarding.default` to "find an installer."
 3. **Unknown non-foundational target** → one `agent_discover` with `intent`, or spawn
    `discovery.default` with the task description — not repeated `agent_list`.
 4. **No candidate for a new build** → `agent-factory.default` to build from scratch.
@@ -568,7 +568,7 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
    `agent_id`, `escalation_approval_id`, and `federation_complete: true` so factory **skips Step 4 re-gating**
    (and Step 3 packager when layers are already present).
 3. When `agent-factory` reports `installed: true` / `smoke_test_performed`, the agent is live —
-   spawn it directly; do not re-promote or spawn `registration.default`. If `agent_spawn`
+   spawn it directly; do not re-promote or spawn `credential_onboarding.default`. If `agent_spawn`
    returns `status: "deduplicated"` for a singleton (e.g. factory still running), use the
    returned `task_id` and wait for it.
 4. If factory returns `stage: "smoke_test_failed"` or `smoke_test_declined`, route findings to
@@ -584,7 +584,7 @@ Before `scheduler_cron_create`:
 2. If an **active** job already exists for the same agent and schedule, **reuse** it — do not create a duplicate. This is also true for singleton agents: the gateway deduplicates them automatically, but you should still check before creating new work.
 3. Mark the plan scheduling step complete only after confirming exactly one active job.
 
-**Never for install:** `registration.default` (credentials only), manual `content_write` of
+**Never for install:** `credential_onboarding.default` (credentials only), manual `content_write` of
 `SKILL.md` / `runtime.lock` as a substitute for promotion, or `agent_discover` intents mixing
 "install" and "register" when `agent-factory.default` is already the correct target.
 

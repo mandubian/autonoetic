@@ -6,7 +6,7 @@ The planner's SKILL.md previously held ~530 lines of prescriptive decision trees
 
 **Principles survive gateway evolution. Rules rot.**
 
-The rewrite replaces the rule tree with six durable principles plus a terse foundational agent directory. The pipeline internals moved to `agent-factory.default`, the credential onboarding details moved to `registration.default`, and the discovery machinery moved to `discovery.default`. The planner now holds orchestration policy — not specialist implementation.
+The rewrite replaces the rule tree with six durable principles plus a terse foundational agent directory. The pipeline internals moved to `agent-factory.default`, the credential onboarding details moved to `credential_onboarding.default`, and the discovery machinery moved to `discovery.default`. The planner now holds orchestration policy — not specialist implementation.
 
 ---
 
@@ -28,7 +28,7 @@ This principle replaces the "MUST delegate" table. The table was derivable from 
 
 ### 3. Secrets never reach LLM context
 
-Any flow involving API keys or tokens must route through `credential_setup` / `credential_request`. The gateway owns the vault. A script that calls a registration API directly prints the secret into LLM context — that is the security anti-pattern `registration.default` exists to prevent.
+Any flow involving API keys or tokens must route through `credential_setup` / `credential_request`. The gateway owns the vault. A script that calls a registration API directly prints the secret into LLM context — that is the security anti-pattern `credential_onboarding.default` exists to prevent.
 
 This principle was the root cause of the security routing bug that triggered this refactor: the planner was sending registration tasks to `coder.default`, which wrote Python scripts that logged secrets into the chat. The principle makes the invariant explicit and durable.
 
@@ -64,7 +64,7 @@ The invariant: **never re-issue `workflow_wait` in a loop, and never spin `workf
 | Promotion gate decision matrix | `agent-factory.default` |
 | Post-coder dependency check | `agent-factory.default` |
 | Agent installation message templates | `agent-factory.default` |
-| Service registration / credential_setup loop | `registration.default` |
+| Service registration / credential_setup loop | `credential_onboarding.default` |
 | "Why registration is not a coder task" prose | Principle 3 |
 | Enumerated error-type-to-action table | Failure handling as principles |
 | Exhaustive "MUST delegate" and "CANNOT do directly" lists | Foundational agent directory + Principle 2 |
@@ -90,7 +90,7 @@ The planner knows these twelve agents by name. Each entry is one line: the role,
 | `packager.default` | Dependency installation for code agents | NetworkAccess (deps) |
 | `specialized_builder.default` | Final agent install (revision create + promote) | AgentRevision |
 | `debugger.default` | Root cause analysis when things fail repeatedly | CodeExecution |
-| `registration.default` | Service onboarding via credential_setup | CredentialAccess |
+| `credential_onboarding.default` | Service onboarding via credential_setup | CredentialAccess |
 | `agent-factory.default` | Building a new agent end-to-end | AgentSpawn |
 | `discovery.default` | Finding a non-foundational agent for an intent | SandboxFunctions |
 
@@ -102,7 +102,7 @@ For non-foundational (user-installed, evolved) agents, the planner uses `discove
 
 ```
 1. Service registration/credential onboarding
-   → researcher (skill_url if unknown) → registration.default
+   → researcher (skill_url if unknown) → credential_onboarding.default
 
 2. New persistent agent
    → agent-factory.default
@@ -152,18 +152,18 @@ The correct path:
 ```
 User: "Register my account with Moltbook"
 Planner → researcher.default (discover skill_url from service docs)
-Planner → registration.default (spawn with skill_url)
-registration.default → credential_setup(skill_url)   # HTTP happens gateway-side
+Planner → credential_onboarding.default (spawn with skill_url)
+credential_onboarding.default → credential_setup(skill_url)   # HTTP happens gateway-side
   → gateway stores secret in vault
   → returns suspended_for_user_input if user input needed
-registration.default → user_ask(question)
-registration.default → credential_setup(credential_id, resume_vars)  # resumes
+credential_onboarding.default → user_ask(question)
+credential_onboarding.default → credential_setup(credential_id, resume_vars)  # resumes
   → ok: true, credential_id returned
 ```
 
 The LLM never sees the secret at any step. This is Principle 3 operationalized.
 
-The security guarantee comes from `registration.default`'s capability declaration:
+The security guarantee comes from `credential_onboarding.default`'s capability declaration:
 - `CredentialAccess: ["*"]` — can call `credential_setup` and `credential_request`
 - `NetworkAccess: ["*"]` — can reach any host for the setup flow
 
