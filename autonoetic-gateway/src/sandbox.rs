@@ -62,6 +62,21 @@ pub struct BwrapIsolationOverrides {
 }
 
 impl BwrapIsolationOverrides {
+    /// Isolation flags derived from the agent's capability **ceiling**: the
+    /// resulting `share_net` says "this agent is permitted network", not "this
+    /// execution was granted network".
+    ///
+    /// Valid only for exec paths whose network policy *is* capability-driven —
+    /// script-mode agents (a fixed entrypoint reviewed once at install, with
+    /// `revision.detected_network_hosts` covered by the declared
+    /// `NetworkAccess.hosts` per P-1.5) and `artifact_exec` (which auto-approves
+    /// on capability presence by design).
+    ///
+    /// Do **not** use this to seed the baseline for an exec path that gates
+    /// network on operator approval: agent-supplied code (`sandbox_exec`) must
+    /// decide per exec via [`crate::runtime::network_grant::decide_share_net`],
+    /// because a ceiling-seeded baseline silently survives whenever no gate is
+    /// raised — the #1022 window. See `docs/sandbox-network-grant.md`.
     pub fn from_capabilities(caps: &[Capability]) -> Self {
         let share_net = caps
             .iter()

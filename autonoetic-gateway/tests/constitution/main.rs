@@ -75,6 +75,7 @@ mod rights_early_bucket;
 mod rights_late_bucket;
 mod rights_mid_bucket;
 mod sandbox_escape_accounting;
+mod sandbox_network_grant_fail_closed;
 mod sandbox_network_policy_parsed;
 mod schema_egress;
 mod sealed_network_proxy;
