@@ -1981,6 +1981,14 @@ struct GrantsPanel {
     /// a confirm-revoke (`r` again). Identity-keyed so the confirm can only
     /// ever fire at the grant the operator actually saw when they armed it.
     pending_revoke: Option<GrantIdent>,
+    /// When Some, THAT envelope — by envelope id — is armed for a
+    /// confirm-unlock (`e` again) that revokes the whole network envelope
+    /// (`session.envelope.revoke`), dropping ALL of its materialized grants
+    /// and the envelope record itself. Distinct from `pending_revoke`: `r`
+    /// revokes one grant while keeping the envelope locked (host stays out of
+    /// auto re-lock), `e` dissolves the envelope so its hosts are re-proposed
+    /// on the next discovery.
+    pending_envelope_revoke: Option<i64>,
 }
 
 impl GrantsPanel {
@@ -2021,6 +2029,13 @@ impl GrantsPanel {
         if let Some(armed) = self.pending_revoke {
             if !self.rows.iter().any(|r| r.ident() == armed) {
                 self.pending_revoke = None;
+            }
+        }
+        // Same for an armed envelope unlock: if the envelope is gone (revoked
+        // elsewhere / expired), the arm must not fire at a ghost.
+        if let Some(env_id) = self.pending_envelope_revoke {
+            if !self.rows.iter().any(|r| r.envelope_id == Some(env_id)) {
+                self.pending_envelope_revoke = None;
             }
         }
     }
@@ -5137,12 +5152,14 @@ pub fn run(
                                     }
                                     KeyCode::Char('j') | KeyCode::Down => {
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                         if panel.selected + 1 < row_count {
                                             panel.selected += 1;
                                         }
                                     }
                                     KeyCode::Char('k') | KeyCode::Up => {
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                         panel.selected = panel.selected.saturating_sub(1);
                                     }
                                     // `G` is the panel's advertised toggle (title
@@ -5155,18 +5172,22 @@ pub fn run(
                                     }
                                     KeyCode::Char('g') | KeyCode::Home => {
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                         panel.selected = 0;
                                     }
                                     KeyCode::End => {
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                         panel.selected = row_count.saturating_sub(1);
                                     }
                                     KeyCode::PageDown => {
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                         panel.selected = (panel.selected + 5).min(row_count - 1);
                                     }
                                     KeyCode::PageUp => {
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                         panel.selected = panel.selected.saturating_sub(5);
                                     }
                                     KeyCode::Char('r') => {
@@ -5182,6 +5203,7 @@ pub fn run(
                                         let idx = panel.selected;
                                         let row = &panel.rows[idx];
                                         let ident = row.ident();
+                                        panel.pending_envelope_revoke = None;
                                         if panel.is_armed(ident) {
                                             let grant_id = row.id;
                                             let kind = row.kind;
@@ -5252,9 +5274,96 @@ pub fn run(
                                             });
                                         }
                                     }
+                                    KeyCode::Char('e') => {
+                                        // Unlock the WHOLE envelope (two-step
+                                        // confirm, mirroring `r`). Where `r`
+                                        // revokes a single grant while keeping
+                                        // the envelope locked — the dangerous-
+                                        // host case, where the host must stay
+                                        // out of auto re-lock — `e` dissolves
+                                        // the envelope record AND all of its
+                                        // materialized grants, so its hosts are
+                                        // re-proposed (and auto-locked) on the
+                                        // next discovery. Only envelope-lock
+                                        // rows qualify.
+                                        let idx = panel.selected;
+                                        let row = &panel.rows[idx];
+                                        match row.envelope_id {
+                                            None => {
+                                                panel.pending_revoke = None;
+                                                panel.pending_envelope_revoke = None;
+                                                status = Some(
+                                                    "only envelope-lock rows can be unlocked (e)"
+                                                        .to_string(),
+                                                );
+                                            }
+                                            Some(env_id) => {
+                                                if panel.pending_envelope_revoke == Some(env_id) {
+                                                    match rpc(
+                                                        client,
+                                                        "session.envelope.revoke",
+                                                        serde_json::json!({
+                                                            "envelope_id": env_id,
+                                                            "revoked_by": "operator:tui",
+                                                        }),
+                                                    ) {
+                                                        Ok(v) => {
+                                                            let promoted = v
+                                                                .get("agents_promoted_under_envelope")
+                                                                .and_then(|a| a.as_array())
+                                                                .map(|a| a.len())
+                                                                .unwrap_or(0);
+                                                            status = Some(format!(
+                                                                "✓ unlocked envelope #{} — hosts will be re-proposed on next use{}",
+                                                                env_id,
+                                                                if promoted > 0 {
+                                                                    format!(
+                                                                        " ({} promotion{} recorded under it)",
+                                                                        promoted,
+                                                                        if promoted == 1 { "" } else { "s" }
+                                                                    )
+                                                                } else {
+                                                                    String::new()
+                                                                }
+                                                            ));
+                                                            // Re-fetch so the list
+                                                            // updates immediately:
+                                                            // the envelope's grants
+                                                            // are all gone.
+                                                            let (rows, taint, child_taints) =
+                                                                fetch_grant_rows(
+                                                                    client,
+                                                                    &root_session_id,
+                                                                );
+                                                            panel.rows = rows;
+                                                            panel.taint = taint;
+                                                            panel.child_taints = child_taints;
+                                                            panel.pending_revoke = None;
+                                                            panel.pending_envelope_revoke = None;
+                                                            panel.clamp_selection();
+                                                            needs_redraw = true;
+                                                        }
+                                                        Err(e) => {
+                                                            status = Some(format!("✗ {e}"));
+                                                            panel.pending_envelope_revoke = None;
+                                                        }
+                                                    }
+                                                } else {
+                                                    panel.pending_revoke = None;
+                                                    panel.pending_envelope_revoke = Some(env_id);
+                                                    status = Some(format!(
+                                                        "press e again to UNLOCK envelope #{} (hosts: {}) — all grants dropped, hosts re-proposed",
+                                                        env_id, row.summary
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => {
-                                        // Any other key cancels a pending revoke.
+                                        // Any other key cancels a pending revoke
+                                        // AND a pending envelope unlock.
                                         panel.pending_revoke = None;
+                                        panel.pending_envelope_revoke = None;
                                     }
                                 }
                                 continue;
@@ -5879,26 +5988,29 @@ pub fn run(
                                     status = Some("no active grants in this session".to_string());
                                 } else {
                                     let rows_empty = rows.is_empty();
+                                    let has_envelope_rows =
+                                        rows.iter().any(|r| r.envelope_id.is_some());
                                     grants_panel = Some(GrantsPanel {
                                         selected: 0,
                                         rows,
                                         taint,
                                         child_taints,
                                         pending_revoke: None,
+                                        pending_envelope_revoke: None,
                                     });
                                     last_grants_poll = Instant::now();
                                     // When there are no grant rows the panel is
                                     // showing child taints only: j/k/r are inert,
                                     // so don't advertise them (#976 review).
-                                    status = Some(
-                                        if rows_empty {
-                                            "grants: child taints only · G/Esc close"
-                                                .to_string()
-                                        } else {
-                                            "grants: j/k navigate · r revoke (confirm) · G/Esc close"
-                                                .to_string()
-                                        },
-                                    );
+                                    status = Some(if rows_empty {
+                                        "grants: child taints only · G/Esc close".to_string()
+                                    } else if has_envelope_rows {
+                                        "grants: j/k navigate · r revoke · e unlock envelope (confirm) · G/Esc close"
+                                            .to_string()
+                                    } else {
+                                        "grants: j/k navigate · r revoke (confirm) · G/Esc close"
+                                            .to_string()
+                                    });
                                 }
                             }
                         }
@@ -10597,7 +10709,13 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
     if !panel.child_taints.is_empty() {
         title.push_str(&format!(" · {} child tainted", panel.child_taints.len()));
     }
-    title.push_str(" [G/Esc close · j/k nav · r revoke] ");
+    // `e` (unlock whole envelope) only exists when there IS an envelope-lock
+    // row, so advertise it only then — the hint is the signal, not the clutter.
+    title.push_str(if n_envelope > 0 {
+        " [G/Esc close · j/k nav · r revoke · e unlock envelope] "
+    } else {
+        " [G/Esc close · j/k nav · r revoke] "
+    });
     let area = centered_rect(82, 78, f.area());
     f.render_widget(Clear, area);
 
@@ -10684,6 +10802,15 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
             if panel.is_armed(r.ident()) {
                 spans.push(Span::styled(
                     "  [press r again to CONFIRM revoke]",
+                    Style::default().fg(Color::Red).bold(),
+                ));
+            }
+            // Same for an armed envelope unlock: the cue rides the envelope,
+            // so a refresh that reorders rows can't mislabel which row the
+            // confirm would hit.
+            if r.envelope_id.is_some() && panel.pending_envelope_revoke == r.envelope_id {
+                spans.push(Span::styled(
+                    "  [press e again to CONFIRM unlock envelope]",
                     Style::default().fg(Color::Red).bold(),
                 ));
             }
@@ -11539,6 +11666,85 @@ mod tests {
             .count();
         let n_declass = rows.len() - n_approval - n_envelope;
         assert_eq!((n_envelope, n_approval, n_declass), (1, 1, 1));
+    }
+
+    #[test]
+    fn grants_panel_prunes_stale_envelope_unlock_arm() {
+        // `prune_armed` must drop a pending envelope unlock when the armed
+        // envelope disappears from the row list (revoked elsewhere / expired),
+        // so the `e` confirm can never fire at a ghost envelope.
+        let mut panel = GrantsPanel {
+            selected: 0,
+            rows: vec![
+                GrantRow {
+                    kind: GrantKind::SessionApproval,
+                    id: 1,
+                    envelope_id: Some(11),
+                    summary: "imap.gmail.com".into(),
+                    detail: "envelope #11 · root · by auto-lock".into(),
+                },
+                GrantRow {
+                    kind: GrantKind::SessionApproval,
+                    id: 2,
+                    envelope_id: None,
+                    summary: "api.example.com".into(),
+                    detail: "root · by operator".into(),
+                },
+            ],
+            taint: None,
+            child_taints: vec![],
+            pending_revoke: None,
+            pending_envelope_revoke: Some(11),
+        };
+        panel.prune_armed();
+        // Envelope 11 is still present → the arm survives.
+        assert_eq!(panel.pending_envelope_revoke, Some(11));
+
+        // The envelope row is revoked elsewhere → the arm must be dropped.
+        panel.rows.retain(|r| r.envelope_id != Some(11));
+        panel.prune_armed();
+        assert_eq!(panel.pending_envelope_revoke, None);
+    }
+
+    #[test]
+    fn grants_panel_envelope_unlock_arm_is_separate_from_grant_revoke_arm() {
+        // `r` and `e` arms are independent states: arming a grant revoke must
+        // not clobber an armed envelope unlock, and vice versa (the key
+        // handlers clear the other arm explicitly, so the two-step confirms
+        // never cross-fire).
+        let mut panel = GrantsPanel {
+            selected: 0,
+            rows: vec![GrantRow {
+                kind: GrantKind::SessionApproval,
+                id: 1,
+                envelope_id: Some(11),
+                summary: "imap.gmail.com".into(),
+                detail: "envelope #11 · root · by auto-lock".into(),
+            }],
+            taint: None,
+            child_taints: vec![],
+            pending_revoke: None,
+            pending_envelope_revoke: Some(11),
+        };
+        assert!(panel.pending_envelope_revoke.is_some());
+        // The grant-revoke arm and envelope-unlock arm are distinct fields.
+        panel.pending_revoke = Some(GrantIdent {
+            kind: GrantKind::SessionApproval,
+            id: 1,
+        });
+        assert!(matches!(
+            panel.pending_revoke,
+            Some(GrantIdent {
+                kind: GrantKind::SessionApproval,
+                id: 1
+            })
+        ));
+        assert_eq!(panel.pending_envelope_revoke, Some(11));
+        // The armed cue conditions never overlap: the grant cue keys off
+        // `is_armed`, the envelope cue off `pending_envelope_revoke == env`.
+        let row = &panel.rows[0];
+        assert!(panel.is_armed(row.ident()));
+        assert!(panel.pending_envelope_revoke == row.envelope_id);
     }
 
     // ---- labels panel (#974) — pure helpers only ----
