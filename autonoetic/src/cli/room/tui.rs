@@ -1071,7 +1071,7 @@ fn build_footer(
             format!("{choices}   [Enter submit · Esc cancel]")
         };
         let err = status
-            .filter(|s| s.starts_with('✗'))
+            .filter(|s| s.starts_with('✗') || !s.starts_with('⏳'))
             .map(|s| format!("   {s}"))
             .unwrap_or_default();
         Line::from(Span::styled(
@@ -1857,6 +1857,12 @@ struct GateInput {
     secret_values: Vec<String>,
     /// True while collecting secrets (Phase 1). The `buffer` holds the current field's input.
     secret_phase: bool,
+    /// True when this input panel opened inside the gate modal overlay (vs. the
+    /// footer-line input used for timeline-row actions). A failed submit after
+    /// the overlay was dismissed must not resurrect a modal-originated input —
+    /// the secret/phrase panel only renders inside the modal, so it would become
+    /// an invisible footer-only ghost.
+    opened_in_modal: bool,
 }
 
 /// A gate RPC that is running in the background so the TUI event loop stays
@@ -3037,6 +3043,7 @@ fn approval_gate_input(
     id: String,
     entries: &[SessionTimelineEntry],
     motivation_required: bool,
+    opened_in_modal: bool,
 ) -> GateInput {
     let (required_confirm_phrase, acknowledged_capabilities) =
         approval_gate_requirements(client, entries, &id);
@@ -3065,6 +3072,7 @@ fn approval_gate_input(
         secret_fields,
         secret_values: Vec::new(),
         secret_phase,
+        opened_in_modal,
     }
 }
 
@@ -3101,9 +3109,15 @@ fn gate_commit_validation_error(gi: &GateInput) -> Option<String> {
     if matches!(gi.action, GateAction::Approve) {
         if let Some(ref required) = gi.required_confirm_phrase {
             if !gi.buffer.trim().eq_ignore_ascii_case(required) {
-                return Some(format!(
-                    "✗ type confirm phrase exactly: '{required}'"
-                ));
+                // An empty buffer is not an error — the operator simply has not
+                // typed the phrase yet. Returning a neutral prompt (no "✗")
+                // stops the flow from reading as a failed submission right
+                // after the secret-entry phase collapsed into the phrase phase.
+                return Some(if gi.buffer.trim().is_empty() {
+                    "type the confirm phrase above, then press Enter".to_string()
+                } else {
+                    format!("✗ type confirm phrase exactly: '{required}'")
+                });
             }
             return None;
         }
@@ -4818,7 +4832,27 @@ pub fn run(
                                 gi.buffer.clear();
                                 status = None;
                             }
-                            KeyCode::Esc => input = None,
+                            KeyCode::Esc => {
+                                if gate_modal.is_some() {
+                                    // One Esc dismisses the in-modal input panel AND drops
+                                    // the overlay into peek mode, so the operator is out of
+                                    // the full-screen modal in a single keypress. Previously
+                                    // the first Esc only closed the input, leaving the modal
+                                    // up still expecting the confirm phrase — the operator
+                                    // had to Esc a second time to reach the peek banner.
+                                    input = None;
+                                    if let Some(m) = gate_modal.as_mut() {
+                                        m.peek_timeline = true;
+                                        m.scroll = 0;
+                                    }
+                                    status = Some(
+                                        "approval peeking — browse timeline · g resolve · y/n act"
+                                            .to_string(),
+                                    );
+                                } else {
+                                    input = None;
+                                }
+                            }
                             KeyCode::Backspace => {
                                 gi.buffer.pop();
                             }
@@ -4903,6 +4937,7 @@ pub fn run(
                                             gate_id,
                                             &entries,
                                             !approve,
+                                            true,
                                         ));
                                         status = None;
                                     }
@@ -4985,6 +5020,7 @@ pub fn run(
                                         gate_id,
                                         &entries,
                                         !approve,
+                                        true,
                                     ));
                                     status = None;
                                     continue;
@@ -5007,6 +5043,7 @@ pub fn run(
                                         secret_fields: Vec::new(),
                                         secret_values: Vec::new(),
                                         secret_phase: false,
+                                        opened_in_modal: true,
                                     });
                                     status = None;
                                     continue;
@@ -5865,6 +5902,7 @@ pub fn run(
                                     g.id.clone(),
                                     &entries,
                                     key.code == KeyCode::Char('n'),
+                                    false,
                                 ));
                                 status = None;
                                 continue;
@@ -5891,6 +5929,7 @@ pub fn run(
                                     secret_fields: Vec::new(),
                                     secret_values: Vec::new(),
                                     secret_phase: false,
+                                    opened_in_modal: false,
                                 });
                                 status = None;
                             }
@@ -6230,6 +6269,7 @@ pub fn run(
                                     secret_fields: Vec::new(),
                                     secret_values: Vec::new(),
                                     secret_phase: false,
+                                    opened_in_modal: false,
                                 });
                                 status = None;
                             } else {
@@ -6898,8 +6938,25 @@ pub fn run(
                                  re-appears, press r to answer again."
                             ));
                         } else {
-                            status = Some(msg);
-                            input = Some(gi);
+                            // Restore the input for an in-place retry only while
+                            // the modal is still up (or the input never lived in
+                            // the modal — footer-line inputs render fine without
+                            // the overlay). If the operator dismissed the modal
+                            // with Esc while the RPC was in flight, resurrecting
+                            // a modal-originated input would leave an invisible
+                            // footer-only ghost (the secret/phrase panel only
+                            // renders inside the overlay) — leave the gate
+                            // pending in the room, where y on the row re-offers
+                            // it cleanly.
+                            if gate_modal.is_some() || !gi.opened_in_modal {
+                                status = Some(msg);
+                                input = Some(gi);
+                            } else {
+                                status = Some(format!(
+                                    "{msg} — overlay was closed; the approval is still \
+                                     pending (y on the row re-opens it)"
+                                ));
+                            }
                         }
                     }
                 }
@@ -11076,6 +11133,11 @@ fn gate_modal_input_panel_lines(
                 err.to_string(),
                 Style::default().fg(Color::Red),
             )));
+        } else if let Some(hint) = status.filter(|s| !s.starts_with('⏳')) {
+            lines.push(Line::from(Span::styled(
+                hint.to_string(),
+                Style::default().fg(Color::Yellow),
+            )));
         }
 
         let is_last = idx + 1 >= total;
@@ -11143,6 +11205,11 @@ fn gate_modal_input_panel_lines(
             "✓ type your details, then press Enter".to_string(),
             Style::default().fg(Color::Green),
         )));
+    } else if let Some(hint) = status.filter(|s| !s.starts_with('⏳')) {
+        lines.push(Line::from(Span::styled(
+            hint.to_string(),
+            Style::default().fg(Color::Yellow),
+        )));
     }
 
     let choices = gi
@@ -11155,7 +11222,7 @@ fn gate_modal_input_panel_lines(
     let hint = if gi.details_mode {
         "Enter submit details · Esc cancel details".to_string()
     } else if gi.options.is_empty() {
-        "Enter submit · Esc back · Esc×2 peek timeline".to_string()
+        "Enter submit · Esc peek timeline".to_string()
     } else {
         format!("{choices}   Enter submit · Esc back")
     };
@@ -12532,6 +12599,7 @@ mod tests {
             secret_fields: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
+            opened_in_modal: false,
         };
         let params = approval_approve_params(&gi);
         assert_eq!(
@@ -12565,11 +12633,50 @@ mod tests {
             secret_fields: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
+            opened_in_modal: false,
         };
         assert!(gate_commit_validation_error(&gi).is_some());
         let mut ok = gi;
         ok.buffer = "promote weather-lookup rev_sha256:abc".into();
         assert!(gate_commit_validation_error(&ok).is_none());
+    }
+
+    #[test]
+    fn gate_commit_validation_empty_phrase_prompts_neutrally_not_as_error() {
+        // Enter on the phrase panel with an empty buffer happens right after the
+        // secret phase collapses into the phrase phase — it must read as a
+        // neutral prompt ("type the phrase"), never as a hard "✗" failure.
+        let mk = |buffer: &str| GateInput {
+            action: GateAction::Approve,
+            id: "apr-promote".into(),
+            buffer: buffer.into(),
+            options: Vec::new(),
+            allow_freeform: true,
+            details_mode: false,
+            motivation_required: false,
+            required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
+            acknowledged_capabilities: vec!["NetworkAccess".into()],
+            secret_fields: Vec::new(),
+            secret_values: Vec::new(),
+            secret_phase: false,
+            opened_in_modal: false,
+        };
+        let msg = gate_commit_validation_error(&mk(""))
+            .expect("empty phrase still blocks commit");
+        assert!(
+            !msg.starts_with('✗'),
+            "empty buffer must not render as a hard error, got: {msg}"
+        );
+        assert!(msg.contains("confirm phrase"), "hint should name the phrase: {msg}");
+        let msg = gate_commit_validation_error(&mk("   "))
+            .expect("blank phrase still blocks commit");
+        assert!(!msg.starts_with('✗'), "blank buffer must also prompt neutrally: {msg}");
+        assert!(
+            gate_commit_validation_error(&mk("agreed"))
+                .unwrap()
+                .starts_with('✗'),
+            "a wrong phrase remains a hard error"
+        );
     }
 
     #[test]
@@ -12587,6 +12694,7 @@ mod tests {
             secret_fields: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
+            opened_in_modal: false,
         };
         assert!(gate_commit_validation_error(&gi).is_some());
         let mut ok = gi;
@@ -12611,6 +12719,7 @@ mod tests {
             secret_fields: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
+            opened_in_modal: false,
         };
         let err = answer_params(&gi, None).unwrap_err();
         assert!(err.contains("empty"), "expected empty-answer rejection, got: {err}");
@@ -12635,6 +12744,7 @@ mod tests {
             secret_fields: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
+            opened_in_modal: false,
         };
 
         // A typed number selects the matching option — even when free-text is
