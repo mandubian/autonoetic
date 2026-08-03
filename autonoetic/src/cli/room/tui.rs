@@ -1932,7 +1932,7 @@ struct GrantIdent {
 struct GrantRow {
     kind: GrantKind,
     id: i64,
-    /// Envelope lock this grant was materialized from, when any
+    /// Envelope lock this grant was materialized from, if any
     /// (`source_approval_id == "session-envelope:{id}"`). Envelope-lock grants
     /// are session-approval grants created by locking a network envelope; the
     /// panel labels them distinctly so an operator can tell a locked host
@@ -10689,12 +10689,18 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
     // locked network envelope; they are counted and labelled separately so an
     // operator can see at a glance which hosts are locked by envelope vs.
     // granted by a one-off approval.
-    let n_envelope = rows.iter().filter(|r| r.envelope_id.is_some()).count();
+    let n_envelope = rows
+        .iter()
+        .filter(|r| r.kind == GrantKind::SessionApproval && r.envelope_id.is_some())
+        .count();
     let n_approval = rows
         .iter()
         .filter(|r| r.kind == GrantKind::SessionApproval && r.envelope_id.is_none())
         .count();
-    let n_declass = rows.len() - n_approval - n_envelope;
+    let n_declass = rows
+        .iter()
+        .filter(|r| r.kind == GrantKind::EgressDeclassification)
+        .count();
     let taint_str = panel
         .taint
         .clone()
@@ -10776,12 +10782,14 @@ fn draw_grants_panel(f: &mut Frame, panel: &GrantsPanel) {
             // Envelope-lock grants are labelled `env` (distinct from one-off
             // `approval` grants) so the operator sees which hosts are locked
             // by a network envelope.
-            let kind_str = if r.envelope_id.is_some() {
+            let is_envelope_lock =
+                r.kind == GrantKind::SessionApproval && r.envelope_id.is_some();
+            let kind_str = if is_envelope_lock {
                 "env"
             } else {
                 r.kind.label()
             };
-            let kind_style = if r.envelope_id.is_some() {
+            let kind_style = if is_envelope_lock {
                 Color::Green
             } else if r.kind == GrantKind::EgressDeclassification {
                 Color::Magenta
