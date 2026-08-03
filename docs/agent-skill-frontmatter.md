@@ -47,7 +47,7 @@ maps fails parse (`invalid type: map, expected a string`).
 |---|---|---|
 | `approval_mode` | `"required"` \| `"preapproved"` | `required` = operator approval per request; `preapproved` = auto-approve when `NetworkAccess` covers the host |
 | `targets` | list of `GrantTarget` | Outbound host rules the declaration covers |
-| `enabled_languages` | list of `python`\|`javascript`\|`rust`\|`go` | Restrict import detectors to these (empty = all) |
+| `enabled_languages` | list of `python`\|`javascript`\|`rust`\|`go` | Restrict analyzer detection to these languages — both import detectors and language-tagged function-call heuristics (empty = all; see below) |
 | `python_imports` | list of strings | Python modules expected (e.g. `imaplib`, `requests`) |
 | `js_imports` / `rust_imports` / `go_imports` | list of strings | Same, per language |
 | `function_calls` | list of strings | Call-pattern prefixes expected (e.g. `"requests.get("`, `"fetch("`) |
@@ -56,6 +56,33 @@ maps fails parse (`invalid type: map, expected a string`).
 
 **There is no `hosts` or `patterns` field.** Declaring network hosts belongs in
 `targets`; declaring call patterns belongs in `function_calls`.
+
+### `enabled_languages` — what it scopes
+
+`enabled_languages` is the analyzer's language allowlist. It scopes **both**
+halves of static detection:
+
+- **Import detectors** — only the listed languages' detectors run.
+- **Function-call heuristics** — call patterns are language-tagged, and only the
+  listed languages' tags fire. So `axios.*(`, `(http|https).(get|request)(`,
+  `net.connect(`, `WebSocket(` and the JS global `fetch(` are JavaScript-only;
+  `urlopen(`, `requests.*(`, `httpx.*(` are Python-only; `(reqwest|ureq)::*(`
+  and `TcpStream::connect(` are Rust-only; `http.(Get|Post|Head)(` and `.Do(`
+  are Go-only.
+
+Language-**agnostic** call patterns always run regardless of the allowlist:
+socket primitives (`.connect(`, `.send(`, `.recv(`, `.bind(`, `.listen(`,
+`.accept(`), `.get(`/`.post(` with an `http` argument, and `connect(…ws://` /
+`wss://`.
+
+When `enabled_languages` is empty there is no allowlist: every import detector
+runs, and the function-call scope is inferred from the code's own import signals
+(which language's imports fired). With no import signal at all the language is
+unknown and **every** tagged pattern runs — detection is never silently lost.
+
+Practical effect: declaring `enabled_languages: ["python"]` stops JS-shaped
+heuristics from firing on Python source, which is what keeps `mail.fetch(b"1",
+"(RFC822)")` (imaplib) from being reported as a "Fetch API call" (#1020).
 
 ### `GrantTarget` shapes (`tag = "kind", content = "value"`)
 

@@ -349,6 +349,62 @@ fn enabled_import_languages(
     })
 }
 
+/// One import-detection pass: the deduped import patterns plus the set of
+/// languages whose detectors actually fired.
+///
+/// That language set *is* the import signal used to scope function-call
+/// heuristics ([`language_scope_for_code`]). Carrying it out of the pass that
+/// collected the patterns keeps `analyze_code_with_declaration` to a single
+/// import scan — this analysis sits on the `sandbox.exec` hot path, so running
+/// every detector's regexes a second time just to re-derive the language set is
+/// not affordable.
+#[derive(Default)]
+struct ImportScan {
+    patterns: Vec<DetectedPattern>,
+    languages: HashSet<RemoteAccessLanguage>,
+}
+
+/// Determines the languages whose function-call patterns should apply to the
+/// code being analyzed. Precedence:
+///   1. `enabled_languages` from the declaration (authoritative when set).
+///   2. Otherwise the languages implied by the code's own import signals —
+///      `import_signal`, the language set of the [`ImportScan`] the caller
+///      already ran (no re-scan here).
+///   3. Otherwise `None` — no language signal, so *all* tagged patterns stay
+///      active (conservative: no detection is lost).
+fn language_scope_for_code(
+    enabled_languages: Option<&HashSet<RemoteAccessLanguage>>,
+    import_signal: &HashSet<RemoteAccessLanguage>,
+) -> Option<HashSet<RemoteAccessLanguage>> {
+    if let Some(set) = enabled_languages {
+        if !set.is_empty() {
+            return Some(set.clone());
+        }
+    }
+    if import_signal.is_empty() {
+        // No import signal → language unknown → unrestricted.
+        None
+    } else {
+        Some(import_signal.clone())
+    }
+}
+
+/// Whether a call pattern tagged `tag` runs under `active` languages.
+/// `None`-tagged patterns are language-agnostic and always run. When `active`
+/// is `None` (language unknown) every tagged pattern runs — conservative.
+fn pattern_applies_in_scope(
+    tag: Option<RemoteAccessLanguage>,
+    active: Option<&HashSet<RemoteAccessLanguage>>,
+) -> bool {
+    match tag {
+        None => true,
+        Some(lang) => match active {
+            None => true,
+            Some(set) => set.contains(&lang),
+        },
+    }
+}
+
 fn normalize_declared_pattern(s: &str) -> String {
     s.trim().to_ascii_lowercase()
 }
@@ -499,11 +555,22 @@ impl RemoteAccessAnalyzer {
         let mut patterns = Vec::new();
         let enabled_imports = enabled_import_languages(declaration);
 
-        // Check for network-related imports
-        patterns.extend(Self::detect_imports(code, enabled_imports.as_ref()));
+        // Check for network-related imports. The scan also reports which
+        // languages' detectors fired, so the function-call scope below comes out
+        // of this single pass rather than a second one.
+        let import_scan = Self::detect_imports(code, enabled_imports.as_ref());
+
+        // Determine which languages are active for function-call scoping:
+        //  1. `enabled_languages` declared by the agent (authoritative), or
+        //  2. inferred from the import signal the scan just produced, or
+        //  3. unknown (no import signal) → scope disabled → all patterns run.
+        let active_languages =
+            language_scope_for_code(enabled_imports.as_ref(), &import_scan.languages);
+
+        patterns.extend(import_scan.patterns);
 
         // Check for network-related function calls
-        patterns.extend(Self::detect_function_calls(code));
+        patterns.extend(Self::detect_function_calls(code, active_languages.as_ref()));
 
         // Check for URL literals
         patterns.extend(Self::detect_url_literals(code));
@@ -542,77 +609,118 @@ impl RemoteAccessAnalyzer {
     /// Detects import statements using registered language detectors.
     ///
     /// When `enabled_languages` is set, only those language detectors run.
+    /// Returns the deduped patterns *and* the set of languages whose detectors
+    /// fired, so the caller gets the import signal for function-call scoping out
+    /// of this pass instead of re-running every detector.
     fn detect_imports(
         code: &str,
         enabled_languages: Option<&HashSet<RemoteAccessLanguage>>,
-    ) -> Vec<DetectedPattern> {
-        let mut patterns: Vec<DetectedPattern> = Vec::new();
+    ) -> ImportScan {
+        let mut scan = ImportScan::default();
         for detector in import_detector_registry() {
             let lang = detector.language();
             let detector_enabled = match enabled_languages {
                 None => true,
                 Some(set) => set.contains(&lang),
             };
-            if detector_enabled {
-                for p in detector.detect(code) {
-                    if !patterns.iter().any(|existing| {
-                        existing.pattern == p.pattern && existing.line_number == p.line_number
-                    }) {
-                        patterns.push(p);
-                    }
+            if !detector_enabled {
+                continue;
+            }
+            let detected = detector.detect(code);
+            if !detected.is_empty() {
+                scan.languages.insert(lang);
+            }
+            for p in detected {
+                if !scan.patterns.iter().any(|existing| {
+                    existing.pattern == p.pattern && existing.line_number == p.line_number
+                }) {
+                    scan.patterns.push(p);
                 }
             }
         }
-        patterns
+        scan
     }
 
     /// Detects function/method calls for network operations.
-    fn detect_function_calls(code: &str) -> Vec<DetectedPattern> {
+    fn detect_function_calls(
+        code: &str,
+        active: Option<&HashSet<RemoteAccessLanguage>>,
+    ) -> Vec<DetectedPattern> {
         let mut patterns = Vec::new();
 
+        // (language tag, pattern, reason). None = applies in any language.
         let call_patterns = vec![
-            (r"\.connect\s*\(", "Socket connection initiation"),
-            (r"\.send\s*\(", "Sending data over network"),
-            (r"\.recv\s*\(", "Receiving data from network"),
-            (r"\.bind\s*\(", "Socket binding"),
-            (r"\.listen\s*\(", "Socket listening"),
-            (r"\.accept\s*\(", "Socket accept connection"),
-            (r"urlopen\s*\(", "Opening URL connection"),
+            (None, r"\.connect\s*\(", "Socket connection initiation"),
+            (None, r"\.send\s*\(", "Sending data over network"),
+            (None, r"\.recv\s*\(", "Receiving data from network"),
+            (None, r"\.bind\s*\(", "Socket binding"),
+            (None, r"\.listen\s*\(", "Socket listening"),
+            (None, r"\.accept\s*\(", "Socket accept connection"),
             (
+                Some(RemoteAccessLanguage::Python),
+                r"urlopen\s*\(",
+                "Opening URL connection",
+            ),
+            (
+                Some(RemoteAccessLanguage::Python),
                 r"requests\.(get|post|put|delete|patch|head|options)\s*\(",
                 "HTTP request",
             ),
             (
+                Some(RemoteAccessLanguage::Python),
                 r"httpx\.(get|post|put|delete|patch|head|options)\s*\(",
                 "HTTP request",
             ),
-            (r"\.get\s*\(.*http", "HTTP GET request"),
-            (r"\.post\s*\(.*http", "HTTP POST request"),
+            (None, r"\.get\s*\(.*http", "HTTP GET request"),
+            (None, r"\.post\s*\(.*http", "HTTP POST request"),
             (
+                Some(RemoteAccessLanguage::Javascript),
                 r"axios\.(get|post|put|delete|patch|head|options)\s*\(",
                 "Axios HTTP request",
             ),
             (
+                Some(RemoteAccessLanguage::Javascript),
                 r"(http|https)\.(get|request)\s*\(",
                 "Node HTTP/HTTPS request",
             ),
-            (r"net\.connect\s*\(", "Node net.connect call"),
-            (r"WebSocket\s*\(", "WebSocket connection"),
-            (r"connect\s*\(.*ws://", "WebSocket connection"),
-            (r"connect\s*\(.*wss://", "Secure WebSocket connection"),
             (
+                Some(RemoteAccessLanguage::Javascript),
+                r"net\.connect\s*\(",
+                "Node net.connect call",
+            ),
+            (
+                Some(RemoteAccessLanguage::Javascript),
+                r"WebSocket\s*\(",
+                "WebSocket connection",
+            ),
+            (None, r"connect\s*\(.*ws://", "WebSocket connection"),
+            (None, r"connect\s*\(.*wss://", "Secure WebSocket connection"),
+            (
+                Some(RemoteAccessLanguage::Rust),
                 r"(reqwest|ureq)::(get|post|put|delete|patch|head)\s*\(",
                 "Rust HTTP request function call",
             ),
             (
+                Some(RemoteAccessLanguage::Rust),
                 r"(std::net|tokio::net)::TcpStream::connect\s*\(",
                 "Rust TCP stream connect call",
             ),
-            (r"http\.(Get|Post|Head)\s*\(", "Go net/http request call"),
-            (r"\.Do\s*\(", "HTTP client Do() call"),
+            (
+                Some(RemoteAccessLanguage::Go),
+                r"http\.(Get|Post|Head)\s*\(",
+                "Go net/http request call",
+            ),
+            (
+                Some(RemoteAccessLanguage::Go),
+                r"\.Do\s*\(",
+                "HTTP client Do() call",
+            ),
         ];
 
-        for (pattern, reason) in &call_patterns {
+        for (tag, pattern, reason) in &call_patterns {
+            if !pattern_applies_in_scope(*tag, active) {
+                continue;
+            }
             if let Ok(re) = Regex::new(pattern) {
                 for mat in re.find_iter(code) {
                     let line_num = code[..mat.start()].matches('\n').count() + 1;
@@ -646,36 +754,42 @@ impl RemoteAccessAnalyzer {
         // the receiver is in [`GLOBAL_FETCH_RECEIVERS`]. The split-by-whitespace
         // method form (`obj.\nfetch(`) is a parser-level concern tracked by
         // #1020; the byte boundary here is the first-aid fix for #1019.
-        if let Ok(re) = Regex::new(r"fetch\s*\(") {
-            let bytes = code.as_bytes();
-            for mat in re.find_iter(code) {
-                let prev_is_method_context = match mat.start().checked_sub(1) {
-                    Some(i) if bytes[i] == b'.' => {
-                        // `.fetch(` — flag only if the receiver is a known JS
-                        // global (the Fetch API), not an arbitrary method call.
-                        !is_global_fetch_receiver(code, mat.start())
+        //
+        // The whole block is JavaScript-scoped: when the code's language is
+        // known to be something else (declared `enabled_languages`, or inferred
+        // from import signals), `fetch(` is not treated as the JS Fetch API.
+        if pattern_applies_in_scope(Some(RemoteAccessLanguage::Javascript), active) {
+            if let Ok(re) = Regex::new(r"fetch\s*\(") {
+                let bytes = code.as_bytes();
+                for mat in re.find_iter(code) {
+                    let prev_is_method_context = match mat.start().checked_sub(1) {
+                        Some(i) if bytes[i] == b'.' => {
+                            // `.fetch(` — flag only if the receiver is a known JS
+                            // global (the Fetch API), not an arbitrary method call.
+                            !is_global_fetch_receiver(code, mat.start())
+                        }
+                        Some(i) => {
+                            matches!(bytes[i], b']' | b')')
+                                || bytes[i].is_ascii_alphanumeric()
+                                || bytes[i] == b'_'
+                        }
+                        None => false,
+                    };
+                    if prev_is_method_context {
+                        continue;
                     }
-                    Some(i) => {
-                        matches!(bytes[i], b']' | b')')
-                            || bytes[i].is_ascii_alphanumeric()
-                            || bytes[i] == b'_'
+                    let line_num = code[..mat.start()].matches('\n').count() + 1;
+                    let pat_str = mat.as_str().trim().to_string();
+                    if !patterns.iter().any(|p: &DetectedPattern| {
+                        p.pattern == pat_str && p.line_number == Some(line_num)
+                    }) {
+                        patterns.push(DetectedPattern {
+                            category: "function_call".to_string(),
+                            pattern: pat_str,
+                            line_number: Some(line_num),
+                            reason: "Fetch API call".to_string(),
+                        });
                     }
-                    None => false,
-                };
-                if prev_is_method_context {
-                    continue;
-                }
-                let line_num = code[..mat.start()].matches('\n').count() + 1;
-                let pat_str = mat.as_str().trim().to_string();
-                if !patterns.iter().any(|p: &DetectedPattern| {
-                    p.pattern == pat_str && p.line_number == Some(line_num)
-                }) {
-                    patterns.push(DetectedPattern {
-                        category: "function_call".to_string(),
-                        pattern: pat_str,
-                        line_number: Some(line_num),
-                        reason: "Fetch API call".to_string(),
-                    });
                 }
             }
         }
@@ -1346,6 +1460,173 @@ resp, err := http.Get("https://example.org")
             .detected_patterns
             .iter()
             .any(|p| p.category == "function_call" && p.pattern.contains("http.Get")));
+    }
+
+    #[test]
+    fn test_js_call_patterns_not_fired_on_python_source() {
+        // Language-scoped patterns (#1020): a Python source with import signals
+        // must not fire JS-specific call patterns (axios, Node http, fetch).
+        let code = r#"
+import requests
+res = requests.get("https://example.org")
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        // The Python HTTP call IS flagged (via the requests pattern)...
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains("requests.get")));
+        // ...but the JS-only axios heuristic must NOT fire on Python source.
+        assert!(
+            !analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "function_call" && p.pattern.contains("axios")),
+            "axios (JS) must not be flagged in Python source: {:?}",
+            analysis.detected_patterns
+        );
+    }
+
+    #[test]
+    fn test_python_call_patterns_not_fired_on_js_source() {
+        // Python-specific call patterns (urlopen, requests, httpx) must not
+        // fire when the source is JS with import signals.
+        let code = r#"
+import axios from "axios";
+const res = axios.get("https://example.org");
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        // The JS call IS flagged (axios is JS-scoped)...
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains("axios.get")));
+        // ...but Python-only `urlopen(` must not fire on JS source.
+        assert!(
+            !analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "function_call" && p.pattern.contains("urlopen")),
+            "urlopen (Python) must not be flagged in JS source: {:?}",
+            analysis.detected_patterns
+        );
+    }
+
+    #[test]
+    fn test_agnostic_patterns_fire_regardless_of_language() {
+        // Socket primitives (.connect/.send/.recv/.bind/.listen/.accept) are
+        // language-agnostic: they must fire even when the language is known.
+        let python_code = r#"
+import socket
+s = socket.socket()
+s.connect(("imap.example.com", 143))
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(python_code);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains(".connect")));
+
+        let js_code = r#"
+const net = require("net");
+const s = net.createConnection(80, "example.com");
+s.connect(443, "example.com");
+"#;
+        let js_analysis = RemoteAccessAnalyzer::analyze_code(js_code);
+        assert!(js_analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "function_call" && p.pattern.contains(".connect")));
+    }
+
+    #[test]
+    fn test_enabled_languages_scopes_function_call_patterns() {
+        // `enabled_languages` on the declaration is authoritative for call
+        // pattern scoping: with Javascript enabled, a Python snippet's
+        // Python-tagged call patterns are suppressed, JS-tagged ones still run.
+        let declaration = RemoteAccessDeclaration {
+            enabled_languages: vec![RemoteAccessLanguage::Javascript],
+            ..Default::default()
+        };
+        let code = r#"
+fetch("https://example.org")
+urlopen("https://example.org")
+"#;
+        let analysis =
+            RemoteAccessAnalyzer::analyze_code_with_declaration(code, Some(&declaration));
+        // JS-tagged `fetch(` still fires under the Javascript declaration...
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.reason == "Fetch API call"));
+        // ...but Python-tagged `urlopen(` is suppressed by the same declaration.
+        assert!(
+            !analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "function_call" && p.pattern.contains("urlopen")),
+            "urlopen (Python) must be suppressed by enabled_languages=[javascript]: {:?}",
+            analysis.detected_patterns
+        );
+    }
+
+    #[test]
+    fn test_import_scan_reports_firing_languages() {
+        // The import signal used for call-pattern scoping comes out of the same
+        // pass that collects the import patterns — `detect_imports` reports which
+        // detectors fired so nothing downstream has to re-scan the code.
+        let python = RemoteAccessAnalyzer::detect_imports("import requests\n", None);
+        assert!(!python.patterns.is_empty());
+        assert_eq!(
+            python.languages,
+            HashSet::from([RemoteAccessLanguage::Python])
+        );
+
+        let mixed = RemoteAccessAnalyzer::detect_imports(
+            "import requests\nconst axios = require(\"axios\");\n",
+            None,
+        );
+        assert_eq!(
+            mixed.languages,
+            HashSet::from([
+                RemoteAccessLanguage::Python,
+                RemoteAccessLanguage::Javascript
+            ])
+        );
+
+        // No network imports → no language signal at all.
+        let inert = RemoteAccessAnalyzer::detect_imports("import json\n", None);
+        assert!(inert.patterns.is_empty());
+        assert!(inert.languages.is_empty());
+
+        // A detector disabled by `enabled_languages` cannot contribute a signal.
+        let scoped = RemoteAccessAnalyzer::detect_imports(
+            "import requests\n",
+            Some(&HashSet::from([RemoteAccessLanguage::Javascript])),
+        );
+        assert!(scoped.patterns.is_empty());
+        assert!(scoped.languages.is_empty());
+    }
+
+    #[test]
+    fn test_language_scope_precedence() {
+        let declared = HashSet::from([RemoteAccessLanguage::Javascript]);
+        let signal = HashSet::from([RemoteAccessLanguage::Python]);
+
+        // 1. Declaration is authoritative — it wins over the import signal.
+        assert_eq!(
+            language_scope_for_code(Some(&declared), &signal),
+            Some(declared.clone())
+        );
+        // 2. No declaration → the import signal scopes the call patterns.
+        assert_eq!(language_scope_for_code(None, &signal), Some(signal.clone()));
+        // 3. Neither → unknown language → unrestricted (all tagged patterns run).
+        assert_eq!(language_scope_for_code(None, &HashSet::new()), None);
+        // An empty declared set is not a scope; fall through to the signal.
+        assert_eq!(
+            language_scope_for_code(Some(&HashSet::new()), &signal),
+            Some(signal)
+        );
     }
 
     // --- Network command detection tests ---

@@ -71,9 +71,15 @@ Two-pass, fail-shut:
    - if a signal is not covered by declared patterns -> `undeclared_remote_pattern`
      deny (structured tool error)
   - concrete URL/IP targets must match `remote_access.targets` (typed target rules)
-3. **Detector selection**:
-   - if `enabled_languages` is empty -> all registered import detectors run
-   - if set -> only those detectors run (pluggable modular selection)
+3. **Language scoping** (`enabled_languages`) — applies to import detectors *and*
+   language-tagged function-call heuristics:
+   - if `enabled_languages` is empty -> all registered import detectors run, and
+     the function-call scope is inferred from the code's own import signals
+     (no signal -> language unknown -> every tagged pattern runs)
+   - if set -> only those import detectors run (pluggable modular selection), and
+     only those languages' call-pattern tags fire
+   - language-agnostic call patterns (socket primitives, `.get(`/`.post(` with an
+     `http` argument, `connect(...ws[s]://`) always run regardless of scope
 4. **Approval policy**:
    - `approval_mode: required` => normal approval flow
    - `approval_mode: preapproved` => auto-approval only when the agent also has
