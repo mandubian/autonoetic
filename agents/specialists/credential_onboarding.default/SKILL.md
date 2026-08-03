@@ -127,12 +127,12 @@ explains what the planner must supply).
    suspend question, the tool response will carry it; surface it via `user_ask` verbatim.
    **Env-var contract:** at spawn time the gateway injects one env var per stored credential,
    named after that credential's `inject_as` when it holds a valid env-var identifier (e.g. a
-   credential stored with `inject_as: GMAIL_EMAIL` arrives as env var `GMAIL_EMAIL`). Only when
+   credential stored with `inject_as: MAIL_EMAIL` arrives as env var `MAIL_EMAIL`). Only when
    `inject_as` is unset — or holds an HTTP injection style such as `bearer` / `header:X-…`
    (those are for `credential_request`, not env injection) — does the name fall back to the
    service-derived `<SERVICE>_SECRET` (e.g. service `github` → `GITHUB_SECRET`). A service
    needing several values gets one credential per value, each with its own env-var-shaped
-   `inject_as` (e.g. gmail → `GMAIL_EMAIL` + `GMAIL_APP_PASSWORD`); at spawn the script
+   `inject_as` (e.g. a mail service → `MAIL_EMAIL` + `MAIL_APP_PASSWORD`); at spawn the script
    receives every credential stored for its declared service under those names. The consuming
    script must read exactly those env var names — agree on them with the agent that writes the
    script. When a smoke test needs specific credentials, the spawner should pin their
