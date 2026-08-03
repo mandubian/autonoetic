@@ -2568,18 +2568,36 @@ pub fn fail_workflow_for_root_session(
         }
     }
 
-    // Mark the workflow itself as Failed only when requested.
+    // Mark the workflow itself as Failed only when requested — and never when
+    // the workflow was emergency-stopped: the stop already aborted every task
+    // and set the status, and a root-session error racing the stop (the
+    // in-flight turn's error landing after the stop handler ran) must not flip
+    // the visible status from EmergencyStopped to Failed (session-d1d8c2bb
+    // churn: "Workflow failed — root session terminated with error" repeatedly
+    // after the operator's stop).
     if mark_workflow_failed {
         if let Ok(Some(mut wf)) = load_workflow_run(config, store, &wf_id) {
-            wf.status = WorkflowRunStatus::Failed;
-            wf.updated_at = now_rfc3339();
-            if let Err(e) = save_workflow_run(config, store, &wf) {
-                tracing::warn!(
+            if matches!(
+                wf.status,
+                WorkflowRunStatus::EmergencyStopped | WorkflowRunStatus::EmergencyStopping
+            ) {
+                tracing::info!(
                     target: "workflow",
                     workflow_id = %wf_id,
-                    error = %e,
-                    "Failed to mark workflow as Failed after root session error"
+                    status = ?wf.status,
+                    "Root session error after emergency stop: keeping EmergencyStopped status (stop wins)"
                 );
+            } else {
+                wf.status = WorkflowRunStatus::Failed;
+                wf.updated_at = now_rfc3339();
+                if let Err(e) = save_workflow_run(config, store, &wf) {
+                    tracing::warn!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        error = %e,
+                        "Failed to mark workflow as Failed after root session error"
+                    );
+                }
             }
         }
     }

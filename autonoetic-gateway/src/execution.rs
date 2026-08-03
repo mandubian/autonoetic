@@ -3678,8 +3678,6 @@ impl GatewayExecutionService {
                 runtime = runtime.with_overflow_recovery(true);
             }
 
-            use crate::runtime::checkpoint::YieldReason;
-
             // --- Session checkpoint resume ---
             // Continuations are fully replaced by enriched checkpoints.  Every
             // suspension state (approval, budget, hibernation, etc.) is captured
@@ -3736,56 +3734,26 @@ impl GatewayExecutionService {
                 let checkpoint =
                     crate::runtime::checkpoint::load_latest_checkpoint_strict(&self.config, session_id)?;
                 if let Some(checkpoint) = checkpoint {
-                    if matches!(
-                        checkpoint.yield_reason,
-                        YieldReason::EmergencyStop { .. }
-                    ) {
-                        tracing::warn!(
-                            target: "execution",
-                            session_id = %session_id,
-                            turn_counter = checkpoint.turn_counter,
-                            "Session was emergency-stopped — continuing with preserved context and fresh LoopGuard"
-                        );
-                        // Restore session state from checkpoint (turn counter, session
-                        // state, etc.) but replace the guard with a fresh one so that
-                        // accumulated failure budgets don't immediately re-trip.
-                        checkpoint.restore_into(&mut runtime);
-
-                        runtime.guard = crate::runtime::tool_dispatch::loop_guard_from_config_and_manifest(
-                            runtime.config.as_deref(),
-                            &runtime.agent_dir,
-                            runtime.loop_guard_declaration.as_ref(),
-                            runtime.manifest.execution_mode,
-                        );
-                        // If the incoming message is already the last user message in
-                        // the checkpoint history, don't duplicate it.
-                        let mut history = checkpoint.history.clone();
-                        inject_session_context_after_system_message(
-                            &runtime.agent_dir,
-                            session_id,
-                            &mut history,
-                        );
-                        let last_user = history.iter().rev().find(|m| m.role == crate::llm::Role::User);
-                        let should_append = match last_user {
-                            Some(last) => last.content != message,
-                            None => true,
-                        };
-                        if should_append {
-                            history.push(crate::llm::Message::user(message));
-                        }
-                        let initial_msg = checkpoint.initial_user_message();
-                        let outcome = execute_with_history_close_on_error(&mut runtime, &mut history).await?;
-                        (outcome, initial_msg, Some(checkpoint.turn_id))
-                    } else {
-                        self.resume_from_checkpoint(
-                            &mut runtime,
-                            session_id,
-                            message,
-                            metadata,
-                            checkpoint,
-                        )
-                        .await?
-                    }
+                    // P-6.14: an EmergencyStop checkpoint is never auto-resumed —
+                    // not by signals, not by queued dispatches, not by a manual
+                    // message (the resume-trigger coherence gate in
+                    // session_resume.rs refuses every trigger). `resume_from_checkpoint`
+                    // enforces the refusal. The historical "continuing with
+                    // preserved context and fresh LoopGuard" branch (125485f5)
+                    // bypassed that gate: every queued dispatch after an emergency
+                    // stop resumed the stopped session, immediately re-yielded on
+                    // the lifecycle pre-flight guard, re-saved the checkpoint with
+                    // an incremented turn counter, closed the root session with an
+                    // error, and re-fired the workflow-failure cascade
+                    // (session-d1d8c2bb churn).
+                    self.resume_from_checkpoint(
+                        &mut runtime,
+                        session_id,
+                        message,
+                        metadata,
+                        checkpoint,
+                    )
+                    .await?
                 } else {
                     let (turn_start_messages, initial_message) =
                         gateway_signal_turn_start_context(
