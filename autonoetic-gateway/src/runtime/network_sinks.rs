@@ -24,7 +24,9 @@
 //!
 //! # How it resolves
 //!
-//! Two passes over the source:
+//! Comments and string bodies are blanked first
+//! ([`mask_strings_and_comments`]) so sink-shaped *text* cannot read as a sink
+//! *call*, then two passes over the source:
 //!
 //! 1. **Collect bindings** introduced by imports — `import urllib.request as u`
 //!    binds `u → urllib.request`; `from http.client import HTTPConnection as HC`
@@ -32,6 +34,10 @@
 //!    require("net")` binds `connect → net.connect`.
 //! 2. **Resolve call heads** against those bindings, then match the canonical
 //!    dotted path against the language's sink table.
+//!
+//! The two passes read *differently masked* source: bindings need string bodies
+//! intact, because a JavaScript module specifier lives inside the quotes
+//! (`require("net")`), while calls must not see string bodies at all.
 //!
 //! A call whose head is *not* bound by an import resolves to nothing and is not
 //! a sink. That is the precision property that name matching lacks: `mail.fetch(`
@@ -61,6 +67,10 @@
 //! * the Node built-in globals `fetch`/`WebSocket`/`XMLHttpRequest`, which need
 //!   no import and so have no binding to anchor on — those stay name-based, on
 //!   top of #1020's language scoping and #1019's `fetch(` byte-boundary guard.
+//! * JavaScript regex literals are not masked (they cannot be told from division
+//!   without parsing), so `/net\.connect\(/` after `require("net")` is the
+//!   remaining known way to produce a spurious sink. That direction is a false
+//!   positive, not a missed detection.
 //!
 //! None of these are new gaps; they are the gaps a regex table has too. The
 //! point is that the *library enumeration* treadmill is gone: adding a client
@@ -352,6 +362,198 @@ fn is_identifier(s: &str) -> bool {
         && !s.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// Which comment/string forms to blank out. The two languages this module
+/// covers differ enough (triple-quoted strings vs block comments and template
+/// literals) that the masker is told which grammar it is reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaskDialect {
+    Python,
+    JavaScript,
+}
+
+/// How much of the source to blank out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaskScope {
+    /// Comments only; string bodies survive.
+    ///
+    /// Required for the **binding** pass, because JavaScript module specifiers
+    /// live inside quotes — masking them would turn `require("net")` into
+    /// `require("   ")` and erase every JS binding.
+    Comments,
+    /// Comments *and* string bodies — for the **call** pass, where sink-shaped
+    /// text inside a literal must not read as a call.
+    CommentsAndStrings,
+}
+
+/// Blank out comments (and optionally string bodies), replacing each masked
+/// character with a space and preserving newlines — so every byte offset and
+/// line number in the result still matches the original source.
+///
+/// Without this, sink-shaped *text* was indistinguishable from a sink *call*: a
+/// comment reading `# never call socket.socket() here` or a message
+/// `print("socket.socket(")` raised a real `network_sink` signal, which becomes
+/// an approval gate and — under a session taint that excludes `Sink::Network` —
+/// a hard refuse.
+///
+/// String state is tracked even under [`MaskScope::Comments`], so a `#` or `//`
+/// appearing inside a string literal does not start a comment.
+///
+/// JavaScript template literals keep their `${…}` interpolations unmasked,
+/// because those hold real code: `` `${net.connect(80)}` `` is a genuine call.
+///
+/// Not masked: JS regex literals (`/net\.connect\(/`), which cannot be told from
+/// division without parsing. A regex literal containing an imported module name
+/// followed by `(` is the remaining known way to spoof a sink; it is a false
+/// positive rather than a missed detection, and detection is a precision layer
+/// (see `docs/sandbox-network-grant.md` for why it is not the boundary).
+fn mask_strings_and_comments(code: &str, dialect: MaskDialect, scope: MaskScope) -> String {
+    #[derive(PartialEq)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        Quoted { delim: char, triple: bool },
+        Template,
+    }
+
+    let chars: Vec<char> = code.chars().collect();
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let mut state = State::Code;
+    // Nesting depth of `${ … }` inside template literals. `> 0` means the
+    // characters are code, not string body.
+    let mut interp_depth: usize = 0;
+    let mut i = 0;
+
+    // Keep a character as-is; masked characters become spaces (newlines always
+    // survive so line counts are unaffected).
+    macro_rules! keep {
+        ($n:expr) => {
+            for _ in 0..$n {
+                out.push(chars[i]);
+                i += 1;
+            }
+        };
+    }
+    macro_rules! blank {
+        ($n:expr) => {
+            for _ in 0..$n {
+                out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+        };
+    }
+    // Inside a string body: blank it only when strings are in scope, but always
+    // consume it as string state so delimiters and comment markers within the
+    // literal are handled correctly.
+    macro_rules! body {
+        ($n:expr) => {
+            if scope == MaskScope::CommentsAndStrings {
+                blank!($n)
+            } else {
+                keep!($n)
+            }
+        };
+    }
+
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match state {
+            State::Code => {
+                match (dialect, c, next) {
+                    (MaskDialect::Python, '#', _) => {
+                        state = State::LineComment;
+                        blank!(1);
+                    }
+                    (MaskDialect::JavaScript, '/', Some('/')) => {
+                        state = State::LineComment;
+                        blank!(2);
+                    }
+                    (MaskDialect::JavaScript, '/', Some('*')) => {
+                        state = State::BlockComment;
+                        blank!(2);
+                    }
+                    (MaskDialect::JavaScript, '`', _) => {
+                        state = State::Template;
+                        body!(1);
+                    }
+                    (_, '\'', _) | (_, '"', _) => {
+                        // Python triple-quote opens a multi-line body.
+                        let triple = dialect == MaskDialect::Python
+                            && next == Some(c)
+                            && chars.get(i + 2).copied() == Some(c);
+                        state = State::Quoted { delim: c, triple };
+                        body!(if triple { 3 } else { 1 });
+                    }
+                    // A `}` while inside an interpolation returns to the
+                    // template body.
+                    (MaskDialect::JavaScript, '}', _) if interp_depth > 0 => {
+                        interp_depth -= 1;
+                        state = State::Template;
+                        body!(1);
+                    }
+                    _ => keep!(1),
+                }
+            }
+            State::LineComment => {
+                if c == '\n' {
+                    state = State::Code;
+                }
+                blank!(1);
+            }
+            State::BlockComment => {
+                if c == '*' && next == Some('/') {
+                    state = State::Code;
+                    blank!(2);
+                } else {
+                    blank!(1);
+                }
+            }
+            State::Quoted { delim, triple } => {
+                if c == '\\' && next.is_some() {
+                    body!(2); // escape pair — never terminates the string
+                } else if c == delim {
+                    if triple {
+                        if next == Some(delim) && chars.get(i + 2).copied() == Some(delim) {
+                            state = State::Code;
+                            body!(3);
+                        } else {
+                            body!(1);
+                        }
+                    } else {
+                        state = State::Code;
+                        body!(1);
+                    }
+                } else if c == '\n' && !triple {
+                    // Unterminated single-quoted string: recover at end of line
+                    // rather than swallowing the rest of the file.
+                    state = State::Code;
+                    body!(1);
+                } else {
+                    body!(1);
+                }
+            }
+            State::Template => {
+                if c == '\\' && next.is_some() {
+                    body!(2);
+                } else if c == '$' && next == Some('{') {
+                    // `${` — the interpolation body is code.
+                    interp_depth += 1;
+                    state = State::Code;
+                    body!(2);
+                } else if c == '`' {
+                    state = State::Code;
+                    body!(1);
+                } else {
+                    body!(1);
+                }
+            }
+        }
+    }
+
+    out.into_iter().collect()
+}
+
 /// Resolve a dotted call head through `bindings` into its canonical path.
 /// Returns `None` when the head is not bound by any import — the property that
 /// keeps `mail.fetch(` and `dict.get(` from being mistaken for sinks.
@@ -413,14 +615,37 @@ fn detect_sinks(
 }
 
 /// Detect Python stdlib network sinks reached through the code's own imports.
+///
+/// Comments and string bodies are blanked first
+/// ([`mask_strings_and_comments`]), so sink-shaped *text* is not read as a sink
+/// *call*.
 pub fn detect_python_sinks(code: &str) -> Vec<DetectedSink> {
-    detect_sinks(code, &python_bindings(code), PYTHON_SINKS)
+    // Bindings read comment-masked source (a commented-out import must not
+    // bind); calls read fully-masked source (sink-shaped text must not fire).
+    let for_bindings = mask_strings_and_comments(code, MaskDialect::Python, MaskScope::Comments);
+    let for_calls =
+        mask_strings_and_comments(code, MaskDialect::Python, MaskScope::CommentsAndStrings);
+    detect_sinks(&for_calls, &python_bindings(&for_bindings), PYTHON_SINKS)
 }
 
 /// Detect Node built-in network sinks reached through the code's own
 /// imports/requires.
+///
+/// Comments and string bodies are blanked first
+/// ([`mask_strings_and_comments`]), template-literal `${…}` interpolations
+/// excepted — those hold real code.
 pub fn detect_javascript_sinks(code: &str) -> Vec<DetectedSink> {
-    detect_sinks(code, &javascript_bindings(code), JAVASCRIPT_SINKS)
+    // Bindings must keep string bodies: the module specifier lives inside the
+    // quotes (`require("net")`). Calls must not see them.
+    let for_bindings =
+        mask_strings_and_comments(code, MaskDialect::JavaScript, MaskScope::Comments);
+    let for_calls =
+        mask_strings_and_comments(code, MaskDialect::JavaScript, MaskScope::CommentsAndStrings);
+    detect_sinks(
+        &for_calls,
+        &javascript_bindings(&for_bindings),
+        JAVASCRIPT_SINKS,
+    )
 }
 
 #[cfg(test)]
@@ -645,5 +870,161 @@ http.request({});
     fn duplicate_calls_on_one_line_are_deduped() {
         let code = "import socket\nsocket.socket(); socket.socket()\n";
         assert_eq!(detect_python_sinks(code).len(), 1);
+    }
+
+    // --- strings and comments must not read as calls (PR #1033 review) ---
+
+    /// Sink-shaped *text* is not a sink *call*. Every one of these fired before
+    /// masking, turning a comment or a log message into an approval gate — and
+    /// under a taint that excludes `Sink::Network`, into a hard refuse.
+    #[test]
+    fn python_sink_text_in_strings_and_comments_is_not_a_call() {
+        let cases = [
+            ("string literal", "import socket\nprint(\"socket.socket(\")\n"),
+            (
+                "line comment",
+                "import socket\n# never call socket.socket() here\nx = 1\n",
+            ),
+            (
+                "docstring",
+                "import urllib.request\n\"\"\"Do not use urllib.request.urlopen() directly.\"\"\"\nx = 1\n",
+            ),
+            (
+                "single-quoted with escape",
+                "import socket\nmsg = 'call \\'socket.socket(\\' never'\n",
+            ),
+            (
+                "comment after real code on the same line",
+                "import json\nj = json.dumps({})  # not socket.socket()\n",
+            ),
+        ];
+        for (label, code) in cases {
+            let found = detect_python_sinks(code);
+            assert!(
+                found.is_empty(),
+                "{label}: sink-shaped text must not be detected, got {:?}",
+                sinks_of(&found)
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_sink_text_in_strings_and_comments_is_not_a_call() {
+        let cases = [
+            (
+                "line comment",
+                "const net = require(\"net\");\n// net.connect(80) is forbidden\nlet x = 1;\n",
+            ),
+            (
+                "block comment",
+                "const net = require(\"net\");\n/* net.connect(80)\n   spans lines */\nlet x = 1;\n",
+            ),
+            (
+                "template literal",
+                "const net = require(\"net\");\nconst msg = `call net.connect(80)`;\n",
+            ),
+            (
+                "double-quoted string",
+                "const net = require(\"net\");\nconst m = \"net.connect(80)\";\n",
+            ),
+        ];
+        for (label, code) in cases {
+            let found = detect_javascript_sinks(code);
+            assert!(
+                found.is_empty(),
+                "{label}: sink-shaped text must not be detected, got {:?}",
+                sinks_of(&found)
+            );
+        }
+    }
+
+    /// The trap masking could easily introduce: JS module specifiers live
+    /// *inside* the quotes, so blanking string bodies before collecting bindings
+    /// would erase every JS binding and silently disable detection. Bindings read
+    /// comment-masked source; only the call pass masks strings.
+    #[test]
+    fn javascript_module_specifiers_survive_masking() {
+        let code = "const net = require(\"net\");\nnet.createConnection(443, host);\n";
+        assert_eq!(
+            sinks_of(&detect_javascript_sinks(code)),
+            vec!["net.createConnection"],
+            "masking must not erase the module specifier"
+        );
+
+        let esm = "import { request } from \"node:https\";\nrequest(opts);\n";
+        assert_eq!(
+            sinks_of(&detect_javascript_sinks(esm)),
+            vec!["https.request"]
+        );
+    }
+
+    /// A template literal's `${…}` interpolation is real code, so a sink called
+    /// there must still be detected — masking the whole literal would be a false
+    /// negative.
+    #[test]
+    fn javascript_sink_inside_template_interpolation_is_detected() {
+        let code = "const net = require(\"net\");\nconst s = `${net.connect(80)}`;\n";
+        assert_eq!(
+            sinks_of(&detect_javascript_sinks(code)),
+            vec!["net.connect"]
+        );
+    }
+
+    /// A commented-out import binds nothing, so a later same-named call cannot
+    /// resolve through it.
+    #[test]
+    fn commented_out_import_does_not_bind() {
+        let py = "# import socket\nsocket.socket()\n";
+        assert!(detect_python_sinks(py).is_empty());
+
+        let js = "// const net = require(\"net\");\nnet.connect(80);\n";
+        assert!(detect_javascript_sinks(js).is_empty());
+    }
+
+    /// A comment marker inside a string must not open a comment, or everything
+    /// after it on the line would be masked and real calls would be missed.
+    #[test]
+    fn comment_markers_inside_strings_do_not_start_comments() {
+        let py = "import socket\nsep = \"#\"\nsocket.socket()\n";
+        assert_eq!(sinks_of(&detect_python_sinks(py)), vec!["socket.socket"]);
+
+        let js = "const net = require(\"net\");\nconst u = \"http://x/a//b\";\nnet.connect(80);\n";
+        assert_eq!(sinks_of(&detect_javascript_sinks(js)), vec!["net.connect"]);
+    }
+
+    /// Masking preserves offsets and newlines, so reported line numbers stay
+    /// exact even when earlier lines are blanked.
+    #[test]
+    fn masking_preserves_line_numbers() {
+        let code = "import socket\n# socket.socket() mentioned\n\"\"\"and\nhere too\n\"\"\"\nsocket.socket()\n";
+        let found = detect_python_sinks(code);
+        assert_eq!(sinks_of(&found), vec!["socket.socket"]);
+        assert_eq!(found[0].line, 6, "line number must survive masking");
+    }
+
+    #[test]
+    fn masking_preserves_length_and_newlines() {
+        let code = "import socket\n# comment\nx = \"str\"\n";
+        for scope in [MaskScope::Comments, MaskScope::CommentsAndStrings] {
+            let masked = mask_strings_and_comments(code, MaskDialect::Python, scope);
+            assert_eq!(
+                masked.chars().count(),
+                code.chars().count(),
+                "{scope:?} changed length"
+            );
+            assert_eq!(
+                masked.matches('\n').count(),
+                code.matches('\n').count(),
+                "{scope:?} changed newline count"
+            );
+        }
+    }
+
+    /// An unterminated quote must not swallow the rest of the file — otherwise
+    /// one stray apostrophe would disable detection for everything below it.
+    #[test]
+    fn unterminated_string_recovers_at_end_of_line() {
+        let code = "import socket\nbad = 'oops\nsocket.socket()\n";
+        assert_eq!(sinks_of(&detect_python_sinks(code)), vec!["socket.socket"]);
     }
 }
