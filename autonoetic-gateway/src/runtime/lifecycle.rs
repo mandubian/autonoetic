@@ -233,7 +233,9 @@ pub struct AgentExecutor {
     /// Set by the scheduler on overflow retry.
     pub overflow_recovery: bool,
     /// Optional extended instructions (after `<!-- extended -->` in SKILL.md).
-    /// Written to content store for on-demand retrieval by the agent.
+    /// Held on the executor only — NOT registered in the content store, so
+    /// `resolve("extended_instructions")` does not find it; delivery is the
+    /// gateway's job (mechanical first-tool-call injection, see `extended_loaded`).
     pub extended_instructions: Option<String>,
     /// Whether the extended SKILL.md half has been mechanically loaded into
     /// this session (#1015). Starts `false`: the system prompt is composed

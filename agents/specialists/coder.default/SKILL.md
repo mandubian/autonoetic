@@ -177,17 +177,18 @@ When the planner asks you to create an agent (e.g. "create a data processing age
 
 ## Extended Instructions
 
-The gateway loads the extended half of this SKILL automatically on your first
-**tool call** — you do not need to resolve it yourself. It contains the
-execution-depth guidance for after you have decided what to do:
+The gateway loads the extended half of this SKILL automatically on your FIRST
+**tool call** — it arrives as a `gateway_note` on the first tool result, and
+from the next turn it is part of your system prompt. You never need to fetch
+it manually: proceed with your first action; do not delay for it. The topics
+below live there, so expect them to appear once you start executing:
 
-- If evaluator/auditor finds issues: how to fix your script in place
-- Gateway response validation & repair
-- Receiving tasks from architect, content system, running code
-- Artifact execution failure handling, permission denied, clarification protocol
-
-If you need a specific section before your first tool call, you may still
-`resolve({"ref": "extended_instructions"})` early.
+- **Evaluator/auditor findings** — when the planner returns review issues for your script
+- **Gateway response validation & repair** — when your output is rejected for a contract violation
+- **Receiving tasks from architect, content system, running code** — when working on an implementation task
+- **Artifact execution failure handling** — when a built artifact fails at runtime
+- **Permission denied** — when a sandboxed operation is refused
+- **Clarification protocol** — when the task is ambiguous and you must ask before coding
 
 <!-- extended -->
 

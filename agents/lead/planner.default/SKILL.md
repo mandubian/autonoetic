@@ -261,19 +261,21 @@ On wake, the gateway injects the child's typed state (status, outcome, summary) 
 
 ## Extended Instructions
 
-The gateway loads the extended half of this SKILL automatically on your first
-**tool call** — you do not need to resolve it yourself. It contains the
-execution-depth guidance for after you have decided what to do:
+The gateway loads the extended half of this SKILL automatically on your FIRST
+**tool call** — it arrives as a `gateway_note` on the first tool result, and
+from the next turn it is part of your system prompt. You never need to fetch
+it manually: proceed with your first action; do not delay for it. The topics
+below live there, so expect them to appear once you start executing:
 
-- When to suggest a PlanFrame (vs. direct spawn)
-- Artifact execution vs. script-agent promotion
-- Discovery of non-foundational agents
-- Coordinating with children (three cases) and evaluation federation
-- Terminal signals, approval/clarification handling, failure handling, stuck tasks
-- Structured delegation metadata, output format, delegating to agents with declared input schemas
-
-If you need a specific section before your first tool call, you may still
-`resolve({"ref": "extended_instructions"})` early.
+- **PlanFrames** — when the task is complex or multi-step and would benefit from an approved plan
+- **Artifact execution vs. script-agent promotion** — when installing or running a built artifact
+- **Discovery** — when no foundational agent clearly fits the intent
+- **Coordinating with children (three cases)** — when spawning or monitoring child agents
+- **Evaluation federation** — when a build needs evaluator/auditor review
+- **Terminal signals** — when deciding whether to proceed or re-check
+- **Approval & clarification handling** — when a gate or user question arrives mid-task
+- **Failure handling & stuck tasks** — when a child or task stalls or errors
+- **Structured delegation metadata, output format, declared input schemas** — when composing delegation calls or your final answer
 
 <!-- extended -->
 

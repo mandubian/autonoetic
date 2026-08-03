@@ -325,13 +325,14 @@ pub(crate) fn compose_system_instructions_with_user_context(
 /// session-3b4485d4 found that agents with the marker never actually issued
 /// `resolve("extended_instructions")` — they just operated on the core
 /// section and silently lost critical guidance (e.g. promotion-gate handling,
-/// "if evaluator finds issues" recipe). The marker still serves as a visual
-/// section divider in the source, but at runtime the two halves are inlined.
+/// "if evaluator finds issues" recipe).
 ///
-/// The parser-level split (`split_extended_instructions`) and the
-/// `LoadedAgent.extended_instructions` field are retained so a future
-/// optimization (e.g. dynamic tiered loading) can re-wire the split without
-/// re-introducing the source structure.
+/// Since #1015 the split is back, with the load mechanical instead of
+/// agent-driven: the gateway composes the system prompt from the core half
+/// until the agent's FIRST tool call, then injects the extended half as a
+/// `gateway_note` on the first tool result and inlines it from then on (see
+/// `AgentExecutor.extended_loaded`). This function is the "loaded" branch of
+/// that gate.
 pub(crate) fn inline_extended(core: &str, extended: Option<&str>) -> String {
     match extended {
         Some(ext) if !ext.is_empty() => format!("{core}\n\n{ext}"),
