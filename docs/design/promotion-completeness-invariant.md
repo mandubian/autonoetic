@@ -43,7 +43,7 @@ For a revision R of agent A being promoted:
    - federation role verdicts exist for the artifact (existing FullJury), **or**
    - R is the **first promotion of a new agent** (no outgoing revision/alias) and
      R is capability-bearing.
-   Missing ⇒ **refuse** with guidance to run `federation.escalate` and obtain
+   Missing ⇒ **refuse** with guidance to run `federation_escalate` and obtain
    operator approval. This removes the previous dependence on the LLM having
    recorded federation verdicts before operator approval was demanded.
 
@@ -86,7 +86,7 @@ self-promote. Completeness stays fail-closed regardless.
 
 - A brand-new capability-bearing agent (e.g. from agent-factory) can no longer be
   promoted without an approved operator escalation. The autonomous evolution loop
-  must call `federation.escalate` and obtain operator approval before promoting a
+  must call `federation_escalate` and obtain operator approval before promoting a
   new agent — which was always the intended process.
 - Zero-capability agents are unaffected (direct promote, gated by the cursor).
 - Existing-agent re-promotion is unaffected.

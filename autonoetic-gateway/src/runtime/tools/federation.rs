@@ -145,7 +145,7 @@ impl NativeTool for FederationEscalateTool {
 
         let Some(store) = gateway_store else {
             return Ok(autonoetic_types::tool_error::ToolError::fatal(
-                "Gateway store not available for federation.escalate",
+                "Gateway store not available for federation_escalate",
                 None::<String>,
             )
             .to_error_response());
@@ -168,7 +168,7 @@ impl NativeTool for FederationEscalateTool {
                     format!(
                         "artifact_ref '{}' was passed but no session_id is available to \
                          resolve it. Pass the canonical artifact_id directly, or invoke \
-                         federation.escalate from within a session.",
+                         federation_escalate from within a session.",
                         ref_id
                     ),
                     None::<String>,
@@ -307,7 +307,7 @@ impl NativeTool for FederationEscalateTool {
                             target: "federation",
                             escalation_artifact_id = %caller_artifact_id,
                             canonical_artifact_id = %art,
-                            "federation.escalate: correcting artifact id to canonical value from revision record"
+                            "federation_escalate: correcting artifact id to canonical value from revision record"
                         );
                     }
                     (art, rev.revision_id.clone(), true)
@@ -407,7 +407,7 @@ impl NativeTool for FederationEscalateTool {
                     agent_id = %args.agent_id,
                     revision_id = %canonical_revision_id,
                     artifact_id = %canonical_artifact_id,
-                    "federation.escalate: revision not seeded yet (new agent) — \
+                    "federation_escalate: revision not seeded yet (new agent) — \
                      reading declared capabilities from the artifact SKILL.md"
                 );
                 super::agent_revision::load_artifact_capabilities(

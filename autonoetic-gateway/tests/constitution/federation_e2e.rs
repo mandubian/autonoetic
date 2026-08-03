@@ -1837,7 +1837,7 @@ fn escalate_existing_agent_requires_seeded_revision() {
     //   (a) the BARE short token as stored in short_id_index
     //   (b) the `rev_`-prefixed form presented to LLMs as `agent@rev_<short>`
     //       (the form the planner is shown and will pass back). Without the
-    //       prefix-strip in federation.escalate this second form was rejected
+    //       prefix-strip in federation_escalate this second form was rejected
     //       as an unknown revision id.
     let short = store
         .list_short_ids_for_agent(agent_id)
@@ -1898,7 +1898,7 @@ fn escalate_existing_agent_requires_seeded_revision() {
 
 /// End-to-end escalate-before-install lifecycle:
 ///
-/// 1. `federation.escalate` runs against a NEW agent with no seeded revision
+/// 1. `federation_escalate` runs against a NEW agent with no seeded revision
 ///    (revision_id omitted) — the escalation is recorded under the derived
 ///    `unseeded:<artifact>` key and the merged `RevisionPromote` approval is
 ///    created in Pending.
@@ -1922,7 +1922,7 @@ fn escalate_unseeded_approval_honored_after_revision_seeded() {
     let (mut s, artifact_id, store) = setup_test_unseeded(&high_risk_skill_md(agent_id));
 
     // Zero the dwell multiplier so the operator approval can complete in the
-    // same test tick — the merged approval created by federation.escalate would
+    // same test tick — the merged approval created by federation_escalate would
     // otherwise require a 5s Critical dwell before the confirm phrase is
     // accepted. The new-agent gate stays ON (set by setup_test_unseeded) so the
     // capability delta is still computed and load_artifact_capabilities is
@@ -1983,7 +1983,7 @@ fn escalate_unseeded_approval_honored_after_revision_seeded() {
     .expect("operator approval should succeed");
 
     // The merged approval is now Approved; the escalation projection remains
-    // keyed under `unseeded:<artifact>` (the federation.escalate path recorded
+    // keyed under `unseeded:<artifact>` (the federation_escalate path recorded
     // it before the real revision existed). The promote-side artifact-scoped
     // lookups must find it.
     let approved_unseeded = store

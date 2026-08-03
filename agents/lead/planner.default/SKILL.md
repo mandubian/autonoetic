@@ -305,7 +305,7 @@ builds, or straightforward delegation patterns from the Decision Flow above.
 
 **Promote to script-agent (durable) when:** stable entrypoint + structured I/O, called repeatedly (across sessions/schedule), has network behavior that should carry declared `NetworkAccess`, or the user's goal is "create a tool/agent" not "run once". If the same artifact executes more than once in a workflow, prefer promotion.
 
-**Promotion path:** `artifact_build` → federation gates (`execution_trace_id` evidence) → `federation.escalate` → `agent-factory.default` (create candidate → smoke test → promote). Spawn `agent-factory.default` with the `artifact_ref` — it owns packager, smoke test, and the split install. **Do not spawn `specialized_builder.default` yourself.** When federation is already approved, pass `federation_complete: true` + `escalation_approval_id` so factory skips re-gating.
+**Promotion path:** `artifact_build` → federation gates (`execution_trace_id` evidence) → `federation_escalate` → `agent-factory.default` (create candidate → smoke test → promote). Spawn `agent-factory.default` with the `artifact_ref` — it owns packager, smoke test, and the split install. **Do not spawn `specialized_builder.default` yourself.** When federation is already approved, pass `federation_complete: true` + `escalation_approval_id` so factory skips re-gating.
 
 | Layer | Target | Evidence |
 |---|---|---|
@@ -364,14 +364,14 @@ libraries, coder declares them in `requirements.txt` / `package.json` and may re
 `status: "needs_packager"`. Spawn **`packager.default`** before federation gates so
 `unit_test_runner` can import deps via mounted layers.
 
-**Order:** coder → packager (if needed) → federation gates → `agent_revision_create` (seed) → `federation.escalate` (pass the seeded `revision_id`) → agent-factory.
+**Order:** coder → packager (if needed) → federation gates → `agent_revision_create` (seed) → `federation_escalate` (pass the seeded `revision_id`) → agent-factory.
 
 Gating an unpackaged artifact then packaging invalidates every `promotion_record` (new digest).
 Always pass the **post-packager** `artifact_ref` to federation roles and to agent-factory.
 
 **Seed the revision before escalating.** Once all federation roles pass, call
 `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` and pass
-the returned `revision_id` (`rev_sha256:...`) to `federation.escalate`. This routes the
+the returned `revision_id` (`rev_sha256:...`) to `federation_escalate`. This routes the
 escalation through the robust **seeded** path (capabilities read from the revision
 record) instead of the fragile **unseeded** path that parses the artifact's `SKILL.md`
 frontmatter at escalate time — a missing/invalid frontmatter then fails fast at seed
@@ -391,10 +391,10 @@ When an artifact-backed agent needs promotion (after `coder.default` produces an
 
 **3. Collect verdicts:** Call `promotion_query({artifact_ref})` — not child reply JSON. Execution roles (`unit_test_runner`, `sealed_evaluator`) need `execution_trace_id`; gateway derives `pass`. Auditor needs `pass: true`, no `critical` findings.
 
-**4. Seed revision, then escalate:** Call `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` → pass the returned `revision_id` (`rev_sha256:...`; `already_exists`/`reactivated` is fine) to `federation.escalate`. Never omit `revision_id` — the unseeded path parses SKILL.md at escalate time and fails opaquely. Use `federation.escalate` (not `session_escalate`).
+**4. Seed revision, then escalate:** Call `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` → pass the returned `revision_id` (`rev_sha256:...`; `already_exists`/`reactivated` is fine) to `federation_escalate`. Never omit `revision_id` — the unseeded path parses SKILL.md at escalate time and fails opaquely. Use `federation_escalate` (not `session_escalate`).
 
 ```json
-federation.escalate({
+federation_escalate({
   "artifact_ref": "<ar.* ref>", "agent_id": "<agent_id>",
   "revision_id": "<rev_sha256:... from agent_revision_create>",
   "root_session_id": "<root_session_id>",
@@ -407,7 +407,7 @@ federation.escalate({
 })
 ```
 
-Returns `{approval_request_id: "apr-esc-...", status: "pending"}` — **gates `agent.spawn` for the entire session until resolved.** Save the id.
+Returns `{approval_request_id: "apr-esc-...", status: "pending"}` — **gates `agent_spawn` for the entire session until resolved.** Save the id.
 
 **5. Wait — one channel only:** Do NOT call `user_ask` for the approval — it's a separate artifact and won't resolve the gate. Surface the `approval_request_id` + resolution command (`autonoetic gateway approvals approve <id>` or chat `/approvals`) in your final reply, then end your turn. Next turn, check `approval_status({approval_id})`. Operator's options:
 

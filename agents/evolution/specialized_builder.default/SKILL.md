@@ -374,7 +374,7 @@ Before `agent_revision_promote`, call `promotion_query({artifact_ref})` and conf
 |---|---|---|
 | `auditor` | Every install with gates | `pass: true`, no `critical` findings |
 | `static_evaluator` / `unit_test_runner` / `sealed_evaluator` | Code-bearing or network/exec agents | `execution_trace_id` present; gateway derives `pass` from trace |
-| Operator escalation | Full jury (typical federation path) | Approved `federation.escalate` before promote |
+| Operator escalation | Full jury (typical federation path) | Approved `federation_escalate` before promote |
 
 Pure-reasoning intent-only bundles may have auditor record only — execution roles correctly absent.
 
@@ -415,11 +415,11 @@ When `agent_revision_promote` returns `"Promotion gate: no promotion_record foun
 
 ### FullJury Escalation Required
 
-When `agent_revision_promote` returns `"Promotion gate (FullJury): revision 'rev_X' has federation role verdicts but no approved operator escalation. The planner must call federation.escalate ..."`:
+When `agent_revision_promote` returns `"Promotion gate (FullJury): revision 'rev_X' has federation role verdicts but no approved operator escalation. The planner must call federation_escalate ..."`:
 
 1. **STOP immediately** — do NOT retry the promote call. The gate is mechanically enforced.
 2. **Report back to planner** with the `revision_id` from the error message.
-3. The planner is responsible for calling `federation.escalate` to request operator approval. You cannot do this yourself.
+3. The planner is responsible for calling `federation_escalate` to request operator approval. You cannot do this yourself.
 4. Once the operator approves the escalation, the planner will re-delegate the install to you. At that point retry `agent_revision_promote` once.
 
 ### `promotion_query` Returns "No promotion record found"

@@ -90,8 +90,8 @@ When a pipeline stage is owned by another installed agent, your default action i
 - `source_artifact_ref` (optional): existing artifact to reuse for packaging, gating, or installation instead of rebuilding from loose files
 - `source_script_entry` (optional): entry script inside `source_artifact_ref` when the artifact is already a script candidate
 - `source_validated` (optional): whether executor/evaluator already proved the artifact works for the intended use (transient `artifact_exec` — not a substitute for federation traces or install smoke test)
-- `federation_complete` (optional): `true` when the planner already ran federation gates and `federation.escalate` was **approved**. Skip Step 4 re-gating; verify `promotion_query` records + `escalation_approval_id` before Step 5.
-- `escalation_approval_id` (optional): approved `apr-esc-*` from planner's `federation.escalate`. Required when `federation_complete: true`.
+- `federation_complete` (optional): `true` when the planner already ran federation gates and `federation_escalate` was **approved**. Skip Step 4 re-gating; verify `promotion_query` records + `escalation_approval_id` before Step 5.
+- `escalation_approval_id` (optional): approved `apr-esc-*` from planner's `federation_escalate`. Required when `federation_complete: true`.
 - `execution_mode_hint` (optional): `reasoning | script | auto` — defaults to auto-detect
 - `design_needed` (optional): boolean — force architect step even for simple tasks
 

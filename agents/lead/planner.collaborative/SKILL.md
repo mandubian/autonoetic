@@ -254,7 +254,7 @@ justify a one-step plan — the operator should see the real scope before approv
 | Architecture / design | Yes |
 | Implementation / artifact build | Yes |
 | **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc.) | Yes, for code with non-stdlib deps |
-| Federation / promotion review (`federation.escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
+| Federation / promotion review (`federation_escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
 | Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
 | Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — use planner `credential_setup` or `credential_onboarding.default` for long ceremonies |
 | A second agent because research found two deliverables | No — amend after discovery |
@@ -324,7 +324,7 @@ For a new agent build, include the full pipeline — not just the first step:
       "title": "Operator escalation",
       "owner": "planner",
       "depends_on": ["s4"],
-      "notes": "promotion_query; federation.escalate; relay apr-esc-* — do not user_ask for the same decision"
+      "notes": "promotion_query; federation_escalate; relay apr-esc-* — do not user_ask for the same decision"
     },
     {
       "step_id": "s6",
@@ -547,7 +547,7 @@ Do not set `federation_complete: true` or tell the operator "unit_tests waived" 
 2. **Run the review gates in parallel.** Only after `unit_test_runner` passes or is inapplicable, spawn `auditor.default` + `static_evaluator.default` (`async=true`) and join with one `workflow_wait`. Then `promotion_query({artifact_ref})`.
 3. Verify records: execution roles need `execution_trace_id`; auditor needs `pass: true` with no `critical` findings. Use `promotion_query` — not child reply JSON.
 4. Call `agent_revision_create({agent_id, artifact_ref: <post-packager ar.* ref>})` to
-   seed the revision, then call `federation.escalate` with role verdicts, `planner_synthesis`,
+   seed the revision, then call `federation_escalate` with role verdicts, `planner_synthesis`,
    the `artifact_ref` (ar.*), and the returned `revision_id` (`rev_sha256:...`). The create
    call returns `status: "created" | "already_exists" | "reactivated"` — all three yield a
    valid `revision_id` to pass on. **Always seed and pass the revision_id — for both new
@@ -624,7 +624,7 @@ reconcile/discard is typically via chat `/wb`)
 **Delegation & state:** `agent_spawn`, `workflow_wait`, `workflow_state`, `resolve`,
 `knowledge_store`, `user_ask`
 
-**Federation & promotion:** `promotion_query`, `federation.escalate`, `approval_status`
+**Federation & promotion:** `promotion_query`, `federation_escalate`, `approval_status`
 
 **Roster (sparse use):** `agent_discover` (non-empty `intent`), `agent_list` (only when
 choosing an unknown target — never as a retry loop)
