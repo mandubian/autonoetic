@@ -289,7 +289,7 @@ fn test_credential_check_service_scoped_denial() {
             Some(store),
             None,
         )
-        .expect("credential.check should succeed");
+        .expect("credential_check should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], true);
@@ -345,7 +345,7 @@ fn test_credential_request_denied_wrong_service() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -407,7 +407,7 @@ fn test_credential_request_denied_host_not_in_allowed_hosts() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -482,7 +482,7 @@ fn test_credential_request_allowed_when_host_matches() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], true);
@@ -554,7 +554,7 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], true);
@@ -629,7 +629,7 @@ fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], true);
@@ -694,7 +694,7 @@ fn test_credential_request_denied_expired() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -760,7 +760,7 @@ fn test_credential_request_denied_malformed_expiry() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -826,7 +826,7 @@ fn test_credential_request_denied_network_policy() {
             Some(store),
             None,
         )
-        .expect("credential.request should succeed");
+        .expect("credential_request should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -888,7 +888,7 @@ fn test_credential_setup_denied_wrong_service() {
             Some(store),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -938,7 +938,7 @@ fn test_credential_setup_denied_network_policy() {
             Some(store),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -983,12 +983,93 @@ fn test_credential_setup_user_action_succeeds() {
             Some(store),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], true);
     assert_eq!(parsed["service"], "github");
     assert_eq!(parsed["secrets_stored"], 0);
+}
+
+#[test]
+fn test_credential_setup_defaults_inject_as_to_service_derived_env_var() {
+    // A flow that does not pass `inject_as` must still store a credential that
+    // resolves by service at spawn time: `resolve_credential_env` matches
+    // stored `inject_as` against `inject_as_for_service(service)`, so the
+    // record must carry the derived name, not NULL (the missing-credential
+    // class behind silent script-exec failures).
+    let manifest = test_manifest(vec![Capability::CredentialAccess {
+        services: vec!["github".to_string()],
+    }]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // Call 1: a single user_input step suspends for a non-secret answer.
+    let first = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "steps": [{
+                    "step_type": "user_input",
+                    "question": "Confirm the registration code",
+                    "var_name": "code"
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .expect("credential_setup call 1 should succeed");
+    let first: serde_json::Value = serde_json::from_str(&first).expect("valid json");
+    assert_eq!(first["suspended_for_user_input"], true);
+    let credential_id = first["credential_id"].as_str().expect("credential_id present");
+
+    // Call 2: resume with the answer — flow completes and the record is created.
+    let second = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "github",
+                "credential_id": credential_id,
+                "resume_vars": {"code": "sekret-value"}
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .expect("credential_setup resume should succeed");
+    let second: serde_json::Value = serde_json::from_str(&second).expect("valid json");
+    assert_eq!(second["ok"], true);
+    assert_eq!(second["secrets_stored"], 1);
+
+    let cred = store
+        .get_credential(credential_id)
+        .expect("credential lookup")
+        .expect("credential record exists");
+    assert_eq!(
+        cred.inject_as.as_deref(),
+        Some("GITHUB_SECRET"),
+        "inject_as must default to the service-derived env var"
+    );
 }
 
 #[test]
@@ -1041,7 +1122,7 @@ fn test_credential_setup_user_prompt_suspends_no_further_steps() {
             Some(store),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -1110,7 +1191,7 @@ fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
             Some(store),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], true);
@@ -1141,7 +1222,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
-    // Step 1: Start credential.setup with a UserPrompt step
+    // Step 1: Start credential_setup with a UserPrompt step
     let result = registry
         .execute(
             "credential_setup",
@@ -1166,7 +1247,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
             Some(Arc::clone(&store)),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(suspended["ok"], false);
@@ -1218,7 +1299,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
     assert_eq!(creds[0].service, "github");
     assert_eq!(creds[0].secret_name, "GITHUB_TOKEN");
 
-    // Step 4: Retry credential.setup with approval_ref
+    // Step 4: Retry credential_setup with approval_ref
     let result = registry
         .execute(
             "credential_setup",
@@ -1244,7 +1325,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
             Some(Arc::clone(&store)),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let resumed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(resumed["ok"], true);
@@ -1282,7 +1363,7 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
-    // Start credential.setup with a UserPrompt step
+    // Start credential_setup with a UserPrompt step
     let result = registry
         .execute(
             "credential_setup",
@@ -1308,7 +1389,7 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
             Some(Arc::clone(&store)),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     let request_id = suspended["request_id"]
@@ -1396,7 +1477,7 @@ fn test_credential_prompt_approval_carries_secret_fields_for_inspect() {
             Some(Arc::clone(&store)),
             None,
         )
-        .expect("credential.setup should succeed");
+        .expect("credential_setup should succeed");
 
     let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert!(suspended["approval_required"].as_bool().unwrap_or(false));
@@ -1488,7 +1569,7 @@ fn test_credential_setup_user_input_with_secret_fields_rejected() {
             Some(Arc::clone(&store)),
             None,
         )
-        .expect("credential.setup should return a response");
+        .expect("credential_setup should return a response");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);
@@ -1574,7 +1655,7 @@ autonoetic:
             Some(Arc::clone(&store)),
             None,
         )
-        .expect("credential.setup should return a response");
+        .expect("credential_setup should return a response");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
     assert_eq!(parsed["ok"], false);

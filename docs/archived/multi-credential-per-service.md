@@ -10,7 +10,7 @@ The credential system assumed **one credential per service**. Two agents that ne
 separate identities on the same external service (e.g., two distinct registrations
 on a "moltbook" messaging platform) could not coexist because:
 
-1. **`credential.setup` dedup**: if any credential already existed for a service,
+1. **`credential_setup` dedup**: if any credential already existed for a service,
    the tool returned the existing one and skipped external registration.
 2. **`resolve_credential_env`**: picked the **first** (oldest) credential for the
    service, so script agents always got the same secret.
@@ -33,7 +33,7 @@ pub struct CredentialRecord {
 
 - SQLite migration v40: `ALTER TABLE credentials ADD COLUMN label TEXT DEFAULT NULL`
 - Multiple credentials for the same service are distinguished by label
-- `credential.setup` dedup is now scoped to `(service, label)` — calling with
+- `credential_setup` dedup is now scoped to `(service, label)` — calling with
   `label: "agent-b"` only returns an existing credential if one with that exact
   label exists; calling without a label only matches unlabeled credentials
 
@@ -90,7 +90,7 @@ Flow: `agent_spawn` → `QueuedTaskRun.credential_bindings` →
 | `autonoetic-types/src/agent.rs` | Added `label` field to `CredentialRecord` |
 | `autonoetic-types/src/runtime_lock.rs` | Added `credential_id` to `LockedCredentialMount` |
 | `autonoetic-types/src/workflow.rs` | Added `credential_bindings` to `QueuedTaskRun` |
-| `autonoetic-gateway/src/runtime/tools/credential.rs` | `credential.setup` accepts `label`, dedup scoped to (service, label) |
+| `autonoetic-gateway/src/runtime/tools/credential.rs` | `credential_setup` accepts `label`, dedup scoped to (service, label) |
 | `autonoetic-gateway/src/runtime/tools/agent.rs` | `agent_spawn` accepts `credential_bindings` |
 | `autonoetic-gateway/src/runtime/script_execute.rs` | New `resolve_credential_env_with_bindings` with ID resolution + spawn override |
 | `autonoetic-gateway/src/runtime/install_contract.rs` | `LockedCredentialMount` construction includes `credential_id: None` |

@@ -397,12 +397,19 @@ The gateway classifies smoke-test involvement mechanically from the candidate's 
 **Procedure (when Step 6 applies):**
 
 1. **Classify** the candidate from its `execution_mode`, capabilities, and `runtime.lock` credentials.
-2. **If operator_directed:** call `user_ask` with the proposed test input; on decline, report `ok: false, stage: "smoke_test_declined"` and stop.
-3. Call `agent_spawn` with `agent_id="<agent_id>"`, `revision_id="<revision_id>"`, `async=true`, and a minimal task exercising the agent's primary purpose.
-4. Call `workflow_wait(task_ids=[<smoke_test_task_id>], timeout_secs=300)`.
-5. If status is not `Succeeded`, report `ok: false, stage: "smoke_test_failed"` and stop — do NOT promote.
-6. **`script_exec_failed` is never "infra stall".** If the child closes with `script_exec_failed` and stderr contains `AttributeError`, `ModuleNotFoundError`, or `has no attribute`, that is a **code bug** — report `smoke_test_failed` with the stderr excerpt. Do not promote with `smoke_test_performed: false` and claim success.
-7. Capture `workflow_id`, `task_id`, and (if operator_directed) the confirmed `smoke_test_input`.
+2. **Onboard credentials BEFORE any smoke test that needs them.** If the candidate declares
+   `credential_services` (or the smoke test needs secrets), run the credential ceremony to
+   completion FIRST — spawn `credential_onboarding.default` (or drive `credential_setup` to
+   `ok: true, secrets_stored >= 1`) and only then run the smoke test. A smoke test run without
+   its credentials will fail with missing-credential errors; do NOT retry the smoke test or
+   blame the code — finish onboarding first. A single spawn of the onboarding agent is
+   sufficient: if it returns `ready_for_execution: false`, relay its `next_action` and stop.
+3. **If operator_directed:** call `user_ask` with the proposed test input; on decline, report `ok: false, stage: "smoke_test_declined"` and stop.
+4. Call `agent_spawn` with `agent_id="<agent_id>"`, `revision_id="<revision_id>"`, `async=true`, and a minimal task exercising the agent's primary purpose.
+5. Call `workflow_wait(task_ids=[<smoke_test_task_id>], timeout_secs=300)`.
+6. If status is not `Succeeded`, report `ok: false, stage: "smoke_test_failed"` and stop — do NOT promote.
+7. **`script_exec_failed` is never "infra stall".** If the child closes with `script_exec_failed` and stderr contains `AttributeError`, `ModuleNotFoundError`, or `has no attribute`, that is a **code bug** — report `smoke_test_failed` with the stderr excerpt. Do not promote with `smoke_test_performed: false` and claim success.
+8. Capture `workflow_id`, `task_id`, and (if operator_directed) the confirmed `smoke_test_input`.
 
 The gateway **always** rejects `agent_revision_promote` for new capability-bearing agents without successful smoke-test evidence. **Script-mode** candidates also need successful smoke evidence (Step 6) before Step 7. Provide `smoke_test_task_id`, `smoke_test_workflow_id`, and `smoke_test_input` (when operator-directed) in Step 7.
 
@@ -435,7 +442,9 @@ If any step fails: return `ok: false, stage: "<step>", error: "<message>"` to pl
 | Builder transient error (5xx, connection) | Return `stage: "install", reason: "transient_infrastructure_failure"` — retry once after recovery, do NOT rebuild |
 | Builder revision-state conflict (`already has active revision`, `Archived`, etc.) | Return `stage: "install_conflict"` — planner must inspect existing state |
 | Smoke test `script_exec_failed` with `AttributeError`/`ModuleNotFoundError` | Code bug — report `smoke_test_failed` with stderr, never promote without it |
+| Smoke test fails with missing credentials (stderr reports unset credential env vars, or the gateway logs `No credential found`) | NOT a code bug — finish credential onboarding first (Step 6.2), then re-run the smoke test once |
 | Operator declines smoke test | Return `stage: "smoke_test_declined"`, stop |
+| `user_ask` returns `secret_collection_not_allowed` | You tried to collect a secret through `user_ask` — forbidden. Secrets flow only through `credential_setup` `user_prompt` steps (operator approval popup). Delegate to `credential_onboarding.default`; never retry the question. |
 
 ### Gate outcomes — report failures, do not fix
 

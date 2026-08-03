@@ -1963,7 +1963,7 @@ impl NativeTool for WebCallTool {
                 headers and JSON body. Use this for service registration, REST API calls, and \
                 webhook endpoints. The response body is returned as-is (JSON-parsed when \
                 possible). Note: secrets returned in responses are visible in the LLM context — \
-                use credential.setup for flows that must keep secrets server-side."
+                use credential_setup for flows that must keep secrets server-side."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",

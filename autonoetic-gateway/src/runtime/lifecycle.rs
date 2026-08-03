@@ -4870,7 +4870,7 @@ impl AgentExecutor {
 
             if let Some((pending_call_id, interaction_id)) = interaction_info {
                 // User interaction required — persist assistant prefix + completed tool
-                // results, then checkpoint (pending `user.ask` has no result until resume).
+                // results, then checkpoint (pending `user_ask` has no result until resume).
                 let completed_results = results[..results.len() - 1].to_vec();
                 let remaining_calls = tool_calls[results.len()..].to_vec();
 

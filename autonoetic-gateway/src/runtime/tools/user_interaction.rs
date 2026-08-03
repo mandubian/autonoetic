@@ -128,8 +128,8 @@ impl NativeTool for UserAskTool {
 
         if asks_for_secret(&args) {
             return Ok(ToolError::validation(
-                "user.ask cannot be used to request secrets or credential values.",
-                Some("Use credential.setup / credential.prompt flows so secrets stay in gateway vault-backed channels."),
+                "user_ask cannot be used to request secrets or credential values.",
+                Some("Use credential_setup with user_prompt steps so secrets stay in gateway vault-backed channels."),
             )
             .with_code("secret_collection_not_allowed")
             .to_error_response());
@@ -167,7 +167,7 @@ impl NativeTool for UserAskTool {
                 });
                 if has_active_children {
                     return Ok(ToolError::conflict(
-                        "user.ask is not available while workflow tasks are active. Complete or cancel child tasks first.",
+                        "user_ask is not available while workflow tasks are active. Complete or cancel child tasks first.",
                         Some("Call workflow_wait until child tasks complete, then retry."),
                     )
                     .with_code("workflow_tasks_active")
@@ -183,7 +183,7 @@ impl NativeTool for UserAskTool {
                 .unwrap_or_default();
             if !pending_approvals.is_empty() || !pending_interactions.is_empty() {
                 return Ok(ToolError::conflict(
-                    "user.ask is not available while gates are pending. Resolve or wait for pending gates, then retry.",
+                    "user_ask is not available while gates are pending. Resolve or wait for pending gates, then retry.",
                     Some("Resolve or wait for pending gates, then retry."),
                 )
                 .with_code("gates_pending")
@@ -226,7 +226,7 @@ impl NativeTool for UserAskTool {
             Some(ref s) => s.clone(),
             None => {
                 return Ok(ToolError::resource(
-                    "Gateway store not available; user.ask requires persistent store",
+                    "Gateway store not available; user_ask requires persistent store",
                     Some("Configure GatewayStore with a persistent backend for user interaction support."),
                 )
                 .with_code("user_interaction_store_unavailable")
