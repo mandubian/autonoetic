@@ -50,7 +50,7 @@ maps fails parse (`invalid type: map, expected a string`).
 | `enabled_languages` | list of `python`\|`javascript`\|`rust`\|`go` | Restrict import detectors to these (empty = all) |
 | `python_imports` | list of strings | Python modules expected (e.g. `imaplib`, `requests`) |
 | `js_imports` / `rust_imports` / `go_imports` | list of strings | Same, per language |
-| `function_calls` | list of strings | Call-pattern prefixes expected (e.g. `"imaplib.fetch("`, `"fetch("`) |
+| `function_calls` | list of strings | Call-pattern prefixes expected (e.g. `"requests.get("`, `"fetch("`) |
 | `shell_commands` | list of strings | Shell commands expected (e.g. `curl`, `wget`) |
 | `package_manager_commands` | list of strings | Package-manager commands (e.g. `pip install`) |
 

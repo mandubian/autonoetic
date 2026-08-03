@@ -444,6 +444,39 @@ pub fn undeclared_patterns_against_manifest(
         .collect()
 }
 
+/// JavaScript receivers whose `.fetch(` is the global Fetch API, not an
+/// arbitrary object method. Keeping this an allowlist (rather than flagging
+/// every `.fetch(`) preserves the disambiguation `detect_function_calls`
+/// exists for — `IMAP4.fetch`, DBAPI `cursor.fetch`, collection `.fetch`, …
+/// — so only the genuine JS global is admitted. See [`is_global_fetch_receiver`].
+const GLOBAL_FETCH_RECEIVERS: &[&str] = &["globalThis", "window", "self"];
+
+/// Is the `.fetch(` ending at `fetch_pos` (the index of the `f`) reached via a
+/// known JavaScript global receiver? Returns true for `globalThis.fetch(`,
+/// `window.fetch(`, `self.fetch(`. The receiver is the maximal `[A-Za-z0-9_]`
+/// run immediately before the `.` at `fetch_pos - 1`. Byte-based by necessity
+/// (the `regex` crate has no lookbehind); the split-by-whitespace form
+/// (`obj.\nfetch(`) is tracked by #1020.
+fn is_global_fetch_receiver(code: &str, fetch_pos: usize) -> bool {
+    let bytes = code.as_bytes();
+    // `fetch_pos` indexes 'f' in `fetch(`; the byte before it must be '.'.
+    let mut end = match fetch_pos.checked_sub(2) {
+        Some(e) if e < bytes.len() => e,
+        _ => return false,
+    };
+    if !(bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        return false; // no receiver identifier directly before the '.'
+    }
+    let mut start = end;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    matches!(
+        &code[start..=end],
+        "globalThis" | "window" | "self"
+    )
+}
+
 impl RemoteAccessAnalyzer {
     /// Analyzes code for patterns that require network/remote access.
     ///
@@ -606,13 +639,27 @@ impl RemoteAccessAnalyzer {
         // detection. Only flag a `fetch(` that is NOT preceded by `.`, a word
         // char, `]`, or `)`, i.e. a standalone/global call. (The `regex` crate
         // has no lookbehind, so this boundary check is byte-based.)
+        //
+        // Exception: `globalThis.fetch(` / `window.fetch(` / `self.fetch(` are
+        // the global Fetch API reached via a known global receiver, not an
+        // arbitrary object method — so the `.`-preceded case still flags when
+        // the receiver is in [`GLOBAL_FETCH_RECEIVERS`]. The split-by-whitespace
+        // method form (`obj.\nfetch(`) is a parser-level concern tracked by
+        // #1020; the byte boundary here is the first-aid fix for #1019.
         if let Ok(re) = Regex::new(r"fetch\s*\(") {
             let bytes = code.as_bytes();
             for mat in re.find_iter(code) {
                 let prev_is_method_context = match mat.start().checked_sub(1) {
-                    Some(i) => matches!(bytes[i], b'.' | b']' | b')')
-                        || bytes[i].is_ascii_alphanumeric()
-                        || bytes[i] == b'_',
+                    Some(i) if bytes[i] == b'.' => {
+                        // `.fetch(` — flag only if the receiver is a known JS
+                        // global (the Fetch API), not an arbitrary method call.
+                        !is_global_fetch_receiver(code, mat.start())
+                    }
+                    Some(i) => {
+                        matches!(bytes[i], b']' | b')')
+                            || bytes[i].is_ascii_alphanumeric()
+                            || bytes[i] == b'_'
+                    }
                     None => false,
                 };
                 if prev_is_method_context {
@@ -1138,6 +1185,53 @@ typ, data = mail.fetch(b"1", "(RFC822)")
                     .iter()
                     .any(|p| p.reason == "Fetch API call"),
                 "global fetch( must be flagged for code:\n{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_global_fetch_receivers_flagged() {
+        // `globalThis.fetch` / `window.fetch` / `self.fetch` are the JS global
+        // Fetch API reached via a known global receiver — they must be flagged,
+        // even though the byte before `fetch(` is `.`. Review feedback on #1019:
+        // the immediate-byte disambiguation otherwise treated these as method
+        // calls and missed them.
+        for code in [
+            r#"globalThis.fetch("https://example.com")"#,
+            r#"window.fetch(url)"#,
+            r#"self.fetch("/api")"#,
+        ] {
+            let analysis = RemoteAccessAnalyzer::analyze_code(code);
+            assert!(
+                analysis
+                    .detected_patterns
+                    .iter()
+                    .any(|p| p.reason == "Fetch API call"),
+                "global-receiver fetch( must be flagged for code:\n{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_arbitrary_method_fetch_still_not_flagged() {
+        // The allowlist must NOT admit arbitrary `.fetch(` method calls — only
+        // the known JS globals. `mail.fetch(` (imaplib), `cursor.fetch(` (DBAPI)
+        // and collection `.fetch(` stay excluded.
+        for code in [
+            r#"mail.fetch(b"1", "(RFC822)")"#,
+            r#"cursor.fetchmany(10)"#,
+            r#"collection.fetch()"#,
+        ] {
+            let analysis = RemoteAccessAnalyzer::analyze_code(code);
+            let fetch_api_count = analysis
+                .detected_patterns
+                .iter()
+                .filter(|p| p.reason == "Fetch API call")
+                .count();
+            assert_eq!(
+                fetch_api_count, 0,
+                "arbitrary .fetch() must not be flagged as Fetch API:\n{code}\n{:?}",
+                analysis.detected_patterns
             );
         }
     }
