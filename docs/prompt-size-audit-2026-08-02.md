@@ -272,6 +272,13 @@ half when the agent first calls a tool whose contract lives there, or a
 hybrid: keep promotion/eval gates in core, defer reference tables), not just
 un-reverting the parser.
 
+> **Update (#1015, landed):** the mechanical re-wire shipped — the gateway now
+> loads the extended half automatically on the agent's first tool call
+> (injected as a `gateway_note` on the first tool result; inlined into the
+> system prompt from the next compose on). Turn 1 (no tool call) pays core
+> only; the cold-input saving described in §8.1 applies until the first tool
+> call.
+
 ### 8.4 Conversation estimate overcounts (explained)
 
 `estimate_message_tokens` (prompt_budget.rs) counts `reasoning_content` —

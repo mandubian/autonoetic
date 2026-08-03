@@ -233,8 +233,19 @@ pub struct AgentExecutor {
     /// Set by the scheduler on overflow retry.
     pub overflow_recovery: bool,
     /// Optional extended instructions (after `<!-- extended -->` in SKILL.md).
-    /// Written to content store for on-demand retrieval by the agent.
+    /// Held on the executor only — NOT registered in the content store, so
+    /// `resolve("extended_instructions")` does not find it; delivery is the
+    /// gateway's job (mechanical first-tool-call injection, see `extended_loaded`).
     pub extended_instructions: Option<String>,
+    /// Whether the extended SKILL.md half has been mechanically loaded into
+    /// this session (#1015). Starts `false`: the system prompt is composed
+    /// from the core instructions only, and the extended content is injected
+    /// automatically on the FIRST tool call (as a `gateway_note` on the first
+    /// tool result) — agents do not reliably issue `resolve("extended_instructions")`
+    /// themselves. Once `true`, every subsequent system-prompt compose inlines
+    /// the extended half (`inline_extended`). Persisted in checkpoints so a
+    /// resumed session keeps the same loaded state.
+    pub extended_loaded: bool,
     pub blocked_state_event_emitted: bool,
 
     /// Transient resume seed (#719): a single operator-approved tool call to
@@ -314,6 +325,29 @@ fn is_signal_derived_exit(value: &serde_json::Value) -> bool {
 /// Best-effort normalization of an error message so semantically identical
 /// errors compare equal even when incidental details (ids, paths, timestamps)
 /// vary. Used to build stable `FeedbackEvent::ToolError` signatures.
+/// Attach the extended SKILL.md content to a tool result as a `gateway_note`
+/// key in the result JSON (#1015). The extended text rides on the FIRST tool
+/// result of the session so the model sees it immediately, in-band with the
+/// tool output — not as a separate system message. When the result is not
+/// JSON (defensive; tool results are JSON by contract) the note is appended
+/// as a plain-text suffix so it is never lost.
+fn attach_extended_gateway_note(result: String, extended: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(&result) {
+        Ok(mut value) => {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "gateway_note".to_string(),
+                    serde_json::Value::String(extended.to_string()),
+                );
+            }
+            serde_json::to_string(&value).unwrap_or_else(|_| result)
+        }
+        Err(_) => {
+            format!("{result}\n\n[gateway_note — extended instructions loaded on first tool call]\n{extended}")
+        }
+    }
+}
+
 fn normalize_error_signature(message: &str) -> String {
     let mut s = message.to_lowercase();
     // Replace UUID-like hex strings.
@@ -495,6 +529,7 @@ impl AgentExecutor {
             persona: None,
             overflow_recovery: false,
             extended_instructions: None,
+            extended_loaded: false,
             blocked_state_event_emitted: false,
             resume_pending_batch: None,
             loop_guard_declaration,
@@ -1743,6 +1778,7 @@ impl AgentExecutor {
             tool_tier_escalated: self.tool_tier_escalated,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: self.blocked_state_event_emitted,
+            extended_loaded: self.extended_loaded,
             agent_id: self.manifest.agent.id.clone(),
             session_id: self.session_id.clone().unwrap_or_default(),
             turn_id: turn_id.to_string(),
@@ -2004,7 +2040,7 @@ impl AgentExecutor {
     pub async fn execute_loop(&mut self) -> anyhow::Result<()> {
         let user_context = self.build_user_context_snippet();
         let memory_context = self.build_memory_context_snippet();
-        let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
+        let inlined_instructions = self.composed_instructions();
         // This pre-loop system message is replaced by the per-turn compose before
         // the model sees it, so ToolPresent gating (empty here) doesn't matter.
         let guidance_rendered = self.render_tool_guidance(&self.compute_tier_filter(), &[]);
@@ -2744,7 +2780,7 @@ impl AgentExecutor {
             let guidance_rendered = self.render_tool_guidance(&tier_filter, &advertised_tool_names);
             let user_context = self.build_user_context_snippet();
             let memory_context = self.build_memory_context_snippet();
-            let inlined_instructions = inline_extended(&self.instructions, self.extended_instructions.as_deref());
+            let inlined_instructions = self.composed_instructions();
             let mut system_instructions = compose_system_instructions_full(
                 &inlined_instructions,
                 &self.manifest,
@@ -4552,6 +4588,45 @@ impl AgentExecutor {
 
     /// Processes a batch of tool calls from the LLM. Returns `Some(TurnOutcome)`
     /// if the turn should suspend (approval/user-input/escalation), or `None`
+    /// The agent-instruction layer for the system prompt (#1015).
+    ///
+    /// Before the first tool call of the session the extended SKILL.md half is
+    /// NOT inlined — the core instructions are composed alone, saving the
+    /// extended tokens (~4.3k for planner) on the cold turn-1 input. The first
+    /// tool call flips `extended_loaded` (and injects the extended content as
+    /// a `gateway_note` on the first tool result), so every compose from then
+    /// on inlines both halves exactly as before the split.
+    fn composed_instructions(&self) -> String {
+        if self.extended_loaded {
+            inline_extended(&self.instructions, self.extended_instructions.as_deref())
+        } else {
+            self.instructions.clone()
+        }
+    }
+
+    /// Mechanically load the extended SKILL.md half on the FIRST tool call of
+    /// the session (#1015). Flipped at the top of `handle_tool_batch`, so the
+    /// next system-prompt compose (which happens after the tool results are
+    /// committed) inlines the extended content. Returns the extended text to
+    /// attach as a `gateway_note` on the first tool result pushed to history,
+    /// or `None` when already loaded / there is nothing to load.
+    fn take_first_tool_extended_note(&mut self) -> Option<String> {
+        if self.extended_loaded {
+            return None;
+        }
+        let ext = self
+            .extended_instructions
+            .as_deref()
+            .filter(|e| !e.is_empty())?;
+        self.extended_loaded = true;
+        tracing::info!(
+            target: "autonoetic::extended",
+            chars = ext.chars().count(),
+            "Extended SKILL instructions mechanically loaded on first tool call"
+        );
+        Some(ext.to_string())
+    }
+
     /// Truncate a tool result once, at push time, using JSON-aware
     /// truncation. This avoids re-parsing every tool result as JSON on every
     /// subsequent turn via `sanitize_history_for_request`.
@@ -4583,6 +4658,11 @@ impl AgentExecutor {
         digest_turn_active: &mut bool,
     ) -> anyhow::Result<Option<TurnOutcome>> {
         let session_id = self.ensure_session_id();
+        // #1015: the FIRST tool call of the session mechanically loads the
+        // extended SKILL.md half. Flip the flag up front (so the next system-
+        // prompt compose inlines it) and keep the text to attach to the first
+        // tool result pushed to history below.
+        let mut first_tool_extended_note = self.take_first_tool_extended_note();
             if let Some(budget) = self.session_budget.as_ref() {
                 if let Err(e) = budget
                     .reserve_tool_invocations(&session_id, tool_calls.len() as u64)
@@ -4881,11 +4961,16 @@ impl AgentExecutor {
 
                 history.push(assistant_msg);
                 for (id, name, result) in &completed_results {
-                    history.push(Message::tool_result(
-                        id.clone(),
-                        name.clone(),
-                        self.truncate_result(result),
-                    ));
+                    let mut content = result.clone();
+                    // First tool result of the session carries the extended
+                    // SKILL.md content as a `gateway_note` (#1015); attached
+                    // BEFORE truncation so the note survives the JSON-aware
+                    // truncator (see the main push site comment).
+                    if let Some(note) = first_tool_extended_note.take() {
+                        content = attach_extended_gateway_note(content, &note);
+                    }
+                    let content = self.truncate_result(&content);
+                    history.push(Message::tool_result(id.clone(), name.clone(), content));
                 }
 
                 let pending_tool_state = Some(PendingToolState {
@@ -5069,11 +5154,22 @@ impl AgentExecutor {
             history.push(assistant_msg);
             let mut tool_feedback_events: Vec<FeedbackEvent> = Vec::new();
             for (id, _name, result) in &results {
-                history.push(Message::tool_result(
-                    id.clone(),
-                    _name.clone(),
-                    self.truncate_result(result),
-                ));
+                let mut content = result.clone();
+                // First tool result of the session carries the extended
+                // SKILL.md content as a `gateway_note` (#1015). The note is
+                // attached BEFORE truncation: truncate_result is JSON-aware
+                // and exempts `gateway_note` (and its siblings in
+                // TRUNCATION_EXEMPT_KEYS) from the per-field budget, so the
+                // stored result stays within `max_tool_result_chars` while the
+                // extended content survives verbatim. Attaching after
+                // truncation would leave an oversized message that
+                // `sanitize_history_for_request` later whole-string-truncates
+                // (non-JSON-aware `truncate_middle`) — invalid JSON risk.
+                if let Some(note) = first_tool_extended_note.take() {
+                    content = attach_extended_gateway_note(content, &note);
+                }
+                let content = self.truncate_result(&content);
+                history.push(Message::tool_result(id.clone(), _name.clone(), content));
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result) {
                     // Recurring-error detector (#703): feed every result — the
                     // method no-ops on non-errors and fingerprints both `ok:false`
@@ -6364,6 +6460,190 @@ mod tests {
         assert!(
             !system.contains("Editing existing content"),
             "content_patch guidance must be absent without WriteAccess"
+        );
+    }
+
+    // ---- extended-instructions mechanical loading (#1015) ----
+
+    #[test]
+    fn composed_instructions_gates_extended_half_on_loaded_flag() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "CORE CONTENT".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.extended_instructions = Some("EXTENDED CONTENT".to_string());
+
+        // Before the first tool call the extended half is NOT inlined.
+        assert!(!runtime.extended_loaded);
+        assert_eq!(runtime.composed_instructions(), "CORE CONTENT");
+
+        // After mechanical loading, both halves compose as before the split.
+        runtime.extended_loaded = true;
+        assert_eq!(
+            runtime.composed_instructions(),
+            "CORE CONTENT\n\nEXTENDED CONTENT"
+        );
+    }
+
+    #[test]
+    fn take_first_tool_extended_note_loads_once_and_returns_text() {
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "core".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.extended_instructions = Some("extended text".to_string());
+
+        // First tool call: flips the flag, returns the text to attach.
+        assert_eq!(
+            runtime.take_first_tool_extended_note().as_deref(),
+            Some("extended text")
+        );
+        assert!(runtime.extended_loaded);
+
+        // Second call (any later tool batch): no-op.
+        assert_eq!(runtime.take_first_tool_extended_note(), None);
+
+        // No extended instructions: never flips, never returns text.
+        let mut bare = AgentExecutor::new(
+            manifest_with_capabilities(vec![]),
+            "core".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        assert_eq!(bare.take_first_tool_extended_note(), None);
+        assert!(!bare.extended_loaded);
+    }
+
+    #[test]
+    fn attach_extended_gateway_note_injects_json_key_and_plain_fallback() {
+        // JSON tool result: extended content rides as a `gateway_note` key.
+        let json_result = r#"{"ok":true,"output":"done"}"#;
+        let attached = attach_extended_gateway_note(json_result.to_string(), "EXT");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&attached).expect("result stays valid JSON");
+        assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
+        assert_eq!(
+            parsed["gateway_note"],
+            serde_json::Value::String("EXT".to_string())
+        );
+
+        // Non-JSON result (defensive): note appended as a text suffix.
+        let plain = attach_extended_gateway_note("raw output".to_string(), "EXT");
+        assert!(plain.contains("raw output"));
+        assert!(plain.contains("EXT"));
+    }
+
+    #[test]
+    fn truncate_after_attach_keeps_note_and_budget() {
+        // Review feedback on #1032: the note must be attached BEFORE
+        // truncation so the stored tool result stays within
+        // max_tool_result_chars (JSON-aware) instead of being whole-string
+        // truncated later by the sanitize safety-net. The truncator exempts
+        // `gateway_note`, so the extended content survives verbatim while a
+        // bulky non-exempt output field is still cut.
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let runtime = AgentExecutor::new(
+            manifest,
+            "core".to_string(),
+            Arc::new(FixedTextDriver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+
+        // Build the full result (note attached), then truncate once — mirroring
+        // the push-site ordering in handle_tool_batch.
+        let big_output = "O".repeat(8000);
+        let result = serde_json::json!({
+            "ok": true,
+            "output": big_output,
+        })
+        .to_string();
+        let with_note = attach_extended_gateway_note(result, "EXTENDED SKILL TEXT");
+        let truncated = runtime.truncate_result(&with_note);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&truncated).expect("truncated result stays valid JSON");
+        assert_eq!(
+            parsed["gateway_note"].as_str().unwrap(),
+            "EXTENDED SKILL TEXT"
+        );
+        let out = parsed["output"].as_str().unwrap();
+        assert!(
+            out.chars().count() < 8000,
+            "non-exempt output field should still be truncated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_loop_core_only_before_first_tool_call_then_extended() {
+        // Acceptance test (#1015): with extended instructions present, the
+        // system prompt before any tool call contains ONLY the core; after the
+        // first tool call flips the flag, the next compose inlines extended.
+        let manifest = manifest_with_capabilities(vec![]);
+        let temp = tempdir().expect("tempdir should create");
+        let captured = Arc::new(Mutex::new(None));
+        let driver = CaptureSystemDriver {
+            system_message: Arc::clone(&captured),
+        };
+        let mut runtime = AgentExecutor::new(
+            manifest,
+            "CORE RULES".to_string(),
+            Arc::new(driver),
+            temp.path().to_path_buf(),
+            crate::runtime::tools::default_registry(),
+            None,
+        );
+        runtime.extended_instructions = Some("EXTENDED EXECUTION RULES".to_string());
+
+        // First turn: no tool calls (driver returns EndTurn immediately), so
+        // the flag never flips and the system prompt is core-only.
+        runtime
+            .execute_loop()
+            .await
+            .expect("execution should succeed");
+        let system = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("system message captured");
+        assert!(system.contains("CORE RULES"));
+        assert!(
+            !system.contains("EXTENDED EXECUTION RULES"),
+            "extended content must NOT be in the system prompt before the first tool call"
+        );
+        assert!(!runtime.extended_loaded);
+
+        // Simulate the first tool call having happened: the mechanical load
+        // flips the flag, so the next compose inlines the extended half.
+        runtime.extended_loaded = true;
+        runtime
+            .execute_loop()
+            .await
+            .expect("execution should succeed");
+        let system = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("system message captured");
+        assert!(
+            system.contains("EXTENDED EXECUTION RULES"),
+            "extended content must appear in the system prompt after the first tool call"
         );
     }
 

@@ -179,6 +179,13 @@ pub struct SessionCheckpoint {
     pub discovered_tools: std::collections::HashSet<String>,
     #[serde(default)]
     pub blocked_state_event_emitted: bool,
+    /// Whether the extended SKILL.md half has been mechanically loaded on the
+    /// first tool call (#1015). Persisted so a resumed session keeps the same
+    /// loaded state: an already-loaded session must not re-inject the
+    /// `gateway_note`, and an un-loaded one must not inline extended before
+    /// its first tool call.
+    #[serde(default)]
+    pub extended_loaded: bool,
 
     // --- Session identity ---
     pub agent_id: String,
@@ -300,6 +307,7 @@ impl SessionCheckpoint {
         runtime.session_state = self.session_state;
         runtime.tool_tier_escalated = self.tool_tier_escalated;
         runtime.discovered_tools = self.discovered_tools.clone();
+        runtime.extended_loaded = self.extended_loaded;
         runtime.session_started = true;
         runtime.turn_counter = self.turn_counter;
         runtime.blocked_state_event_emitted = self.blocked_state_event_emitted;
@@ -1110,6 +1118,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
             turn_id: "turn-001".to_string(),
@@ -1164,6 +1173,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: "session-egress".to_string(),
             turn_id: "turn-001".to_string(),
@@ -1328,6 +1338,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: "session-123".to_string(),
             turn_id: "turn-001".to_string(),
@@ -1372,6 +1383,115 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_round_trips_extended_loaded_flag() {
+        // #1015: the extended-instructions loaded flag must survive save/load.
+        // A session that already mechanically loaded extended on its first
+        // tool call must not re-inject the gateway_note after a resume, and an
+        // un-loaded one must not inline extended before its first tool call.
+        let temp = tempfile::tempdir().expect("tempdir should create");
+        let config = test_config(&temp);
+
+        for expected in [false, true] {
+            let checkpoint = SessionCheckpoint {
+                egress_labels: Default::default(),
+                egress_ask: None,
+                history: vec![Message::user("hello")],
+                turn_counter: 1,
+                loop_guard_state: LoopGuard::default(),
+                session_state: autonoetic_types::agent::SessionState::Normal,
+                tool_tier_escalated: false,
+                discovered_tools: Default::default(),
+                blocked_state_event_emitted: false,
+                extended_loaded: expected,
+                agent_id: "test-agent".to_string(),
+                session_id: format!("session-ext-{expected}"),
+                turn_id: "turn-001".to_string(),
+                workflow_id: None,
+                task_id: None,
+                runtime_lock_hash: None,
+                constitution_version: None,
+                constitution_digest: None,
+                llm_config_snapshot: None,
+                tool_registry_version: None,
+                yield_reason: YieldReason::Hibernation,
+                content_store_refs: vec![],
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                pending_tool_state: None,
+                llm_rounds_consumed: 1,
+                tool_invocations_consumed: 0,
+                tokens_consumed: 100,
+                estimated_cost_usd: 0.001,
+                compression_metadata: None,
+                capsule_state: None,
+                assistant_message: None,
+                pending_action: None,
+                suspended_at: None,
+                suppress_until_turn: 0,
+                trajectory_last_level: None,
+                feedback_events: vec![],
+            };
+            save_checkpoint(&config, &checkpoint).expect("should save");
+            let loaded = load_checkpoint(&config, &checkpoint.session_id, &checkpoint.turn_id)
+                .expect("should load")
+                .expect("should have checkpoint");
+            assert_eq!(loaded.extended_loaded, expected);
+        }
+
+        // Legacy checkpoints (predating the field) deserialize as unloaded.
+        let legacy = SessionCheckpoint {
+            egress_labels: Default::default(),
+            egress_ask: None,
+            history: vec![Message::user("hello")],
+            turn_counter: 1,
+            loop_guard_state: LoopGuard::default(),
+            session_state: autonoetic_types::agent::SessionState::Normal,
+            tool_tier_escalated: false,
+            discovered_tools: Default::default(),
+            blocked_state_event_emitted: false,
+            extended_loaded: true,
+            agent_id: "test-agent".to_string(),
+            session_id: "session-legacy".to_string(),
+            turn_id: "turn-001".to_string(),
+            workflow_id: None,
+            task_id: None,
+            runtime_lock_hash: None,
+            constitution_version: None,
+            constitution_digest: None,
+            llm_config_snapshot: None,
+            tool_registry_version: None,
+            yield_reason: YieldReason::Hibernation,
+            content_store_refs: vec![],
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            pending_tool_state: None,
+            llm_rounds_consumed: 1,
+            tool_invocations_consumed: 0,
+            tokens_consumed: 100,
+            estimated_cost_usd: 0.001,
+            compression_metadata: None,
+            capsule_state: None,
+            assistant_message: None,
+            pending_action: None,
+            suspended_at: None,
+            suppress_until_turn: 0,
+            trajectory_last_level: None,
+            feedback_events: vec![],
+        };
+        // Serialize with the field present, then strip it to simulate an old
+        // checkpoint file (serde default kicks in on deserialize).
+        let json = serde_json::to_string(&legacy).expect("serialize");
+        let stripped: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        let obj = stripped.as_object().expect("object");
+        let without_field = {
+            let mut o = obj.clone();
+            o.remove("extended_loaded");
+            serde_json::Value::Object(o)
+        };
+        let deserialized: SessionCheckpoint =
+            serde_json::from_value(without_field).expect("legacy checkpoint deserializes");
+        assert!(!deserialized.extended_loaded);
+    }
+
+    #[test]
     fn test_load_latest_checkpoint() {
         let temp = tempfile::tempdir().expect("tempdir should create");
         let config = test_config(&temp);
@@ -1398,6 +1518,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: "turn-001".to_string(),
@@ -1472,6 +1593,7 @@ mod tests {
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
+                extended_loaded: false,
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),
                 turn_id: format!("turn-{:03}", i),
@@ -1566,6 +1688,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
@@ -1650,6 +1773,7 @@ mod tests {
                 tool_tier_escalated: false,
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
+                extended_loaded: false,
                 agent_id: "test-agent".to_string(),
                 session_id: session_id.to_string(),
                 turn_id: turn_id_for(turn),
@@ -1713,6 +1837,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
@@ -1788,6 +1913,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: session_id.to_string(),
             turn_id: turn_id.to_string(),
@@ -1851,6 +1977,7 @@ mod tests {
             tool_tier_escalated: false,
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "test-agent".to_string(),
             session_id: "session-legacy".to_string(),
             turn_id: "turn-001".to_string(),

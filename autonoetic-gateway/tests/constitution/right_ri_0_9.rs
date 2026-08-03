@@ -86,6 +86,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         agent_id: "planner.default".to_string(),
         session_id: session_id.to_string(),
         turn_id: "turn-000001".to_string(),

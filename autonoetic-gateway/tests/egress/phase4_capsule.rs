@@ -310,6 +310,7 @@ fn replay_checkpoint(
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         loop_guard_state: Default::default(),
         agent_id: agent_id.to_string(),
         session_id: session_id.to_string(),

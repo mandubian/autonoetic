@@ -64,10 +64,19 @@ Your natural language instructions go here.
 ## Extended Instructions (`<!-- extended -->`)
 
 Place `<!-- extended -->` on its own line to split the body:
-- **Before marker**: Always injected into system prompt
-- **After marker**: Available on-demand via `resolve({"ref": "extended_instructions"})`
+- **Before marker**: Always injected into system prompt (the core)
+- **After marker**: The extended half — loaded **mechanically by the gateway on
+  the agent's first tool call** (#1015), injected as a `gateway_note` on the
+  first tool result; from then on it is inlined into the system prompt like any
+  other content. There is no manual fetch path: agents do not (and cannot)
+  `resolve` it ahead of time — any first tool call delivers it.
 
-Use this to keep the core prompt lean while providing detailed reference material.
+Use this to keep the core prompt lean (saving the extended tokens on the cold
+turn-1 input) while still guaranteeing the agent gets the detailed reference
+material the moment it starts executing — no `resolve` required. Agent SKILLs
+with the marker should include a compact "Extended Instructions" ToC in the
+core half so the agent knows what topics will arrive (see planner.default /
+coder.default).
 
 ## Runtime Lock
 

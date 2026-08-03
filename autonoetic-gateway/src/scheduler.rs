@@ -3699,6 +3699,7 @@ mod stuck_task_tests {
             tool_tier_escalated: false,
             discovered_tools: std::collections::HashSet::new(),
             blocked_state_event_emitted: false,
+            extended_loaded: false,
             agent_id: "coder.default".to_string(),
             session_id: session_id.clone(),
             turn_id: "turn-1".to_string(),

@@ -80,6 +80,7 @@ fn default_checkpoint(session_id: &str, turn: u64) -> SessionCheckpoint {
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
         turn_id: turn_id_for(turn),

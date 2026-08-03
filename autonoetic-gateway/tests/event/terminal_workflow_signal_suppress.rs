@@ -210,6 +210,7 @@ fn build_hibernation_checkpoint(
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         agent_id: "planner.default".to_string(),
         session_id: session_id.to_string(),
         turn_id: "turn-000003".to_string(),

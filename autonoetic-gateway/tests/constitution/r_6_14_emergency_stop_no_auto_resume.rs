@@ -28,6 +28,7 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
         tool_tier_escalated: false,
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
+        extended_loaded: false,
         agent_id: "test-agent".to_string(),
         session_id: session_id.to_string(),
         turn_id: "turn-0001".to_string(),
