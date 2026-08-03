@@ -201,6 +201,19 @@ fn collect_regex_matches(
     }
 }
 
+/// Library-name import detector for Python.
+///
+/// **Do not extend this list to cover a newly-encountered client library.** That
+/// was the treadmill #1021 removed: the list can never keep up (it was missing
+/// `http.client` — Python's own stdlib HTTP client — until sink detection
+/// landed). Reaching the network requires bottoming out on a stdlib primitive,
+/// and [`crate::runtime::network_sinks`] detects those structurally, so a new
+/// library is covered with no code change.
+///
+/// The list remains useful for two narrower jobs, and should only change for
+/// them: it is a coarse signal that a *module was imported at all* (which
+/// catches intent even where no sink call is resolvable), and it is what the
+/// `python_imports` declaration field is matched against.
 struct PythonImportDetector;
 impl ImportLanguageDetector for PythonImportDetector {
     fn language(&self) -> RemoteAccessLanguage {
@@ -572,6 +585,13 @@ impl RemoteAccessAnalyzer {
         // Check for network-related function calls
         patterns.extend(Self::detect_function_calls(code, active_languages.as_ref()));
 
+        // Check for network sinks reached through the code's own import bindings
+        // (#1021). Structural: a client library that is on no import list is
+        // still detected, because it bottoms out on the closed stdlib/builtin
+        // sink set. Scoped by the same active-language set as the call
+        // heuristics.
+        patterns.extend(Self::detect_network_sinks(code, active_languages.as_ref()));
+
         // Check for URL literals
         patterns.extend(Self::detect_url_literals(code));
 
@@ -639,6 +659,59 @@ impl RemoteAccessAnalyzer {
             }
         }
         scan
+    }
+
+    /// Detects network sinks resolved through the code's own import bindings
+    /// (see [`crate::runtime::network_sinks`]).
+    ///
+    /// This is the structural counterpart to the library-name import lists: it
+    /// answers "does this code reach a network primitive?" instead of "does this
+    /// code name a library we happen to know about?", so an unlisted or brand-new
+    /// client is still detected.
+    ///
+    /// Emitted under the `network_sink` category, which
+    /// [`undeclared_patterns_against_manifest`] does not gate — the sink is a
+    /// *detection* signal that raises the approval gate, and does not add
+    /// anything new that agents must enumerate in their declaration. Narrowing
+    /// what must be declared is #1023's decision, not this one's.
+    ///
+    /// When the language is unknown both resolvers run. That is safe rather than
+    /// merely conservative: each resolver only matches calls bound by its own
+    /// language's import grammar, so the Python resolver binds nothing in JS
+    /// source and vice versa.
+    fn detect_network_sinks(
+        code: &str,
+        active: Option<&HashSet<RemoteAccessLanguage>>,
+    ) -> Vec<DetectedPattern> {
+        use crate::runtime::network_sinks::{detect_javascript_sinks, detect_python_sinks};
+
+        let mut found = Vec::new();
+        if pattern_applies_in_scope(Some(RemoteAccessLanguage::Python), active) {
+            found.extend(detect_python_sinks(code));
+        }
+        if pattern_applies_in_scope(Some(RemoteAccessLanguage::Javascript), active) {
+            found.extend(detect_javascript_sinks(code));
+        }
+
+        let mut patterns: Vec<DetectedPattern> = Vec::new();
+        for sink in found {
+            // Name the resolved sink, and the as-written call when the two
+            // differ, so an operator reading the approval sees both the
+            // primitive and the alias it arrived through.
+            let reason = if sink.matched == sink.sink {
+                sink.reason.clone()
+            } else {
+                format!("{} (via `{}`)", sink.reason, sink.matched)
+            };
+            push_unique_pattern(
+                &mut patterns,
+                "network_sink",
+                &sink.sink,
+                sink.line,
+                &reason,
+            );
+        }
+        patterns
     }
 
     /// Detects function/method calls for network operations.
@@ -1626,6 +1699,170 @@ urlopen("https://example.org")
         assert_eq!(
             language_scope_for_code(Some(&HashSet::new()), &signal),
             Some(signal)
+        );
+    }
+
+    // --- Network sink detection tests (#1021) ---
+
+    /// The treadmill fix, demonstrated on a real gap: `http.client` is Python's
+    /// *stdlib* HTTP client and appears nowhere in `PythonImportDetector`'s
+    /// library list, so this code produced **zero** signals before sink
+    /// resolution. Nothing had to be added to a list to catch it — the call
+    /// resolves to a sink.
+    #[test]
+    fn test_stdlib_sink_detected_without_any_import_list_entry() {
+        let code = r#"
+import http.client
+conn = http.client.HTTPSConnection(target_host)
+conn.request("GET", "/v1/data")
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(
+            analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "network_sink"
+                    && p.pattern == "http.client.HTTPSConnection"),
+            "expected the stdlib sink to be detected: {:?}",
+            analysis.detected_patterns
+        );
+    }
+
+    /// An unlisted client library is irrelevant when the sink it bottoms out on
+    /// is in the analyzed source — this is the issue's headline case.
+    #[test]
+    fn test_unlisted_library_detected_through_its_sink() {
+        let code = r#"
+import socket
+# `acme_transport` is on no list in this codebase and never needs to be.
+def send(payload, host):
+    s = socket.create_connection((host, 9000))
+    s.sendall(payload)
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_sink" && p.pattern == "socket.create_connection"));
+    }
+
+    /// Aliases are followed, and the operator-facing reason names the alias the
+    /// sink arrived through.
+    #[test]
+    fn test_sink_alias_is_resolved_and_reported() {
+        let code = "import urllib.request as u\nu.urlopen(dest)\n";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        let sink = analysis
+            .detected_patterns
+            .iter()
+            .find(|p| p.category == "network_sink")
+            .expect("sink detected");
+        assert_eq!(sink.pattern, "urllib.request.urlopen");
+        assert!(
+            sink.reason.contains("via `u.urlopen`"),
+            "reason should name the alias: {}",
+            sink.reason
+        );
+    }
+
+    /// Sinks strengthen **detection** without widening what an agent must
+    /// enumerate: `network_sink` is not gated by
+    /// `undeclared_patterns_against_manifest`. Narrowing/expanding the
+    /// declaration contract is #1023's decision, not #1021's — so a declaration
+    /// that covers the agent's hosts does not also have to list every sink.
+    #[test]
+    fn test_network_sink_does_not_add_declaration_burden() {
+        let code = "import http.client\nhttp.client.HTTPSConnection(h)\n";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        let sinks: Vec<&DetectedPattern> = analysis
+            .detected_patterns
+            .iter()
+            .filter(|p| p.category == "network_sink")
+            .collect();
+        assert!(!sinks.is_empty(), "precondition: a sink was detected");
+
+        // A declaration that names no function calls at all.
+        let declaration = RemoteAccessDeclaration {
+            targets: vec![],
+            ..Default::default()
+        };
+        let undeclared =
+            undeclared_patterns_against_manifest(&analysis.detected_patterns, Some(&declaration));
+        assert!(
+            !undeclared.iter().any(|p| p.category == "network_sink"),
+            "sinks must not fail shut as undeclared patterns: {undeclared:?}"
+        );
+    }
+
+    /// Sink scoping honours `enabled_languages`, consistently with the #1020
+    /// call-pattern scoping.
+    #[test]
+    fn test_enabled_languages_scopes_sink_detection() {
+        let python_code = "import http.client\nhttp.client.HTTPSConnection(h)\n";
+        let js_only = RemoteAccessDeclaration {
+            enabled_languages: vec![RemoteAccessLanguage::Javascript],
+            ..Default::default()
+        };
+        let analysis =
+            RemoteAccessAnalyzer::analyze_code_with_declaration(python_code, Some(&js_only));
+        assert!(
+            !analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "network_sink"),
+            "Python sinks must not fire when only Javascript is enabled: {:?}",
+            analysis.detected_patterns
+        );
+
+        let py_only = RemoteAccessDeclaration {
+            enabled_languages: vec![RemoteAccessLanguage::Python],
+            ..Default::default()
+        };
+        let analysis =
+            RemoteAccessAnalyzer::analyze_code_with_declaration(python_code, Some(&py_only));
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_sink"));
+    }
+
+    /// A `node:`-prefixed Node built-in import matches none of the JS import
+    /// regexes (they alternate on bare specifiers), so this was another
+    /// zero-signal case that sink resolution closes.
+    #[test]
+    fn test_node_prefixed_builtin_import_detected_through_sink() {
+        let code = "import { request } from \"node:https\";\nrequest(opts);\n";
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(
+            analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "network_sink" && p.pattern == "https.request"),
+            "expected node:https sink: {:?}",
+            analysis.detected_patterns
+        );
+    }
+
+    /// Inert code stays inert — sink resolution must not manufacture signals,
+    /// since every new signal can turn a silent exec into an approval gate.
+    #[test]
+    fn test_sinks_add_no_false_positives_to_inert_code() {
+        let code = r#"
+import json
+import math
+data = {}
+data.get("http")
+print(json.dumps({"a": math.sqrt(4)}))
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(
+            !analysis
+                .detected_patterns
+                .iter()
+                .any(|p| p.category == "network_sink"),
+            "no sinks expected: {:?}",
+            analysis.detected_patterns
         );
     }
 

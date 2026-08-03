@@ -45,6 +45,7 @@ pub mod memory;
 pub mod middleware;
 pub mod model_router;
 pub mod network_grant;
+pub mod network_sinks;
 pub mod network_host_contract;
 pub mod network_policy;
 pub mod local_model_context;
