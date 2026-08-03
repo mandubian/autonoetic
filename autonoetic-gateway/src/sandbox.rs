@@ -44,6 +44,14 @@ const ALLOW_SANDBOX_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_SANDBOX_ENV_OVER
 
 static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
 static SDK_DEPLOYED_PATH: OnceLock<String> = OnceLock::new();
+/// Additional host paths to mask inside every bubblewrap sandbox. Stopgap for
+/// #1002: the host `/` is ro-bind-mounted, so without masking a sandboxed
+/// process can read gateway-internal files. The gateway directory's sensitive
+/// contents (vault key, session DB, identity key, sessions/, …) are ALWAYS
+/// masked — derived per-spawn from the agent dir (see [`bwrap_deny_path_flags`]).
+/// This list is for the operator config file and any other paths the operator
+/// chooses to add. Populated once at startup via [`init_sandbox_host_deny_paths`].
+static SANDBOX_HOST_DENY_PATHS: OnceLock<Vec<std::path::PathBuf>> = OnceLock::new();
 
 /// Per-execution overrides for bubblewrap isolation flags.
 /// Derived from the executing agent's capabilities.
@@ -135,6 +143,61 @@ pub fn init_sdk_deployed_path(gateway_dir: &Path) {
     if py_sdk.exists() {
         let _ = SDK_DEPLOYED_PATH.set(py_sdk.to_string_lossy().to_string());
     }
+}
+
+/// Register additional host paths to mask (hide) inside every bubblewrap
+/// sandbox. Stopgap for #1002: the default bubblewrap driver ro-binds the
+/// whole host `/`, so a sandboxed agent with code-execution could otherwise
+/// read the gateway config (provider/endpoint config, `continuation_key`),
+/// sibling agents' state, or any operator file. The gateway directory's own
+/// sensitive files are masked unconditionally (derived per-spawn); this list
+/// is for the config file and operator-specified paths. Non-existent paths are
+/// silently skipped at mount-build time. Idempotent — first call wins.
+///
+/// Paths are normalized via [`normalize_deny_paths`] before storage: relative
+/// paths are made absolute (bwrap dests are namespace-absolute against the
+/// ro-mounted `/`, so a relative path would silently fail to mask), and
+/// symlinked targets are added alongside the link path so a config reachable
+/// via its real path can't escape masking.
+pub fn init_sandbox_host_deny_paths(paths: Vec<PathBuf>) {
+    let _ = SANDBOX_HOST_DENY_PATHS.set(normalize_deny_paths(&paths));
+}
+
+/// Normalize a set of deny paths for use as bwrap mount destinations:
+/// - **Make absolute** — resolve relative paths against the gateway CWD. bwrap
+///   interprets bind destinations against the sandbox namespace (rooted at the
+///   ro-mounted host `/`), so a relative path would not mask the real file.
+/// - **Add canonical targets** — if a path is a symlink, `canonicalize` it and
+///   include the real target so the file can't be read via its underlying path
+///   (e.g. `~/.autonoetic/config.yaml` → `/etc/autonoetic/config.yaml`).
+/// - **Dedup** — identical absolute/canonical forms collapse to one entry.
+///
+/// Existence is *not* required here — the mount-builder
+/// ([`push_deny_file`]/[`push_deny_dir`]) skips non-existent paths at spawn
+/// time. A path that doesn't resolve canonically (missing now, created later)
+/// still contributes its absolute form for the common case.
+fn normalize_deny_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        let abs = if p.is_absolute() {
+            p.clone()
+        } else {
+            cwd.join(p)
+        };
+        // Cover symlinked configs: mask the real target too, so the file can't
+        // be read via its canonical path around the link.
+        let canon = std::fs::canonicalize(&abs).ok();
+        if !out.contains(&abs) {
+            out.push(abs);
+        }
+        if let Some(canon) = canon {
+            if !out.contains(&canon) {
+                out.push(canon);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -1400,6 +1463,89 @@ fn split_entrypoint(entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
     Ok((program, args))
 }
 
+/// Sensitive files inside the gateway directory that a sandboxed process must
+/// never read: the credential vault key + encrypted blob, the SQLite session
+/// DB (and its WAL/shm sidecars), and the Ed25519 attestation identity key.
+/// The public sidecar and `sdk/` / `wiki/` / `constitution/` are deliberately
+/// NOT listed — `sdk/` is the SDK PYTHONPATH source (needed in-sandbox), and
+/// the constitution is public agent-readable law.
+const BWRAP_GATEWAY_SENSITIVE_FILES: &[&str] = &[
+    "vault.key",
+    "vault.enc.json",
+    "gateway.db",
+    "gateway.db-shm",
+    "gateway.db-wal",
+    "state_attestation.ed25519",
+];
+
+/// Sensitive subdirectories inside the gateway directory that a sandboxed
+/// process has no legitimate reason to read directly — the agent reaches all
+/// of these through tools, not the filesystem. Masked with an empty tmpfs.
+const BWRAP_GATEWAY_SENSITIVE_DIRS: &[&str] = &[
+    "sessions",
+    "scheduler",
+    "checkpoints",
+    "history",
+    "logs",
+    "revisions",
+];
+
+/// Push a bubblewrap flag that shadows a single host FILE with `/dev/null`
+/// (reads return EOF), so the sandboxed process cannot read it. No-op when the
+/// path doesn't exist on the host — bwrap resolves sources against the host
+/// filesystem, so the dest must resolve against the ro-mounted `/` too.
+fn push_deny_file(flags: &mut Vec<String>, p: &std::path::Path) {
+    if p.exists() {
+        flags.push("--ro-bind".to_string());
+        flags.push("/dev/null".to_string());
+        flags.push(p.to_string_lossy().to_string());
+    }
+}
+
+/// Push a bubblewrap flag that shadows a host DIRECTORY with an empty tmpfs,
+/// so the sandboxed process cannot read or list it. No-op when the path
+/// doesn't exist on the host.
+fn push_deny_dir(flags: &mut Vec<String>, p: &std::path::Path) {
+    if p.exists() {
+        flags.push("--tmpfs".to_string());
+        flags.push(p.to_string_lossy().to_string());
+    }
+}
+
+/// Build the bubblewrap argv slice that masks gateway-internal secrets and any
+/// operator-registered deny paths, so a sandboxed process cannot read them
+/// through the ro-mounted host `/` (stopgap for #1002). The gateway directory
+/// is derived from the agent dir as its sibling `.gateway`; its `sdk/` subtree
+/// is intentionally left accessible (the sandbox reads its PYTHONPATH from that
+/// host path). Operator paths come from [`init_sandbox_host_deny_paths`].
+fn bwrap_deny_path_flags(agent_dir: &str) -> Vec<String> {
+    let mut flags = Vec::new();
+
+    if let Some(gateway_dir) = std::path::Path::new(agent_dir)
+        .parent()
+        .map(|agents_root| agents_root.join(".gateway"))
+    {
+        for name in BWRAP_GATEWAY_SENSITIVE_FILES {
+            push_deny_file(&mut flags, &gateway_dir.join(name));
+        }
+        for name in BWRAP_GATEWAY_SENSITIVE_DIRS {
+            push_deny_dir(&mut flags, &gateway_dir.join(name));
+        }
+    }
+
+    if let Some(extra) = SANDBOX_HOST_DENY_PATHS.get() {
+        for p in extra {
+            if p.is_dir() {
+                push_deny_dir(&mut flags, p);
+            } else {
+                push_deny_file(&mut flags, p);
+            }
+        }
+    }
+
+    flags
+}
+
 fn bubblewrap_command(
     agent_dir: &str,
     entrypoint: &str,
@@ -1417,6 +1563,11 @@ fn bubblewrap_command(
         BWRAP_WORKSPACE_DIR.to_string(),
     ];
     append_bwrap_isolation_flags(&mut argv, overrides);
+    // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
+    // the host `/` is ro-bind-mounted above). Must come after the ro-bind of
+    // `/` so the destinations resolve, and before any explicit re-expose
+    // mounts so they can layer back on top.
+    argv.extend(bwrap_deny_path_flags(agent_dir));
     argv.push("--".to_string());
     argv.push(program);
     argv.extend(args);
@@ -1452,6 +1603,11 @@ fn bubblewrap_shell_command(
         BWRAP_WORKSPACE_DIR.to_string(),
     ];
     append_bwrap_isolation_flags(&mut argv, overrides);
+
+    // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
+    // the host `/` is ro-bind-mounted above) BEFORE explicit content/SDK
+    // mounts so those can layer back on top of the masked paths when needed.
+    argv.extend(bwrap_deny_path_flags(agent_dir));
 
     // Add extra bind mounts for session content
     for mount in extra_mounts {
@@ -1778,11 +1934,18 @@ mod tests {
 
     #[test]
     fn test_bubblewrap_command_shape() {
-        let (_bin, argv) = bubblewrap_command("/tmp/agent", "python main.py", None)
+        // Use an isolated tempdir so the deny-path masking (derived from the
+        // agent dir's sibling `.gateway`) has nothing to mask — keeps the
+        // fixed argv positions stable regardless of the host's /tmp state.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
+        let (_bin, argv) = bubblewrap_command(&agent_dir_str, "python main.py", None)
             .expect("bubblewrap command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
-        assert_eq!(argv[4], "/tmp/agent");
+        assert_eq!(argv[4], agent_dir_str);
         assert_eq!(argv[5], "/tmp");
         assert_eq!(argv[6], "--chdir");
         assert_eq!(argv[7], "/tmp");
@@ -1959,11 +2122,17 @@ mod tests {
 
     #[test]
     fn test_bubblewrap_shell_command_shape() {
-        let (_bin, argv) = bubblewrap_shell_command("/tmp/agent", "echo hi", &[], None)
+        // Isolated tempdir: no `.gateway` secrets to mask, so argv positions
+        // are stable.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
+        let (_bin, argv) = bubblewrap_shell_command(&agent_dir_str, "echo hi", &[], None)
             .expect("shell command should build");
         assert_eq!(argv[0], "--ro-bind");
         assert_eq!(argv[3], "--bind");
-        assert_eq!(argv[4], "/tmp/agent");
+        assert_eq!(argv[4], agent_dir_str);
         assert_eq!(argv[5], "/tmp");
         assert_eq!(argv[6], "--chdir");
         assert_eq!(argv[7], "/tmp");
@@ -1972,6 +2141,160 @@ mod tests {
         assert_eq!(argv[10], "sh");
         assert_eq!(argv[11], "-c"); // Non-login shell
         assert_eq!(argv[12], "echo hi");
+    }
+
+    /// Stopgap for #1002: the bubblewrap sandbox masks gateway-internal secrets
+    /// (vault key, session DB, identity key, sessions/, …) so a sandboxed
+    /// process cannot read them through the ro-mounted host `/`. The SDK
+    /// subtree (`sdk/`) must stay visible because PYTHONPATH points there.
+    #[test]
+    fn bwrap_deny_flags_mask_gateway_secrets_but_not_sdk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_root = tmp.path();
+        let gateway_dir = agents_root.join(".gateway");
+        let agent_dir = agents_root.join("demo.agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(gateway_dir.join("sdk")).unwrap();
+        std::fs::create_dir_all(gateway_dir.join("sessions")).unwrap();
+        std::fs::write(gateway_dir.join("vault.key"), "secret").unwrap();
+        std::fs::write(gateway_dir.join("gateway.db"), "db").unwrap();
+        std::fs::write(gateway_dir.join("state_attestation.ed25519"), "k").unwrap();
+
+        let flags = bwrap_deny_path_flags(agent_dir.to_str().unwrap());
+        let joined = flags.join(" ");
+
+        // Sensitive files are shadowed with /dev/null.
+        assert!(
+            joined.contains(&format!(
+                "--ro-bind /dev/null {}",
+                gateway_dir.join("vault.key").display()
+            )),
+            "vault.key must be masked, got: {joined}"
+        );
+        assert!(
+            joined.contains(&format!(
+                "--ro-bind /dev/null {}",
+                gateway_dir.join("gateway.db").display()
+            )),
+            "gateway.db must be masked, got: {joined}"
+        );
+        assert!(
+            joined.contains(&format!(
+                "--ro-bind /dev/null {}",
+                gateway_dir.join("state_attestation.ed25519").display()
+            )),
+            "identity key must be masked, got: {joined}"
+        );
+        // Sensitive dirs are shadowed with an empty tmpfs.
+        assert!(
+            joined.contains(&format!("--tmpfs {}", gateway_dir.join("sessions").display())),
+            "sessions/ must be masked, got: {joined}"
+        );
+        // The SDK subtree and constitution must NOT be masked — the sandbox
+        // reads its PYTHONPATH from `<gateway_dir>/sdk` and the constitution
+        // is public agent-readable law.
+        assert!(
+            !joined.contains(&format!("{}", gateway_dir.join("sdk").display())),
+            "sdk/ must stay accessible, got: {joined}"
+        );
+    }
+
+    /// Non-existent gateway paths produce no deny flags (no false mountpoints,
+    /// no perturbing the argv shape for fresh gateways).
+    #[test]
+    fn bwrap_deny_flags_skip_nonexistent_paths() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // No .gateway at all → nothing to mask.
+        let flags = bwrap_deny_path_flags(agent_dir.to_str().unwrap());
+        assert!(flags.is_empty(), "expected no deny flags, got: {flags:?}");
+    }
+
+    /// The full shell-command builder inserts the deny slice between the
+    /// isolation flags and the `--` separator (and before explicit re-expose
+    /// mounts, so they can overlay masked paths).
+    #[test]
+    fn bubblewrap_shell_command_includes_deny_slice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let gateway_dir = tmp.path().join(".gateway");
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        std::fs::write(gateway_dir.join("vault.key"), "secret").unwrap();
+
+        let (_bin, argv) = bubblewrap_shell_command(agent_dir.to_str().unwrap(), "echo hi", &[], None)
+            .expect("shell command should build");
+        let unshare = argv.iter().position(|a| a == "--unshare-all").unwrap();
+        let sep = argv.iter().position(|a| a == "--").unwrap();
+        // The deny slice sits between isolation flags and the separator.
+        let deny_slice = &argv[unshare + 1..sep];
+        assert!(
+            deny_slice.iter().any(|a| a == "--ro-bind"),
+            "expected deny flags before the separator, argv: {argv:?}"
+        );
+    }
+
+    /// Relative deny paths are resolved to absolute form — bwrap destinations
+    /// are namespace-absolute, so a relative path would silently fail to mask.
+    #[test]
+    fn normalize_deny_paths_makes_relative_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let out = normalize_deny_paths(&[PathBuf::from("config.yaml")]);
+        assert!(
+            out.contains(&cwd.join("config.yaml")),
+            "relative path must be made absolute, got: {out:?}"
+        );
+        // No relative entries survive.
+        assert!(out.iter().all(|p| p.is_absolute()));
+    }
+
+    /// A symlinked config is masked at BOTH the link path and its canonical
+    /// target, so the file can't be read via its real path around the link.
+    #[test]
+    fn normalize_deny_paths_adds_symlink_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real_config.yaml");
+        std::fs::write(&real, "provider: x").unwrap();
+        let link = tmp.path().join("config.yaml");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let out = normalize_deny_paths(&[link.clone()]);
+        let canon = std::fs::canonicalize(&real).unwrap();
+        assert!(out.contains(&link), "link path must be present, got: {out:?}");
+        assert!(
+            out.contains(&canon),
+            "canonical target must also be masked, got: {out:?}"
+        );
+    }
+
+    /// A non-existent path still contributes its absolute form (it may be
+    /// created later), and produces no canonical entry.
+    #[test]
+    fn normalize_deny_paths_missing_path_is_absolute_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does_not_exist.yaml");
+        let out = normalize_deny_paths(&[missing.clone()]);
+        assert_eq!(out, vec![missing], "missing path → absolute form only");
+    }
+
+    /// Duplicate absolute/canonical forms collapse to one entry.
+    #[test]
+    fn normalize_deny_paths_dedups() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("f.yaml");
+        std::fs::write(&p, "x").unwrap();
+        // Pass the same path twice: the result must hold no duplicate entries,
+        // whether or not abs and canonical forms differ on this platform
+        // (macOS tempdirs live under a /var symlink).
+        let out = normalize_deny_paths(&[p.clone(), p.clone()]);
+        let unique: std::collections::HashSet<&PathBuf> = out.iter().collect();
+        assert_eq!(
+            unique.len(),
+            out.len(),
+            "no duplicate entries, got: {out:?}"
+        );
+        assert!(out.contains(&p));
     }
 
     #[test]

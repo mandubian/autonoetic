@@ -256,6 +256,58 @@ fn pipeline_unavailable_reason(
     }
 }
 
+/// Describe the LLM this agent is running on, resolved from its preset +
+/// gateway config. Exposes only `model`, `provider`, `context_window_tokens`,
+/// and the resolved `preset` — never `base_url`, `api_key_env`, or any other
+/// provider/endpoint secret. The signed per-turn state attestation carries
+/// the authoritative model id (including any session override); this is the
+/// default resolution at the time of the call, and degrades honestly to the
+/// manifest-declared fields (then `"unknown"`) when no config is available
+/// or resolution fails.
+fn describe_llm(
+    manifest: &AgentManifest,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+) -> serde_json::Value {
+    const NOTE_RESOLVED: &str = "Resolved from your preset + gateway config. The signed \
+        per-turn state attestation carries the authoritative model id (including any session \
+        override). Provider config, endpoints, and API keys are never exposed.";
+    const NOTE_FALLBACK: &str = "No gateway config available to resolve a preset — showing \
+        manifest-declared fields. The signed per-turn state attestation carries the \
+        authoritative resolved model id at runtime.";
+
+    if let Some(cfg) = config {
+        if let Ok(profile) =
+            crate::runtime::inference_profile::resolve_inference_profile(
+                &manifest.agent.id,
+                manifest,
+                cfg,
+                None,
+            )
+        {
+            return serde_json::json!({
+                "preset": profile.preset_name,
+                "model": profile.llm_config.model,
+                "provider": profile.llm_config.provider,
+                "context_window_tokens": profile.llm_config.context_window_tokens,
+                "note": NOTE_RESOLVED,
+            });
+        }
+    }
+
+    let (model, provider, context_window_tokens) = manifest
+        .llm_config
+        .as_ref()
+        .map(|c| (c.model.clone(), c.provider.clone(), c.context_window_tokens))
+        .unwrap_or_else(|| ("unknown".to_string(), String::new(), None));
+    serde_json::json!({
+        "preset": manifest.llm_preset,
+        "model": model,
+        "provider": provider,
+        "context_window_tokens": context_window_tokens,
+        "note": NOTE_FALLBACK,
+    })
+}
+
 pub struct SelfDescribeTool;
 
 impl NativeTool for SelfDescribeTool {
@@ -293,7 +345,7 @@ impl NativeTool for SelfDescribeTool {
         _arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
-        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<Arc<GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
@@ -335,6 +387,14 @@ impl NativeTool for SelfDescribeTool {
                 "name": manifest.agent.name,
                 "description": manifest.agent.description,
             },
+            // what am I running on — the concrete model resolved from your
+            // preset + gateway config. The signed per-turn state attestation
+            // carries the authoritative model id (incl. session overrides);
+            // this is the default resolution. Provider config, endpoints, and
+            // API keys are never exposed — only model id, provider, and the
+            // context window, so you can self-calibrate (context budget, known
+            // weaknesses, honest escalation) without a leak surface.
+            "llm": describe_llm(manifest, config),
             // what may I do
             "may_do": {
                 "capabilities": manifest
@@ -438,6 +498,60 @@ mod tests {
         serde_json::from_str(&r).unwrap()
     }
 
+    fn run_with_config(
+        manifest: &AgentManifest,
+        config: &autonoetic_types::config::GatewayConfig,
+    ) -> serde_json::Value {
+        let tool = SelfDescribeTool;
+        let policy = PolicyEngine::new(manifest.clone());
+        let r = tool
+            .execute(
+                manifest,
+                &policy,
+                Path::new("/tmp"),
+                None,
+                "{}",
+                Some("sess-1"),
+                None,
+                Some(config),
+                None,
+                None,
+            )
+            .unwrap();
+        serde_json::from_str(&r).unwrap()
+    }
+
+    /// Minimal config with one fixed provider/model preset, keyed under `name`.
+    fn config_with_preset(name: &str, model: &str) -> autonoetic_types::config::GatewayConfig {
+        use autonoetic_types::config::{GatewayConfig, LlmPreset};
+        use std::collections::HashMap;
+        let mut presets = HashMap::new();
+        presets.insert(
+            name.to_string(),
+            LlmPreset {
+                provider: Some("anthropic".to_string()),
+                model: Some(model.to_string()),
+                temperature: Some(0.1),
+                fallback_provider: None,
+                fallback_model: None,
+                chat_only: Some(false),
+                context_window_tokens: Some(200_000),
+                base_url: None,
+                api_key_env: None,
+                thinking: None,
+                tier: None,
+                cost: None,
+                latency: None,
+                routing: None,
+                egress_class: None,
+            },
+        );
+        GatewayConfig {
+            llm_presets: presets,
+            ..GatewayConfig::default()
+        }
+    }
+
     #[test]
     fn always_available() {
         assert!(SelfDescribeTool.is_available(&manifest_with(vec![])));
@@ -456,6 +570,35 @@ mod tests {
             rights.iter().any(|r| r["id"] == "Ri-0.14"),
             "expected the wake-up right to be surfaced"
         );
+    }
+
+    #[test]
+    fn llm_block_falls_back_without_config() {
+        // No config and no manifest llm_config → honest "unknown", and the
+        // note says so. The block is always present even when nothing resolves.
+        let v = run(&manifest_with(vec![]));
+        assert_eq!(v["llm"]["model"], "unknown");
+        assert!(v["llm"]["note"].as_str().unwrap().contains("No gateway config"));
+    }
+
+    #[test]
+    fn llm_block_resolves_preset_from_config() {
+        // Manifest declares a preset; config carries the preset definition →
+        // the concrete model + provider + context window are resolved and
+        // surfaced. Provider config / api_key_env / base_url are NOT surfaced.
+        let mut manifest = manifest_with(vec![]);
+        manifest.llm_preset = Some("sonnet".to_string());
+        let config = config_with_preset("sonnet", "claude-sonnet-4-20250514");
+        let v = run_with_config(&manifest, &config);
+        assert_eq!(v["llm"]["model"], "claude-sonnet-4-20250514");
+        assert_eq!(v["llm"]["provider"], "anthropic");
+        assert_eq!(v["llm"]["preset"], "sonnet");
+        assert_eq!(v["llm"]["context_window_tokens"], 200_000);
+        // No secret-shaped fields leak into the introspection output.
+        let llm = v["llm"].as_object().unwrap();
+        assert!(!llm.contains_key("base_url"));
+        assert!(!llm.contains_key("api_key_env"));
+        assert!(!llm.contains_key("api_key"));
     }
 
     #[test]

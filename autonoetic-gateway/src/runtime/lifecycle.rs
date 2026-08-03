@@ -1955,8 +1955,10 @@ impl AgentExecutor {
     /// resolved inference profile (preset → concrete `llm_config`), not
     /// `manifest.llm_config` (normally `None`). Falls back to a legacy explicit
     /// `manifest.llm_config.model`, then `"unknown"`. Shared by tracing/
-    /// context-window sizing and guidance (`model_family`).
-    fn resolved_model_id(&self) -> String {
+    /// context-window sizing and guidance (`model_family`), and bound into the
+    /// signed per-turn state attestation so the agent can self-calibrate
+    /// against a verified model id.
+    pub(crate) fn resolved_model_id(&self) -> String {
         // Preferred: the resolved profile's concrete model (from the preset).
         if let Some(profile) = self.resolved_inference.as_ref() {
             let m = profile.llm_config.model.trim();
@@ -1972,7 +1974,6 @@ impl AgentExecutor {
             .filter(|m| !m.is_empty() && m != "unknown")
             .unwrap_or_else(|| "unknown".to_string())
     }
-
     fn render_tool_guidance(
         &self,
         tier_filter: &crate::runtime::tools::ToolTierFilter,
