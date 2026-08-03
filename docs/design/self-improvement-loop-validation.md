@@ -32,7 +32,7 @@ all under the **prompt-only guardrail**:
   `autonoetic/src/cli/improve.rs`). The candidate starts byte-identical
   to baseline; **the operator hand-edits the candidate's `SKILL.md`
   before validate** to make the prompt change being tested.
-- `validate` — `improvement.ab_replay` tool runs an eval suite over
+- `validate` — `improvement_ab_replay` tool runs an eval suite over
   both revisions, computes the multi-axis `CompareRecommendation`.
   **Guarded:** `improve.restrict_to_prompt_only = true` (default)
   rejects pairs whose declared capability or tool-tier surface differs.
@@ -102,7 +102,7 @@ Replace this section after each cycle. Cycles can be of any 3 agents
 ### Per-cycle multi-axis deltas
 
 For each row above, attach the full `CompareRecommendation` JSON (from
-the `stats` field of `eval_compare` / `improvement.ab_replay`'s output):
+the `stats` field of `eval_compare` / `improvement_ab_replay`'s output):
 
 #### Cycle 1
 

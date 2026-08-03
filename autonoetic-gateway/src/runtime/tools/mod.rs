@@ -1042,7 +1042,7 @@ pub(crate) fn ensure_safe_credential_id_reference(credential_id: &str) -> anyhow
 
     anyhow::ensure!(
         !looks_like_secret,
-        "credential_id must reference a stored credential (from credential.check), not a raw secret value"
+        "credential_id must reference a stored credential (from credential_check), not a raw secret value"
     );
 
     Ok(())

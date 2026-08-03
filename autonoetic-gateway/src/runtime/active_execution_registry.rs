@@ -25,7 +25,7 @@ pub struct NativeToolRunContext {
     pub live_report: Option<Arc<Mutex<crate::runtime::session_report::SessionReportWriter>>>,
     /// User ID for profile binding resolution (if authenticated).
     pub user_id: Option<String>,
-    /// Artifact ID whose layers should be auto-mounted into sandbox.exec calls.
+    /// Artifact ID whose layers should be auto-mounted into sandbox_exec calls.
     pub artifact_id: Option<String>,
     /// Shared suppression target for `sentinel.suppress`. The tool writes a
     /// suppress-until turn counter here; the lifecycle reads it after tool

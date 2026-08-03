@@ -645,7 +645,7 @@ pub struct CredentialRecord {
 }
 
 /// A step in the credential setup (automated registration) workflow.
-/// Each step is executed server-side by the gateway during `credential.setup`.
+/// Each step is executed server-side by the gateway during `credential_setup`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "step_type", rename_all = "snake_case")]
 pub enum CredentialSetupStep {
@@ -675,15 +675,15 @@ pub enum CredentialSetupStep {
         #[serde(default)]
         data_refs: Vec<String>,
     },
-    /// Tells `credential.setup` to pause and ask the agent to collect user input.
+    /// Tells `credential_setup` to pause and ask the agent to collect user input.
     ///
     /// When the gateway encounters this step it returns early with
     /// `suspended_for_user_input: true` and the question.  The agent should call
-    /// `user.ask` with the question, collect the human's answer, then call
-    /// `credential.setup` again with `credential_id` + `resume_vars: { var_name: answer }`.
+    /// `user_ask` with the question, collect the human's answer, then call
+    /// `credential_setup` again with `credential_id` + `resume_vars: { var_name: answer }`.
     ///
     /// `secret_fields` is rejected at execution time: `user_input` answers flow
-    /// through the LLM (`user.ask`), so it must never be used to collect secret
+    /// through the LLM (`user_ask`), so it must never be used to collect secret
     /// material — use [`CredentialSetupStep::UserPrompt`] for secrets, which
     /// prompts the operator through a secure out-of-band channel.
     UserInput {

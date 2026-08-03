@@ -53,7 +53,7 @@ fn test_tool_error_serializes_correct_shape() {
 fn test_tool_error_not_found_includes_repair_hint() {
     let err = ToolError::not_found(
         "credential 'abc'",
-        Some("Use credential.check.".to_string()),
+        Some("Use credential_check.".to_string()),
     );
     let json_str = err.to_error_response();
     let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -66,7 +66,7 @@ fn test_tool_error_not_found_includes_repair_hint() {
         .contains("credential 'abc'"));
     assert_eq!(
         parsed["repair_hint"].as_str().unwrap(),
-        "Use credential.check."
+        "Use credential_check."
     );
 }
 
@@ -172,7 +172,7 @@ fn test_tool_error_fatal_is_not_recoverable() {
 }
 
 // ---------------------------------------------------------------------------
-// End-to-end: credential.check returns structured error for missing store
+// End-to-end: credential_check returns structured error for missing store
 // ---------------------------------------------------------------------------
 
 #[test]

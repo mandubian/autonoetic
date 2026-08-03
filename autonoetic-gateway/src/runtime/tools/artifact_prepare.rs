@@ -82,7 +82,7 @@ impl NativeTool for ArtifactPrepareTool {
                             "properties": {
                                 "credential_id": {
                                     "type": "string",
-                                    "description": "Credential ID from credential.check or planner delegation"
+                                    "description": "Credential ID from credential_check or planner delegation"
                                 },
                                 "env_var": {
                                     "type": "string",

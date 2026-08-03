@@ -876,7 +876,7 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
              natural-language `message`: call agent.spawn directly with the \
              agent_id and a plain-text task. A null `io_accepts` (message_format \
              \"free_text\") is expected, not missing data. If you are missing an \
-             operator decision instead, use user.ask or end the turn.",
+             operator decision instead, use user_ask or end the turn.",
             tool,
             repeats,
             floor

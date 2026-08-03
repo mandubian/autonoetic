@@ -2695,7 +2695,7 @@ impl GatewayExecutionService {
         {
             let store = self.gateway_store.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "GatewayStore is required to resume user.ask checkpoints"
+                    "GatewayStore is required to resume user_ask checkpoints"
                 )
             })?;
             let interaction = store
@@ -2741,7 +2741,7 @@ impl GatewayExecutionService {
                         target: "user_interaction",
                         session_id = %session_id,
                         interaction_id = %interaction.interaction_id,
-                        "Resuming session from user.ask checkpoint with stored answer"
+                        "Resuming session from user_ask checkpoint with stored answer"
                     );
 
                     checkpoint.restore_into(runtime);
@@ -3986,7 +3986,7 @@ impl GatewayExecutionService {
         Ok(result)
     }
 
-    /// Resume execution after a `user.ask` interaction was answered.
+    /// Resume execution after a `user_ask` interaction was answered.
     ///
     /// Loads the interaction to extract session/agent/workflow identity, then
     /// delegates to `spawn_agent_once` which handles checkpoint loading and the
@@ -5813,7 +5813,7 @@ mod tests {
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call_1".to_string(),
-                    name: "credential.setup".to_string(),
+                    name: "credential_setup".to_string(),
                     arguments: r#"{"skill_url":"http://localhost:8080/skill.md"}"#.to_string(),
                 }],
                 tool_call_id: None,

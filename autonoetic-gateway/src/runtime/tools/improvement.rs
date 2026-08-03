@@ -420,7 +420,7 @@ impl NativeTool for AbReplayTool {
                 "policy_applied": policy_applied,
                 "holdout_coerced_from": holdout_coerced_from,
                 "queued_eval_run_ids": queued_ids,
-                "message": "Queued eval runs for A/B replay. Call improvement.ab_replay again with the same args \
+                "message": "Queued eval runs for A/B replay. Call improvement_ab_replay again with the same args \
                             once the background eval runner completes the runs to get the comparison report.",
             }).to_string());
         }

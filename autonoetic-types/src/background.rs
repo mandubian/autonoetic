@@ -154,7 +154,7 @@ pub enum ScheduledAction {
     },
     /// Approval subject only: "this approval request is for a credential setup UserPrompt step."
     /// Not executed by the scheduler; the operator provides secrets through the approval channel,
-    /// then the caller retries `credential.setup` with `approval_ref`.
+    /// then the caller retries `credential_setup` with `approval_ref`.
     CredentialPrompt {
         service: String,
         credential_id: String,
@@ -163,7 +163,7 @@ pub enum ScheduledAction {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
-    /// Approval subject + executable continuation: credential.request call blocked by
+    /// Approval subject + executable continuation: credential_request call blocked by
     /// network policy (e.g. localhost). After operator approval, runtime retries the same
     /// request with `approval_ref` and executes it.
     CredentialRequest {
@@ -920,7 +920,7 @@ pub struct UserInteractionOption {
     pub value: String,
 }
 
-/// An interaction created by `user.ask`.
+/// An interaction created by `user_ask`.
 ///
 /// Stored in `user_interactions` table. When a user interaction is created,
 /// the agent's turn is suspended and a checkpoint is saved.

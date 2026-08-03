@@ -300,7 +300,7 @@ Current bundles:
   - `agents/specialists/static_evaluator.default/`
   - `agents/specialists/unit_test_runner.default/`
   - `agents/specialists/auditor.default/`
-  - `agents/specialists/registration.default/` (plus `credential_onboarding.default/`)
+  - `agents/specialists/credential_onboarding.default/`
   - `agents/specialists/discovery.default/`
   - `agents/specialists/watchdog.default/` (plus `watchdog-fast.default/`)
   - `agents/specialists/improvement-orchestrator.default/`, `outcome-grader.default/`

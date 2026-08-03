@@ -94,7 +94,7 @@ events / press 's' to unsquash" detail (`tui.rs:3061`). What is missing is
 | Tier | Examples | Rendering |
 |------|----------|-----------|
 | **Checkpoint** | `plan.*`, `approval.*`, `escalation.*`, `operator.message`, `session.start`, `workbench.created`, `promotion.*` | Always shown; banner chrome (icon + color + one-line gist); never squashed |
-| **Significant** | state-changing tools: `agent_spawn`, `content_write`, `artifact_build/_project`, `sandbox_exec`, `federation.escalate`, `promotion_record`, `agent_revision_*` | Shown, compact |
+| **Significant** | state-changing tools: `agent_spawn`, `content_write`, `artifact_build/_project`, `sandbox_exec`, `federation_escalate`, `promotion_record`, `agent_revision_*` | Shown, compact |
 | **Routine** | `turn.start/end`, `llm.round`, `agent.reasoning`, read-only tools (`resolve`, `artifact_inspect`, `agent_list`, `workflow_state/wait`) | Folded into runs |
 
 - Default view = checkpoints + significant; routine folded into collapsible runs.

@@ -109,7 +109,7 @@ fn validate_nonsecret_answer_payload(answer_text: &Option<String>) -> anyhow::Re
     if let Some(text) = answer_text.as_deref() {
         if looks_like_secret_value(text) {
             anyhow::bail!(
-                "Secret-like values are not accepted via interaction.answer. Use credential.setup / credential.prompt flow so secrets stay in vault-backed channels."
+                "Secret-like values are not accepted via interaction.answer. Use credential_setup with user_prompt steps so secrets stay in vault-backed channels."
             );
         }
     }

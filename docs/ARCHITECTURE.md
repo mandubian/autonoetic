@@ -1239,12 +1239,12 @@ On checkpoint resume for `HumanEscalation`:
 - If rejected/cancelled → bail with "escalation was rejected"
 - If approved → restore `LoopGuard` state, inject operator guidance as system message, resume execution
 
-### Federation Escalation (`federation.escalate`)
+### Federation Escalation (`federation_escalate`)
 
 Structured promotion review where the planner bundles verdicts from all federation roles into an `EscalationMessage` and submits them for operator decision:
 
 1. **Planner collects verdicts** from `static_evaluator`, `unit_test_runner`, `auditor` via `promotion_query`
-2. **Planner calls `federation.escalate`** with all role verdicts and a synthesis
+2. **Planner calls `federation_escalate`** with all role verdicts and a synthesis
 3. **Gateway persists `EscalationMessage`** in the `escalations` SQLite table with status `Pending`
 4. **Operator reviews** via `admin.escalation_list` / `admin.escalation_inspect`
 5. **Operator decides** via `admin.escalation_resolve(Approved | Rejected)` — `decided_by` and `decision_reason` recorded
@@ -1290,14 +1290,14 @@ This is a fifth gate mode (`FullJury`) that activates on top of the legacy gate 
 The `EscalationMessage` type (`autonoetic-types/src/escalation.rs`) is a channel-agnostic structured payload that carries federation verdicts from the planner to the operator:
 
 ```
-Planner collects verdicts → federation.escalate → EscalationMessage persisted
+Planner collects verdicts → federation_escalate → EscalationMessage persisted
 Operator reviews → admin.escalation_list / admin.escalation_inspect
 Operator decides → admin.escalation_resolve(Approved | Rejected)
 Gate checks escalation status → promote or reject
 ```
 
 Key properties:
-- **Capability-gated**: only agents with `AgentSpawn` can call `federation.escalate`
+- **Capability-gated**: only agents with `AgentSpawn` can call `federation_escalate`
 - **Dedup**: a second escalation for the same (artifact, revision) is rejected while a previous one is `Pending`
 - **Audit trail**: `decided_by` and `decision_reason` recorded on resolution
 - **Admin routes**: `admin.escalation_list`, `admin.escalation_inspect`, `admin.escalation_resolve`

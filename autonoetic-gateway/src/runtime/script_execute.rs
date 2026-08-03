@@ -597,9 +597,15 @@ pub(crate) fn resolve_credential_env_with_bindings(
                 continue;
             }
         };
+        // A credential with no explicit `inject_as` matches the service-derived
+        // env var: `None` previously never matched, so flows that stored a
+        // credential without passing `inject_as` silently injected nothing
+        // ("No credential found for service with matching inject_as"). Treat
+        // `None` as "resolve by service" — an explicit `inject_as` still
+        // requires an exact match.
         let matched = creds
             .iter()
-            .filter(|c| c.inject_as.as_deref() == Some(&env_var))
+            .filter(|c| c.inject_as.is_none() || c.inject_as.as_deref() == Some(&env_var))
             .collect::<Vec<_>>();
         let cred = match matched.len() {
             0 => {
@@ -662,6 +668,99 @@ mod tests {
             normalize_script_input_payload(&kickoff, Some(&metadata)),
             payload
         );
+    }
+
+    /// Resolver contract for service-based credential lookup: a credential
+    /// stored with no `inject_as` (the session that spawned the fix — flows
+    /// that did not pass it) must still resolve by service-derived env var;
+    /// an explicit `inject_as` still requires an exact match.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_resolves_null_inject_as_by_service() {
+        use autonoetic_types::agent::CredentialRecord;
+
+        let old_key = std::env::var("AUTONOETIC_VAULT_KEY").ok();
+        std::env::set_var(
+            "AUTONOETIC_VAULT_KEY",
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        );
+        let old_key_path = std::env::var("AUTONOETIC_VAULT_KEY_PATH").ok();
+        std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let gateway_dir = temp.path().join(".gateway");
+        let agent_dir = temp.path().join("agent");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        std::fs::create_dir_all(&agent_dir).unwrap();
+
+        // Vault with one secret, at the path resolve_credential_env derives
+        // (<vault_dir>/.gateway/vault.enc.json where vault_dir = parent of gateway_dir).
+        let mut vault = crate::vault::Vault::new();
+        vault.set_secret("api-key-secret", "top-secret-value".to_string());
+        vault
+            .persist_to_file(&gateway_dir.join("vault.enc.json"))
+            .expect("vault persist");
+
+        std::fs::write(
+            agent_dir.join("runtime.lock"),
+            r#"{"gateway":{"artifact":"marketplace://gateway/autonoetic-gateway","version":"0.1.0","sha256":"sha256:abc","binary_sha256":"sha256:def","build_tag":"0.1.0","signature":null},"sdk":{"version":"0.1.0"},"sandbox":{"backend":"bubblewrap"},"credentials":[{"service":"github"}]}"#,
+        )
+        .expect("lock write");
+
+        let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
+        let make_cred = |inject_as: Option<String>| CredentialRecord {
+            credential_id: "cred_test_1".to_string(),
+            service: "github".to_string(),
+            secret_name: "api-key-secret".to_string(),
+            inject_as,
+            created_by_agent: None,
+            expires_at: None,
+            shared_with: vec![],
+            allowed_hosts: vec![],
+            refresh_token_secret_name: None,
+            refresh_url: None,
+            refresh_method: None,
+            refresh_headers: None,
+            refresh_extract_access_token: None,
+            refresh_extract_refresh_token: None,
+            refresh_extract_expires_in: None,
+            label: None,
+        };
+
+        // NULL inject_as → resolves by service-derived env var.
+        store.upsert_credential(&make_cred(None)).unwrap();
+        let resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store);
+        assert_eq!(
+            resolved,
+            vec![("GITHUB_SECRET".to_string(), "top-secret-value".to_string())],
+            "NULL inject_as must resolve by service-derived env var"
+        );
+
+        // Explicit matching inject_as → resolves (unchanged behaviour).
+        store
+            .upsert_credential(&make_cred(Some("GITHUB_SECRET".to_string())))
+            .unwrap();
+        let resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store);
+        assert_eq!(resolved.len(), 1, "explicit matching inject_as must resolve");
+
+        // Explicit non-matching inject_as → still skipped.
+        store
+            .upsert_credential(&make_cred(Some("OTHER_SECRET".to_string())))
+            .unwrap();
+        let resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store);
+        assert!(
+            resolved.is_empty(),
+            "non-matching inject_as must not resolve, got {resolved:?}"
+        );
+
+        match old_key {
+            Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY", v),
+            None => std::env::remove_var("AUTONOETIC_VAULT_KEY"),
+        }
+        match old_key_path {
+            Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", v),
+            None => std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH"),
+        }
     }
 
     #[cfg(test)]

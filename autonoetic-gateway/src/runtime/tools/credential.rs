@@ -1,14 +1,14 @@
-//! Credential management tools — credential.check, credential.request, credential.setup.
+//! Credential management tools — credential_check, credential_request, credential_setup.
 //!
 //! Phase A (MVP): Pre-configured credentials.
-//! - credential.check: Query stored credentials by service name
-//! - credential.request: Gateway-side HTTP client using stored credentials
+//! - credential_check: Query stored credentials by service name
+//! - credential_request: Gateway-side HTTP client using stored credentials
 //!
 //! Phase B (Automated Registration):
-//! - credential.setup: Multi-step server-side credential registration flow
+//! - credential_setup: Multi-step server-side credential registration flow
 //!   Extended with `skill_url` to ingest a skill.md onboarding spec (HTTPS URL
 //!   or local filename from gateway skills/ directory), `user_input` step support
-//!   (gateway returns early, agent calls user.ask), and `resume_vars` to continue
+//!   (gateway returns early, agent calls user_ask), and `resume_vars` to continue
 //!   after user input is collected.
 
 use crate::llm::ToolDefinition;
@@ -56,7 +56,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 }
 
 // ---------------------------------------------------------------------------
-// credential.check
+// credential_check
 // ---------------------------------------------------------------------------
 
 /// Query stored credentials by service name.
@@ -71,7 +71,7 @@ impl NativeTool for CredentialCheckTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "credential_check".to_string(),
-            description: "Check available credentials for a service. Returns credential metadata (not the secret values). Use this before credential.request to verify a credential exists.".to_string(),
+            description: "Check available credentials for a service. Returns credential metadata (not the secret values). Use this before credential_request to verify a credential exists.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -178,7 +178,7 @@ impl NativeTool for CredentialCheckTool {
 }
 
 // ---------------------------------------------------------------------------
-// credential.request
+// credential_request
 // ---------------------------------------------------------------------------
 
 /// Make an authenticated HTTP request using a stored credential.
@@ -212,7 +212,7 @@ impl NativeTool for CredentialRequestTool {
                 "properties": {
                     "credential_id": {
                         "type": "string",
-                        "description": "Credential ID from credential.check"
+                        "description": "Credential ID from credential_check"
                     },
                     "method": {
                         "type": "string",
@@ -281,7 +281,7 @@ impl NativeTool for CredentialRequestTool {
             return Ok(autonoetic_types::tool_error::ToolError::not_found(
                 format!("credential '{}'", args.credential_id),
                 Some(
-                    "Use credential.check to list available credentials for this service."
+                    "Use credential_check to list available credentials for this service."
                         .to_string(),
                 ),
             )
@@ -337,15 +337,15 @@ impl NativeTool for CredentialRequestTool {
                                 true
                             } else {
                                 return Ok(autonoetic_types::tool_error::ToolError::validation(
-                                    "approval_ref does not match this credential.request payload",
+                                    "approval_ref does not match this credential_request payload",
                                     Some("Ensure all parameters match the original request that created the approval.".to_string()),
                                 ).to_error_response());
                             }
                         }
                         _ => {
                             return Ok(autonoetic_types::tool_error::ToolError::validation(
-                                format!("approval_ref '{}' is not for credential.request", approval_ref),
-                                Some("Use the approval_ref from a credential.request approval response.".to_string()),
+                                format!("approval_ref '{}' is not for credential_request", approval_ref),
+                                Some("Use the approval_ref from a credential_request approval response.".to_string()),
                             ).to_error_response());
                         }
                     }
@@ -488,7 +488,7 @@ impl NativeTool for CredentialRequestTool {
                             "ok": false,
                             "error_type": "permission",
                             "message": format!(
-                                "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
+                                "Execution suspended pending operator approval ({}). Retry credential_request with approval_ref after approval.",
                                 gate_id
                             ),
                             "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
@@ -512,7 +512,7 @@ impl NativeTool for CredentialRequestTool {
                         tracing::warn!(
                             target: "credential_request",
                             gate_result = ?other,
-                            "Unexpected gate result for credential.request remote target gate"
+                            "Unexpected gate result for credential_request remote target gate"
                         );
                     }
                 }
@@ -590,7 +590,7 @@ impl NativeTool for CredentialRequestTool {
                         "ok": false,
                         "error_type": "permission",
                         "message": format!(
-                            "Execution suspended pending operator approval ({}). Retry credential.request with approval_ref after approval.",
+                            "Execution suspended pending operator approval ({}). Retry credential_request with approval_ref after approval.",
                             gate_id
                         ),
                         "repair_hint": "Wait for approval and retry this exact request using approval_ref.",
@@ -611,7 +611,7 @@ impl NativeTool for CredentialRequestTool {
                     tracing::warn!(
                         target: "credential_request",
                         gate_result = ?other,
-                        "Unexpected gate result for credential.request network gate"
+                        "Unexpected gate result for credential_request network gate"
                     );
                 }
             }
@@ -641,7 +641,7 @@ impl NativeTool for CredentialRequestTool {
                     if expiry < now {
                         return Ok(autonoetic_types::tool_error::ToolError::resource(
                             format!("Credential expired at {}", exp_str),
-                            Some("Use credential.refresh to obtain a new token, or set up a new credential.".to_string()),
+                            Some("Use credential_refresh to obtain a new token, or set up a new credential.".to_string()),
                         ).to_error_response());
                     }
                 }
@@ -890,7 +890,7 @@ fn validate_local_skill_path(gateway_dir: &Path, path_hint: &str) -> anyhow::Res
 }
 
 // ---------------------------------------------------------------------------
-// credential.refresh
+// credential_refresh
 // ---------------------------------------------------------------------------
 
 /// Refresh an expired or stale credential using a stored refresh token.
@@ -984,7 +984,7 @@ impl NativeTool for CredentialRefreshTool {
             None => {
                 return Ok(autonoetic_types::tool_error::ToolError::not_found(
                     format!("credential '{}'", credential_id),
-                    Some("Use credential.check to list available credentials.".to_string()),
+                    Some("Use credential_check to list available credentials.".to_string()),
                 )
                 .to_error_response());
             }
@@ -1007,7 +1007,7 @@ impl NativeTool for CredentialRefreshTool {
                 return Ok(autonoetic_types::tool_error::ToolError::validation(
                     "Credential has no refresh_url configured",
                     Some(
-                        "Use credential.setup with refresh metadata to enable token refresh."
+                        "Use credential_setup with refresh metadata to enable token refresh."
                             .to_string(),
                     ),
                 )
@@ -1021,7 +1021,7 @@ impl NativeTool for CredentialRefreshTool {
                 return Ok(autonoetic_types::tool_error::ToolError::validation(
                     "Credential has no refresh_token_secret_name",
                     Some(
-                        "Store a refresh token during credential.setup to enable refresh."
+                        "Store a refresh token during credential_setup to enable refresh."
                             .to_string(),
                     ),
                 )
@@ -1141,7 +1141,7 @@ impl NativeTool for CredentialRefreshTool {
 }
 
 /// Attempt a token refresh for a credential with refresh metadata.
-/// Called internally when `credential.request` gets a 401.
+/// Called internally when `credential_request` gets a 401.
 /// Returns Ok(updated_credential) on success, Err on failure.
 fn try_auto_refresh(
     cred: &CredentialRecord,
@@ -1237,7 +1237,7 @@ fn try_auto_refresh(
 }
 
 // ---------------------------------------------------------------------------
-// credential.setup
+// credential_setup
 // ---------------------------------------------------------------------------
 
 /// Multi-step server-side credential registration flow.
@@ -1249,7 +1249,7 @@ fn try_auto_refresh(
 ///
 /// When a `user_input` step is reached the tool returns early with
 /// `suspended_for_user_input: true` and the question.  The agent should call
-/// `user.ask` with that question, collect the answer, and call `credential.setup`
+/// `user_ask` with that question, collect the answer, and call `credential_setup`
 /// again with `credential_id` + `resume_vars: { var_name: answer }`.
 struct CredentialSetupTool;
 
@@ -1281,7 +1281,7 @@ struct CredentialSetupArgs {
     label: Option<String>,
 }
 
-/// Persisted state between `credential.setup` calls for multi-step onboarding.
+/// Persisted state between `credential_setup` calls for multi-step onboarding.
 #[derive(Debug, Serialize, Deserialize)]
 struct CredentialSetupState {
     /// Full step list (serialized so we can resume without re-fetching skill.md).
@@ -1490,7 +1490,7 @@ fn credential_step_oneof_schema() -> serde_json::Value {
         },
         {
             "type": "object",
-            "description": "NON-secret question: the tool suspends, you call user.ask with the question, then credential_setup again with credential_id + resume_vars. NEVER for secrets — use user_prompt.",
+            "description": "NON-secret question: the tool suspends, you call user_ask with the question, then credential_setup again with credential_id + resume_vars. NEVER for secrets — use user_prompt.",
             "properties": {
                 "step_type": {"const": "user_input"},
                 "question": {"type": "string", "description": "The question to ask (non-secret)"},
@@ -1546,9 +1546,9 @@ impl NativeTool for CredentialSetupTool {
                 e.g. an app password or API key; the secret never enters chat), \
                 `user_action` (human does something in their browser), and `user_input` \
                 (a NON-secret question; the tool returns `suspended_for_user_input: true` and a \
-                `question`, you call `user.ask` with it, then call `credential.setup` again with \
+                `question`, you call `user_ask` with it, then call `credential_setup` again with \
                 `credential_id` + `resume_vars: { var_name: answer }`). \
-                IMPORTANT: `user_input` must never be used for secrets — user.ask \
+                IMPORTANT: `user_input` must never be used for secrets — user_ask \
                 heuristically rejects secret-collection-shaped questions and the gateway \
                 rejects `user_input` steps carrying `secret_fields`; use `user_prompt` for \
                 secrets so they never enter chat. \
@@ -1592,7 +1592,7 @@ impl NativeTool for CredentialSetupTool {
                     },
                     "approval_ref": {
                         "type": "string",
-                        "description": "Approval request ID from a completed credential.setup approval (UserPrompt or remote-access gate)."
+                        "description": "Approval request ID from a completed credential_setup approval (UserPrompt or remote-access gate)."
                     },
                     "label": {
                         "type": "string",
@@ -1693,7 +1693,7 @@ impl NativeTool for CredentialSetupTool {
                 return Ok(autonoetic_types::tool_error::ToolError::not_found(
                     format!("suspended setup state for credential '{}'", cred_id),
                     Some(
-                        "No in-progress setup was found. Start a new credential.setup call."
+                        "No in-progress setup was found. Start a new credential_setup call."
                             .to_string(),
                     ),
                 )
@@ -1868,10 +1868,10 @@ impl NativeTool for CredentialSetupTool {
                                         "ok": false,
                                         "error_type": violation_type,
                                         "message": format!(
-                                            "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                            "Execution suspended pending operator approval ({}). Retry credential_setup with approval_ref after approval.",
                                             gate_id
                                         ),
-                                        "repair_hint": "Wait for approval and retry credential.setup with the same skill_url plus approval_ref.",
+                                        "repair_hint": "Wait for approval and retry credential_setup with the same skill_url plus approval_ref.",
                                         "approval_required": true,
                                         "request_id": gate_id,
                                         "suspended": true,
@@ -2185,10 +2185,10 @@ impl NativeTool for CredentialSetupTool {
                                     "ok": false,
                                     "error_type": violation_type,
                                     "message": format!(
-                                        "Execution suspended pending operator approval ({}). Retry credential.setup with approval_ref after approval.",
+                                        "Execution suspended pending operator approval ({}). Retry credential_setup with approval_ref after approval.",
                                         gate_id
                                     ),
-                                    "repair_hint": "Wait for approval and retry credential.setup with approval_ref.",
+                                    "repair_hint": "Wait for approval and retry credential_setup with approval_ref.",
                                     "approval_required": true,
                                     "request_id": gate_id,
                                     "suspended": true,
@@ -2284,7 +2284,7 @@ fn execute_steps(
     run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
     label: Option<&str>,
 ) -> anyhow::Result<String> {
-    // Mechanical guard: `user_input` answers flow through the LLM (`user.ask`),
+    // Mechanical guard: `user_input` answers flow through the LLM (`user_ask`),
     // so a `user_input` step must never be used to collect secret material.
     // Reject at entry (before any side effects) instead of silently dropping
     // the fields the way tagged-enum deserialization would.
@@ -2452,18 +2452,18 @@ fn execute_steps(
                 // Persist any secrets extracted so far.
                 vault.persist_to_file(vault_path)?;
 
-                let message = "credential.setup suspended for user input; call user.ask with the provided question, then resume with credential_id and resume_vars";
+                let message = "credential_setup suspended for user input; call user_ask with the provided question, then resume with credential_id and resume_vars";
                 return Ok(json!({
                     "ok": false,
                     "error_type": "conflict",
                     "message": message,
-                    "repair_hint": "Ask the user the question, collect values for var_name, then call credential.setup with credential_id + resume_vars.",
+                    "repair_hint": "Ask the user the question, collect values for var_name, then call credential_setup with credential_id + resume_vars. If user_ask returns workflow_tasks_active, complete/cancel child tasks before retrying (never blind-retry in a loop). This step is for NON-secret questions only — collect secrets via a user_prompt step instead.",
                     "suspended_for_user_input": true,
                     "credential_id": credential_id,
                     "question": resolved_question,
                     "var_name": var_name,
                     "public_data": public_data,
-                    "reason": "user_input step — call user.ask with the question, then resume with credential_id + resume_vars"
+                    "reason": "user_input step — call user_ask with the question, then resume with credential_id + resume_vars"
                 })
                 .to_string());
             }
@@ -2554,10 +2554,10 @@ fn execute_steps(
                         return Ok(json!({
                             "ok": false,
                             "error_type": "permission",
-                            "message": "credential.setup suspended: equivalent prompt was already cleared but the secret is still missing",
+                            "message": "credential_setup suspended: equivalent prompt was already cleared but the secret is still missing",
                             "repair_hint": format!(
                                 "Ask the operator for the requested secret field(s) ({}), then call \
-                                 credential.setup with credential_id + resume_vars to provide them.",
+                                 credential_setup with credential_id + resume_vars to provide them.",
                                 field_names.join(", ")
                             ),
                             "suspended": true,
@@ -2590,12 +2590,12 @@ fn execute_steps(
                             .and_then(|v| v.as_str().map(String::from))
                     })
                     .next();
-                let message = "credential.setup suspended pending human input for secret fields";
+                let message = "credential_setup suspended pending human input for secret fields";
                 return Ok(json!({
                     "ok": false,
                     "error_type": "permission",
                     "message": message,
-                    "repair_hint": "Wait for approval or provide requested secret fields, then resume credential.setup.",
+                    "repair_hint": "Wait for approval or provide requested secret fields, then resume credential_setup.",
                     "suspended": true,
                     "approval_required": true,
                     "request_id": approval_request_id,
@@ -2677,7 +2677,7 @@ fn execute_steps(
         .collect();
         return Ok(autonoetic_types::tool_error::ToolError::validation(
             format!(
-                "credential.setup completed with no secrets stored, but the flow expected: {}",
+                "credential_setup completed with no secrets stored, but the flow expected: {}",
                 expected.join(", ")
             ),
             Some(
@@ -2694,11 +2694,22 @@ fn execute_steps(
     let _ = store.delete_credential_setup_state(credential_id);
 
     if !secret_names.is_empty() {
+        // Default `inject_as` to the service-derived env var when the flow did
+        // not pass one explicitly: `resolve_credential_env` matches stored
+        // `inject_as` against `inject_as_for_service(service)`, so a NULL would
+        // never resolve by service at spawn time (silent "No credential
+        // found"). `credential_request` is unaffected — non-bearer/non-header
+        // values fall through to the default Bearer style.
+        let effective_inject_as = inject_as
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                autonoetic_types::runtime_lock::inject_as_for_service(service)
+            });
         let cred = CredentialRecord {
             credential_id: credential_id.to_string(),
             service: service.to_string(),
             secret_name: secret_names[0].clone(),
-            inject_as: inject_as.map(str::to_string),
+            inject_as: Some(effective_inject_as),
             created_by_agent: Some(manifest.agent.id.clone()),
             expires_at: expires_at.map(str::to_string),
             shared_with: vec![],

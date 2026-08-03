@@ -15,6 +15,7 @@ metadata:
       id: "credential_onboarding.default"
       name: "Credential Onboarding Default"
       description: "Focused agent for suspended credential flows; does not cold-start onboarding from remote skill URLs."
+      singleton: true
     llm_preset: agentic
     llm_overrides:
       temperature: 0.0
@@ -124,25 +125,52 @@ explains what the planner must supply).
 1. **Resume or align state** — Call `credential_setup` with the identifiers the planner gave you
    (`credential_id`, and `resume_vars` only after you have user answers). If you need the current
    suspend question, the tool response will carry it; surface it via `user_ask` verbatim.
+   **Env-var contract:** the gateway injects one env var per credential mount, always named
+   `<SERVICE>_SECRET` (derived from the service name — e.g. service `github` → `GITHUB_SECRET`).
+   A credential whose `inject_as` does not match that derived name never resolves by service at
+   spawn time. The consuming script must read the derived env var; if a service needs several
+   values, store them as one JSON secret under the single derived env var (or use distinct
+   services). One credential = one secret = one env var.
 
 2. **`suspended_for_user_input` loop** — When the response has `suspended_for_user_input: true`:
-   - Note `credential_id`, `question`, and `var_name`.
+   - Note `credential_id`, `question`, and `var_name`. A `user_input` question is **non-secret by
+     design** — it must never be used to collect secrets.
    - Call `user_ask` with the exact `question` string.
-   - Call `credential_setup` again with `credential_id` and
+   - **Handle rejection codes — never blind-retry in a loop:**
+     - `workflow_tasks_active` — the caller still has child tasks running in this workflow and
+       `user_ask` is blocked until they settle. **Stop the loop now**: set
+       `ready_for_execution: false` and put in `next_action` that the caller must complete or
+       cancel its child tasks before resuming onboarding. Re-issuing `user_ask` against this
+       block burns turns and never succeeds.
+     - `secret_collection_not_allowed` — the question is secret-shaped; the flow mis-declared
+       the step. `user_input` cannot collect secrets: the gateway rejects both secret-shaped
+       `user_ask` questions and `user_input` steps carrying `secret_fields`. Stop, set
+       `ready_for_execution: false`, and name the mis-declared step in `next_action`.
+   - On success, call `credential_setup` again with `credential_id` and
      `resume_vars: { "<var_name>": "<user answer>" }`.
 
 3. **Repeat** step 2 until `credential_setup` returns `ok: true` or a non-recoverable error.
+   Cap `user_ask`/retry attempts at 3 per suspension; beyond that, stop and return
+   `ready_for_execution: false` with the blocker in `next_action`.
 
-4. **Completion gate before handoff** (do not skip):
+4. **Secrets use `user_prompt`, not `user_input`** — When the flow needs a secret (password,
+   token, API key, app password), the steps must declare `user_prompt` steps with
+   `secret_fields`: the gateway prompts the operator through a secure popup/approval channel and
+   the value never reaches chat. A `user_prompt` step returns
+   `suspended: true, approval_required: true`; wait for the approval, then resume
+   `credential_setup` with `credential_id` (plus `resume_vars` for any `user_input` steps).
+   Do not attempt to collect a secret via `user_ask` or `user_input` — both are rejected.
+
+5. **Completion gate before handoff** (do not skip):
    - Onboarding is complete only when `credential_setup` returned `ok: true`,
      `secrets_stored >= 1`, and `credential_id` is present in that final result.
    - Call `credential_check` for `service` and confirm the list contains that `credential_id`.
    - If any check fails, set `ready_for_execution: false` and describe the blocker in `next_action`.
 
-5. **Discovery indexing** — Normalized skills are indexed automatically by the gateway after
+6. **Discovery indexing** — Normalized skills are indexed automatically by the gateway after
   successful normalization, so no manual `knowledge_store` write is required here.
 
-6. **Return to the planner** — Single JSON object:
+7. **Return to the planner** — Single JSON object:
    - `service`, `credential_id`, `env_var`, `ready_for_execution`, `public_data`, `next_action`,
      `summary` as in the schema.
 
@@ -153,4 +181,6 @@ explains what the planner must supply).
 - Do not fabricate `steps` JSON from arbitrary markdown here — that belongs to the planner’s
   `skill_normalize` path.
 - Cap corrective retries on validation errors at 3; then stop and return the exact error in JSON.
+- Never re-issue `user_ask` when it returns `workflow_tasks_active` or
+  `secret_collection_not_allowed` — both are persistent state, not transient failures.
 - Do not store, log, or repeat API keys, tokens, or passwords.

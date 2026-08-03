@@ -922,11 +922,11 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     },
                     "credential_env": {
                         "type": "array",
-                        "description": "Inject vault-stored credentials as environment variables into the sandbox. The gateway resolves the secret server-side — it never appears in tool arguments or responses. Use credential_id from credential.check output.",
+                        "description": "Inject vault-stored credentials as environment variables into the sandbox. The gateway resolves the secret server-side — it never appears in tool arguments or responses. Use credential_id from credential_check output.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "credential_id": { "type": "string", "description": "Credential ID (from credential.check or delegated by planner)" },
+                                "credential_id": { "type": "string", "description": "Credential ID (from credential_check or delegated by planner)" },
                                 "env_var": { "type": "string", "description": "Environment variable name to inject (e.g., 'API_KEY')" }
                             },
                             "required": ["credential_id", "env_var"]
