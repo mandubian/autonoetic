@@ -314,7 +314,10 @@ sandbox (`sandbox.rs::bwrap_deny_path_flags`), layered over the ro-bind of `/`:
 The operator **config file** is likewise masked at its actual load path
 (registered via `sandbox::init_sandbox_host_deny_paths` at gateway startup), so
 provider/endpoint config, `continuation_key`, and trusted-signer material are
-not readable from inside the sandbox. The `sdk/` subtree is deliberately *left
+not readable from inside the sandbox. Registered paths are normalized before
+masking — made absolute and, when symlinked, masked at both the link path and
+its canonical target — so a relative or symlinked config cannot be read around
+the mask. The `sdk/` subtree is deliberately *left
 accessible* because the sandbox resolves its `PYTHONPATH` from
 `<gateway_dir>/sdk`; the constitution is public agent-readable law and is not
 masked.

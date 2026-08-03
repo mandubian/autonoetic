@@ -153,8 +153,51 @@ pub fn init_sdk_deployed_path(gateway_dir: &Path) {
 /// sensitive files are masked unconditionally (derived per-spawn); this list
 /// is for the config file and operator-specified paths. Non-existent paths are
 /// silently skipped at mount-build time. Idempotent — first call wins.
+///
+/// Paths are normalized via [`normalize_deny_paths`] before storage: relative
+/// paths are made absolute (bwrap dests are namespace-absolute against the
+/// ro-mounted `/`, so a relative path would silently fail to mask), and
+/// symlinked targets are added alongside the link path so a config reachable
+/// via its real path can't escape masking.
 pub fn init_sandbox_host_deny_paths(paths: Vec<PathBuf>) {
-    let _ = SANDBOX_HOST_DENY_PATHS.set(paths);
+    let _ = SANDBOX_HOST_DENY_PATHS.set(normalize_deny_paths(&paths));
+}
+
+/// Normalize a set of deny paths for use as bwrap mount destinations:
+/// - **Make absolute** — resolve relative paths against the gateway CWD. bwrap
+///   interprets bind destinations against the sandbox namespace (rooted at the
+///   ro-mounted host `/`), so a relative path would not mask the real file.
+/// - **Add canonical targets** — if a path is a symlink, `canonicalize` it and
+///   include the real target so the file can't be read via its underlying path
+///   (e.g. `~/.autonoetic/config.yaml` → `/etc/autonoetic/config.yaml`).
+/// - **Dedup** — identical absolute/canonical forms collapse to one entry.
+///
+/// Existence is *not* required here — the mount-builder
+/// ([`push_deny_file`]/[`push_deny_dir`]) skips non-existent paths at spawn
+/// time. A path that doesn't resolve canonically (missing now, created later)
+/// still contributes its absolute form for the common case.
+fn normalize_deny_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        let abs = if p.is_absolute() {
+            p.clone()
+        } else {
+            cwd.join(p)
+        };
+        // Cover symlinked configs: mask the real target too, so the file can't
+        // be read via its canonical path around the link.
+        let canon = std::fs::canonicalize(&abs).ok();
+        if !out.contains(&abs) {
+            out.push(abs);
+        }
+        if let Some(canon) = canon {
+            if !out.contains(&canon) {
+                out.push(canon);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -2190,6 +2233,68 @@ mod tests {
             deny_slice.iter().any(|a| a == "--ro-bind"),
             "expected deny flags before the separator, argv: {argv:?}"
         );
+    }
+
+    /// Relative deny paths are resolved to absolute form — bwrap destinations
+    /// are namespace-absolute, so a relative path would silently fail to mask.
+    #[test]
+    fn normalize_deny_paths_makes_relative_absolute() {
+        let cwd = std::env::current_dir().unwrap();
+        let out = normalize_deny_paths(&[PathBuf::from("config.yaml")]);
+        assert!(
+            out.contains(&cwd.join("config.yaml")),
+            "relative path must be made absolute, got: {out:?}"
+        );
+        // No relative entries survive.
+        assert!(out.iter().all(|p| p.is_absolute()));
+    }
+
+    /// A symlinked config is masked at BOTH the link path and its canonical
+    /// target, so the file can't be read via its real path around the link.
+    #[test]
+    fn normalize_deny_paths_adds_symlink_target() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real_config.yaml");
+        std::fs::write(&real, "provider: x").unwrap();
+        let link = tmp.path().join("config.yaml");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let out = normalize_deny_paths(&[link.clone()]);
+        let canon = std::fs::canonicalize(&real).unwrap();
+        assert!(out.contains(&link), "link path must be present, got: {out:?}");
+        assert!(
+            out.contains(&canon),
+            "canonical target must also be masked, got: {out:?}"
+        );
+    }
+
+    /// A non-existent path still contributes its absolute form (it may be
+    /// created later), and produces no canonical entry.
+    #[test]
+    fn normalize_deny_paths_missing_path_is_absolute_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does_not_exist.yaml");
+        let out = normalize_deny_paths(&[missing.clone()]);
+        assert_eq!(out, vec![missing], "missing path → absolute form only");
+    }
+
+    /// Duplicate absolute/canonical forms collapse to one entry.
+    #[test]
+    fn normalize_deny_paths_dedups() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("f.yaml");
+        std::fs::write(&p, "x").unwrap();
+        // Pass the same path twice: the result must hold no duplicate entries,
+        // whether or not abs and canonical forms differ on this platform
+        // (macOS tempdirs live under a /var symlink).
+        let out = normalize_deny_paths(&[p.clone(), p.clone()]);
+        let unique: std::collections::HashSet<&PathBuf> = out.iter().collect();
+        assert_eq!(
+            unique.len(),
+            out.len(),
+            "no duplicate entries, got: {out:?}"
+        );
+        assert!(out.contains(&p));
     }
 
     #[test]
