@@ -473,10 +473,95 @@ fn is_package_manager_command_pattern(pattern: &str) -> bool {
     .any(|prefix| p.starts_with(prefix))
 }
 
-/// Returns network-related detected patterns not covered by agent-declared patterns.
+/// Signal categories that the declaration **gates**: an occurrence not covered by
+/// the declaration fails shut with `undeclared_remote_pattern`.
 ///
-/// Enforcement is declaration-gated: if the agent does not declare a remote-access
-/// pattern surface, this returns an empty set.
+/// These are the durable half of the contract (#1023). `url_literal`/`ip_address`
+/// name a *reachable target*, checked against `remote_access.targets`;
+/// `network_command`/`dependency_install` name a *shell execution surface*,
+/// checked against `shell_commands`/`package_manager_commands`. All four are
+/// things an agent can state from its own intent, without knowing anything about
+/// the analyzer.
+const GATING_CATEGORIES: &[&str] = &[
+    "url_literal",
+    "ip_address",
+    "network_command",
+    "dependency_install",
+];
+
+/// Signal categories that are **advisory**: detected, shown to the operator at the
+/// approval gate, but never a reason to fail shut on their own (#1023).
+///
+/// These describe *how* code reaches the network rather than *what it reaches*,
+/// and mirroring them required agents to know analyzer internals.
+/// session-912c7791 is the evidence: the coder declared
+/// `function_calls: ["imaplib.fetch("]` while the analyzer detects the bare
+/// `fetch(` — a declaration that could never match — after ~30 turns of guessing
+/// at the schema.
+const ADVISORY_CATEGORIES: &[&str] = &["import", "function_call", "network_sink"];
+
+/// Every declared import pattern, across languages.
+fn declared_import_patterns(decl: &RemoteAccessDeclaration) -> Vec<String> {
+    let mut out = Vec::new();
+    out.extend(decl.python_imports.clone());
+    out.extend(decl.js_imports.clone());
+    out.extend(decl.rust_imports.clone());
+    out.extend(decl.go_imports.clone());
+    out
+}
+
+/// Whether one detected pattern is covered by the declaration, per category.
+/// Used by both the gating and the advisory views.
+fn declaration_covers_pattern(decl: &RemoteAccessDeclaration, p: &DetectedPattern) -> bool {
+    match p.category.as_str() {
+        "import" => observed_matches_declared(&p.pattern, &declared_import_patterns(decl)),
+        "function_call" => observed_matches_declared(&p.pattern, &decl.function_calls),
+        // A sink is resolved structurally by the gateway, never declared.
+        "network_sink" => true,
+        "url_literal" => extract_host_from_url_literal(&p.pattern)
+            .map(|host| declaration_allows_target(decl, &host, Some(&p.pattern)))
+            .unwrap_or(false),
+        "ip_address" => declaration_allows_target(decl, &p.pattern, None),
+        "network_command" => {
+            if is_package_manager_command_pattern(&p.pattern) {
+                observed_matches_declared(&p.pattern, &decl.package_manager_commands)
+            } else {
+                observed_matches_declared(&p.pattern, &decl.shell_commands)
+            }
+        }
+        "dependency_install" => !decl.package_manager_commands.is_empty(),
+        _ => true,
+    }
+}
+
+/// Returns detected patterns the declaration must cover but does not — the set
+/// whose non-emptiness fails an exec shut with `undeclared_remote_pattern`.
+///
+/// Enforcement is declaration-gated: an agent that declares no remote-access
+/// surface at all gets an empty set here (the upstream
+/// `missing_remote_access_declaration` check owns that case).
+///
+/// # What is gated, and why only that (#1023)
+///
+/// **`targets` (hosts) are the authoritative declaration.** A concrete
+/// `url_literal`/`ip_address` must be covered by `remote_access.targets`, and a
+/// `network_command`/`dependency_install` by
+/// `shell_commands`/`package_manager_commands`. Those are statements of intent an
+/// agent can write from what it is trying to do.
+///
+/// **Import and function-call lists are advisory.** They used to gate too, which
+/// forced agents to mirror the analyzer's own pattern strings — a contract agents
+/// demonstrably cannot satisfy (see [`ADVISORY_CATEGORIES`]). Since #1021 resolves
+/// sinks structurally, requiring the agent to re-declare what the gateway already
+/// derives is pure friction.
+///
+/// Demoting them does not make an undetected exec reachable, because the
+/// declaration is not the network boundary. What remains between agent code and
+/// the network: the `NetworkAccess` capability ceiling (with install-time
+/// `detected_network_hosts` coverage, P-1.5), `targets` still gating concrete
+/// hosts here, operator approval at the gate, and the per-exec grant from #1022
+/// without which the sandbox has no network namespace at all. The advisory signals
+/// are still shown to the operator when they approve.
 pub fn undeclared_patterns_against_manifest(
     patterns: &[DetectedPattern],
     declaration: Option<&RemoteAccessDeclaration>,
@@ -484,31 +569,34 @@ pub fn undeclared_patterns_against_manifest(
     let Some(decl) = declaration else {
         return Vec::new();
     };
-    let mut import_patterns = Vec::new();
-    import_patterns.extend(decl.python_imports.clone());
-    import_patterns.extend(decl.js_imports.clone());
-    import_patterns.extend(decl.rust_imports.clone());
-    import_patterns.extend(decl.go_imports.clone());
-
     patterns
         .iter()
-        .filter(|p| match p.category.as_str() {
-            "import" => !observed_matches_declared(&p.pattern, &import_patterns),
-            "function_call" => !observed_matches_declared(&p.pattern, &decl.function_calls),
-            "url_literal" => extract_host_from_url_literal(&p.pattern)
-                .map(|host| !declaration_allows_target(decl, &host, Some(&p.pattern)))
-                .unwrap_or(true),
-            "ip_address" => !declaration_allows_target(decl, &p.pattern, None),
-            "network_command" => {
-                if is_package_manager_command_pattern(&p.pattern) {
-                    !observed_matches_declared(&p.pattern, &decl.package_manager_commands)
-                } else {
-                    !observed_matches_declared(&p.pattern, &decl.shell_commands)
-                }
-            }
-            "dependency_install" => decl.package_manager_commands.is_empty(),
-            _ => false,
+        .filter(|p| GATING_CATEGORIES.contains(&p.category.as_str()))
+        .filter(|p| !declaration_covers_pattern(decl, p))
+        .cloned()
+        .collect()
+}
+
+/// Advisory signals the declaration does not name: import/function-call activity
+/// outside what the agent declared.
+///
+/// Never a reason to refuse — this is drift, surfaced so an operator (or a curator
+/// reviewing manifest hygiene) can see that a declaration has fallen behind the
+/// code. `network_sink` is excluded: sinks are derived by the gateway and were
+/// never something an agent declares.
+pub fn advisory_undeclared_patterns(
+    patterns: &[DetectedPattern],
+    declaration: Option<&RemoteAccessDeclaration>,
+) -> Vec<DetectedPattern> {
+    let Some(decl) = declaration else {
+        return Vec::new();
+    };
+    patterns
+        .iter()
+        .filter(|p| {
+            ADVISORY_CATEGORIES.contains(&p.category.as_str()) && p.category != "network_sink"
         })
+        .filter(|p| !declaration_covers_pattern(decl, p))
         .cloned()
         .collect()
 }
@@ -2354,6 +2442,26 @@ mymod.do_thing()
             undeclared.is_empty(),
             "expected non-python import declarations to match"
         );
+
+        // Imports no longer gate (#1023), so the assertion above would hold even
+        // if the per-language fields were ignored. Assert the matching itself via
+        // the advisory view, which is where import coverage is still computed.
+        assert!(
+            advisory_undeclared_patterns(&patterns, Some(&declaration)).is_empty(),
+            "js/rust/go import fields must still be honoured when computing coverage"
+        );
+        let unmatched = advisory_undeclared_patterns(
+            &patterns,
+            Some(&autonoetic_types::agent::RemoteAccessDeclaration {
+                targets: vec![autonoetic_types::background::GrantTarget::Any],
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            unmatched.len(),
+            3,
+            "with no import fields declared, all three imports are advisory drift"
+        );
     }
 
     #[test]
@@ -2467,6 +2575,197 @@ mymod.do_thing()
             undeclared.is_empty(),
             "expected wildcard allowlist to allow IP target"
         );
+    }
+
+    // --- targets are the durable contract; import/call lists are advisory (#1023) ---
+
+    fn decl_with_targets(
+        targets: Vec<autonoetic_types::background::GrantTarget>,
+    ) -> RemoteAccessDeclaration {
+        RemoteAccessDeclaration {
+            targets,
+            ..Default::default()
+        }
+    }
+
+    /// The behaviour change: an import the declaration does not name no longer
+    /// fails the exec shut. Before #1023 this returned the pattern and
+    /// `sandbox_exec` refused with `undeclared_remote_pattern`.
+    #[test]
+    fn test_undeclared_import_is_advisory_not_gating() {
+        let patterns = vec![DetectedPattern {
+            category: "import".to_string(),
+            pattern: "import imaplib".to_string(),
+            line_number: Some(1),
+            reason: "IMAP client library".to_string(),
+        }];
+        let declaration =
+            decl_with_targets(vec![autonoetic_types::background::GrantTarget::ExactHost(
+                "imap.example.com".to_string(),
+            )]);
+
+        assert!(
+            undeclared_patterns_against_manifest(&patterns, Some(&declaration)).is_empty(),
+            "an undeclared import must not fail shut"
+        );
+        // …but the drift is still observable.
+        let advisory = advisory_undeclared_patterns(&patterns, Some(&declaration));
+        assert_eq!(advisory.len(), 1);
+        assert_eq!(advisory[0].pattern, "import imaplib");
+    }
+
+    /// Same for function calls — the category agents could least reliably mirror.
+    #[test]
+    fn test_undeclared_function_call_is_advisory_not_gating() {
+        let patterns = vec![DetectedPattern {
+            category: "function_call".to_string(),
+            pattern: ".connect(".to_string(),
+            line_number: Some(4),
+            reason: "Socket connection initiation".to_string(),
+        }];
+        let declaration = decl_with_targets(vec![autonoetic_types::background::GrantTarget::Any]);
+
+        assert!(undeclared_patterns_against_manifest(&patterns, Some(&declaration)).is_empty());
+        assert_eq!(
+            advisory_undeclared_patterns(&patterns, Some(&declaration)).len(),
+            1
+        );
+    }
+
+    /// The session-912c7791 failure, reproduced: the coder declared
+    /// `function_calls: ["imaplib.fetch("]` while the analyzer detects the bare
+    /// `fetch(`, so the declaration could never match and the exec failed shut —
+    /// ~30 turns of guessing. With hosts declared and calls advisory, this now
+    /// proceeds to the approval gate instead of refusing.
+    #[test]
+    fn test_session_912c7791_unmatchable_function_call_declaration_no_longer_fails_shut() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "import".to_string(),
+                pattern: "import imaplib".to_string(),
+                line_number: Some(1),
+                reason: "IMAP client library".to_string(),
+            },
+            DetectedPattern {
+                category: "function_call".to_string(),
+                pattern: "fetch(".to_string(),
+                line_number: Some(9),
+                reason: "Fetch API call".to_string(),
+            },
+        ];
+        let declaration = RemoteAccessDeclaration {
+            targets: vec![autonoetic_types::background::GrantTarget::HostAndPort {
+                host: "imap.gmail.com".to_string(),
+                port: 993,
+            }],
+            python_imports: vec!["imaplib".to_string()],
+            // The unmatchable entry the agent actually wrote.
+            function_calls: vec!["imaplib.fetch(".to_string()],
+            ..Default::default()
+        };
+
+        assert!(
+            undeclared_patterns_against_manifest(&patterns, Some(&declaration)).is_empty(),
+            "a well-declared host must not be blocked by an unmatchable call pattern"
+        );
+        // The import matched; only the call pattern is drift.
+        let advisory = advisory_undeclared_patterns(&patterns, Some(&declaration));
+        assert_eq!(advisory.len(), 1);
+        assert_eq!(advisory[0].category, "function_call");
+    }
+
+    /// `targets` keeps its authority: a concrete host outside the declaration still
+    /// fails shut. Demoting the import lists must not weaken this.
+    #[test]
+    fn test_targets_remain_authoritative_for_concrete_hosts() {
+        let patterns = vec![
+            DetectedPattern {
+                category: "url_literal".to_string(),
+                pattern: "https://evil.example.net/exfil".to_string(),
+                line_number: Some(2),
+                reason: "url".to_string(),
+            },
+            DetectedPattern {
+                category: "ip_address".to_string(),
+                pattern: "203.0.113.9".to_string(),
+                line_number: Some(3),
+                reason: "ip".to_string(),
+            },
+        ];
+        let declaration =
+            decl_with_targets(vec![autonoetic_types::background::GrantTarget::ExactHost(
+                "api.example.com".to_string(),
+            )]);
+
+        let undeclared = undeclared_patterns_against_manifest(&patterns, Some(&declaration));
+        assert_eq!(undeclared.len(), 2, "{undeclared:?}");
+    }
+
+    /// Shell/package-manager surfaces stay gating — they name an execution surface
+    /// rather than analyzer internals, and `dependency_install` is what routes work
+    /// to `packager.default`.
+    #[test]
+    fn test_shell_and_dependency_surfaces_remain_gating() {
+        let wget = vec![DetectedPattern {
+            category: "network_command".to_string(),
+            pattern: "wget".to_string(),
+            line_number: Some(1),
+            reason: "command".to_string(),
+        }];
+        let declaration = RemoteAccessDeclaration {
+            targets: vec![autonoetic_types::background::GrantTarget::Any],
+            shell_commands: vec!["curl".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            undeclared_patterns_against_manifest(&wget, Some(&declaration)).len(),
+            1
+        );
+
+        let dep = vec![DetectedPattern {
+            category: "dependency_install".to_string(),
+            pattern: "requests".to_string(),
+            line_number: None,
+            reason: "dependency".to_string(),
+        }];
+        assert_eq!(
+            undeclared_patterns_against_manifest(&dep, Some(&declaration)).len(),
+            1,
+            "no declared package_manager_commands ⇒ dependency install still gated"
+        );
+    }
+
+    /// Sinks are derived by the gateway, so they are neither gating nor reported as
+    /// declaration drift — an agent cannot be expected to declare them.
+    #[test]
+    fn test_network_sink_is_neither_gating_nor_advisory_drift() {
+        let patterns = vec![DetectedPattern {
+            category: "network_sink".to_string(),
+            pattern: "http.client.HTTPSConnection".to_string(),
+            line_number: Some(3),
+            reason: "HTTPS client connection".to_string(),
+        }];
+        let declaration = decl_with_targets(vec![autonoetic_types::background::GrantTarget::Any]);
+
+        assert!(undeclared_patterns_against_manifest(&patterns, Some(&declaration)).is_empty());
+        assert!(
+            advisory_undeclared_patterns(&patterns, Some(&declaration)).is_empty(),
+            "sinks must not be reported as something the agent failed to declare"
+        );
+    }
+
+    /// No declaration at all ⇒ both views are empty; the
+    /// `missing_remote_access_declaration` check upstream owns that case.
+    #[test]
+    fn test_advisory_view_is_empty_without_a_declaration() {
+        let patterns = vec![DetectedPattern {
+            category: "import".to_string(),
+            pattern: "import requests".to_string(),
+            line_number: Some(1),
+            reason: "import".to_string(),
+        }];
+        assert!(advisory_undeclared_patterns(&patterns, None).is_empty());
+        assert!(undeclared_patterns_against_manifest(&patterns, None).is_empty());
     }
 }
 

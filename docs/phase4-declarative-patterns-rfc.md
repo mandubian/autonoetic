@@ -71,14 +71,24 @@ Two-pass, fail-shut:
    `http(s)`, `dgram`, …). Sinks are structural: an unlisted or brand-new client
    library is detected because it bottoms out on a primitive, with no code change.
    See `docs/network-sink-detection.md`.
-2. **Declared coverage check**:
-   - if a signal maps to a declared pattern category and is covered -> allowed
-   - if a signal is not covered by declared patterns -> `undeclared_remote_pattern`
-     deny (structured tool error)
-  - concrete URL/IP targets must match `remote_access.targets` (typed target rules)
-  - the `network_sink` category is **detection-only**: it raises the approval gate
-    but is not part of the declared-coverage check, so sinks add nothing an agent
-    must enumerate (what must be declared is #1023's decision)
+2. **Declared coverage check** — two classes of signal (#1023):
+   - **Gating** (`url_literal`, `ip_address`, `network_command`,
+     `dependency_install`): not covered by the declaration -> `undeclared_remote_pattern`
+     deny (structured tool error). Concrete URL/IP targets must match
+     `remote_access.targets` (typed target rules); commands must match
+     `shell_commands` / `package_manager_commands`. These state intent an agent can
+     write from its own task — `targets` is the authoritative, durable contract.
+   - **Advisory** (`import`, `function_call`): detected and shown to the operator at
+     the gate, surfaced as declaration drift in the `sandbox_exec` trace, but never
+     a deny on their own. Gating on these forced agents to mirror analyzer pattern
+     strings, which session-912c7791 showed they cannot do
+     (`function_calls: ["imaplib.fetch("]` vs the detected bare `fetch(`).
+   - **Derived** (`network_sink`): resolved by the gateway, neither gating nor
+     reported as drift — never something an agent declares.
+   - Demotion removes no protection: the declaration was never the network
+     boundary. What remains is the capability ceiling (P-1.5 detected-host
+     coverage), `targets`, operator approval, and the per-exec grant (#1022)
+     without which the sandbox has no network namespace.
 3. **Language scoping** (`enabled_languages`) — applies to import detectors,
    language-tagged function-call heuristics, *and* sink resolution:
    - if `enabled_languages` is empty -> all registered import detectors run, and

@@ -791,7 +791,10 @@ your task; do NOT `EndTurn` immediately after resumption.\n\n\
 to remove the network access, and do NOT retry the same code — you cannot edit your own installed \
 SKILL.md. Stop and report the `error_type` + `undeclared_patterns` to your caller; the caller must \
 have the builder flow (agent-factory / specialized_builder) re-issue the install intent or a \
-revision whose `remote_access` declaration covers the listed patterns."
+revision whose `remote_access` declaration covers the listed patterns. The listed patterns are \
+always hosts/IPs (fix: add them to `remote_access.targets`) or shell/package-manager commands \
+(fix: `shell_commands` / `package_manager_commands`) — imports and call patterns are advisory and \
+never cause this error, so there is no need to enumerate them."
             .to_string(),
     }
 }
@@ -1297,6 +1300,28 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                     .to_string(),
                 undeclared,
             ));
+        }
+
+        // Declaration drift (#1023): import/function-call signals the declaration
+        // does not name. Advisory by design — `targets` is the authoritative
+        // contract, and mirroring analyzer pattern strings is a contract agents
+        // cannot keep. Logged rather than enforced, so manifest hygiene stays
+        // observable without turning a stale hint into a refusal. The operator also
+        // sees these patterns in the approval prompt itself.
+        let advisory_drift = crate::runtime::remote_access::advisory_undeclared_patterns(
+            &remote_analysis.detected_patterns,
+            declared_remote_access.as_ref(),
+        );
+        if !advisory_drift.is_empty() {
+            tracing::info!(
+                target: "sandbox_exec",
+                agent_id = %manifest.agent.id,
+                undeclared_advisory = ?advisory_drift
+                    .iter()
+                    .map(|p| format!("{}:{}", p.category, p.pattern))
+                    .collect::<Vec<_>>(),
+                "Remote-access signals outside the agent's declared import/function lists (advisory — targets are the gating contract)"
+            );
         }
 
         let agent_has_network_access = manifest
