@@ -456,22 +456,141 @@ fn cap_chars(s: &str, max: usize) -> String {
 
 /// Resolve credential env vars from a runtime.lock's `credentials` section.
 ///
-/// For each `LockedCredentialMount`, looks up credentials by service name in
-/// the store, derives the env-var name via `inject_as_for_service()`, and
-/// resolves the secret from the vault. Returns `(env_var, secret_value)` pairs
-/// ready to inject into the sandbox environment.
+/// For each `LockedCredentialMount`, looks up credentials in the store and
+/// resolves their secrets from the vault. Each credential is injected under
+/// its own env-var name: an `inject_as` holding a valid env-var identifier
+/// (e.g. `GMAIL_EMAIL`) is honored as-is; anything else (NULL, or an HTTP
+/// injection style like `bearer` / `header:X-…` used by `credential_request`)
+/// falls back to the service-derived [`inject_as_for_service`] name. A service
+/// may legitimately resolve to several env vars (multi-secret services such as
+/// gmail → `GMAIL_EMAIL` + `GMAIL_APP_PASSWORD`).
 ///
 /// `spawn_bindings` provides credential overrides from `agent_spawn` — entries
 /// here take precedence over runtime.lock entries for the same service.
 ///
-/// Failures are logged and skipped — a missing credential should not block
-/// the agent spawn (the credential may not be needed this session).
+/// Fail-closed: when credential mounts are declared (lock or bindings) but a
+/// declared service resolves to zero env vars (no credential record, or the
+/// vault secret is missing), the spawn fails with a
+/// `credential_injection_failed` error naming the service. Running the script
+/// without its declared credentials only produced cryptic "missing env var"
+/// script errors and agent onboarding loops — the typed failure surfaces the
+/// real cause immediately.
 pub(crate) fn resolve_credential_env(
     agent_dir: &Path,
     gateway_dir: &Path,
     store: &crate::scheduler::gateway_store::GatewayStore,
-) -> Vec<(String, String)> {
+) -> anyhow::Result<Vec<(String, String)>> {
     resolve_credential_env_with_bindings(agent_dir, gateway_dir, store, &[])
+}
+
+/// The env-var name a credential is injected under, and whether the name came
+/// from the credential's own `inject_as` (`true`) or from the service-derived
+/// fallback (`false`). `inject_as` is overloaded: HTTP injection styles
+/// (`bearer`, `Authorization`, `header:X-…`) belong to `credential_request`,
+/// not env injection, so they take the fallback.
+fn env_var_name_for_credential(
+    cred: &autonoetic_types::agent::CredentialRecord,
+    service: &str,
+) -> (String, bool) {
+    if let Some(name) = cred.inject_as.as_deref() {
+        let lower = name.to_ascii_lowercase();
+        let http_style =
+            lower == "bearer" || lower == "authorization" || lower.starts_with("header:");
+        if !http_style && is_injectable_env_var_name(name) {
+            return (name.to_string(), true);
+        }
+    }
+    (
+        autonoetic_types::runtime_lock::inject_as_for_service(service),
+        false,
+    )
+}
+
+/// True when `name` is a safe env-var identifier to inject into a sandbox:
+/// POSIX-ish shape, and not one of the names that would let a credential
+/// record hijack the process runtime (PATH, LD_*, …). `inject_as` values are
+/// operator-approved, but defense in depth applies: an unsafe name is never
+/// honored as an env var — the service-derived fallback is used instead.
+fn is_injectable_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    !matches!(
+        name,
+        "PATH"
+            | "HOME"
+            | "IFS"
+            | "ENV"
+            | "BASH_ENV"
+            | "LD_PRELOAD"
+            | "LD_LIBRARY_PATH"
+            | "LD_AUDIT"
+            | "DYLD_INSERT_LIBRARIES"
+            | "PYTHONPATH"
+            | "NODE_PATH"
+    )
+}
+
+/// A resolved credential env var, with the provenance needed for deterministic
+/// collision handling.
+struct ResolvedCredentialEnv {
+    env_var: String,
+    secret: String,
+    /// True when the env-var name came from the credential's own `inject_as`;
+    /// false when derived from the service name.
+    explicit: bool,
+    credential_id: String,
+}
+
+/// Push a resolved env var, resolving collisions deterministically: an
+/// explicit `inject_as` name shadows the service-derived fallback; otherwise
+/// the first match wins. Both cases are logged loudly — one secret silently
+/// shadowing another under the same env var must never be quiet.
+fn push_credential_env(
+    resolved: &mut Vec<ResolvedCredentialEnv>,
+    env_var: String,
+    secret: String,
+    explicit: bool,
+    credential_id: &str,
+) {
+    if let Some(pos) = resolved.iter().position(|e| e.env_var == env_var) {
+        let existing = &resolved[pos];
+        if explicit && !existing.explicit {
+            tracing::warn!(
+                target: "script_execute",
+                env_var = %env_var,
+                shadowed_credential_id = %existing.credential_id,
+                winner_credential_id = %credential_id,
+                "Credential env-var collision: explicit inject_as shadows the service-derived fallback"
+            );
+            resolved[pos] = ResolvedCredentialEnv {
+                env_var,
+                secret,
+                explicit,
+                credential_id: credential_id.to_string(),
+            };
+        } else {
+            tracing::warn!(
+                target: "script_execute",
+                env_var = %env_var,
+                kept_credential_id = %existing.credential_id,
+                ignored_credential_id = %credential_id,
+                "Credential env-var collision: keeping first match — pin a credential_id in spawn bindings to disambiguate"
+            );
+        }
+        return;
+    }
+    resolved.push(ResolvedCredentialEnv {
+        env_var,
+        secret,
+        explicit,
+        credential_id: credential_id.to_string(),
+    });
 }
 
 /// Like [`resolve_credential_env`] but accepts spawn-time credential bindings
@@ -481,7 +600,7 @@ pub(crate) fn resolve_credential_env_with_bindings(
     gateway_dir: &Path,
     store: &crate::scheduler::gateway_store::GatewayStore,
     spawn_bindings: &[autonoetic_types::runtime_lock::LockedCredentialMount],
-) -> Vec<(String, String)> {
+) -> anyhow::Result<Vec<(String, String)>> {
     let lock_path = agent_dir.join(
         "runtime.lock",
     );
@@ -496,14 +615,14 @@ pub(crate) fn resolve_credential_env_with_bindings(
                     error = %e,
                     "Failed to parse runtime.lock; skipping credential resolution"
                 );
-                return vec![];
+                return Ok(vec![]);
             }
         },
-        Err(_) => return vec![],
+        Err(_) => return Ok(vec![]),
     };
 
     if lock.credentials.is_empty() && spawn_bindings.is_empty() {
-        return vec![];
+        return Ok(vec![]);
     }
 
     // Merge: spawn_bindings override lock.credentials for matching services.
@@ -527,25 +646,27 @@ pub(crate) fn resolve_credential_env_with_bindings(
     let vault_dir = gateway_dir.parent().unwrap_or(gateway_dir);
     if crate::vault::ensure_default_key(vault_dir).is_err() {
         tracing::warn!(target: "script_execute", "Failed to ensure vault key; skipping credential resolution");
-        return vec![];
+        return Ok(vec![]);
     }
     let vault_path = crate::vault::default_vault_path(vault_dir);
     let vault = match crate::vault::Vault::load_from_file(&vault_path) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(target: "script_execute", error = %e, "Failed to load vault; skipping credential resolution");
-            return vec![];
+            return Ok(vec![]);
         }
     };
 
-    let mut resolved = Vec::new();
+    let mut resolved: Vec<ResolvedCredentialEnv> = Vec::new();
+    let mut unsatisfied_services: Vec<String> = Vec::new();
     for cm in &merged {
-        let env_var = autonoetic_types::runtime_lock::inject_as_for_service(&cm.service);
+        let mut mount_resolved = 0usize;
 
         // If a specific credential_id is declared in runtime.lock, resolve directly.
         if let Some(ref cred_id) = cm.credential_id {
             match store.get_credential(cred_id) {
                 Ok(Some(cred)) => {
+                    let (env_var, explicit) = env_var_name_for_credential(&cred, &cm.service);
                     if let Some(secret) = vault.get_secret(&cred.secret_name) {
                         tracing::info!(
                             target: "script_execute",
@@ -554,7 +675,14 @@ pub(crate) fn resolve_credential_env_with_bindings(
                             env_var = %env_var,
                             "Resolved credential by ID for script agent"
                         );
-                        resolved.push((env_var, secret.expose_secret().to_string()));
+                        push_credential_env(
+                            &mut resolved,
+                            env_var,
+                            secret.expose_secret().to_string(),
+                            explicit,
+                            cred_id,
+                        );
+                        mount_resolved += 1;
                     } else {
                         tracing::warn!(
                             target: "script_execute",
@@ -563,6 +691,9 @@ pub(crate) fn resolve_credential_env_with_bindings(
                             secret_name = %cred.secret_name,
                             "Secret not found in vault for pinned credential_id"
                         );
+                    }
+                    if mount_resolved == 0 {
+                        unsatisfied_services.push(cm.service.clone());
                     }
                     continue;
                 }
@@ -584,7 +715,12 @@ pub(crate) fn resolve_credential_env_with_bindings(
             }
         }
 
-        // Fallback: resolve by service name (first match).
+        // Fallback: resolve by service name. Every credential stored for the
+        // service is injected under its own env-var name — an env-var-shaped
+        // `inject_as` resolves under that name, anything else under the
+        // service-derived `<SERVICE>_SECRET`. Multi-secret services (e.g.
+        // gmail → GMAIL_EMAIL + GMAIL_APP_PASSWORD) resolve fully instead of
+        // silently picking a first match.
         let creds = match store.list_credentials_by_service(&cm.service) {
             Ok(c) => c,
             Err(e) => {
@@ -594,62 +730,64 @@ pub(crate) fn resolve_credential_env_with_bindings(
                     error = %e,
                     "Failed to list credentials for service"
                 );
+                unsatisfied_services.push(cm.service.clone());
                 continue;
             }
         };
-        // A credential with no explicit `inject_as` matches the service-derived
-        // env var: `None` previously never matched, so flows that stored a
-        // credential without passing `inject_as` silently injected nothing
-        // ("No credential found for service with matching inject_as"). Treat
-        // `None` as "resolve by service" — an explicit `inject_as` still
-        // requires an exact match.
-        let matched = creds
-            .iter()
-            .filter(|c| c.inject_as.is_none() || c.inject_as.as_deref() == Some(&env_var))
-            .collect::<Vec<_>>();
-        let cred = match matched.len() {
-            0 => {
-                tracing::warn!(
-                    target: "script_execute",
-                    service = %cm.service,
-                    env_var = %env_var,
-                    "No credential found for service with matching inject_as; skipping"
-                );
-                continue;
-            }
-            1 => matched[0],
-            _ => {
-                tracing::warn!(
-                    target: "script_execute",
-                    service = %cm.service,
-                    env_var = %env_var,
-                    count = matched.len(),
-                    "Multiple credentials found for service+env_var; using first match. Pin a credential_id in runtime.lock to disambiguate."
-                );
-                matched[0]
-            }
-        };
-        match vault.get_secret(&cred.secret_name) {
-            Some(secret) => {
-                tracing::info!(
-                    target: "script_execute",
-                    service = %cm.service,
-                    env_var = %env_var,
-                    "Resolved credential for script agent"
-                );
-                resolved.push((env_var, secret.expose_secret().to_string()));
-            }
-            None => {
-                tracing::warn!(
-                    target: "script_execute",
-                    service = %cm.service,
-                    secret_name = %cred.secret_name,
-                    "Secret not found in vault; skipping credential injection"
-                );
+        if creds.is_empty() {
+            tracing::warn!(
+                target: "script_execute",
+                service = %cm.service,
+                "No credential found for service"
+            );
+        }
+        for cred in &creds {
+            let (env_var, explicit) = env_var_name_for_credential(cred, &cm.service);
+            match vault.get_secret(&cred.secret_name) {
+                Some(secret) => {
+                    tracing::info!(
+                        target: "script_execute",
+                        service = %cm.service,
+                        credential_id = %cred.credential_id,
+                        env_var = %env_var,
+                        "Resolved credential for script agent"
+                    );
+                    push_credential_env(
+                        &mut resolved,
+                        env_var,
+                        secret.expose_secret().to_string(),
+                        explicit,
+                        &cred.credential_id,
+                    );
+                    mount_resolved += 1;
+                }
+                None => {
+                    tracing::warn!(
+                        target: "script_execute",
+                        service = %cm.service,
+                        credential_id = %cred.credential_id,
+                        secret_name = %cred.secret_name,
+                        "Secret not found in vault; skipping credential injection"
+                    );
+                }
             }
         }
+        if mount_resolved == 0 {
+            unsatisfied_services.push(cm.service.clone());
+        }
     }
-    resolved
+
+    if !unsatisfied_services.is_empty() {
+        anyhow::bail!(
+            "credential_injection_failed: credential mount(s) declared for service(s) [{}] but no secret resolved (no credential record, or the vault secret is missing). Onboard via credential_setup or pin a valid credential_id; refusing to spawn the script agent without its declared credentials.",
+            unsatisfied_services.join(", ")
+        );
+    }
+
+    Ok(resolved
+        .into_iter()
+        .map(|entry| (entry.env_var, entry.secret))
+        .collect())
 }
 
 #[cfg(test)]
@@ -670,49 +808,94 @@ mod tests {
         );
     }
 
-    /// Resolver contract for service-based credential lookup: a credential
-    /// stored with no `inject_as` (the session that spawned the fix — flows
-    /// that did not pass it) must still resolve by service-derived env var;
-    /// an explicit `inject_as` still requires an exact match.
-    #[test]
-    #[serial_test::serial]
-    fn resolve_credential_env_resolves_null_inject_as_by_service() {
-        use autonoetic_types::agent::CredentialRecord;
+    /// Process-env guard for the vault key, restored on drop (tests in this
+    /// binary share one process under `cargo test`).
+    struct VaultKeyGuard {
+        old_key: Option<String>,
+        old_key_path: Option<String>,
+    }
 
-        let old_key = std::env::var("AUTONOETIC_VAULT_KEY").ok();
-        std::env::set_var(
-            "AUTONOETIC_VAULT_KEY",
-            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        );
-        let old_key_path = std::env::var("AUTONOETIC_VAULT_KEY_PATH").ok();
-        std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+    impl VaultKeyGuard {
+        fn set_test_key() -> Self {
+            let old_key = std::env::var("AUTONOETIC_VAULT_KEY").ok();
+            std::env::set_var(
+                "AUTONOETIC_VAULT_KEY",
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            );
+            let old_key_path = std::env::var("AUTONOETIC_VAULT_KEY_PATH").ok();
+            std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+            Self {
+                old_key,
+                old_key_path,
+            }
+        }
+    }
 
+    impl Drop for VaultKeyGuard {
+        fn drop(&mut self) {
+            match &self.old_key {
+                Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY", v),
+                None => std::env::remove_var("AUTONOETIC_VAULT_KEY"),
+            }
+            match &self.old_key_path {
+                Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", v),
+                None => std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH"),
+            }
+        }
+    }
+
+    /// Shared fixture: a temp gateway dir with a vault holding `secrets`, an
+    /// agent dir whose runtime.lock declares the given credential mounts
+    /// (JSON array fragment), and an open store.
+    fn credential_resolver_fixture(
+        secrets: &[(&str, &str)],
+        lock_credentials_json: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        crate::scheduler::gateway_store::GatewayStore,
+    ) {
         let temp = tempfile::tempdir().expect("tempdir");
         let gateway_dir = temp.path().join(".gateway");
         let agent_dir = temp.path().join("agent");
         std::fs::create_dir_all(&gateway_dir).unwrap();
         std::fs::create_dir_all(&agent_dir).unwrap();
 
-        // Vault with one secret, at the path resolve_credential_env derives
+        // Vault at the path resolve_credential_env derives
         // (<vault_dir>/.gateway/vault.enc.json where vault_dir = parent of gateway_dir).
         let mut vault = crate::vault::Vault::new();
-        vault.set_secret("api-key-secret", "top-secret-value".to_string());
+        for (name, value) in secrets {
+            vault.set_secret(name, value.to_string());
+        }
         vault
             .persist_to_file(&gateway_dir.join("vault.enc.json"))
             .expect("vault persist");
 
         std::fs::write(
             agent_dir.join("runtime.lock"),
-            r#"{"gateway":{"artifact":"marketplace://gateway/autonoetic-gateway","version":"0.1.0","sha256":"sha256:abc","binary_sha256":"sha256:def","build_tag":"0.1.0","signature":null},"sdk":{"version":"0.1.0"},"sandbox":{"backend":"bubblewrap"},"credentials":[{"service":"github"}]}"#,
+            format!(
+                r#"{{"gateway":{{"artifact":"marketplace://gateway/autonoetic-gateway","version":"0.1.0","sha256":"sha256:abc","binary_sha256":"sha256:def","build_tag":"0.1.0","signature":null}},"sdk":{{"version":"0.1.0"}},"sandbox":{{"backend":"bubblewrap"}},"credentials":{}}}"#,
+                lock_credentials_json
+            ),
         )
         .expect("lock write");
 
         let store = crate::scheduler::gateway_store::GatewayStore::open(temp.path()).unwrap();
-        let make_cred = |inject_as: Option<String>| CredentialRecord {
-            credential_id: "cred_test_1".to_string(),
-            service: "github".to_string(),
-            secret_name: "api-key-secret".to_string(),
-            inject_as,
+        (temp, gateway_dir, agent_dir, store)
+    }
+
+    fn resolver_test_credential(
+        credential_id: &str,
+        service: &str,
+        secret_name: &str,
+        inject_as: Option<&str>,
+    ) -> autonoetic_types::agent::CredentialRecord {
+        autonoetic_types::agent::CredentialRecord {
+            credential_id: credential_id.to_string(),
+            service: service.to_string(),
+            secret_name: secret_name.to_string(),
+            inject_as: inject_as.map(str::to_string),
             created_by_agent: None,
             expires_at: None,
             shared_with: vec![],
@@ -725,42 +908,239 @@ mod tests {
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
             label: None,
-        };
+        }
+    }
 
-        // NULL inject_as → resolves by service-derived env var.
-        store.upsert_credential(&make_cred(None)).unwrap();
-        let resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store);
+    /// Resolver contract for the env-var name: the stored `inject_as` IS the
+    /// injection target when it holds a valid env-var identifier. NULL and
+    /// HTTP injection styles (`bearer`/`header:…`, used by
+    /// `credential_request`) fall back to the service-derived
+    /// `<SERVICE>_SECRET`; unsafe names (PATH, LD_…) are never honored.
+    /// Diagnosed from session-d1d8c2bb: credentials stored with
+    /// inject_as=GMAIL_EMAIL/GMAIL_APP_PASSWORD never reached the script
+    /// because the resolver only ever injected the service-derived name.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_inject_as_is_the_env_var_name() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("api-key-secret", "top-secret-value")],
+            r#"[{"service":"github"}]"#,
+        );
+
+        // NULL inject_as → resolves under the service-derived env var.
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_a",
+                "github",
+                "api-key-secret",
+                None,
+            ))
+            .unwrap();
+        assert_eq!(
+            resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+            vec![("GITHUB_SECRET".to_string(), "top-secret-value".to_string())],
+            "NULL inject_as must resolve under the service-derived env var"
+        );
+
+        // Explicit env-var inject_as → honored as the injection target.
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_a",
+                "github",
+                "api-key-secret",
+                Some("GITHUB_TOKEN"),
+            ))
+            .unwrap();
+        assert_eq!(
+            resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+            vec![("GITHUB_TOKEN".to_string(), "top-secret-value".to_string())],
+            "an env-var-shaped inject_as is the injection target"
+        );
+
+        // HTTP injection styles are not env names → service-derived fallback.
+        for style in ["bearer", "Authorization", "header:X-Custom-Auth"] {
+            store
+                .upsert_credential(&resolver_test_credential(
+                    "cred_a",
+                    "github",
+                    "api-key-secret",
+                    Some(style),
+                ))
+                .unwrap();
+            assert_eq!(
+                resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+                vec![("GITHUB_SECRET".to_string(), "top-secret-value".to_string())],
+                "HTTP injection style {style} must fall back to the service-derived env var"
+            );
+        }
+
+        // Unsafe env names are never honored → service-derived fallback.
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_a",
+                "github",
+                "api-key-secret",
+                Some("PATH"),
+            ))
+            .unwrap();
+        assert_eq!(
+            resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+            vec![("GITHUB_SECRET".to_string(), "top-secret-value".to_string())],
+            "unsafe inject_as must fall back to the service-derived env var"
+        );
+    }
+
+    /// Multi-secret services: every credential stored for the service is
+    /// injected under its own env-var name. The session-d1d8c2bb scenario —
+ /// one NULL placeholder plus two properly named credentials — must yield
+    /// all three env vars.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_injects_every_credential_for_a_service() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[
+                ("app_password", "pw"),
+                ("gmail_email", "u@gmail.com"),
+                ("gmail_app_password", "pw"),
+            ],
+            r#"[{"service":"gmail"}]"#,
+        );
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_old",
+                "gmail",
+                "app_password",
+                None,
+            ))
+            .unwrap();
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_email",
+                "gmail",
+                "gmail_email",
+                Some("GMAIL_EMAIL"),
+            ))
+            .unwrap();
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_pw",
+                "gmail",
+                "gmail_app_password",
+                Some("GMAIL_APP_PASSWORD"),
+            ))
+            .unwrap();
+
+        let mut resolved =
+            resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap();
+        resolved.sort();
         assert_eq!(
             resolved,
-            vec![("GITHUB_SECRET".to_string(), "top-secret-value".to_string())],
-            "NULL inject_as must resolve by service-derived env var"
+            vec![
+                ("GMAIL_APP_PASSWORD".to_string(), "pw".to_string()),
+                ("GMAIL_EMAIL".to_string(), "u@gmail.com".to_string()),
+                ("GMAIL_SECRET".to_string(), "pw".to_string()),
+            ],
+            "all credentials for the service must be injected under their own names"
         );
+    }
 
-        // Explicit matching inject_as → resolves (unchanged behaviour).
+    /// Collision contract: a NULL placeholder and an explicit credential
+    /// targeting the same env var — the explicit `inject_as` wins regardless
+    /// of insertion order.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_collision_explicit_shadows_fallback() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("old-secret", "old"), ("new-secret", "new")],
+            r#"[{"service":"github"}]"#,
+        );
         store
-            .upsert_credential(&make_cred(Some("GITHUB_SECRET".to_string())))
+            .upsert_credential(&resolver_test_credential(
+                "cred_old", "github", "old-secret", None,
+            ))
             .unwrap();
-        let resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store);
-        assert_eq!(resolved.len(), 1, "explicit matching inject_as must resolve");
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_new",
+                "github",
+                "new-secret",
+                Some("GITHUB_SECRET"),
+            ))
+            .unwrap();
+        assert_eq!(
+            resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+            vec![("GITHUB_SECRET".to_string(), "new".to_string())],
+            "explicit inject_as must shadow the service-derived fallback"
+        );
+    }
 
-        // Explicit non-matching inject_as → still skipped.
+    /// By-ID pinning: a runtime.lock `credential_id` mount resolves under the
+    /// credential's own `inject_as` — the by-ID path previously always used
+    /// the service-derived name (the session-d1d8c2bb bug).
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_by_id_honors_stored_inject_as() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("gmail_app_password", "pw")],
+            r#"[{"service":"gmail","credential_id":"cred_pw"}]"#,
+        );
         store
-            .upsert_credential(&make_cred(Some("OTHER_SECRET".to_string())))
+            .upsert_credential(&resolver_test_credential(
+                "cred_pw",
+                "gmail",
+                "gmail_app_password",
+                Some("GMAIL_APP_PASSWORD"),
+            ))
             .unwrap();
-        let resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store);
+        assert_eq!(
+            resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+            vec![("GMAIL_APP_PASSWORD".to_string(), "pw".to_string())],
+            "a pinned credential must be injected under its stored inject_as"
+        );
+    }
+
+    /// Fail-closed: a declared credential mount that resolves to zero env vars
+    /// is a hard `credential_injection_failed` error, not a silent skip — the
+    /// silent skip was the loop fuel in session-d1d8c2bb (script ran without
+    /// its declared credentials and failed with cryptic missing-env errors).
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_fails_closed_on_unresolvable_declaration() {
+        let _guard = VaultKeyGuard::set_test_key();
+
+        // Declared service with no credential record at all → hard error.
+        let (_temp, gateway_dir, agent_dir, store) =
+            credential_resolver_fixture(&[], r#"[{"service":"github"}]"#);
+        let err = resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap_err();
+        let msg = err.to_string();
         assert!(
-            resolved.is_empty(),
-            "non-matching inject_as must not resolve, got {resolved:?}"
+            msg.contains("credential_injection_failed"),
+            "expected a credential_injection_failed error, got: {msg}"
         );
+        assert!(msg.contains("github"), "error must name the service: {msg}");
 
-        match old_key {
-            Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY", v),
-            None => std::env::remove_var("AUTONOETIC_VAULT_KEY"),
-        }
-        match old_key_path {
-            Some(v) => std::env::set_var("AUTONOETIC_VAULT_KEY_PATH", v),
-            None => std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH"),
-        }
+        // Pinned credential_id whose vault secret is missing → hard error.
+        let (_temp2, gateway_dir2, agent_dir2, store2) = credential_resolver_fixture(
+            &[],
+            r#"[{"service":"gmail","credential_id":"cred_pw"}]"#,
+        );
+        store2
+            .upsert_credential(&resolver_test_credential(
+                "cred_pw",
+                "gmail",
+                "gmail_app_password",
+                Some("GMAIL_APP_PASSWORD"),
+            ))
+            .unwrap();
+        let err = resolve_credential_env(&agent_dir2, &gateway_dir2, &store2).unwrap_err();
+        assert!(
+            err.to_string().contains("credential_injection_failed"),
+            "missing vault secret for a pinned credential must fail closed, got: {err}"
+        );
     }
 
     #[cfg(test)]
