@@ -754,6 +754,12 @@ impl AgentExecutor {
         let constitution_version = crate::constitution_digest::constitution_version();
         let constitution_digest = crate::constitution_digest::constitution_digest();
 
+        // The concrete model this spawn is actually running (preset-resolved,
+        // session-override-aware). Authoritative per-turn value — mirrors what
+        // tracing and guidance gating use. Provider config/endpoints are
+        // intentionally excluded; only the model id is attested.
+        let model_id = self.resolved_model_id();
+
         let attestation = crate::runtime::state_attestation::compose_and_sign(
             crate::runtime::state_attestation::AttestationInputs {
                 agent_id: &self.manifest.agent.id,
@@ -772,6 +778,7 @@ impl AgentExecutor {
                 burn_rate,
                 constitution_version: &constitution_version,
                 constitution_digest: &constitution_digest,
+                model_id: &model_id,
             },
             &key,
         )?;

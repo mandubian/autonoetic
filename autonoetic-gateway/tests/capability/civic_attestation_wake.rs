@@ -129,6 +129,7 @@ fn attestation_tail_surfaces_own_pending_proposal_and_flag() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -248,6 +249,7 @@ fn attestation_tail_surfaces_open_amendment_invitations() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )

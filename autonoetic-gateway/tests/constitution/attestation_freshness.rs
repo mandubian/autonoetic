@@ -61,6 +61,7 @@ fn turn_counter_monotonic_across_attestations() {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "test-model",
             },
             &key,
         )
@@ -112,6 +113,7 @@ fn budget_meters_reflect_consumption() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -160,6 +162,7 @@ fn budget_meters_reflect_consumption() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -207,6 +210,7 @@ fn capability_changes_appear_immediately() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -240,6 +244,7 @@ fn capability_changes_appear_immediately() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -277,6 +282,7 @@ fn pending_approval_ids_are_current() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -303,6 +309,7 @@ fn pending_approval_ids_are_current() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -329,6 +336,7 @@ fn pending_approval_ids_are_current() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -362,6 +370,7 @@ fn attested_at_advances_across_turns() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -385,6 +394,7 @@ fn attested_at_advances_across_turns() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -428,6 +438,7 @@ fn spawn_depth_tracks_session_path() {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "test-model",
             },
             &key,
         )
@@ -466,6 +477,7 @@ fn pending_gate_ids_include_all_gate_kinds() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "deadbeef",
+            model_id: "test-model",
         },
         &key,
     )
@@ -513,6 +525,7 @@ fn constitution_digest_reflects_active_law() {
             burn_rate: None,
             constitution_version: "2026.07.02",
             constitution_digest: "aaaa1111",
+            model_id: "test-model",
         },
         &key,
     )
@@ -537,6 +550,7 @@ fn constitution_digest_reflects_active_law() {
             burn_rate: None,
             constitution_version: "2026.07.08",
             constitution_digest: "bbbb2222",
+            model_id: "test-model",
         },
         &key,
     )

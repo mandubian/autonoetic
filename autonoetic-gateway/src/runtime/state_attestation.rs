@@ -76,6 +76,15 @@ pub struct AttestationInputs<'a> {
     /// SHA-256 digest of the canonical constitution text the session runs
     /// under. See [`AttestationInputs::constitution_version`].
     pub constitution_digest: &'a str,
+    /// The concrete model id this agent is actually running on this turn
+    /// (preset-resolved, session-override-aware — the executor's
+    /// `resolved_model_id()`). Surfaced so the agent can self-calibrate
+    /// (context budget, known-weakness workarounds, honest escalation)
+    /// against a verified per-turn fact rather than guessing. Provider
+    /// config, endpoints, and pricing are deliberately NOT included — only
+    /// the model id, the same string the gateway already uses for guidance
+    /// gating and tracing.
+    pub model_id: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -181,6 +190,12 @@ pub struct StateAttestationPayload {
     /// verified fact (P-6.23 / Ri-0.10 non-retroactivity), not only via
     /// `constitution_read`.
     pub constitution_digest: String,
+    /// Concrete model id this agent is running on this turn (preset-resolved,
+    /// session-override-aware). `#[serde(default)]` keeps older persisted
+    /// payloads deserializable. Only the model id — never provider config,
+    /// endpoint URLs, or pricing.
+    #[serde(default)]
+    pub model_id: String,
     pub attested_at: String,
 }
 
@@ -288,6 +303,7 @@ pub fn compose_and_sign(
         gateway_node_id: inputs.gateway_node_id.to_string(),
         constitution_version: inputs.constitution_version.to_string(),
         constitution_digest: inputs.constitution_digest.to_string(),
+        model_id: inputs.model_id.to_string(),
         attested_at: chrono::Utc::now().to_rfc3339(),
     };
 
@@ -322,8 +338,11 @@ pub fn render_tail(att: &StateAttestation) -> anyhow::Result<String> {
          invitations issued to you from repeated rule denials (each naming \
          the rule and the denial count — you may answer by filing a \
          proposal through the ordinary Ri-0.8 path), spawn depth, session \
-          ids, turn counter, burn-rate forecast, and the constitution \
-          version + digest you are running under. If your own memory of \
+           ids, turn counter, burn-rate forecast, the **model id you are \
+           running on** (use it to self-calibrate: context budget, known \
+           weaknesses, honest escalation — never to exfiltrate provider \
+           config, which is deliberately withheld), and the constitution \
+           version + digest you are running under. If your own memory of \
           these facts disagrees with the block, \
           the block is correct. The constitution digest pins the exact law \
           in force for this session; if it changes mid-session, the law \
@@ -478,6 +497,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -521,6 +541,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -558,6 +579,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -597,6 +619,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -635,6 +658,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -674,6 +698,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -720,6 +745,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -760,6 +786,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -795,6 +822,7 @@ mod tests {
                 burn_rate: None,
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )
@@ -837,6 +865,7 @@ mod tests {
                 burn_rate: Some(forecast.clone()),
                 constitution_version: "2026.07.02",
                 constitution_digest: "deadbeef",
+                model_id: "claude-test-1",
             },
             &key,
         )

@@ -56,6 +56,7 @@ fn default_inputs<'a>(manifest: &'a AgentManifest) -> AttestationInputs<'a> {
         burn_rate: None,
         constitution_version: "2026.07.02",
         constitution_digest: "abc123def456",
+        model_id: "test-model",
     }
 }
 
