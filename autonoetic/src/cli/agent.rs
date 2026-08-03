@@ -504,7 +504,17 @@ pub fn handle_init_config(output: Option<&str>, overwrite: bool) -> anyhow::Resu
 /// this prints pure defaults, so "what is actually activated" is answerable
 /// without reading Rust source or diffing against the template.
 pub fn handle_effective_config(config_path: &Path, json: bool, redact: bool) -> anyhow::Result<()> {
-    let config = autonoetic_gateway::config::load_config(config_path)?;
+    let mut config = autonoetic_gateway::config::load_config(config_path)?;
+
+    // Mirror the runtime env-var overrides the gateway applies at startup
+    // (server/mod.rs `GatewayServer::run`) so this print matches what the
+    // daemon actually runs with — not just the file + serde defaults.
+    if let Ok(node_id) = std::env::var("AUTONOETIC_NODE_ID") {
+        config.node_id = node_id;
+    }
+    if let Ok(node_name) = std::env::var("AUTONOETIC_NODE_NAME") {
+        config.node_name = node_name;
+    }
 
     // Round-trip through serde_json::Value so redaction works uniformly for
     // both output formats (serde_yaml can serialize a serde_json::Value).
@@ -527,8 +537,8 @@ pub fn handle_effective_config(config_path: &Path, json: bool, redact: bool) -> 
     println!("# Effective configuration (source: {})", source);
     println!("# Values shown are the merged result: file overrides + built-in defaults");
     println!("# + profile-derived + env overrides. This is what the gateway runs with.");
-    println!("#
-# Redacted: {}", if redact { "yes" } else { "no" });
+    println!("#");
+    println!("# Redacted: {}", if redact { "yes" } else { "no" });
     println!("{}", yaml);
     Ok(())
 }
@@ -3123,7 +3133,7 @@ Use tools when needed.
         std::fs::write(
             &config_path,
             format!(
-                "agents_dir: \"{}\"\nport: 4001\nevidence_mode: errors\n",
+                "agents_dir: \"{}\"\nport: 4001\nevidence_mode: errors\ncontinuation_key: \"super-secret-hmac\"\n",
                 agents_dir.display()
             ),
         )
@@ -3135,8 +3145,22 @@ Use tools when needed.
         let config = autonoetic_gateway::config::load_config(&config_path).expect("load");
         assert_eq!(config.port, 4001);
         assert_eq!(config.evidence_mode, "errors");
+        assert_eq!(
+            config.continuation_key.as_deref(),
+            Some("super-secret-hmac"),
+            "test fixture must set the real secret so redaction is exercised"
+        );
+
+        // Directly assert the redaction helper masks the secret.
+        let mut val = serde_json::to_value(&config).expect("config serializes");
+        redact_config_value(&mut val);
+        assert_eq!(
+            val.pointer("/continuation_key").and_then(|v| v.as_str()),
+            Some("<redacted>")
+        );
+
         // And both output modes complete without error (stdout is the sink; the
-        // value-level contract is asserted above via load_config).
+        // value-level contract is asserted above via load_config + redaction).
         handle_effective_config(&config_path, true, false).expect("json mode ok");
         handle_effective_config(&config_path, false, true).expect("yaml redact mode ok");
     }
