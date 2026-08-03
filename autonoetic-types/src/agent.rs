@@ -318,8 +318,17 @@ pub struct RemoteAccessDeclaration {
     /// Supports any-host, exact host, host suffix, host+port, and URL prefix rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<GrantTarget>,
-    /// Optional language-detector allowlist for import scanning.
-    /// Empty means all registered language detectors are enabled.
+    /// Optional language allowlist for the remote-access analyzer.
+    ///
+    /// When set it scopes *both* halves of static detection to these languages:
+    /// which import detectors run, and which language-tagged function-call
+    /// heuristics run (`axios.*`/`fetch(` are JavaScript-only, `urlopen(` is
+    /// Python-only, `reqwest::get(` is Rust-only, …). Language-agnostic call
+    /// patterns — socket primitives like `.connect(`/`.send(` — always run.
+    ///
+    /// Empty means no allowlist: every import detector runs, and the
+    /// function-call scope falls back to the languages implied by the code's own
+    /// import signals (with no such signal, every tagged pattern runs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enabled_languages: Vec<RemoteAccessLanguage>,
     /// Python import/module patterns expected in network-capable code.

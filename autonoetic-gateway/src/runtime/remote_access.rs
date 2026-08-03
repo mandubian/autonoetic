@@ -349,34 +349,43 @@ fn enabled_import_languages(
     })
 }
 
-/// Determines the languages whose function-call patterns should apply to
-/// `code`. Precedence:
+/// One import-detection pass: the deduped import patterns plus the set of
+/// languages whose detectors actually fired.
+///
+/// That language set *is* the import signal used to scope function-call
+/// heuristics ([`language_scope_for_code`]). Carrying it out of the pass that
+/// collected the patterns keeps `analyze_code_with_declaration` to a single
+/// import scan — this analysis sits on the `sandbox.exec` hot path, so running
+/// every detector's regexes a second time just to re-derive the language set is
+/// not affordable.
+#[derive(Default)]
+struct ImportScan {
+    patterns: Vec<DetectedPattern>,
+    languages: HashSet<RemoteAccessLanguage>,
+}
+
+/// Determines the languages whose function-call patterns should apply to the
+/// code being analyzed. Precedence:
 ///   1. `enabled_languages` from the declaration (authoritative when set).
-///   2. Otherwise the languages implied by the code's own import signals
-///      (which import detectors fire).
+///   2. Otherwise the languages implied by the code's own import signals —
+///      `import_signal`, the language set of the [`ImportScan`] the caller
+///      already ran (no re-scan here).
 ///   3. Otherwise `None` — no language signal, so *all* tagged patterns stay
 ///      active (conservative: no detection is lost).
 fn language_scope_for_code(
-    code: &str,
     enabled_languages: Option<&HashSet<RemoteAccessLanguage>>,
+    import_signal: &HashSet<RemoteAccessLanguage>,
 ) -> Option<HashSet<RemoteAccessLanguage>> {
     if let Some(set) = enabled_languages {
         if !set.is_empty() {
             return Some(set.clone());
         }
     }
-    // Infer from the import detectors: which language's imports fire?
-    let mut inferred = HashSet::new();
-    for detector in import_detector_registry() {
-        if !detector.detect(code).is_empty() {
-            inferred.insert(detector.language());
-        }
-    }
-    if inferred.is_empty() {
+    if import_signal.is_empty() {
         // No import signal → language unknown → unrestricted.
         None
     } else {
-        Some(inferred)
+        Some(import_signal.clone())
     }
 }
 
@@ -546,14 +555,19 @@ impl RemoteAccessAnalyzer {
         let mut patterns = Vec::new();
         let enabled_imports = enabled_import_languages(declaration);
 
-        // Check for network-related imports
-        patterns.extend(Self::detect_imports(code, enabled_imports.as_ref()));
+        // Check for network-related imports. The scan also reports which
+        // languages' detectors fired, so the function-call scope below comes out
+        // of this single pass rather than a second one.
+        let import_scan = Self::detect_imports(code, enabled_imports.as_ref());
 
         // Determine which languages are active for function-call scoping:
         //  1. `enabled_languages` declared by the agent (authoritative), or
-        //  2. inferred from which import detectors fire in this code, or
+        //  2. inferred from the import signal the scan just produced, or
         //  3. unknown (no import signal) → scope disabled → all patterns run.
-        let active_languages = language_scope_for_code(code, enabled_imports.as_ref());
+        let active_languages =
+            language_scope_for_code(enabled_imports.as_ref(), &import_scan.languages);
+
+        patterns.extend(import_scan.patterns);
 
         // Check for network-related function calls
         patterns.extend(Self::detect_function_calls(code, active_languages.as_ref()));
@@ -595,28 +609,36 @@ impl RemoteAccessAnalyzer {
     /// Detects import statements using registered language detectors.
     ///
     /// When `enabled_languages` is set, only those language detectors run.
+    /// Returns the deduped patterns *and* the set of languages whose detectors
+    /// fired, so the caller gets the import signal for function-call scoping out
+    /// of this pass instead of re-running every detector.
     fn detect_imports(
         code: &str,
         enabled_languages: Option<&HashSet<RemoteAccessLanguage>>,
-    ) -> Vec<DetectedPattern> {
-        let mut patterns: Vec<DetectedPattern> = Vec::new();
+    ) -> ImportScan {
+        let mut scan = ImportScan::default();
         for detector in import_detector_registry() {
             let lang = detector.language();
             let detector_enabled = match enabled_languages {
                 None => true,
                 Some(set) => set.contains(&lang),
             };
-            if detector_enabled {
-                for p in detector.detect(code) {
-                    if !patterns.iter().any(|existing| {
-                        existing.pattern == p.pattern && existing.line_number == p.line_number
-                    }) {
-                        patterns.push(p);
-                    }
+            if !detector_enabled {
+                continue;
+            }
+            let detected = detector.detect(code);
+            if !detected.is_empty() {
+                scan.languages.insert(lang);
+            }
+            for p in detected {
+                if !scan.patterns.iter().any(|existing| {
+                    existing.pattern == p.pattern && existing.line_number == p.line_number
+                }) {
+                    scan.patterns.push(p);
                 }
             }
         }
-        patterns
+        scan
     }
 
     /// Detects function/method calls for network operations.
@@ -1545,6 +1567,65 @@ urlopen("https://example.org")
                 .any(|p| p.category == "function_call" && p.pattern.contains("urlopen")),
             "urlopen (Python) must be suppressed by enabled_languages=[javascript]: {:?}",
             analysis.detected_patterns
+        );
+    }
+
+    #[test]
+    fn test_import_scan_reports_firing_languages() {
+        // The import signal used for call-pattern scoping comes out of the same
+        // pass that collects the import patterns — `detect_imports` reports which
+        // detectors fired so nothing downstream has to re-scan the code.
+        let python = RemoteAccessAnalyzer::detect_imports("import requests\n", None);
+        assert!(!python.patterns.is_empty());
+        assert_eq!(
+            python.languages,
+            HashSet::from([RemoteAccessLanguage::Python])
+        );
+
+        let mixed = RemoteAccessAnalyzer::detect_imports(
+            "import requests\nconst axios = require(\"axios\");\n",
+            None,
+        );
+        assert_eq!(
+            mixed.languages,
+            HashSet::from([
+                RemoteAccessLanguage::Python,
+                RemoteAccessLanguage::Javascript
+            ])
+        );
+
+        // No network imports → no language signal at all.
+        let inert = RemoteAccessAnalyzer::detect_imports("import json\n", None);
+        assert!(inert.patterns.is_empty());
+        assert!(inert.languages.is_empty());
+
+        // A detector disabled by `enabled_languages` cannot contribute a signal.
+        let scoped = RemoteAccessAnalyzer::detect_imports(
+            "import requests\n",
+            Some(&HashSet::from([RemoteAccessLanguage::Javascript])),
+        );
+        assert!(scoped.patterns.is_empty());
+        assert!(scoped.languages.is_empty());
+    }
+
+    #[test]
+    fn test_language_scope_precedence() {
+        let declared = HashSet::from([RemoteAccessLanguage::Javascript]);
+        let signal = HashSet::from([RemoteAccessLanguage::Python]);
+
+        // 1. Declaration is authoritative — it wins over the import signal.
+        assert_eq!(
+            language_scope_for_code(Some(&declared), &signal),
+            Some(declared.clone())
+        );
+        // 2. No declaration → the import signal scopes the call patterns.
+        assert_eq!(language_scope_for_code(None, &signal), Some(signal.clone()));
+        // 3. Neither → unknown language → unrestricted (all tagged patterns run).
+        assert_eq!(language_scope_for_code(None, &HashSet::new()), None);
+        // An empty declared set is not a scope; fall through to the signal.
+        assert_eq!(
+            language_scope_for_code(Some(&HashSet::new()), &signal),
+            Some(signal)
         );
     }
 
