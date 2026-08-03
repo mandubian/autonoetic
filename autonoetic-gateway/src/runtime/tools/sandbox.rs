@@ -570,8 +570,13 @@ pub fn apply_network_isolation_failure_to_result(
          Use constitution.read to inspect the rule. Mock all external services in tests so they \
          run offline."
     } else if has_network_cap {
-        "This agent declares NetworkAccess but this run did not enable the network \
-         namespace (e.g. missing operator approval or misconfiguration)."
+        "This agent declares NetworkAccess, but the capability is a ceiling — each exec \
+         still needs its own grant, and this run had none, so the network namespace stayed \
+         unshared. Usually the target was invisible to static analysis (a host built at \
+         runtime, read from the environment, or reached through a dynamic import), so no \
+         approval was ever requested. Make the target visible — use a literal URL/host in \
+         the code and list it in metadata.autonoetic.remote_access.targets — then retry so \
+         the operator can approve it."
     } else {
         "This agent does not declare NetworkAccess: outbound calls are blocked. \
          Add scoped NetworkAccess, or use packager.default layers so tests run offline."
@@ -2215,28 +2220,51 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             }
         }
 
-        let mut overrides =
-            crate::sandbox::BwrapIsolationOverrides::from_capabilities(&manifest.capabilities);
-
-        // Widening to Network under session taint requires an active
-        // declassification grant (`egress.declassified`) — not host approval alone.
-        // Safe-inspection never gets share_net. Exec-cache hits without a grant
-        // also keep the network off.
-        if safe_inspection_bypass || (network_sink_excluded && !network_declassified) {
-            overrides.share_net = false;
-        } else if approval_validated_for_command {
-            overrides.share_net = true;
-        }
-
         let has_evaluation_cap = manifest.capabilities.iter().any(|c| {
             matches!(
                 c,
                 autonoetic_types::capability::Capability::Evaluation { .. }
             )
         });
-        if has_evaluation_cap {
-            overrides.force_network_off = true;
-            overrides.share_net = false;
+
+        // The per-exec network decision (#1022). `share_net` is granted here, not
+        // inherited: the `NetworkAccess` capability is a ceiling ("may this agent
+        // ever reach the network"), and only an explicit grant for *this* exec
+        // (approval_ref, cleared gate, declared preapproval, approved-exec cache
+        // hit) turns the namespace on. Seeding it from the capability let an exec
+        // that raised no gate — because static analysis found no signal to ask
+        // about — run with `--share-net` and no operator prompt. See
+        // `runtime::network_grant` and docs/sandbox-network-grant.md.
+        //
+        // Widening under a session taint that excludes Network still requires an
+        // active declassification grant (`egress.declassified`), not host
+        // approval alone. Safe-inspection and the Evaluation capability keep the
+        // network off regardless.
+        let network_decision = crate::runtime::network_grant::decide_share_net(
+            crate::runtime::network_grant::ShareNetInputs {
+                capability_allows_network: manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| matches!(c, Capability::NetworkAccess { hosts } if !hosts.is_empty())),
+                approval_validated: approval_validated_for_command,
+                safe_inspection_bypass,
+                network_sink_excluded,
+                network_declassified,
+                force_network_off: has_evaluation_cap,
+            },
+        );
+        let mut overrides = crate::sandbox::BwrapIsolationOverrides {
+            share_net: network_decision.share_net,
+            force_network_off: has_evaluation_cap,
+        };
+        if network_decision.capability_ceiling_unused {
+            tracing::info!(
+                target: "sandbox_exec",
+                agent_id = %manifest.agent.id,
+                reason = network_decision.reason.as_str(),
+                pattern_count = remote_analysis.detected_patterns.len(),
+                "Agent declares NetworkAccess but this exec has no network grant — running with the network namespace unshared"
+            );
         }
 
         let layer_python_path_str = layer_python_paths.join(":");
