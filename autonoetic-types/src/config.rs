@@ -1034,6 +1034,19 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub llm_preset_mapping: HashMap<String, String>,
 
+    /// Per-request timeout, in seconds, for a non-streaming LLM completion.
+    ///
+    /// Unset means the built-in default (120s). Raise it when the upstream is
+    /// slow or queues requests under load: an attempt that exceeds this budget
+    /// is indistinguishable from a dead endpoint, and because the retry
+    /// deadline is a multiple of this value, one slow attempt can consume the
+    /// whole turn.
+    ///
+    /// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` still overrides this for ad-hoc
+    /// runs. Values below 5 are ignored in favour of the built-in default.
+    #[serde(default)]
+    pub llm_request_timeout_secs: Option<u64>,
+
     /// Default orchestrator agent ID for new sessions and workflows.
     /// When set, this agent is used as the lead/planner instead of `planner.default`.
     /// Can be overridden per-session via CLI or API. Default: "planner.default".
@@ -3413,6 +3426,7 @@ impl Default for GatewayConfig {
             schema_enforcement: SchemaEnforcementConfig::default(),
             llm_presets: HashMap::new(),
             llm_preset_mapping: HashMap::new(),
+            llm_request_timeout_secs: None,
             default_orchestrator: default_default_orchestrator(),
             code_analysis: CodeAnalysisConfig::default(),
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,

@@ -838,6 +838,15 @@ llm_presets:
     temperature: 1.0
 
 
+# Per-request timeout for a non-streaming LLM completion, in seconds.
+# The value below is the built-in default; omitting the key entirely is the same.
+# Raise it (e.g. 300) when the upstream queues requests under load: a timed-out
+# attempt consumes its full budget, and since the retry deadline is 2 × this
+# value, one stall ends the turn — so raising it also raises the worst case per
+# turn to twice whatever you set. Env AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS
+# overrides it for one-off runs. Values below 5 are ignored.
+# llm_request_timeout_secs: 120
+
 # Role → preset for agent init and agents without manifest llm_preset.
 # In-repo bundles declare llm_preset directly; mapping is fallback + cross-cutting roles.
 llm_preset_mapping:
