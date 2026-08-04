@@ -388,6 +388,17 @@ Controls the background review of promoted agents (Phase 4 Tier 1). Reviews oper
 Cadence is tracked **per agent**, so a newly promoted agent is reviewed on its
 own schedule rather than inheriting whenever the last unrelated review happened.
 
+An agent whose stored `reviewed_at` cannot be read as a past instant — malformed,
+or dated in the future after clock skew or a manual DB edit — is **skipped**, with
+one aggregated warning per sweep naming the affected agents. It is not reviewed
+"to be safe": the last-review lookup is `ORDER BY reviewed_at DESC` over TEXT, so
+a malformed or future value outranks every well-formed one and no new row can
+displace it, which would mean a write on every tick. Ordinary clock skew
+self-heals once wall-clock passes the stored value; a corrupt row needs the
+operator, which is what the warning is for. An `interval_secs` too large to
+represent as a duration is likewise refused outright rather than wrapping into a
+negative interval that would make every agent look overdue.
+
 Example:
 
 ```yaml

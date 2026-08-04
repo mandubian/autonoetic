@@ -47,8 +47,9 @@ pub struct ReviewFinding {
 /// Run post-promotion review for every promoted agent **whose review is due**.
 ///
 /// Returns a result per agent actually reviewed; agents still inside
-/// `cfg.interval_secs` are skipped and absent from the result. Escalations are
-/// created in the store when critical findings are detected.
+/// `cfg.interval_secs` are skipped and absent from the result. Critical findings
+/// emit an `operator_alert` timeline event — **not** an `escalations` row: an
+/// anomaly is something to see, not a decision to resolve (#739 Part C).
 ///
 /// `now` is injected rather than read from the clock so cadence is testable.
 ///
@@ -74,13 +75,33 @@ pub fn run_post_promotion_review(
         return Ok(Vec::new());
     }
 
+    // Fail closed on an interval we cannot represent. `as i64` would wrap a
+    // large `u64` into a *negative* Duration, which makes every agent look
+    // overdue and restores the per-tick sweep this function exists to prevent;
+    // `Duration::seconds` also panics out of range. Reviewing nothing is the
+    // safe reading of "the configured cadence is uninterpretable".
+    let interval = i64::try_from(cfg.interval_secs)
+        .ok()
+        .and_then(chrono::Duration::try_seconds);
+    let Some((interval, first_review_window)) =
+        interval.and_then(|i| now.checked_sub_signed(i).map(|w| (i, w)))
+    else {
+        tracing::warn!(
+            target: "post_promotion_review",
+            interval_secs = cfg.interval_secs,
+            "post_promotion_review.interval_secs is out of representable range; \
+             skipping the sweep rather than reviewing every agent every tick"
+        );
+        return Ok(Vec::new());
+    };
+
     let now_rfc = now.to_rfc3339();
-    let interval = chrono::Duration::seconds(cfg.interval_secs as i64);
 
     let aliases = store.list_agent_aliases(None)?;
 
     let mut results = Vec::new();
     let mut skipped = 0usize;
+    let mut uninterpretable: Vec<String> = Vec::new();
 
     for alias in &aliases {
         let agent_id = &alias.agent_id;
@@ -92,31 +113,46 @@ pub fn run_post_promotion_review(
             .get_last_post_promotion_review(agent_id)?
             .map(|r| r.reviewed_at);
 
-        // A first-ever review has no previous row to measure from, so it looks
-        // back exactly one interval — the same window every later review gets.
         let window_start = match last_reviewed_at.as_deref() {
-            Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
-                Ok(parsed) => {
-                    if now.signed_duration_since(parsed.with_timezone(&chrono::Utc)) < interval {
+            Some(ts) => {
+                let age = chrono::DateTime::parse_from_rfc3339(ts)
+                    .ok()
+                    .map(|parsed| now.signed_duration_since(parsed.with_timezone(&chrono::Utc)));
+                match age {
+                    Some(age) if age >= chrono::Duration::zero() => {
+                        if age < interval {
+                            skipped += 1;
+                            continue;
+                        }
+                        ts.to_string()
+                    }
+                    // Unparseable, or dated in the future (clock skew, a manual
+                    // DB edit). Either way there is no window to measure, so the
+                    // agent is skipped rather than reviewed.
+                    //
+                    // Reviewing anyway — the obvious "treat it as overdue and
+                    // re-anchor" — writes a row on *every* tick, because the
+                    // lookup is `ORDER BY reviewed_at DESC` over TEXT: a bytewise
+                    // sort in which `"not-a-timestamp"` and any future date
+                    // outrank every well-formed past one, so no row we write can
+                    // displace the bad one. Measured on that approach: 5 ticks
+                    // produced 5 extra rows with `"not-a-timestamp"` still
+                    // selected — the exact amplification this function prevents.
+                    //
+                    // Genuine clock skew self-heals once wall-clock passes the
+                    // stored value. A corrupt value needs an operator, which is
+                    // what the warning below is for.
+                    _ => {
+                        uninterpretable.push(format!("{agent_id}={ts}"));
                         skipped += 1;
                         continue;
                     }
-                    ts.to_string()
                 }
-                // An unparseable stored timestamp must not wedge the agent out
-                // of review forever; treat it as overdue and re-anchor.
-                Err(e) => {
-                    tracing::warn!(
-                        target: "post_promotion_review",
-                        agent_id = %agent_id,
-                        reviewed_at = %ts,
-                        error = %e,
-                        "Unparseable last-review timestamp; reviewing and re-anchoring"
-                    );
-                    (now - interval).to_rfc3339()
-                }
-            },
-            None => (now - interval).to_rfc3339(),
+            }
+            // A first-ever review has no previous row to measure from, so it
+            // looks back exactly one interval — the window every later review
+            // gets.
+            None => first_review_window.to_rfc3339(),
         };
 
         let tool_failures = store.count_tool_failures_since(agent_id, &window_start)?;
@@ -268,6 +304,19 @@ pub fn run_post_promotion_review(
             findings,
             escalated,
         });
+    }
+
+    // One aggregated warning per sweep rather than one per agent: the sweep runs
+    // every tick, so per-agent logging would spam at tick frequency for as long
+    // as the bad row exists.
+    if !uninterpretable.is_empty() {
+        tracing::warn!(
+            target: "post_promotion_review",
+            count = uninterpretable.len(),
+            agents = %uninterpretable.join(", "),
+            "Skipped agents whose last-review timestamp is unparseable or dated in \
+             the future; they stay unreviewed until the row is corrected"
+        );
     }
 
     if !results.is_empty() {
@@ -524,16 +573,61 @@ mod tests {
         );
     }
 
-    /// A corrupt stored timestamp must not lock an agent out of review forever.
+    /// A timestamp that cannot be read as "in the past" gives no window to
+    /// measure, so the agent is skipped — and, critically, skipped on *every*
+    /// tick rather than reviewed on every tick.
+    ///
+    /// The tempting fix (treat it as overdue and re-anchor) does not work: the
+    /// lookup is `ORDER BY reviewed_at DESC` over TEXT, a bytewise sort in which
+    /// `"not-a-timestamp"` outranks every well-formed date, so no row written can
+    /// displace it. That path was measured at 5 ticks → 5 extra rows.
     #[test]
-    fn unparseable_last_review_timestamp_is_treated_as_due() {
+    fn uninterpretable_last_review_timestamp_never_writes_on_every_tick() {
+        let cfg = PostPromotionReviewConfig::default();
+        let t0 = Utc::now();
+
+        for bad in [
+            "not-a-timestamp",
+            // Dated in the future: clock skew or a manual DB edit.
+            &(t0 + Duration::days(365)).to_rfc3339(),
+        ] {
+            let (_dir, store) = store_with_agents(1);
+            store
+                .record_post_promotion_review("agent0.default", "rev_0", bad, 0, 0, 0, 0, "[]")
+                .unwrap();
+
+            for tick in 0..5 {
+                let reviewed =
+                    run_post_promotion_review(&store, &cfg, t0 + Duration::seconds(5 * tick))
+                        .unwrap();
+                assert!(
+                    reviewed.is_empty(),
+                    "{bad:?} must not be reviewed (tick {tick})"
+                );
+            }
+            assert_eq!(
+                review_count(&store),
+                1,
+                "{bad:?} must leave the seeded row alone, not add one per tick"
+            );
+        }
+    }
+
+    /// Modest clock skew must self-heal: once wall-clock passes the stored value
+    /// the agent becomes reviewable again on the normal schedule, with no
+    /// operator intervention.
+    #[test]
+    fn future_timestamp_from_clock_skew_self_heals() {
         let (_dir, store) = store_with_agents(1);
         let cfg = PostPromotionReviewConfig::default();
+        let t0 = Utc::now();
+
+        // Stamped 30s ahead of t0.
         store
             .record_post_promotion_review(
                 "agent0.default",
                 "rev_0",
-                "not-a-timestamp",
+                &(t0 + Duration::seconds(30)).to_rfc3339(),
                 0,
                 0,
                 0,
@@ -542,8 +636,41 @@ mod tests {
             )
             .unwrap();
 
-        let reviewed = run_post_promotion_review(&store, &cfg, Utc::now()).unwrap();
-        assert_eq!(reviewed.len(), 1, "must review rather than skip forever");
+        assert!(
+            run_post_promotion_review(&store, &cfg, t0)
+                .unwrap()
+                .is_empty(),
+            "not reviewable while the stored stamp is still in the future"
+        );
+        // A full interval after the stored stamp, it is due again.
+        let due = run_post_promotion_review(
+            &store,
+            &cfg,
+            t0 + Duration::seconds(30 + cfg.interval_secs as i64),
+        )
+        .unwrap();
+        assert_eq!(due.len(), 1, "self-heals without operator intervention");
+    }
+
+    /// An `interval_secs` too large to represent must fail closed. Casting it
+    /// with `as i64` would wrap to a negative Duration, making every agent look
+    /// overdue — restoring the per-tick sweep this function exists to prevent.
+    #[test]
+    fn out_of_range_interval_reviews_nobody() {
+        let (_dir, store) = store_with_agents(3);
+        for interval_secs in [u64::MAX, i64::MAX as u64, i64::MAX as u64 + 1] {
+            let cfg = PostPromotionReviewConfig {
+                interval_secs,
+                ..Default::default()
+            };
+            assert!(
+                run_post_promotion_review(&store, &cfg, Utc::now())
+                    .unwrap()
+                    .is_empty(),
+                "interval_secs {interval_secs} must fail closed, not sweep everything"
+            );
+            assert_eq!(review_count(&store), 0);
+        }
     }
 
     #[test]
