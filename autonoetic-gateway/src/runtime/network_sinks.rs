@@ -386,8 +386,15 @@ enum MaskScope {
 }
 
 /// Blank out comments (and optionally string bodies), replacing each masked
-/// character with a space and preserving newlines — so every byte offset and
-/// line number in the result still matches the original source.
+/// character with a space and preserving newlines — so the result has the same
+/// character count as the input and its newlines fall on the same characters,
+/// which keeps reported line numbers exact.
+///
+/// Byte offsets are deliberately *not* preserved: a masked multi-byte character
+/// becomes a one-byte space, so on non-ASCII source the result is shorter in
+/// bytes than the original. Nothing needs them to match — [`detect_sinks`]
+/// derives its line by counting newlines *within the masked string it scans*,
+/// never by indexing back into the original source.
 ///
 /// Without this, sink-shaped *text* was indistinguishable from a sink *call*: a
 /// comment reading `# never call socket.socket() here` or a message
@@ -992,8 +999,8 @@ http.request({});
         assert_eq!(sinks_of(&detect_javascript_sinks(js)), vec!["net.connect"]);
     }
 
-    /// Masking preserves offsets and newlines, so reported line numbers stay
-    /// exact even when earlier lines are blanked.
+    /// Masking keeps newlines on the same characters, so reported line numbers
+    /// stay exact even when earlier lines are blanked.
     #[test]
     fn masking_preserves_line_numbers() {
         let code = "import socket\n# socket.socket() mentioned\n\"\"\"and\nhere too\n\"\"\"\nsocket.socket()\n";
@@ -1002,21 +1009,53 @@ http.request({});
         assert_eq!(found[0].line, 6, "line number must survive masking");
     }
 
+    /// Line fidelity must not depend on the masked text being ASCII. A masked
+    /// multi-byte character collapses to a one-byte space, so byte offsets into
+    /// the masked source do *not* line up with the original — harmless, because
+    /// the reported line is counted inside the masked string that was scanned.
+    /// Pinned because the guarantee is a line count, never a byte offset.
     #[test]
-    fn masking_preserves_length_and_newlines() {
-        let code = "import socket\n# comment\nx = \"str\"\n";
-        for scope in [MaskScope::Comments, MaskScope::CommentsAndStrings] {
-            let masked = mask_strings_and_comments(code, MaskDialect::Python, scope);
-            assert_eq!(
-                masked.chars().count(),
-                code.chars().count(),
-                "{scope:?} changed length"
-            );
-            assert_eq!(
-                masked.matches('\n').count(),
-                code.matches('\n').count(),
-                "{scope:?} changed newline count"
-            );
+    fn masking_preserves_line_numbers_with_non_ascii_source() {
+        let py = "import socket\n# ne jamais appeler socket.socket() — jamais\nmsg = \"héllo → socket.socket(\"\nsocket.socket()\n";
+        let found = detect_python_sinks(py);
+        assert_eq!(
+            sinks_of(&found),
+            vec!["socket.socket"],
+            "non-ASCII comment/string text must not read as a call"
+        );
+        assert_eq!(
+            found[0].line, 4,
+            "line number must survive masking of multi-byte characters"
+        );
+
+        let js = "const net = require(\"net\");\n// ne pas appeler net.connect(80) — jamais\nconst s = `héllo → net.connect(`;\nnet.connect(80);\n";
+        let found = detect_javascript_sinks(js);
+        assert_eq!(sinks_of(&found), vec!["net.connect"]);
+        assert_eq!(found[0].line, 4);
+    }
+
+    /// The masked output has the same *character* count and newline count as the
+    /// input. Byte length is deliberately not asserted: masking a multi-byte
+    /// character to a space shortens it, and nothing consumes byte offsets.
+    #[test]
+    fn masking_preserves_char_count_and_newlines() {
+        for code in [
+            "import socket\n# comment\nx = \"str\"\n",
+            "import socket\n# héllo → commentaire\nx = \"chaîne → ok\"\n",
+        ] {
+            for scope in [MaskScope::Comments, MaskScope::CommentsAndStrings] {
+                let masked = mask_strings_and_comments(code, MaskDialect::Python, scope);
+                assert_eq!(
+                    masked.chars().count(),
+                    code.chars().count(),
+                    "{scope:?} changed character count"
+                );
+                assert_eq!(
+                    masked.matches('\n').count(),
+                    code.matches('\n').count(),
+                    "{scope:?} changed newline count"
+                );
+            }
         }
     }
 
