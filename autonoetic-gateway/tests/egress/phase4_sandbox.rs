@@ -10,7 +10,7 @@ use autonoetic_gateway::runtime::egress_labeler::{
     session_host_network_declass_target, session_network_declass_target,
     session_network_declassified, session_network_declassified_for_hosts,
 };
-use autonoetic_gateway::runtime::remote_access::{
+use autonoetic_gateway::runtime::remote_access::{DetectedPatternCategory, 
     classify_network_coverage, DetectedPattern, NetworkCoverage,
 };
 use autonoetic_gateway::scheduler::approval::{apply_decision, ApproveOptions, DecisionContext};
@@ -97,7 +97,7 @@ fn network_sink_excluded_when_local_only_taint() {
 #[test]
 fn unresolved_coverage_with_taint_is_sandbox_hard_refuse_shape() {
     let patterns = vec![DetectedPattern {
-        category: "dependency_install".into(),
+        category: DetectedPatternCategory::DependencyInstall,
         pattern: "pip install requests".into(),
         line_number: Some(1),
         reason: "package manager".into(),

@@ -6,7 +6,7 @@ use rusqlite::{params, Connection};
 use std::collections::BTreeSet;
 
 use crate::runtime::approved_exec_cache::normalize_targets;
-use crate::runtime::remote_access::RemoteAccessAnalyzer;
+use crate::runtime::remote_access::default_remote_access_detector;
 
 use super::GatewayStore;
 
@@ -276,7 +276,8 @@ fn hosts_from_trace_arguments(tool_name: &str, arguments_json: &str) -> Vec<Stri
 }
 
 fn hosts_from_text(text: &str) -> Vec<String> {
-    let analysis = RemoteAccessAnalyzer::analyze_command_and_dependencies(text, None);
+    let analysis =
+        default_remote_access_detector().analyze_command_and_dependencies(text, None);
     let mut hosts = normalize_targets(&analysis.detected_patterns);
     if hosts.is_empty() {
         hosts = extract_url_hosts_from_text(text);

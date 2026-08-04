@@ -3,12 +3,118 @@
 //! Analyzes code before execution to detect patterns that require
 //! network access (HTTP requests, socket connections, etc.).
 //! If detected, the code execution requires operator approval.
+//!
+//! # Detector seam (#1039)
+//!
+//! Callers that need a swappable analyzer should depend on
+//! [`RemoteAccessDetector`]. [`RemoteAccessAnalyzer`] is the default
+//! mechanical implementation. Category vocabulary is typed
+//! ([`DetectedPatternCategory`]) so a second detector cannot invent
+//! undeclared labels that silently bypass gating tables.
 
 use regex::Regex;
 use std::collections::HashSet;
+use std::fmt;
+use std::str::FromStr;
 
 use crate::runtime::network_policy::declaration_allows_target;
 use autonoetic_types::agent::{RemoteAccessDeclaration, RemoteAccessLanguage};
+
+/// Closed vocabulary of remote-access signal categories (#1039).
+///
+/// Wire format stays the historical snake_case strings (`"url_literal"`, …)
+/// so approval payloads, traces, and artifact-analysis caches round-trip.
+///
+/// Contract roles (#1023):
+/// - **Gating** ([`Self::is_gating`]): undeclared occurrence fails shut.
+/// - **Advisory** ([`Self::is_advisory`]): drift only; never a refusal alone.
+/// - **Derived** ([`Self::is_derived`]): gateway-resolved; neither gating nor drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectedPatternCategory {
+    Import,
+    FunctionCall,
+    UrlLiteral,
+    IpAddress,
+    NetworkCommand,
+    DependencyInstall,
+    NetworkSink,
+}
+
+impl DetectedPatternCategory {
+    /// Stable snake_case token used in JSON, logs, and operator-facing strings.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::FunctionCall => "function_call",
+            Self::UrlLiteral => "url_literal",
+            Self::IpAddress => "ip_address",
+            Self::NetworkCommand => "network_command",
+            Self::DependencyInstall => "dependency_install",
+            Self::NetworkSink => "network_sink",
+        }
+    }
+
+    /// Categories the declaration **gates**: undeclared ⇒ `undeclared_remote_pattern`.
+    ///
+    /// Hosts (`UrlLiteral`/`IpAddress`) and shell/package surfaces
+    /// (`NetworkCommand`/`DependencyInstall`) — intent an agent can state
+    /// without knowing analyzer internals.
+    pub const fn is_gating(self) -> bool {
+        matches!(
+            self,
+            Self::UrlLiteral | Self::IpAddress | Self::NetworkCommand | Self::DependencyInstall
+        )
+    }
+
+    /// Categories that are **advisory** drift only (#1023).
+    pub const fn is_advisory(self) -> bool {
+        matches!(self, Self::Import | Self::FunctionCall)
+    }
+
+    /// Categories **derived** by the gateway — neither gated nor advisory.
+    pub const fn is_derived(self) -> bool {
+        matches!(self, Self::NetworkSink)
+    }
+}
+
+impl fmt::Display for DetectedPatternCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for DetectedPatternCategory {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "import" => Ok(Self::Import),
+            "function_call" => Ok(Self::FunctionCall),
+            "url_literal" => Ok(Self::UrlLiteral),
+            "ip_address" => Ok(Self::IpAddress),
+            "network_command" => Ok(Self::NetworkCommand),
+            "dependency_install" => Ok(Self::DependencyInstall),
+            "network_sink" => Ok(Self::NetworkSink),
+            other => Err(format!("unknown DetectedPatternCategory: {other}")),
+        }
+    }
+}
+
+/// Compare against the historical string tokens so call sites and tests that
+/// still write `p.category == "url_literal"` keep working during the seam
+/// extraction. Prefer matching on the enum variant in new code.
+impl PartialEq<&str> for DetectedPatternCategory {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<DetectedPatternCategory> for &str {
+    fn eq(&self, other: &DetectedPatternCategory) -> bool {
+        *self == other.as_str()
+    }
+}
 
 /// Result of analyzing code for remote access patterns.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -24,8 +130,8 @@ pub struct RemoteAccessAnalysis {
 /// A detected pattern indicating potential remote access.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DetectedPattern {
-    /// Category of the pattern (import, function_call, url_literal, etc.)
-    pub category: String,
+    /// Category of the pattern (typed; wire format is snake_case string).
+    pub category: DetectedPatternCategory,
     /// The specific pattern matched.
     pub pattern: String,
     /// Line number where the pattern was found (1-indexed, approximate).
@@ -66,7 +172,10 @@ pub fn classify_network_coverage(
         } else {
             NetworkCoverage::Unresolved
         }
-    } else if patterns.iter().any(|p| p.category == "dependency_install") {
+    } else if patterns
+        .iter()
+        .any(|p| p.category == DetectedPatternCategory::DependencyInstall)
+    {
         NetworkCoverage::Unresolved
     } else {
         NetworkCoverage::Concrete {
@@ -158,7 +267,67 @@ pub fn approval_remote_operator_suffix(
 }
 
 /// Static analyzer for detecting remote access patterns in code.
+///
+/// Default [`RemoteAccessDetector`] implementation. Callers that need a
+/// swappable analyzer should take `&dyn RemoteAccessDetector` (or a generic
+/// bound) rather than naming this type — see #1039.
+#[derive(Debug, Default, Clone, Copy)]
 pub struct RemoteAccessAnalyzer;
+
+/// Pluggable remote-access detector seam (#1039).
+///
+/// The gateway's grant/enforcement half (`decide_share_net`, declaration
+/// gating, approval validation) must stay mechanical. A second detector —
+/// including an AI ensemble that *unions* patterns with the default — plugs
+/// in here and can only cause *more* gates (fail-closed under #1022), never
+/// open the network on its own.
+pub trait RemoteAccessDetector {
+    /// Analyze `code` honoring optional manifest knobs (e.g. `enabled_languages`).
+    fn analyze_code_with_declaration(
+        &self,
+        code: &str,
+        declaration: Option<&RemoteAccessDeclaration>,
+    ) -> RemoteAccessAnalysis;
+
+    /// Analyze command text plus optional dependency-package install signals.
+    fn analyze_command_and_dependencies_with_declaration(
+        &self,
+        code: &str,
+        dep_packages: Option<&[String]>,
+        declaration: Option<&RemoteAccessDeclaration>,
+    ) -> RemoteAccessAnalysis;
+
+    /// Analyze primary `code` and also scan `workspace_files` for transitive imports.
+    fn analyze_code_with_workspace(
+        &self,
+        code: &str,
+        workspace_files: &[(String, String)],
+    ) -> RemoteAccessAnalysis;
+
+    /// Detect network shell / package-manager command patterns only.
+    fn detect_network_commands(&self, code: &str) -> Vec<DetectedPattern>;
+
+    /// Analyze without a declaration (common call-site convenience).
+    fn analyze_code(&self, code: &str) -> RemoteAccessAnalysis {
+        self.analyze_code_with_declaration(code, None)
+    }
+
+    /// Analyze command + deps without a declaration.
+    fn analyze_command_and_dependencies(
+        &self,
+        code: &str,
+        dep_packages: Option<&[String]>,
+    ) -> RemoteAccessAnalysis {
+        self.analyze_command_and_dependencies_with_declaration(code, dep_packages, None)
+    }
+}
+
+/// Process-wide default detector. Swap this only in tests or a carefully
+/// reviewed config path — production should keep the mechanical analyzer
+/// (or an ensemble that unions with it).
+pub fn default_remote_access_detector() -> &'static dyn RemoteAccessDetector {
+    &RemoteAccessAnalyzer
+}
 
 trait ImportLanguageDetector {
     fn language(&self) -> RemoteAccessLanguage;
@@ -167,7 +336,7 @@ trait ImportLanguageDetector {
 
 fn push_unique_pattern(
     patterns: &mut Vec<DetectedPattern>,
-    category: &str,
+    category: DetectedPatternCategory,
     pat_str: &str,
     line_num: usize,
     reason: &str,
@@ -177,7 +346,7 @@ fn push_unique_pattern(
         .any(|p| p.pattern == pat_str && p.line_number == Some(line_num))
     {
         patterns.push(DetectedPattern {
-            category: category.to_string(),
+            category,
             pattern: pat_str.to_string(),
             line_number: Some(line_num),
             reason: reason.to_string(),
@@ -188,7 +357,7 @@ fn push_unique_pattern(
 fn collect_regex_matches(
     code: &str,
     regex: &str,
-    category: &str,
+    category: DetectedPatternCategory,
     reason: &str,
     patterns: &mut Vec<DetectedPattern>,
 ) {
@@ -254,7 +423,7 @@ impl ImportLanguageDetector for PythonImportDetector {
                 regex::escape(lib),
                 regex::escape(lib)
             );
-            collect_regex_matches(code, &import_regex, "import", reason, &mut patterns);
+            collect_regex_matches(code, &import_regex, DetectedPatternCategory::Import, reason, &mut patterns);
         }
         patterns
     }
@@ -283,7 +452,7 @@ impl ImportLanguageDetector for JsImportDetector {
             ),
         ];
         for (regex, reason) in regexes {
-            collect_regex_matches(code, regex, "import", reason, &mut patterns);
+            collect_regex_matches(code, regex, DetectedPatternCategory::Import, reason, &mut patterns);
         }
         patterns
     }
@@ -308,7 +477,7 @@ impl ImportLanguageDetector for RustImportDetector {
             ),
         ];
         for (regex, reason) in regexes {
-            collect_regex_matches(code, regex, "import", reason, &mut patterns);
+            collect_regex_matches(code, regex, DetectedPatternCategory::Import, reason, &mut patterns);
         }
         patterns
     }
@@ -335,7 +504,7 @@ impl ImportLanguageDetector for GoImportDetector {
             ),
         ];
         for (regex, reason) in regexes {
-            collect_regex_matches(code, regex, "import", reason, &mut patterns);
+            collect_regex_matches(code, regex, DetectedPatternCategory::Import, reason, &mut patterns);
         }
         patterns
     }
@@ -473,36 +642,6 @@ fn is_package_manager_command_pattern(pattern: &str) -> bool {
     .any(|prefix| p.starts_with(prefix))
 }
 
-/// Signal categories that the declaration **gates**: an occurrence not covered by
-/// the declaration fails shut with `undeclared_remote_pattern`.
-///
-/// These are the durable half of the contract (#1023). `url_literal`/`ip_address`
-/// name a *reachable target*, checked against `remote_access.targets`;
-/// `network_command`/`dependency_install` name a *shell execution surface*,
-/// checked against `shell_commands`/`package_manager_commands`. All four are
-/// things an agent can state from its own intent, without knowing anything about
-/// the analyzer.
-const GATING_CATEGORIES: &[&str] = &[
-    "url_literal",
-    "ip_address",
-    "network_command",
-    "dependency_install",
-];
-
-/// Signal categories that are **advisory**: detected, shown to the operator at the
-/// approval gate, but never a reason to fail shut on their own (#1023).
-///
-/// These describe *how* code reaches the network rather than *what it reaches*,
-/// and mirroring them required agents to know analyzer internals.
-/// session-912c7791 is the evidence: the coder declared
-/// `function_calls: ["imaplib.fetch("]` while the analyzer detects the bare
-/// `fetch(` — a declaration that could never match — after ~30 turns of guessing
-/// at the schema.
-///
-/// `network_sink` is deliberately absent: sinks are **derived** by the gateway
-/// (neither gating nor advisory drift) — see [`declaration_covers_pattern`].
-const ADVISORY_CATEGORIES: &[&str] = &["import", "function_call"];
-
 /// Every declared import pattern, across languages.
 fn declared_import_patterns(decl: &RemoteAccessDeclaration) -> Vec<String> {
     let mut out = Vec::new();
@@ -516,24 +655,27 @@ fn declared_import_patterns(decl: &RemoteAccessDeclaration) -> Vec<String> {
 /// Whether one detected pattern is covered by the declaration, per category.
 /// Used by both the gating and the advisory views.
 fn declaration_covers_pattern(decl: &RemoteAccessDeclaration, p: &DetectedPattern) -> bool {
-    match p.category.as_str() {
-        "import" => observed_matches_declared(&p.pattern, &declared_import_patterns(decl)),
-        "function_call" => observed_matches_declared(&p.pattern, &decl.function_calls),
+    match p.category {
+        DetectedPatternCategory::Import => {
+            observed_matches_declared(&p.pattern, &declared_import_patterns(decl))
+        }
+        DetectedPatternCategory::FunctionCall => {
+            observed_matches_declared(&p.pattern, &decl.function_calls)
+        }
         // A sink is resolved structurally by the gateway, never declared.
-        "network_sink" => true,
-        "url_literal" => extract_host_from_url_literal(&p.pattern)
+        DetectedPatternCategory::NetworkSink => true,
+        DetectedPatternCategory::UrlLiteral => extract_host_from_url_literal(&p.pattern)
             .map(|host| declaration_allows_target(decl, &host, Some(&p.pattern)))
             .unwrap_or(false),
-        "ip_address" => declaration_allows_target(decl, &p.pattern, None),
-        "network_command" => {
+        DetectedPatternCategory::IpAddress => declaration_allows_target(decl, &p.pattern, None),
+        DetectedPatternCategory::NetworkCommand => {
             if is_package_manager_command_pattern(&p.pattern) {
                 observed_matches_declared(&p.pattern, &decl.package_manager_commands)
             } else {
                 observed_matches_declared(&p.pattern, &decl.shell_commands)
             }
         }
-        "dependency_install" => !decl.package_manager_commands.is_empty(),
-        _ => true,
+        DetectedPatternCategory::DependencyInstall => !decl.package_manager_commands.is_empty(),
     }
 }
 
@@ -556,9 +698,9 @@ fn declaration_covers_pattern(decl: &RemoteAccessDeclaration, p: &DetectedPatter
 ///
 /// **Import and function-call lists are advisory.** They used to gate too, which
 /// forced agents to mirror the analyzer's own pattern strings — a contract agents
-/// demonstrably cannot satisfy (see [`ADVISORY_CATEGORIES`]). Since #1021 resolves
-/// sinks structurally, requiring the agent to re-declare what the gateway already
-/// derives is pure friction.
+/// demonstrably cannot satisfy (see [`DetectedPatternCategory::is_advisory`]).
+/// Since #1021 resolves sinks structurally, requiring the agent to re-declare
+/// what the gateway already derives is pure friction.
 ///
 /// Demoting them does not make an undetected exec reachable, because the
 /// declaration is not the network boundary. What remains between agent code and
@@ -576,7 +718,7 @@ pub fn undeclared_patterns_against_manifest(
     };
     patterns
         .iter()
-        .filter(|p| GATING_CATEGORIES.contains(&p.category.as_str()))
+        .filter(|p| p.category.is_gating())
         .filter(|p| !declaration_covers_pattern(decl, p))
         .cloned()
         .collect()
@@ -598,7 +740,7 @@ pub fn advisory_undeclared_patterns(
     };
     patterns
         .iter()
-        .filter(|p| ADVISORY_CATEGORIES.contains(&p.category.as_str()))
+        .filter(|p| p.category.is_advisory())
         .filter(|p| !declaration_covers_pattern(decl, p))
         .cloned()
         .collect()
@@ -796,7 +938,7 @@ impl RemoteAccessAnalyzer {
             };
             push_unique_pattern(
                 &mut patterns,
-                "network_sink",
+                DetectedPatternCategory::NetworkSink,
                 &sink.sink,
                 sink.line,
                 &reason,
@@ -894,7 +1036,7 @@ impl RemoteAccessAnalyzer {
                         p.pattern == pat_str && p.line_number == Some(line_num)
                     }) {
                         patterns.push(DetectedPattern {
-                            category: "function_call".to_string(),
+                            category: DetectedPatternCategory::FunctionCall,
                             pattern: pat_str,
                             line_number: Some(line_num),
                             reason: reason.to_string(),
@@ -948,7 +1090,7 @@ impl RemoteAccessAnalyzer {
                         p.pattern == pat_str && p.line_number == Some(line_num)
                     }) {
                         patterns.push(DetectedPattern {
-                            category: "function_call".to_string(),
+                            category: DetectedPatternCategory::FunctionCall,
                             pattern: pat_str,
                             line_number: Some(line_num),
                             reason: "Fetch API call".to_string(),
@@ -978,7 +1120,7 @@ impl RemoteAccessAnalyzer {
                 }
 
                 patterns.push(DetectedPattern {
-                    category: "url_literal".to_string(),
+                    category: DetectedPatternCategory::UrlLiteral,
                     pattern: url.to_string(),
                     line_number: Some(line_num),
                     reason: "URL literal indicates external resource access".to_string(),
@@ -1006,7 +1148,7 @@ impl RemoteAccessAnalyzer {
                 }
 
                 patterns.push(DetectedPattern {
-                    category: "ip_address".to_string(),
+                    category: DetectedPatternCategory::IpAddress,
                     pattern: ip.to_string(),
                     line_number: Some(line_num),
                     reason: "IP address literal indicates external network access".to_string(),
@@ -1115,7 +1257,7 @@ impl RemoteAccessAnalyzer {
                 let pat = pattern_str.trim().to_string();
                 if !patterns.iter().any(|p: &DetectedPattern| p.pattern == pat) {
                     patterns.push(DetectedPattern {
-                        category: "network_command".to_string(),
+                        category: DetectedPatternCategory::NetworkCommand,
                         pattern: pat,
                         line_number: Some(line_num),
                         reason: reason.to_string(),
@@ -1155,7 +1297,7 @@ impl RemoteAccessAnalyzer {
         if let Some(packages) = dep_packages {
             if !packages.is_empty() {
                 patterns.detected_patterns.push(DetectedPattern {
-                    category: "dependency_install".to_string(),
+                    category: DetectedPatternCategory::DependencyInstall,
                     pattern: format!("packages: [{}]", packages.join(", ")),
                     line_number: None,
                     reason: format!(
@@ -1274,9 +1416,144 @@ impl RemoteAccessAnalyzer {
     }
 }
 
+impl RemoteAccessDetector for RemoteAccessAnalyzer {
+    fn analyze_code_with_declaration(
+        &self,
+        code: &str,
+        declaration: Option<&RemoteAccessDeclaration>,
+    ) -> RemoteAccessAnalysis {
+        Self::analyze_code_with_declaration(code, declaration)
+    }
+
+    fn analyze_command_and_dependencies_with_declaration(
+        &self,
+        code: &str,
+        dep_packages: Option<&[String]>,
+        declaration: Option<&RemoteAccessDeclaration>,
+    ) -> RemoteAccessAnalysis {
+        Self::analyze_command_and_dependencies_with_declaration(code, dep_packages, declaration)
+    }
+
+    fn analyze_code_with_workspace(
+        &self,
+        code: &str,
+        workspace_files: &[(String, String)],
+    ) -> RemoteAccessAnalysis {
+        Self::analyze_code_with_workspace(code, workspace_files)
+    }
+
+    fn detect_network_commands(&self, code: &str) -> Vec<DetectedPattern> {
+        Self::detect_network_commands(code)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A second detector implementation — proves the #1039 seam: orchestration
+    /// can call through [`RemoteAccessDetector`] without naming
+    /// [`RemoteAccessAnalyzer`]. Unions a synthetic host signal with the
+    /// mechanical analyzer (additive / fail-closed-safe).
+    #[derive(Debug, Default)]
+    struct UnionExtraHostDetector;
+
+    impl RemoteAccessDetector for UnionExtraHostDetector {
+        fn analyze_code_with_declaration(
+            &self,
+            code: &str,
+            declaration: Option<&RemoteAccessDeclaration>,
+        ) -> RemoteAccessAnalysis {
+            let mut analysis =
+                RemoteAccessAnalyzer.analyze_code_with_declaration(code, declaration);
+            analysis.detected_patterns.push(DetectedPattern {
+                category: DetectedPatternCategory::UrlLiteral,
+                pattern: "https://seam-test.example/".to_string(),
+                line_number: None,
+                reason: "synthetic union signal from alternate detector".to_string(),
+            });
+            analysis.requires_approval = true;
+            analysis
+        }
+
+        fn analyze_command_and_dependencies_with_declaration(
+            &self,
+            code: &str,
+            dep_packages: Option<&[String]>,
+            declaration: Option<&RemoteAccessDeclaration>,
+        ) -> RemoteAccessAnalysis {
+            let mut analysis = RemoteAccessAnalyzer
+                .analyze_command_and_dependencies_with_declaration(
+                    code,
+                    dep_packages,
+                    declaration,
+                );
+            analysis.detected_patterns.push(DetectedPattern {
+                category: DetectedPatternCategory::UrlLiteral,
+                pattern: "https://seam-test.example/".to_string(),
+                line_number: None,
+                reason: "synthetic union signal from alternate detector".to_string(),
+            });
+            analysis.requires_approval = true;
+            analysis
+        }
+
+        fn analyze_code_with_workspace(
+            &self,
+            code: &str,
+            _workspace_files: &[(String, String)],
+        ) -> RemoteAccessAnalysis {
+            self.analyze_code_with_declaration(code, None)
+        }
+
+        fn detect_network_commands(&self, code: &str) -> Vec<DetectedPattern> {
+            RemoteAccessAnalyzer.detect_network_commands(code)
+        }
+    }
+
+    #[test]
+    fn test_detected_pattern_category_contract_roles() {
+        assert!(DetectedPatternCategory::UrlLiteral.is_gating());
+        assert!(DetectedPatternCategory::IpAddress.is_gating());
+        assert!(DetectedPatternCategory::NetworkCommand.is_gating());
+        assert!(DetectedPatternCategory::DependencyInstall.is_gating());
+        assert!(DetectedPatternCategory::Import.is_advisory());
+        assert!(DetectedPatternCategory::FunctionCall.is_advisory());
+        assert!(DetectedPatternCategory::NetworkSink.is_derived());
+        assert!(!DetectedPatternCategory::NetworkSink.is_gating());
+        assert!(!DetectedPatternCategory::NetworkSink.is_advisory());
+    }
+
+    #[test]
+    fn test_detected_pattern_category_serde_roundtrip() {
+        let p = DetectedPattern {
+            category: DetectedPatternCategory::UrlLiteral,
+            pattern: "https://example.com".to_string(),
+            line_number: Some(1),
+            reason: "test".to_string(),
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["category"], "url_literal");
+        let back: DetectedPattern = serde_json::from_value(json).unwrap();
+        assert_eq!(back.category, DetectedPatternCategory::UrlLiteral);
+    }
+
+    #[test]
+    fn test_remote_access_detector_trait_swap_without_naming_analyzer() {
+        fn run(detector: &dyn RemoteAccessDetector) -> RemoteAccessAnalysis {
+            detector.analyze_code("print('hello')")
+        }
+        let via_default = run(default_remote_access_detector());
+        assert!(!via_default.requires_approval);
+
+        let via_union = run(&UnionExtraHostDetector);
+        assert!(via_union.requires_approval);
+        assert!(via_union
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == DetectedPatternCategory::UrlLiteral
+                && p.pattern.contains("seam-test.example")));
+    }
 
     #[test]
     fn test_no_remote_access() {
@@ -2155,7 +2432,7 @@ mymod.do_thing()
     #[test]
     fn test_classify_coverage_unresolved_import_only() {
         let patterns = vec![DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "import requests".to_string(),
             line_number: Some(1),
             reason: "HTTP client".to_string(),
@@ -2167,7 +2444,7 @@ mymod.do_thing()
     #[test]
     fn test_classify_coverage_concrete_url_only() {
         let patterns = vec![DetectedPattern {
-            category: "url_literal".to_string(),
+            category: DetectedPatternCategory::UrlLiteral,
             pattern: "https://wttr.in/Paris".to_string(),
             line_number: Some(1),
             reason: "URL literal".to_string(),
@@ -2185,19 +2462,19 @@ mymod.do_thing()
     fn test_classify_coverage_concrete_with_import_and_function_call() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "import requests".to_string(),
                 line_number: Some(1),
                 reason: "HTTP client".to_string(),
             },
             DetectedPattern {
-                category: "function_call".to_string(),
+                category: DetectedPatternCategory::FunctionCall,
                 pattern: "requests.get(".to_string(),
                 line_number: Some(2),
                 reason: "HTTP GET".to_string(),
             },
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://wttr.in/Paris".to_string(),
                 line_number: Some(2),
                 reason: "URL literal".to_string(),
@@ -2216,19 +2493,19 @@ mymod.do_thing()
     fn test_classify_coverage_unresolved_with_dependency_install() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "import requests".to_string(),
                 line_number: Some(1),
                 reason: "HTTP client".to_string(),
             },
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://wttr.in/Paris".to_string(),
                 line_number: Some(2),
                 reason: "URL literal".to_string(),
             },
             DetectedPattern {
-                category: "dependency_install".to_string(),
+                category: DetectedPatternCategory::DependencyInstall,
                 pattern: "packages: [requests]".to_string(),
                 line_number: None,
                 reason: "Package installation requires network".to_string(),
@@ -2242,13 +2519,13 @@ mymod.do_thing()
     fn test_classify_coverage_concrete_with_network_command() {
         let patterns = vec![
             DetectedPattern {
-                category: "network_command".to_string(),
+                category: DetectedPatternCategory::NetworkCommand,
                 pattern: "curl".to_string(),
                 line_number: Some(1),
                 reason: "curl makes network requests".to_string(),
             },
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://api.example.com/data".to_string(),
                 line_number: Some(1),
                 reason: "URL literal".to_string(),
@@ -2267,13 +2544,13 @@ mymod.do_thing()
     fn test_classify_coverage_unresolved_function_call_no_url() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "import requests".to_string(),
                 line_number: Some(1),
                 reason: "HTTP client".to_string(),
             },
             DetectedPattern {
-                category: "function_call".to_string(),
+                category: DetectedPatternCategory::FunctionCall,
                 pattern: "requests.get(".to_string(),
                 line_number: Some(2),
                 reason: "HTTP GET".to_string(),
@@ -2286,7 +2563,7 @@ mymod.do_thing()
     #[test]
     fn test_approval_remote_suffix_prefers_hosts() {
         let patterns = vec![DetectedPattern {
-            category: "function_call".to_string(),
+            category: DetectedPatternCategory::FunctionCall,
             pattern: "urlopen(".to_string(),
             line_number: Some(1),
             reason: "open URL".to_string(),
@@ -2299,13 +2576,13 @@ mymod.do_thing()
     fn test_approval_remote_suffix_signals_when_no_hosts() {
         let patterns = vec![
             DetectedPattern {
-                category: "function_call".to_string(),
+                category: DetectedPatternCategory::FunctionCall,
                 pattern: "urlopen(".to_string(),
                 line_number: Some(1),
                 reason: "open URL".to_string(),
             },
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "from urllib.request import urlopen".to_string(),
                 line_number: Some(1),
                 reason: "import".to_string(),
@@ -2325,7 +2602,7 @@ mymod.do_thing()
     #[test]
     fn test_approval_remote_suffix_category_fallback_when_pattern_empty() {
         let patterns = vec![DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "\n\t".to_string(),
             line_number: Some(1),
             reason: "x".to_string(),
@@ -2339,7 +2616,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_patterns_against_manifest_no_declaration_is_noop() {
         let patterns = vec![DetectedPattern {
-            category: "network_command".to_string(),
+            category: DetectedPatternCategory::NetworkCommand,
             pattern: "curl".to_string(),
             line_number: Some(1),
             reason: "curl".to_string(),
@@ -2352,25 +2629,25 @@ mymod.do_thing()
     fn test_undeclared_patterns_against_manifest_declared_patterns_pass() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "import requests".to_string(),
                 line_number: Some(1),
                 reason: "import".to_string(),
             },
             DetectedPattern {
-                category: "function_call".to_string(),
+                category: DetectedPatternCategory::FunctionCall,
                 pattern: "requests.get(".to_string(),
                 line_number: Some(2),
                 reason: "call".to_string(),
             },
             DetectedPattern {
-                category: "network_command".to_string(),
+                category: DetectedPatternCategory::NetworkCommand,
                 pattern: "curl".to_string(),
                 line_number: Some(3),
                 reason: "cmd".to_string(),
             },
             DetectedPattern {
-                category: "network_command".to_string(),
+                category: DetectedPatternCategory::NetworkCommand,
                 pattern: "pip install".to_string(),
                 line_number: Some(4),
                 reason: "pkg".to_string(),
@@ -2395,7 +2672,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_patterns_against_manifest_missing_command_fails_shut() {
         let patterns = vec![DetectedPattern {
-            category: "network_command".to_string(),
+            category: DetectedPatternCategory::NetworkCommand,
             pattern: "wget".to_string(),
             line_number: Some(1),
             reason: "cmd".to_string(),
@@ -2421,19 +2698,19 @@ mymod.do_thing()
     fn test_undeclared_patterns_against_manifest_accepts_non_python_import_fields() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: r#"import axios from "axios""#.to_string(),
                 line_number: Some(1),
                 reason: "js import".to_string(),
             },
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "use reqwest::Client;".to_string(),
                 line_number: Some(2),
                 reason: "rust import".to_string(),
             },
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: r#""net/http""#.to_string(),
                 line_number: Some(3),
                 reason: "go import".to_string(),
@@ -2485,7 +2762,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_patterns_against_manifest_url_target_allowed() {
         let patterns = vec![DetectedPattern {
-            category: "url_literal".to_string(),
+            category: DetectedPatternCategory::UrlLiteral,
             pattern: "https://api.example.com/v1/items".to_string(),
             line_number: Some(1),
             reason: "url".to_string(),
@@ -2511,7 +2788,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_patterns_against_manifest_url_target_not_allowed() {
         let patterns = vec![DetectedPattern {
-            category: "url_literal".to_string(),
+            category: DetectedPatternCategory::UrlLiteral,
             pattern: "https://api.example.com/v1/items".to_string(),
             line_number: Some(1),
             reason: "url".to_string(),
@@ -2542,7 +2819,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_patterns_against_manifest_url_target_wildcard_suffix_allowed() {
         let patterns = vec![DetectedPattern {
-            category: "url_literal".to_string(),
+            category: DetectedPatternCategory::UrlLiteral,
             pattern: "https://api.example.com/v1/items".to_string(),
             line_number: Some(1),
             reason: "url".to_string(),
@@ -2571,7 +2848,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_patterns_against_manifest_ip_target_global_wildcard_allowed() {
         let patterns = vec![DetectedPattern {
-            category: "ip_address".to_string(),
+            category: DetectedPatternCategory::IpAddress,
             pattern: "10.0.0.10".to_string(),
             line_number: Some(1),
             reason: "ip".to_string(),
@@ -2612,7 +2889,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_import_is_advisory_not_gating() {
         let patterns = vec![DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "import imaplib".to_string(),
             line_number: Some(1),
             reason: "IMAP client library".to_string(),
@@ -2636,7 +2913,7 @@ mymod.do_thing()
     #[test]
     fn test_undeclared_function_call_is_advisory_not_gating() {
         let patterns = vec![DetectedPattern {
-            category: "function_call".to_string(),
+            category: DetectedPatternCategory::FunctionCall,
             pattern: ".connect(".to_string(),
             line_number: Some(4),
             reason: "Socket connection initiation".to_string(),
@@ -2659,13 +2936,13 @@ mymod.do_thing()
     fn test_session_912c7791_unmatchable_function_call_declaration_no_longer_fails_shut() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "import imaplib".to_string(),
                 line_number: Some(1),
                 reason: "IMAP client library".to_string(),
             },
             DetectedPattern {
-                category: "function_call".to_string(),
+                category: DetectedPatternCategory::FunctionCall,
                 pattern: "fetch(".to_string(),
                 line_number: Some(9),
                 reason: "Fetch API call".to_string(),
@@ -2698,13 +2975,13 @@ mymod.do_thing()
     fn test_targets_remain_authoritative_for_concrete_hosts() {
         let patterns = vec![
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://evil.example.net/exfil".to_string(),
                 line_number: Some(2),
                 reason: "url".to_string(),
             },
             DetectedPattern {
-                category: "ip_address".to_string(),
+                category: DetectedPatternCategory::IpAddress,
                 pattern: "203.0.113.9".to_string(),
                 line_number: Some(3),
                 reason: "ip".to_string(),
@@ -2725,7 +3002,7 @@ mymod.do_thing()
     #[test]
     fn test_shell_and_dependency_surfaces_remain_gating() {
         let wget = vec![DetectedPattern {
-            category: "network_command".to_string(),
+            category: DetectedPatternCategory::NetworkCommand,
             pattern: "wget".to_string(),
             line_number: Some(1),
             reason: "command".to_string(),
@@ -2741,7 +3018,7 @@ mymod.do_thing()
         );
 
         let dep = vec![DetectedPattern {
-            category: "dependency_install".to_string(),
+            category: DetectedPatternCategory::DependencyInstall,
             pattern: "requests".to_string(),
             line_number: None,
             reason: "dependency".to_string(),
@@ -2758,7 +3035,7 @@ mymod.do_thing()
     #[test]
     fn test_network_sink_is_neither_gating_nor_advisory_drift() {
         let patterns = vec![DetectedPattern {
-            category: "network_sink".to_string(),
+            category: DetectedPatternCategory::NetworkSink,
             pattern: "http.client.HTTPSConnection".to_string(),
             line_number: Some(3),
             reason: "HTTPS client connection".to_string(),
@@ -2777,7 +3054,7 @@ mymod.do_thing()
     #[test]
     fn test_advisory_view_is_empty_without_a_declaration() {
         let patterns = vec![DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "import requests".to_string(),
             line_number: Some(1),
             reason: "import".to_string(),

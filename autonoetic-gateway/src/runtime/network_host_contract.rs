@@ -4,7 +4,7 @@ use autonoetic_types::capability::Capability;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::runtime::remote_access::{extract_host_from_url_literal, RemoteAccessAnalyzer};
+use crate::runtime::remote_access::extract_host_from_url_literal;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostContractValidation {
@@ -87,10 +87,11 @@ pub fn detect_network_hosts_from_file_map(file_map: &BTreeMap<String, Vec<u8>>) 
         let Ok(code) = std::str::from_utf8(bytes) else {
             continue;
         };
-        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        let analysis = crate::runtime::remote_access::default_remote_access_detector()
+            .analyze_code(code);
         for pattern in &analysis.detected_patterns {
-            match pattern.category.as_str() {
-                "url_literal" => {
+            match pattern.category {
+                crate::runtime::remote_access::DetectedPatternCategory::UrlLiteral => {
                     if let Some(host) = extract_host_from_url_literal(&pattern.pattern) {
                         if !host.is_empty()
                             && host != "localhost"
@@ -100,7 +101,7 @@ pub fn detect_network_hosts_from_file_map(file_map: &BTreeMap<String, Vec<u8>>) 
                         }
                     }
                 }
-                "ip_address" => {
+                crate::runtime::remote_access::DetectedPatternCategory::IpAddress => {
                     let host = pattern.pattern.trim().to_ascii_lowercase();
                     if !host.is_empty() && !host.starts_with("127.") && host != "0.0.0.0" {
                         detected_hosts.insert(host);

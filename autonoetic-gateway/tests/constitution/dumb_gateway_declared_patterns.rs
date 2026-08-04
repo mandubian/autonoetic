@@ -1,6 +1,6 @@
 //! Constitution Phase 4.3/4.4 pin: remote-access signals must be declaration-driven.
 
-use autonoetic_gateway::runtime::remote_access::{
+use autonoetic_gateway::runtime::remote_access::{DetectedPatternCategory, 
     undeclared_patterns_against_manifest, DetectedPattern,
 };
 use autonoetic_types::agent::RemoteAccessDeclaration;
@@ -9,25 +9,25 @@ use autonoetic_types::agent::RemoteAccessDeclaration;
 fn declared_patterns_cover_known_signals() {
     let patterns = vec![
         DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "import requests".to_string(),
             line_number: Some(1),
             reason: "import".to_string(),
         },
         DetectedPattern {
-            category: "function_call".to_string(),
+            category: DetectedPatternCategory::FunctionCall,
             pattern: "requests.get(".to_string(),
             line_number: Some(2),
             reason: "call".to_string(),
         },
         DetectedPattern {
-            category: "network_command".to_string(),
+            category: DetectedPatternCategory::NetworkCommand,
             pattern: "curl".to_string(),
             line_number: Some(3),
             reason: "command".to_string(),
         },
         DetectedPattern {
-            category: "network_command".to_string(),
+            category: DetectedPatternCategory::NetworkCommand,
             pattern: "pip install".to_string(),
             line_number: Some(4),
             reason: "package manager".to_string(),
@@ -53,7 +53,7 @@ fn declared_patterns_cover_known_signals() {
 #[test]
 fn undeclared_patterns_fail_shut() {
     let patterns = vec![DetectedPattern {
-        category: "network_command".to_string(),
+        category: DetectedPatternCategory::NetworkCommand,
         pattern: "wget".to_string(),
         line_number: Some(1),
         reason: "command".to_string(),
@@ -79,7 +79,7 @@ fn undeclared_patterns_fail_shut() {
 #[test]
 fn undeclared_remote_target_fails_shut() {
     let patterns = vec![DetectedPattern {
-        category: "url_literal".to_string(),
+        category: DetectedPatternCategory::UrlLiteral,
         pattern: "https://api.example.com/v1/data".to_string(),
         line_number: Some(1),
         reason: "url".to_string(),

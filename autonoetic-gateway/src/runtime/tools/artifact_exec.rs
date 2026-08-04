@@ -5,8 +5,8 @@ use crate::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
 use crate::runtime::remote_access::{
-    approval_remote_operator_suffix, classify_network_coverage, is_safe_inspection_command,
-    NetworkCoverage, RemoteAccessAnalyzer,
+    approval_remote_operator_suffix, classify_network_coverage, default_remote_access_detector,
+    is_safe_inspection_command, NetworkCoverage,
 };
 use crate::runtime::tools::{
     build_approval_details, load_session_content_mounts,
@@ -436,7 +436,8 @@ impl NativeTool for ArtifactExecTool {
         }
 
         let remote_analysis =
-            RemoteAccessAnalyzer::analyze_code_with_workspace(&artifact_code, &workspace_files);
+            default_remote_access_detector()
+                .analyze_code_with_workspace(&artifact_code, &workspace_files);
 
         let agent_has_network_access = manifest
             .capabilities
@@ -1202,7 +1203,8 @@ fn normalize_targets_from_artifact(
     code: &str,
     workspace_files: &[(String, String)],
 ) -> Vec<String> {
-    let analysis = RemoteAccessAnalyzer::analyze_code_with_workspace(code, workspace_files);
+    let analysis =
+        default_remote_access_detector().analyze_code_with_workspace(code, workspace_files);
     normalize_targets(&analysis.detected_patterns)
 }
 
@@ -1509,7 +1511,7 @@ mod tests {
         artifact_exec_approval_operator_reason, artifact_exec_approval_summary_line,
         promotion_gate_artifact_command_decision, ArtifactExecArgs, ArtifactExecTool,
     };
-    use crate::runtime::remote_access::DetectedPattern;
+    use crate::runtime::remote_access::{DetectedPattern, DetectedPatternCategory};
     use crate::runtime::tools::NativeTool;
     use autonoetic_types::capability::Capability;
 
@@ -1610,7 +1612,7 @@ mod tests {
     #[test]
     fn artifact_exec_reason_includes_sections_and_pattern_cues() {
         let patterns = vec![DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "import requests".to_string(),
             line_number: Some(12),
             reason: "HTTP client library".to_string(),

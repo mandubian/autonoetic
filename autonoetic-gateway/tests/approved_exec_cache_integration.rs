@@ -15,7 +15,7 @@ use autonoetic_gateway::policy::PolicyEngine;
 use autonoetic_gateway::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache, ApprovedExecEntry,
 };
-use autonoetic_gateway::runtime::remote_access::{
+use autonoetic_gateway::runtime::remote_access::{DetectedPatternCategory, 
     classify_network_coverage, DetectedPattern, NetworkCoverage,
 };
 use autonoetic_gateway::runtime::tools::default_registry;
@@ -25,9 +25,9 @@ use autonoetic_types::config::GatewayConfig;
 use tempfile::tempdir;
 use support::manifest_builder::TestManifest;
 
-fn create_pattern(category: &str, pattern: &str) -> DetectedPattern {
+fn create_pattern(category: DetectedPatternCategory, pattern: &str) -> DetectedPattern {
     DetectedPattern {
-        category: category.to_string(),
+        category,
         pattern: pattern.to_string(),
         line_number: Some(1),
         reason: "test".to_string(),
@@ -224,7 +224,7 @@ fn test_cache_all_remove_clear() {
 #[test]
 fn test_classify_coverage_url_only() {
     let patterns = vec![create_pattern(
-        "url_literal",
+        DetectedPatternCategory::UrlLiteral,
         "https://api.example.com/data",
     )];
     let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
@@ -239,8 +239,8 @@ fn test_classify_coverage_url_only() {
 #[test]
 fn test_classify_coverage_mixed_concrete() {
     let patterns = vec![
-        create_pattern("url_literal", "https://api.example.com/data"),
-        create_pattern("ip_address", "192.168.1.100"),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/data"),
+        create_pattern(DetectedPatternCategory::IpAddress, "192.168.1.100"),
     ];
     let targets = vec!["192.168.1.100".to_string(), "api.example.com".to_string()];
     let coverage = classify_network_coverage(&patterns, targets.clone());
@@ -250,8 +250,8 @@ fn test_classify_coverage_mixed_concrete() {
 #[test]
 fn test_classify_coverage_import_plus_url_is_concrete() {
     let patterns = vec![
-        create_pattern("import", "import requests"),
-        create_pattern("url_literal", "https://api.example.com/data"),
+        create_pattern(DetectedPatternCategory::Import, "import requests"),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/data"),
     ];
     let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
     assert_eq!(
@@ -266,8 +266,8 @@ fn test_classify_coverage_import_plus_url_is_concrete() {
 #[test]
 fn test_classify_coverage_function_call_plus_url_is_concrete() {
     let patterns = vec![
-        create_pattern("url_literal", "https://api.example.com/data"),
-        create_pattern("function_call", ".connect("),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/data"),
+        create_pattern(DetectedPatternCategory::FunctionCall, ".connect("),
     ];
     let coverage = classify_network_coverage(&patterns, vec!["api.example.com".to_string()]);
     assert_eq!(
@@ -282,8 +282,8 @@ fn test_classify_coverage_function_call_plus_url_is_concrete() {
 #[test]
 fn test_classify_coverage_import_only_is_unresolved() {
     let patterns = vec![
-        create_pattern("import", "import requests"),
-        create_pattern("function_call", "requests.get("),
+        create_pattern(DetectedPatternCategory::Import, "import requests"),
+        create_pattern(DetectedPatternCategory::FunctionCall, "requests.get("),
     ];
     let coverage = classify_network_coverage(&patterns, vec![]);
     assert_eq!(coverage, NetworkCoverage::Unresolved);
@@ -298,9 +298,9 @@ fn test_classify_coverage_empty_is_none() {
 #[test]
 fn test_normalize_targets() {
     let patterns = vec![
-        create_pattern("url_literal", "https://api.example.com/v1/data"),
-        create_pattern("url_literal", "https://status.github.com/api"),
-        create_pattern("import", "import requests"), // Should be skipped
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/v1/data"),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://status.github.com/api"),
+        create_pattern(DetectedPatternCategory::Import, "import requests"), // Should be skipped
     ];
     let targets = normalize_targets(&patterns);
     assert_eq!(targets, vec!["api.example.com", "status.github.com"]);
@@ -309,8 +309,8 @@ fn test_normalize_targets() {
 #[test]
 fn test_normalize_targets_dedup() {
     let patterns = vec![
-        create_pattern("url_literal", "https://api.example.com/v1"),
-        create_pattern("url_literal", "https://api.example.com/v2"),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/v1"),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/v2"),
     ];
     let targets = normalize_targets(&patterns);
     assert_eq!(targets, vec!["api.example.com"]);
@@ -382,8 +382,8 @@ fn test_cache_not_used_for_unresolved_targets() {
 
     // Code with ONLY imports/function calls, no concrete URL - should classify as Unresolved
     let patterns = vec![
-        create_pattern("import", "import requests"),
-        create_pattern("function_call", "requests.get("),
+        create_pattern(DetectedPatternCategory::Import, "import requests"),
+        create_pattern(DetectedPatternCategory::FunctionCall, "requests.get("),
     ];
 
     let coverage = classify_network_coverage(&patterns, vec![]);
@@ -421,7 +421,7 @@ fn test_sandbox_exec_cache_hit_skips_approval() {
     // Pre-populate the cache with a known fingerprint for concrete URL-only code
     let code_content = r#"print("https://api.example.com/data")"#;
     let patterns = vec![create_pattern(
-        "url_literal",
+        DetectedPatternCategory::UrlLiteral,
         "https://api.example.com/data",
     )];
     let targets = normalize_targets(&patterns);
@@ -533,7 +533,7 @@ fn test_capability_change_misses_cache_recorded_under_old_scope() {
 
     // Concrete URL with no host authorization (the originally-approved exec).
     let code_content = r#"print("https://api.example.com/data")"#;
-    let patterns = vec![create_pattern("url_literal", "https://api.example.com/data")];
+    let patterns = vec![create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.example.com/data")];
     let targets = normalize_targets(&patterns);
 
     // Pre-populate the cache as if approved under the NARROW capability scope.
@@ -594,6 +594,14 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
         ..Default::default()
     };
 
+    // Egress boundary fail-closed requires a GatewayStore to resolve session
+    // taint (pre-existing rot after phase-4 sandbox wiring — without a store
+    // the tool returns `egress_boundary_refused` before the approval path).
+    let store = std::sync::Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .expect("gateway store should open"),
+    );
+
     // Cache is empty - should require approval for concrete URL code
     // Use python -c to avoid file path issues with sandbox
     let code_content = r#"print("https://api.cache-test.dev/data")"#;
@@ -612,7 +620,7 @@ fn test_sandbox_exec_cache_miss_requires_approval_for_concrete_url() {
         Some("test-session"),
         None,
         Some(&config),
-        None,
+        Some(store),
         None,
     );
 
@@ -672,8 +680,8 @@ fn test_sandbox_exec_import_plus_url_caches() {
     let code_content = r#"import requests
 requests.get("https://api.cache-test.dev")"#;
     let patterns = vec![
-        create_pattern("import", "import requests"),
-        create_pattern("url_literal", "https://api.cache-test.dev"),
+        create_pattern(DetectedPatternCategory::Import, "import requests"),
+        create_pattern(DetectedPatternCategory::UrlLiteral, "https://api.cache-test.dev"),
     ];
     let targets = normalize_targets(&patterns);
 

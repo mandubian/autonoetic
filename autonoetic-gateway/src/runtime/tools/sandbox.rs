@@ -245,7 +245,8 @@ pub fn extract_and_cache_artifact_analysis(
         return None;
     }
 
-    let analysis = crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(&code);
+    let analysis = crate::runtime::remote_access::default_remote_access_detector()
+        .analyze_code(&code);
     let _ = std::fs::create_dir_all(cache_path.parent().unwrap());
     let _ = std::fs::write(
         &cache_path,
@@ -1154,10 +1155,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 let test_filename = extract_test_target_from_command(&effective_command);
                 if let Some(ref test_file) = test_filename {
                     if let Some(test_code) = extract_artifact_file_source(gw_dir, aid, test_file) {
-                        let analysis =
-                            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_code(
-                                &test_code,
-                            );
+                        let analysis = crate::runtime::remote_access::default_remote_access_detector()
+                            .analyze_code(&test_code);
                         artifact_analysis_override = Some(analysis);
                         test_code
                     } else {
@@ -1195,10 +1194,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             .any(|c| matches!(c, Capability::NetworkAccess { .. }));
 
         if !agent_has_network_access && !approval_validated_for_command {
-            let early_analysis =
-                crate::runtime::remote_access::RemoteAccessAnalyzer::detect_network_commands(
-                    &code_to_analyze,
-                );
+            let early_analysis = crate::runtime::remote_access::default_remote_access_detector()
+                .detect_network_commands(&code_to_analyze);
             let is_dep_install = early_analysis
                 .iter()
                 .any(|p| p.category == "network_command" && is_package_manager_command(&p.pattern));
@@ -1225,11 +1222,12 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
         let remote_analysis = if let Some(artifact_analysis) = artifact_analysis_override {
             artifact_analysis
         } else {
-            crate::runtime::remote_access::RemoteAccessAnalyzer::analyze_command_and_dependencies_with_declaration(
-                &code_to_analyze,
-                dep_packages.as_deref(),
-                declared_remote_access.as_ref(),
-            )
+            crate::runtime::remote_access::default_remote_access_detector()
+                .analyze_command_and_dependencies_with_declaration(
+                    &code_to_analyze,
+                    dep_packages.as_deref(),
+                    declared_remote_access.as_ref(),
+                )
         };
 
         // Per-host `sandbox_exec` probe budget (#853). Refuse a probe against a
@@ -2938,7 +2936,7 @@ remote_access:
 #[cfg(test)]
 mod approval_message_tests {
     use super::{sandbox_approval_operator_reason, sandbox_approval_summary_line};
-    use crate::runtime::remote_access::DetectedPattern;
+    use crate::runtime::remote_access::{DetectedPattern, DetectedPatternCategory};
 
     #[test]
     fn sandbox_approval_summary_uses_intent_and_command() {
@@ -2955,7 +2953,7 @@ mod approval_message_tests {
     #[test]
     fn sandbox_approval_reason_lists_cues() {
         let patterns = vec![DetectedPattern {
-            category: "import".to_string(),
+            category: DetectedPatternCategory::Import,
             pattern: "import requests".to_string(),
             line_number: Some(67),
             reason: "HTTP client library".to_string(),

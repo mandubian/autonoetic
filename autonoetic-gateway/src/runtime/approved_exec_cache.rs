@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
-use crate::runtime::remote_access::DetectedPattern;
+use crate::runtime::remote_access::{DetectedPattern, DetectedPatternCategory};
 
 /// A cached approved sandbox exec entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -208,8 +208,8 @@ pub fn normalize_targets(patterns: &[DetectedPattern]) -> Vec<String> {
     let mut hosts = Vec::new();
 
     for pattern in patterns {
-        match pattern.category.as_str() {
-            "url_literal" => {
+        match pattern.category {
+            crate::runtime::remote_access::DetectedPatternCategory::UrlLiteral => {
                 // Extract host from URL literal
                 if let Some(host) = extract_host_from_url(&pattern.pattern) {
                     if !hosts.contains(&host) {
@@ -217,7 +217,7 @@ pub fn normalize_targets(patterns: &[DetectedPattern]) -> Vec<String> {
                     }
                 }
             }
-            "ip_address" => {
+            crate::runtime::remote_access::DetectedPatternCategory::IpAddress => {
                 // IP address is already a host
                 if !hosts.contains(&pattern.pattern) {
                     hosts.push(pattern.pattern.clone());
@@ -313,13 +313,13 @@ mod tests {
     fn test_normalize_targets_urls() {
         let patterns = vec![
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://api.example.com/v1/data".to_string(),
                 line_number: Some(1),
                 reason: "URL literal".to_string(),
             },
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://status.github.com/api".to_string(),
                 line_number: Some(2),
                 reason: "URL literal".to_string(),
@@ -333,13 +333,13 @@ mod tests {
     fn test_normalize_targets_dedup() {
         let patterns = vec![
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://api.example.com/v1".to_string(),
                 line_number: Some(1),
                 reason: "URL literal".to_string(),
             },
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://api.example.com/v2".to_string(),
                 line_number: Some(2),
                 reason: "URL literal".to_string(),
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn test_normalize_targets_ip() {
         let patterns = vec![DetectedPattern {
-            category: "ip_address".to_string(),
+            category: DetectedPatternCategory::IpAddress,
             pattern: "192.168.1.100".to_string(),
             line_number: Some(1),
             reason: "IP address".to_string(),
@@ -365,13 +365,13 @@ mod tests {
     fn test_normalize_targets_skips_imports() {
         let patterns = vec![
             DetectedPattern {
-                category: "import".to_string(),
+                category: DetectedPatternCategory::Import,
                 pattern: "import requests".to_string(),
                 line_number: Some(1),
                 reason: "HTTP client".to_string(),
             },
             DetectedPattern {
-                category: "url_literal".to_string(),
+                category: DetectedPatternCategory::UrlLiteral,
                 pattern: "https://api.example.com/data".to_string(),
                 line_number: Some(2),
                 reason: "URL literal".to_string(),
