@@ -1226,21 +1226,44 @@ pub fn approve_request_with_options(
             );
         }
 
-        for field in secret_fields {
-            if let Some((_, value)) = secret_pairs.iter().find(|(name, _)| name == &field.name) {
-                vault.set_secret(&field.name, value.clone());
-            }
-        }
+        // Multi-field prompts also store a combined flat JSON object under the
+        // credential id so spawn-time env injection delivers every field (the
+        // record points at the combined object; single-field prompts keep the
+        // raw-value contract under the field name).
+        let collected: Vec<(String, String)> = secret_fields
+            .iter()
+            .filter_map(|f| {
+                secret_pairs
+                    .iter()
+                    .find(|(name, _)| name == &f.name)
+                    .map(|(_, v)| (f.name.clone(), v.clone()))
+            })
+            .collect();
+        let record_secret_name =
+            crate::runtime::tools::credential::store_collected_secret_values(
+                &mut vault,
+                credential_id,
+                &collected,
+            );
         vault.persist_to_file(&vault_path)?;
+
+        // Extract the setup label from the payload so dedup stays scoped to
+        // the (service, label) pair the caller declared.
+        let label = payload
+            .as_ref()
+            .and_then(|p| p.get("label"))
+            .and_then(|v| v.as_str().map(String::from));
+
+        // Default `inject_as` to the service-derived env var when the flow did
+        // not pass one, matching the credential_setup completion path.
+        let inject_as = inject_as
+            .or_else(|| Some(autonoetic_types::runtime_lock::inject_as_for_service(service)));
 
         // Create the CredentialRecord with full metadata
         let cred = autonoetic_types::agent::CredentialRecord {
             credential_id: credential_id.clone(),
             service: service.clone(),
-            secret_name: secret_fields
-                .first()
-                .map(|f| f.name.clone())
-                .unwrap_or_default(),
+            secret_name: record_secret_name,
             inject_as,
             created_by_agent: Some(req.agent_id.clone()),
             expires_at,
@@ -1253,7 +1276,7 @@ pub fn approve_request_with_options(
             refresh_extract_access_token: None,
             refresh_extract_refresh_token: None,
             refresh_extract_expires_in: None,
-            label: None,
+            label,
         };
         store.upsert_credential(&cred)?;
 

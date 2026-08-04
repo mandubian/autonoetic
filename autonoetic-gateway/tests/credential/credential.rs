@@ -1346,6 +1346,207 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
 }
 
 #[test]
+fn test_credential_setup_user_prompt_multi_field_stores_combined_blob() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["photos".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // Step 1: start a two-field user_prompt flow, with a dedup label.
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "photos",
+                "label": "default",
+                "steps": [{
+                    "step_type": "user_prompt",
+                    "message": "Enter your account name and app token",
+                    "secret_fields": [
+                        {"name": "account_name", "label": "Account name", "masked": false},
+                        {"name": "app_token", "label": "App token", "masked": true}
+                    ]
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential_setup should succeed");
+
+    let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(suspended["ok"], false);
+    assert_eq!(suspended["suspended"], true);
+    let request_id = suspended["request_id"]
+        .as_str()
+        .expect("request_id should be present");
+    let credential_id = suspended["credential_id"]
+        .as_str()
+        .expect("credential_id should be present")
+        .to_string();
+
+    // Step 2: approve with both secret fields (simulating operator action).
+    let mut approve_config = autonoetic_types::config::GatewayConfig::default();
+    approve_config.approval_dwell_multiplier = 0.0;
+    approve_config.agents_dir = temp.path().to_path_buf();
+    let confirm_phrase = format!("register photos {}", credential_id);
+    autonoetic_gateway::scheduler::approve_request_with_options(
+        &approve_config,
+        Some(&store),
+        request_id,
+        "test",
+        None,
+        Some(vec![
+            ("account_name".to_string(), "acct-1".to_string()),
+            ("app_token".to_string(), "tok-9".to_string()),
+        ]),
+        None,
+        None,
+        autonoetic_gateway::scheduler::ApproveOptions {
+            grant_scope: None,
+            grant_targets: Vec::new(),
+            grant_expires_at: None,
+            acknowledged_capabilities: Vec::new(),
+            confirm_phrase: Some(confirm_phrase),
+            decider_session_id: None,
+            create_grant: None,
+        },
+    )
+    .expect("approval should succeed");
+
+    // Step 3: the record points at the combined blob stored under the
+    // credential id, keeps the declared label, and carries the
+    // service-derived default inject_as.
+    let cred = store
+        .get_credential(&credential_id)
+        .expect("get credential")
+        .expect("credential exists");
+    assert_eq!(cred.service, "photos");
+    assert_eq!(cred.secret_name, credential_id);
+    assert_eq!(cred.label.as_deref(), Some("default"));
+    assert_eq!(cred.inject_as.as_deref(), Some("PHOTOS_SECRET"));
+
+    // Step 4: the vault holds the combined JSON object plus the raw fields
+    // (the raw entries keep {{secrets.<field>}} templates working).
+    let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").unwrap();
+    let vault = autonoetic_gateway::vault::Vault::load_from_file(std::path::Path::new(&vault_path))
+        .expect("load vault");
+    let blob = vault
+        .get_secret(&credential_id)
+        .expect("combined blob exists")
+        .expose_secret()
+        .to_string();
+    let blob: serde_json::Value = serde_json::from_str(&blob).expect("blob is json");
+    assert_eq!(blob["account_name"], "acct-1");
+    assert_eq!(blob["app_token"], "tok-9");
+    assert_eq!(
+        vault
+            .get_secret("account_name")
+            .expect("raw field exists")
+            .expose_secret(),
+        "acct-1"
+    );
+    assert_eq!(
+        vault
+            .get_secret("app_token")
+            .expect("raw field exists")
+            .expose_secret(),
+        "tok-9"
+    );
+
+    // Step 5: a retry for the same (service, label) dedups — and a new
+    // inject_as is applied instead of silently dropped, with the injection
+    // contract reported back to the caller.
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "photos",
+                "label": "default",
+                "inject_as": "PHOTOS_LOGIN"
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("dedup retry should succeed");
+    let deduped: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(deduped["ok"], true);
+    assert_eq!(deduped["existing"], true);
+    assert_eq!(deduped["credential_id"], credential_id);
+    assert_eq!(deduped["inject_as_updated"], true);
+    assert_eq!(deduped["inject_as"], "PHOTOS_LOGIN");
+    assert_eq!(deduped["injection"]["env_var"], "PHOTOS_LOGIN");
+    assert_eq!(deduped["injection"]["value_shape"], "json_object");
+    assert_eq!(
+        deduped["injection"]["field_env_vars"],
+        serde_json::json!(["PHOTOS_ACCOUNT_NAME", "PHOTOS_APP_TOKEN"])
+    );
+
+    let cred = store
+        .get_credential(&credential_id)
+        .expect("get credential")
+        .expect("credential exists");
+    assert_eq!(
+        cred.inject_as.as_deref(),
+        Some("PHOTOS_LOGIN"),
+        "the inject_as update must persist"
+    );
+
+    // Step 6: repeating the same update is a no-op (no spurious update flag).
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "photos",
+                "label": "default",
+                "inject_as": "PHOTOS_LOGIN"
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("second dedup retry should succeed");
+    let deduped: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(deduped["existing"], true);
+    assert!(
+        deduped.get("inject_as_updated").is_none(),
+        "an unchanged inject_as must not be reported as updated"
+    );
+}
+
+#[test]
 #[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
 fn test_credential_setup_approval_fails_with_missing_secrets() {
     let manifest = test_manifest(vec![

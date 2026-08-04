@@ -65,6 +65,15 @@ Agent calls sandbox_exec({ command: "python3 app.py",
 | `credential_env` on `artifact_exec` | Injected as env var in sandbox | No |
 | `credential_request` | Gateway makes HTTP request with auth | No (response is redacted) |
 
+## Env-Var Contract for Spawned Script Agents
+
+When a script agent declares `credential_services` and is spawned, the gateway injects each resolved credential as an env var:
+
+- **Name**: the credential's `inject_as` when it holds a valid env-var identifier, otherwise the service-derived `<SERVICE>_SECRET` (e.g. service `photos` → `PHOTOS_SECRET`). HTTP injection styles (`bearer`, `header:X-…`) belong to `credential_request` and fall back to the derived name.
+- **Multi-field credentials**: a `user_prompt` flow that collected several secret fields stores a combined flat JSON object, and the record points at it. At spawn the combined object is injected under the credential's env-var name, **and** each field is also injected under `<SERVICE>_<FIELD>` (uppercase-sanitized) — e.g. fields `account_name` + `app_token` for service `photos` yield `PHOTOS_ACCOUNT_NAME` and `PHOTOS_APP_TOKEN` alongside the combined value. A script can read either shape.
+- **Verify before spawning**: `credential_check` and `credential_setup` return an `injection` block per credential — `env_var`, `value_shape` (`scalar` / `json_object`), and for multi-field credentials the `fields` and derived `field_env_vars`. Check it against what the script reads; do not guess env-var names.
+- **Wrong env-var name on an existing credential**: retry `credential_setup` with the same `service` (and `label`, if one was used) plus the correct `inject_as`. The dedup path reuses the credential and applies the new name (`inject_as_updated: true`) — the secret is untouched and never re-collected.
+
 ## CLI Credential Commands
 
 Operators can also manage credentials directly:
