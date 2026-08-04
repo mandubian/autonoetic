@@ -185,10 +185,13 @@ of looking like a broken sandbox.
 Static analysis is a **precision/UX layer** over this grant rule: it decides
 *what the operator is asked about*, not whether the namespace opens. Call sites
 that need analysis go through [`RemoteAccessDetector`]
-(`runtime/remote_access.rs`); [`RemoteAccessAnalyzer`] is the default
-mechanical implementation. Category vocabulary is a closed typed enum
-([`DetectedPatternCategory`]) with the historical snake_case wire strings, so a
-second detector cannot invent labels that silently bypass gating tables.
+(`runtime/remote_access.rs`); [`default_remote_access_detector()`] always
+returns the mechanical [`RemoteAccessAnalyzer`]. Alternate detectors are
+injected by passing a different `&dyn RemoteAccessDetector` at the call site —
+there is no runtime swap of the default entry point. Category vocabulary is a
+closed typed enum ([`DetectedPatternCategory`]) with the historical snake_case
+wire strings, so a second detector cannot invent labels that silently bypass
+gating tables.
 
 A future AI (or other) detector may plug in behind that trait — preferably by
 **unioning** patterns with the mechanical analyzer. Because missed detection
