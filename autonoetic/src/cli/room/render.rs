@@ -2899,8 +2899,8 @@ fn collapsed_summary(run: &[&SessionTimelineEntry]) -> String {
             "agent.reasoning" => {
                 reasoning_count += 1;
                 if let Some(p) = parse_entry_payload(e) {
-                    if let Some(text) = payload_field_str(&p, "reasoning") {
-                        let snippet = one_line(&text, 160);
+                    if let Some(text) = p.get("reasoning").and_then(|v| v.as_str()) {
+                        let snippet = one_line(text, 160);
                         if !snippet.is_empty() {
                             reasoning_snippet = Some(snippet);
                         }
