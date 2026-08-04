@@ -46,16 +46,47 @@ maps fails parse (`invalid type: map, expected a string`).
 | Field | Type | Purpose |
 |---|---|---|
 | `approval_mode` | `"required"` \| `"preapproved"` | `required` = operator approval per request; `preapproved` = auto-approve when `NetworkAccess` covers the host |
-| `targets` | list of `GrantTarget` | Outbound host rules the declaration covers |
+| `targets` | list of `GrantTarget` | **Gating.** Outbound host rules the declaration covers — the authoritative contract |
 | `enabled_languages` | list of `python`\|`javascript`\|`rust`\|`go` | Restrict analyzer detection to these languages — both import detectors and language-tagged function-call heuristics (empty = all; see below) |
-| `python_imports` | list of strings | Python modules expected (e.g. `imaplib`, `requests`) |
-| `js_imports` / `rust_imports` / `go_imports` | list of strings | Same, per language |
-| `function_calls` | list of strings | Call-pattern prefixes expected (e.g. `"requests.get("`, `"fetch("`) |
-| `shell_commands` | list of strings | Shell commands expected (e.g. `curl`, `wget`) |
-| `package_manager_commands` | list of strings | Package-manager commands (e.g. `pip install`) |
+| `shell_commands` | list of strings | **Gating.** Shell commands expected (e.g. `curl`, `wget`) |
+| `package_manager_commands` | list of strings | **Gating.** Package-manager commands (e.g. `pip install`) |
+| `python_imports` | list of strings | *Advisory.* Python modules expected (e.g. `imaplib`, `requests`) |
+| `js_imports` / `rust_imports` / `go_imports` | list of strings | *Advisory.* Same, per language |
+| `function_calls` | list of strings | *Advisory.* Call-pattern prefixes expected (e.g. `"requests.get("`) |
 
 **There is no `hosts` or `patterns` field.** Declaring network hosts belongs in
-`targets`; declaring call patterns belongs in `function_calls`.
+`targets`.
+
+### What you must declare (and what you needn't)
+
+Only the **gating** fields above can fail an exec shut with
+`undeclared_remote_pattern`:
+
+- a concrete URL or IP in the code must be covered by `targets`;
+- a network shell command must be named in `shell_commands`;
+- installing packages requires `package_manager_commands` to be non-empty.
+
+Each of those is a statement of intent you can write from *what you are trying to
+do*. `targets` is the durable contract — declare the hosts.
+
+The **advisory** fields (`python_imports`, `js_imports`, `rust_imports`,
+`go_imports`, `function_calls`) are hints. They sharpen the approval prompt and
+make declaration drift visible, but an import or call the declaration doesn't name
+will **not** refuse the exec (#1023). They used to gate, which forced agents to
+mirror the analyzer's internal pattern strings — a contract agents could not keep.
+The evidence: in session-912c7791 the coder declared
+`function_calls: ["imaplib.fetch("]` while the analyzer detects the bare `fetch(`,
+so the declaration could never match — after ~30 turns spent guessing at the
+schema. Since the gateway now resolves network **sinks** structurally
+(`docs/network-sink-detection.md`), asking the agent to re-declare what the gateway
+already derives was pure friction.
+
+Demoting them removes no protection, because the declaration was never the network
+boundary. Between agent code and the network there remain: the `NetworkAccess`
+capability ceiling (with install-time `detected_network_hosts` coverage, P-1.5),
+`targets` gating concrete hosts, operator approval at the gate — which shows the
+advisory signals too — and the per-exec grant from #1022, without which the sandbox
+has no network namespace at all (`docs/sandbox-network-grant.md`).
 
 ### `enabled_languages` — what it scopes
 
