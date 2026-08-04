@@ -498,7 +498,10 @@ const GATING_CATEGORIES: &[&str] = &[
 /// `function_calls: ["imaplib.fetch("]` while the analyzer detects the bare
 /// `fetch(` — a declaration that could never match — after ~30 turns of guessing
 /// at the schema.
-const ADVISORY_CATEGORIES: &[&str] = &["import", "function_call", "network_sink"];
+///
+/// `network_sink` is deliberately absent: sinks are **derived** by the gateway
+/// (neither gating nor advisory drift) — see [`declaration_covers_pattern`].
+const ADVISORY_CATEGORIES: &[&str] = &["import", "function_call"];
 
 /// Every declared import pattern, across languages.
 fn declared_import_patterns(decl: &RemoteAccessDeclaration) -> Vec<String> {
@@ -537,9 +540,11 @@ fn declaration_covers_pattern(decl: &RemoteAccessDeclaration, p: &DetectedPatter
 /// Returns detected patterns the declaration must cover but does not — the set
 /// whose non-emptiness fails an exec shut with `undeclared_remote_pattern`.
 ///
-/// Enforcement is declaration-gated: an agent that declares no remote-access
-/// surface at all gets an empty set here (the upstream
-/// `missing_remote_access_declaration` check owns that case).
+/// Enforcement is declaration-gated: returns empty when the `remote_access`
+/// block is absent (`declaration: None`) — the upstream
+/// `missing_remote_access_declaration` check owns that case. An empty
+/// declaration object (block present, no `targets`/commands) still yields
+/// gating misses for any detected gating categories.
 ///
 /// # What is gated, and why only that (#1023)
 ///
@@ -593,9 +598,7 @@ pub fn advisory_undeclared_patterns(
     };
     patterns
         .iter()
-        .filter(|p| {
-            ADVISORY_CATEGORIES.contains(&p.category.as_str()) && p.category != "network_sink"
-        })
+        .filter(|p| ADVISORY_CATEGORIES.contains(&p.category.as_str()))
         .filter(|p| !declaration_covers_pattern(decl, p))
         .cloned()
         .collect()

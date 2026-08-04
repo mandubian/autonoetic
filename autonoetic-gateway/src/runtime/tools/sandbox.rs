@@ -791,10 +791,13 @@ your task; do NOT `EndTurn` immediately after resumption.\n\n\
 to remove the network access, and do NOT retry the same code — you cannot edit your own installed \
 SKILL.md. Stop and report the `error_type` + `undeclared_patterns` to your caller; the caller must \
 have the builder flow (agent-factory / specialized_builder) re-issue the install intent or a \
-revision whose `remote_access` declaration covers the listed patterns. The listed patterns are \
-always hosts/IPs (fix: add them to `remote_access.targets`) or shell/package-manager commands \
-(fix: `shell_commands` / `package_manager_commands`) — imports and call patterns are advisory and \
-never cause this error, so there is no need to enumerate them."
+revision whose `remote_access` declaration covers the listed patterns. For \
+`undeclared_remote_pattern`, the listed patterns are always hosts/IPs (fix: add them to \
+`remote_access.targets`) or shell/package-manager commands (fix: `shell_commands` / \
+`package_manager_commands`). For `missing_remote_access_declaration`, the payload may also \
+include import/call signals as context — those are advisory only; the actionable fix is still \
+to declare `targets` (and command surfaces when used). Imports and call patterns never cause \
+`undeclared_remote_pattern`, so there is no need to enumerate them."
             .to_string(),
     }
 }
