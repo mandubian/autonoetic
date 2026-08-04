@@ -13,6 +13,7 @@ use tempfile::tempdir;
 const TEST_VAULT_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 #[test]
+#[serial_test::serial]
 fn test_response_secret_is_persisted_and_redacted() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let vault_path = tmp.path().join("vault.json");

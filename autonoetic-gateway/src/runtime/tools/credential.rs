@@ -2155,16 +2155,32 @@ impl NativeTool for CredentialSetupTool {
                     .filter(|s| !s.is_empty());
                 let mut cred = cred.clone();
                 let mut inject_as_updated = false;
+                // A 0-row update means the record disappeared between the
+                // dedup lookup and the write. Report the miss — never claim a
+                // persistence that did not happen.
+                let mut inject_as_update_lost = false;
                 if let Some(new_name) = requested_inject_as {
                     if cred.inject_as.as_deref() != Some(new_name) {
-                        store.update_credential_inject_as(&cred.credential_id, new_name)?;
-                        cred.inject_as = Some(new_name.to_string());
-                        inject_as_updated = true;
+                        if store.update_credential_inject_as(&cred.credential_id, new_name)? {
+                            cred.inject_as = Some(new_name.to_string());
+                            inject_as_updated = true;
+                        } else {
+                            inject_as_update_lost = true;
+                            tracing::warn!(
+                                target: "credential",
+                                credential_id = %cred.credential_id,
+                                service = %service,
+                                requested_inject_as = %new_name,
+                                "inject_as update matched no credential row — the record vanished after the dedup lookup"
+                            );
+                        }
                     }
                 }
                 let vault = load_vault_readonly(_gateway_dir, _agent_dir);
                 let note = if inject_as_updated {
                     "Credential already exists for this service/label — reusing existing credential; inject_as updated."
+                } else if inject_as_update_lost {
+                    "A credential matched this service/label but its record vanished before the inject_as update could persist — re-run credential_setup to re-onboard it."
                 } else {
                     "Credential already exists for this service/label — reusing existing credential."
                 };
@@ -2178,6 +2194,8 @@ impl NativeTool for CredentialSetupTool {
                 });
                 if inject_as_updated {
                     response["inject_as_updated"] = json!(true);
+                } else if inject_as_update_lost {
+                    response["inject_as_updated"] = json!(false);
                 }
                 if let Some(inject_as) = &cred.inject_as {
                     response["inject_as"] = json!(inject_as);

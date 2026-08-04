@@ -642,6 +642,12 @@ fn push_credential_env(
 /// under `<SERVICE>_<FIELD>` so scripts can consume either the combined value
 /// or individual variables. The combined value is always pushed under the
 /// primary name; field vars are additive.
+///
+/// Order matters: the combined value goes in **first** so that a primary name
+/// which happens to collide with a derived field name (`inject_as:
+/// SERVICE_FIELD`) keeps the combined value — `push_credential_env` resolves
+/// same-provenance collisions first-match-wins, so pushing fields first would
+/// silently drop the primary contract.
 fn push_credential_secret_env(
     resolved: &mut Vec<ResolvedCredentialEnv>,
     env_var: String,
@@ -650,14 +656,15 @@ fn push_credential_secret_env(
     credential_id: &str,
     service: &str,
 ) {
-    if let Some(fields) = flat_json_object_fields(&secret) {
+    let fields = flat_json_object_fields(&secret);
+    push_credential_env(resolved, env_var, secret, explicit, credential_id);
+    if let Some(fields) = fields {
         for (field, value) in fields {
             if let Some(field_env) = field_env_var_name(service, &field) {
                 push_credential_env(resolved, field_env, value, explicit, credential_id);
             }
         }
     }
-    push_credential_env(resolved, env_var, secret, explicit, credential_id);
 }
 
 /// Like [`resolve_credential_env`] but accepts spawn-time credential bindings
@@ -1309,6 +1316,40 @@ mod tests {
                 "secret {secret} must not get per-field expansion"
             );
         }
+    }
+
+    /// An explicit `inject_as` that collides with one of the credential's own
+    /// derived field names must keep the combined value — the primary name is
+    /// the injection contract, so the field var is the one that yields.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_explicit_inject_as_wins_over_own_field_var() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let blob = r#"{"account_name":"acct-1","app_token":"tok-9"}"#;
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("cred_multi", blob)],
+            r#"[{"service":"photos","credential_id":"cred_multi"}]"#,
+        );
+        // inject_as is exactly the env var the `account_name` field derives.
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_multi",
+                "photos",
+                "cred_multi",
+                Some("PHOTOS_ACCOUNT_NAME"),
+            ))
+            .unwrap();
+
+        let mut resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap();
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("PHOTOS_ACCOUNT_NAME".to_string(), blob.to_string()),
+                ("PHOTOS_APP_TOKEN".to_string(), "tok-9".to_string()),
+            ],
+            "the combined value must survive a collision with its own field var"
+        );
     }
 
     /// A field name with no usable characters is skipped; the combined value
