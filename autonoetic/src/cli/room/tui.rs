@@ -68,10 +68,11 @@ const MARK_W: usize = 1;
 const QUIT_ARM_SECS: u64 = 3;
 const QUIT_ARM_STATUS: &str = "Quit? press q or Ctrl+C again within 3s — Esc cancels";
 
-/// Seconds the operator has to press Esc again after arming to trigger
-/// an emergency stop of the running session.
+/// Seconds the operator has to press X again after arming to trigger
+/// an emergency stop of the running session. X is deliberate — it has no
+/// other meaning in the room, so double-X cannot be a reflex accident.
 const ESTOP_ARM_SECS: u64 = 2;
-const ESTOP_ARM_STATUS: &str = "Interrupt session? press Esc again within 2s";
+const ESTOP_ARM_STATUS: &str = "Emergency stop? press X again within 2s · /estop also works";
 
 fn quit_armed(armed_until: &Option<Instant>) -> bool {
     armed_until
@@ -3885,6 +3886,12 @@ pub fn run(
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
     let mut session_async_processing = false;
+    // Local reflection of the operator-initiated pause state (`p`). Set true
+    // when the operator requests a pause; reset on explicit resume (`p` again)
+    // or when a message is sent (which resumes the session naturally). This is
+    // the operator's *intent*, tracked locally — the gateway consumes it as a
+    // cooperative flag in the execute loop.
+    let mut session_paused = false;
     let mut spawn_lineage: HashMap<String, SessionSpawnLineageEntry> = HashMap::new();
     // Last rendered frame — input is drained before the next timeline fetch.
     let mut view_rows: Vec<RenderedRow> = Vec::new();
@@ -3955,6 +3962,10 @@ pub fn run(
                                 compose = None;
                                 follow = true;
                                 force_timeline_refresh = true;
+                                // Sending a message resumes a paused session —
+                                // drop the local paused reflection so the next
+                                // `p` requests a fresh pause.
+                                session_paused = false;
                             }
                         }
                         continue;
@@ -5684,38 +5695,35 @@ pub fn run(
                                         wiki_request_ids = None;
                             } else if search_query.is_some() {
                                 // Clear an active search before falling through to
-                                // the emergency-stop arming path.
+                                // the plain dismiss path.
                                 search_query = None;
                                 search_matches.clear();
                                 status = Some("search cleared".to_string());
                             } else if estop_armed(&estop_armed_until) {
-                                // Double-Esc within the arm window → emergency stop
+                                // Esc must never arm destructive actions — it is
+                                // the dismiss/close reflex (panes, prompts,
+                                // search). Double-Esc firing an emergency stop was
+                                // removed because the close reflex collided with
+                                // it. Estop is now deliberate: `/estop` or `X`
+                                // twice. If an estop is somehow armed, a second
+                                // Esc still disarms it (never fires).
                                 disarm_estop(&mut estop_armed_until, &mut status);
-                                match rpc(
-                                    client,
-                                    "root_session.emergency_stop",
-                                    serde_json::json!({
-                                        "root_session_id": &*root_session_id,
-                                        "reason": "Interrupted by operator (double Esc in room TUI)",
-                                        "requested_by_type": "operator",
-                                        "requested_by_id": "session-room",
-                                        "trigger_kind": "manual",
-                                        "notify_where_practical": true,
-                                    }),
-                                ) {
-                                    Ok(_) => {
-                                        status = Some("✓ session interrupted — press i to send a new message, F to fork from a turn".to_string());
-                                        force_timeline_refresh = true;
-                                        follow = true;
-                                    }
-                                    Err(e) => {
-                                        status = Some(format!("✗ interrupt failed: {e}"));
-                                    }
-                                }
+                                status = Some(
+                                    "Esc only closes panes — emergency stop is /estop or X twice"
+                                        .to_string(),
+                                );
                             } else {
-                                // First Esc with nothing open → arm the interrupt window
+                                // Nothing open and nothing to cancel: Esc is a
+                                // no-op. It never arms quit either — the quit
+                                // reflex is q/Ctrl+C, and mashing a dismiss key
+                                // must not quit the room.
                                 disarm_quit(&mut quit_armed_until, &mut status);
-                                arm_estop(&mut estop_armed_until, &mut status);
+                                if status.is_none() {
+                                    status = Some(
+                                        "nothing to close — q quits · X twice or /estop interrupts"
+                                            .to_string(),
+                                    );
+                                }
                             }
                         }
                         // Number pick from session list: when the detail pane is
@@ -6278,6 +6286,92 @@ pub fn run(
                                 detail = None;
                                 compose = Some(ComposeInput::new());
                                 status = None;
+                            }
+                        }
+                        // p: cooperative pause / resume of the running session.
+                        // Pause asks the gateway to park the turn at the next
+                        // tool boundary (yield ManualStop); the checkpoint is
+                        // saved, so the session resumes in place when the
+                        // operator sends their next message. Pressing p again
+                        // clears any not-yet-consumed pause flag. Distinct from
+                        // X-twice / /estop, which hard-abort the session.
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            if content_view.is_some() || artifact_file_view.is_some()
+                                || artifact_viewer.is_some() || detail.is_some()
+                                || input.is_some() || pending_gate.is_some() || compose.is_some()
+                            {
+                                // don't grab 'p' while another overlay/text input is active
+                            } else if session_paused {
+                                match rpc(
+                                    client,
+                                    "root_session.resume",
+                                    serde_json::json!({
+                                        "root_session_id": &*root_session_id,
+                                    }),
+                                ) {
+                                    Ok(_) => {
+                                        session_paused = false;
+                                        status = Some(
+                                            "⏵ pause cancelled — if the turn already parked, send a message (i) to continue"
+                                                .to_string(),
+                                        );
+                                    }
+                                    Err(e) => status = Some(format!("✗ resume failed: {e}")),
+                                }
+                            } else {
+                                match rpc(
+                                    client,
+                                    "root_session.pause",
+                                    serde_json::json!({
+                                        "root_session_id": &*root_session_id,
+                                        "reason": "Operator pause from room TUI (p)",
+                                    }),
+                                ) {
+                                    Ok(_) => {
+                                        session_paused = true;
+                                        force_timeline_refresh = true;
+                                        status = Some(
+                                            "⏸ pause requested — the turn parks at the next tool \
+                                             boundary (p again cancels; once parked, send a message (i) to resume)"
+                                                .to_string(),
+                                        );
+                                    }
+                                    Err(e) => status = Some(format!("✗ pause failed: {e}")),
+                                }
+                            }
+                        }
+                        // X (capital): deliberate emergency stop, press twice
+                        // within the arm window. Esc never arms this; `/estop`
+                        // remains the fully-typed alternative. This is the only
+                        // hard interrupt — it aborts the turn and any sandbox
+                        // children, and the session must be forked to continue.
+                        KeyCode::Char('X') => {
+                            if estop_armed(&estop_armed_until) {
+                                disarm_estop(&mut estop_armed_until, &mut status);
+                                session_paused = false;
+                                match rpc(
+                                    client,
+                                    "root_session.emergency_stop",
+                                    serde_json::json!({
+                                        "root_session_id": &*root_session_id,
+                                        "reason": "Interrupted by operator (double X in room TUI)",
+                                        "requested_by_type": "operator",
+                                        "requested_by_id": "session-room",
+                                        "trigger_kind": "manual",
+                                        "notify_where_practical": true,
+                                    }),
+                                ) {
+                                    Ok(_) => {
+                                        status = Some("✓ session interrupted — press i to send a new message, F to fork from a turn".to_string());
+                                        force_timeline_refresh = true;
+                                        follow = true;
+                                    }
+                                    Err(e) => {
+                                        status = Some(format!("✗ interrupt failed: {e}"));
+                                    }
+                                }
+                            } else {
+                                arm_estop(&mut estop_armed_until, &mut status);
                             }
                         }
                         // /: slash-command mode (vim/Discord convention). `:`
