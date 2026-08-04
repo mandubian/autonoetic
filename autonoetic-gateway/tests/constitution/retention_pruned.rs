@@ -19,6 +19,7 @@ fn r_plus_17_retention_pruned_event_emitted() -> anyhow::Result<()> {
     let retention = RetentionConfig {
         execution_traces_days: 0,
         causal_events_days: 0,
+        post_promotion_reviews_days: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -61,6 +62,7 @@ fn r_plus_17_retention_pruned_event_contains_counts() -> anyhow::Result<()> {
     let retention = RetentionConfig {
         execution_traces_days: 0,
         causal_events_days: 1,
+        post_promotion_reviews_days: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -127,6 +129,7 @@ fn r_plus_17_retention_pruned_event_actor_is_gateway() -> anyhow::Result<()> {
     let retention = RetentionConfig {
         execution_traces_days: 0,
         causal_events_days: 1,
+        post_promotion_reviews_days: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -175,6 +178,7 @@ fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
     let retention = RetentionConfig {
         execution_traces_days: 0,
         causal_events_days: 0,
+        post_promotion_reviews_days: 0,
     };
     store.apply_retention_policy(&retention)?;
 
@@ -183,6 +187,51 @@ fn r_plus_17_zero_days_means_no_pruning() -> anyhow::Result<()> {
         events.len(),
         1,
         "only the original event should exist, no pruned event"
+    );
+
+    Ok(())
+}
+
+/// #1046: `post_promotion_reviews` is subject to the same retention policy as
+/// the events it summarises, and its pruning is auditable in the same
+/// `retention.pruned` event. Before this the table had no retention at all
+/// while being the fastest-growing table in the store.
+#[test]
+fn r_plus_17_post_promotion_reviews_are_pruned_and_reported() -> anyhow::Result<()> {
+    let tempdir = tempfile::tempdir()?;
+    let gateway_dir = tempdir.path().join(".gateway");
+    let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let old = (chrono::Utc::now() - chrono::Duration::days(200)).to_rfc3339();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+    for ts in [&old, &recent] {
+        store.record_post_promotion_review("test.agent", "rev_1", ts, 0, 0, 0, 0, "[]")?;
+    }
+    assert_eq!(store.list_post_promotion_reviews(None, 100)?.len(), 2);
+
+    let retention = RetentionConfig {
+        execution_traces_days: 0,
+        causal_events_days: 0,
+        post_promotion_reviews_days: 90,
+    };
+    store.apply_retention_policy(&retention)?;
+
+    let remaining = store.list_post_promotion_reviews(None, 100)?;
+    assert_eq!(remaining.len(), 1, "the 200-day-old review must be pruned");
+    assert_eq!(remaining[0].reviewed_at, recent);
+
+    // Pruning must be visible in the audit trail, not silent.
+    let events = store.search_causal_events(None, None, 50)?;
+    let pruned = events
+        .iter()
+        .find(|e| e.category == "retention" && e.action == "pruned")
+        .expect("retention.pruned event must be emitted");
+    let payload: serde_json::Value =
+        serde_json::from_str(pruned.payload.as_deref().unwrap_or("{}"))?;
+    assert_eq!(payload["post_promotion_reviews_pruned"], 1);
+    assert_eq!(
+        payload["retention_config"]["post_promotion_reviews_days"], 90,
+        "the applied policy must be recorded alongside the count"
     );
 
     Ok(())

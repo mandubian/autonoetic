@@ -1244,6 +1244,12 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
+    /// Post-promotion background review of promoted agents (Phase 4 Tier 1):
+    /// cadence, enablement, and the drift thresholds. See
+    /// `docs/config-reference.md`.
+    #[serde(default)]
+    pub post_promotion_review: PostPromotionReviewConfig,
+
     /// Cognitive Capsule export/import settings (signing trust, size caps,
     /// default mode). See `docs/cognitive-capsule.md`.
     #[serde(default)]
@@ -2064,6 +2070,13 @@ pub struct RetentionConfig {
     /// Days to retain causal_events. 0 = forever. Default: 90.
     #[serde(default = "default_retention_causal_events_days")]
     pub causal_events_days: u32,
+    /// Days to retain post_promotion_reviews. 0 = forever. Default: 90.
+    ///
+    /// Matches `causal_events_days`, because these rows *are* the drift trend
+    /// derived from those events — keeping reviews longer than their evidence
+    /// would leave unauditable numbers behind.
+    #[serde(default = "default_retention_post_promotion_reviews_days")]
+    pub post_promotion_reviews_days: u32,
 }
 
 impl Default for RetentionConfig {
@@ -2071,6 +2084,7 @@ impl Default for RetentionConfig {
         Self {
             execution_traces_days: 30,
             causal_events_days: 90,
+            post_promotion_reviews_days: 90,
         }
     }
 }
@@ -2080,6 +2094,70 @@ fn default_retention_execution_traces_days() -> u32 {
 }
 fn default_retention_causal_events_days() -> u32 {
     90
+}
+fn default_retention_post_promotion_reviews_days() -> u32 {
+    90
+}
+
+/// Post-promotion background review (Phase 4 Tier 1) — see
+/// `crate`-external `autonoetic_gateway::post_promotion_review`.
+///
+/// The review compares each agent's operational counters against its previous
+/// review, so **`interval_secs` is also the measurement window**: it decides
+/// what "since last review" means. A short interval does not merely review more
+/// often, it makes every trend a comparison of two short windows, which is noise
+/// rather than drift.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostPromotionReviewConfig {
+    /// Enable the background review. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum seconds between reviews **of the same agent**, and therefore the
+    /// measurement window. Default: 86400 (24h).
+    #[serde(default = "default_post_promotion_interval_secs")]
+    pub interval_secs: u64,
+    /// `current / previous` tool-failure ratio that raises a warning finding.
+    #[serde(default = "default_tool_failure_rate_warning")]
+    pub tool_failure_rate_warning: f64,
+    /// `current / previous` tool-failure ratio that raises a critical finding
+    /// (and an `operator_alert`).
+    #[serde(default = "default_tool_failure_rate_critical")]
+    pub tool_failure_rate_critical: f64,
+    /// New sentinel findings in the window, above which a warning is raised.
+    #[serde(default = "default_sentinel_findings_warning")]
+    pub sentinel_findings_warning: u64,
+    /// New sentinel findings in the window, above which the finding is critical.
+    #[serde(default = "default_sentinel_findings_critical")]
+    pub sentinel_findings_critical: u64,
+}
+
+impl Default for PostPromotionReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_post_promotion_interval_secs(),
+            tool_failure_rate_warning: default_tool_failure_rate_warning(),
+            tool_failure_rate_critical: default_tool_failure_rate_critical(),
+            sentinel_findings_warning: default_sentinel_findings_warning(),
+            sentinel_findings_critical: default_sentinel_findings_critical(),
+        }
+    }
+}
+
+fn default_post_promotion_interval_secs() -> u64 {
+    86_400
+}
+fn default_tool_failure_rate_warning() -> f64 {
+    1.5
+}
+fn default_tool_failure_rate_critical() -> f64 {
+    3.0
+}
+fn default_sentinel_findings_warning() -> u64 {
+    0
+}
+fn default_sentinel_findings_critical() -> u64 {
+    2
 }
 
 /// Configuration for Cognitive Capsule export/import.
@@ -3443,6 +3521,7 @@ impl Default for GatewayConfig {
             outcome_grader: OutcomeGraderConfig::default(),
             improve: ImproveConfig::default(),
             retention: RetentionConfig::default(),
+            post_promotion_review: PostPromotionReviewConfig::default(),
             capsule: CapsuleConfig::default(),
             reclamation: ReclamationConfig::default(),
             response_validation: ResponseValidationConfig::default(),

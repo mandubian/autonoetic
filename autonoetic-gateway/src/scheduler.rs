@@ -341,10 +341,19 @@ async fn run_scheduler_tick_common(
         }
     }
 
-    // Post-promotion background review (Phase 4, Tier 1).
-    // Runs daily per-agent: checks causal event trends, sentinel findings.
+    // Post-promotion background review (Phase 4, Tier 1): checks causal event
+    // trends and sentinel findings per agent.
+    //
+    // Called every tick, but `run_post_promotion_review` reviews only agents
+    // whose `post_promotion_review.interval_secs` has elapsed (default 24h) —
+    // the gate lives there, not here, so this call site cannot re-introduce the
+    // per-tick sweep that #1046 fixed.
     if let Some(store) = execution.gateway_store() {
-        if let Err(e) = crate::post_promotion_review::run_post_promotion_review(&store) {
+        if let Err(e) = crate::post_promotion_review::run_post_promotion_review(
+            &store,
+            &config.post_promotion_review,
+            Utc::now(),
+        ) {
             tracing::warn!(error = %e, "Post-promotion review failed");
         }
     }

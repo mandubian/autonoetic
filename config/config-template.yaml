@@ -489,11 +489,28 @@ code_analysis:
 #   max_wall_clock_secs: 7200
 #   max_session_price_usd: 5.0
 
+# ── Post-Promotion Review ─────────────────────────────────────────────
+# Background drift review of promoted agents (tool failures, auth denials,
+# suspensions, sentinel findings). interval_secs is the *measurement window*
+# as well as the cadence: counters are counted since each agent's previous
+# review, so a short interval turns every trend into a comparison of two short
+# windows. Cadence is tracked per agent. Values below are the defaults.
+# post_promotion_review:
+#   enabled: true
+#   interval_secs: 86400                  # 24h — also the measurement window
+#   tool_failure_rate_warning: 1.5        # current / previous ratio
+#   tool_failure_rate_critical: 3.0
+#   sentinel_findings_warning: 0
+#   sentinel_findings_critical: 2
+
 # ── Retention ─────────────────────────────────────────────────────────
-# Days to keep execution_traces and causal_events. 0 = forever.
+# Days to keep execution_traces, causal_events and post_promotion_reviews.
+# 0 = forever. Reviews match causal_events, because they are the drift trend
+# derived from those events.
 retention:
   execution_traces_days: 30
   causal_events_days: 90
+  post_promotion_reviews_days: 90
 
 # ── Cognitive Capsules ────────────────────────────────────────────────
 # Controls the agent-portability capsule export/import pipeline.
