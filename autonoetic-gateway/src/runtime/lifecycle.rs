@@ -1845,6 +1845,14 @@ impl AgentExecutor {
                 // session is finished with its task and parked only so peers
                 // can still reach it.
                 YieldReason::Idle { .. } => "idle",
+                // Operator-initiated cooperative pause: the turn parked at a
+                // tool boundary via `root_session.pause`. "paused" renders as a
+                // distinct status so the room TUI knows `p` toggles to resume
+                // rather than re-issuing a pause. It hibernates-like on resume
+                // (next message). Do NOT collapse this into "hibernated" —
+                // that state means *the agent* finished, this means *the
+                // operator* paused.
+                YieldReason::ManualStop => "paused",
                 _ => "hibernated", // Hibernation, WaitingForChild, Error, BudgetExhausted, etc.
             };
             if let Err(e) = gs.set_session_lifecycle_state(&cp.session_id, lifecycle) {
@@ -4580,6 +4588,31 @@ impl AgentExecutor {
                             ),
                         ));
                     }
+                }
+            }
+
+            // Cooperative operator pause: if the operator pressed `p` in the
+            // room TUI (or called `root_session.pause`), yield gracefully with
+            // `ManualStop` at this pre-LLM checkpoint. Unlike emergency stop,
+            // the current tool batch has already completed — we only prevent
+            // the *next* LLM call. The turn parks; the operator sends their
+            // next message to continue (the checkpoint history is loaded as
+            // usual). This is the only operator affordance that uses the
+            // cooperative flag rather than a hard abort, so a paused session
+            // resumes in-place without forking.
+            if let Some(active) = self.active_executions.as_ref() {
+                if let Some(reason) = active.take_pause_request(root_session_id) {
+                    return Err(self.save_and_yield(
+                        history,
+                        turn_id,
+                        YieldReason::ManualStop,
+                        None,
+                        anyhow::anyhow!(
+                            "manual_stop: root session '{}' paused by operator ({})",
+                            root_session_id,
+                            reason
+                        ),
+                    ));
                 }
             }
 

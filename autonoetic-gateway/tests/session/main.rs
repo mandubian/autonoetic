@@ -16,6 +16,7 @@ mod export;
 mod fork;
 mod grant_close_preservation;
 mod inference;
+mod pause_cooperative;
 mod report;
 mod residency;
 mod trace;

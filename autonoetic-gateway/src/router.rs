@@ -3153,6 +3153,88 @@ impl JsonRpcRouter {
                 }
             }
 
+            "root_session.pause" => {
+                #[derive(Deserialize)]
+                struct PauseParams {
+                    root_session_id: String,
+                    #[serde(default)]
+                    reason: Option<String>,
+                }
+                let params: PauseParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for root_session.pause: {}", e),
+                        );
+                    }
+                };
+                let reason = params
+                    .reason
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("Operator pause")
+                    .to_string();
+                self.execution
+                    .active_executions()
+                    .request_pause(&params.root_session_id, &reason);
+                tracing::info!(
+                    target: "autonoetic::pause",
+                    root_session_id = %params.root_session_id,
+                    reason = %reason,
+                    "Operator pause requested; turn will yield at next checkpoint"
+                );
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "ok": true,
+                        "root_session_id": params.root_session_id,
+                        "paused": true,
+                        "message": "Pause requested. The running turn will park at the next tool boundary; send a message to resume."
+                    }),
+                )
+            }
+
+            "root_session.resume" => {
+                #[derive(Deserialize)]
+                struct ResumeParams {
+                    root_session_id: String,
+                }
+                let params: ResumeParams = match serde_json::from_value(req.params) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for root_session.resume: {}", e),
+                        );
+                    }
+                };
+                let was_pending = self
+                    .execution
+                    .active_executions()
+                    .is_pause_pending(&params.root_session_id);
+                self.execution
+                    .active_executions()
+                    .clear_pause(&params.root_session_id);
+                tracing::info!(
+                    target: "autonoetic::pause",
+                    root_session_id = %params.root_session_id,
+                    had_pending = was_pending,
+                    "Operator resume; pause flag cleared"
+                );
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({
+                        "ok": true,
+                        "root_session_id": params.root_session_id,
+                        "had_pending_pause": was_pending,
+                        "message": "Pause cleared. Send a message to continue the session."
+                    }),
+                )
+            }
+
             "session.degrade" => {
                 #[derive(Deserialize)]
                 struct DegradeParams {

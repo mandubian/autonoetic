@@ -77,6 +77,12 @@ impl Drop for SandboxPidGuard {
 pub struct ActiveExecutionRegistry {
     workflow_task_abort: Mutex<HashMap<String, AbortHandle>>,
     sandbox_child_pids: Mutex<HashMap<String, SandboxChildRecord>>,
+    /// Cooperative pause requests keyed by root session id. Set by
+    /// `root_session.pause`; consumed (atomically check-and-clear) by the
+    /// execute loop at the pre-LLM checkpoint, which yields with
+    /// `YieldReason::ManualStop`. Unlike emergency stop (hard abort), a pause
+    /// is gentle — the current tool batch completes before the turn parks.
+    pause_requests: Mutex<HashMap<String, String>>,
 }
 
 impl ActiveExecutionRegistry {
@@ -84,7 +90,43 @@ impl ActiveExecutionRegistry {
         Arc::new(Self {
             workflow_task_abort: Mutex::new(HashMap::new()),
             sandbox_child_pids: Mutex::new(HashMap::new()),
+            pause_requests: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Register an operator-requested pause for the given root session. The
+    /// running turn (if any) will yield at the next pre-LLM checkpoint.
+    pub fn request_pause(&self, root_session_id: &str, reason: &str) {
+        self.pause_requests
+            .lock()
+            .unwrap()
+            .insert(root_session_id.to_string(), reason.to_string());
+    }
+
+    /// Clear a pending pause request without consuming it (resume button).
+    pub fn clear_pause(&self, root_session_id: &str) {
+        self.pause_requests
+            .lock()
+            .unwrap()
+            .remove(root_session_id);
+    }
+
+    /// Returns `true` if a pause is pending but not yet consumed by the loop.
+    pub fn is_pause_pending(&self, root_session_id: &str) -> bool {
+        self.pause_requests
+            .lock()
+            .unwrap()
+            .contains_key(root_session_id)
+    }
+
+    /// Atomically take (consume) a pending pause request. Called by the
+    /// execute loop at the cooperative checkpoint; returns the reason if a
+    /// pause was pending so the caller can yield with `ManualStop`.
+    pub fn take_pause_request(&self, root_session_id: &str) -> Option<String> {
+        self.pause_requests
+            .lock()
+            .unwrap()
+            .remove(root_session_id)
     }
 
     fn workflow_task_key(workflow_id: &str, task_id: &str) -> String {

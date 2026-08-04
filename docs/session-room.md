@@ -106,8 +106,10 @@ normal autonoetic agent:
 | `a` | Cycle the altitude floor (detail → normal → attention → error → …) |
 | `s` | Toggle squashing of routine `·` runs |
 | `Enter` | Drill into the selected row — show its full detail (metadata, refs, payload). `Enter`/`Esc` closes it. |
-| `q` / `Ctrl+C` | Quit |
-| `Esc` | Close the detail pane if open, otherwise quit |
+| `q` / `Ctrl+C` | Quit (press twice within 3s) |
+| `Esc` | Close the detail pane / content view / search if open — **never** arms destructive actions |
+| `p` | **Pause / resume** the session: parks the running turn at the next tool boundary (cooperative — the checkpoint is saved, no work is lost). Press again or send a message (`i`) to resume. |
+| `X` | Emergency stop — press **twice** within 2s (or `/estop`). Hard abort: kills the turn and sandbox children; the session must be forked to continue. Esc never triggers this. |
 
 ### Acting on the session
 | Key | Available when | Action |
