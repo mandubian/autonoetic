@@ -366,16 +366,38 @@ Controls how capability broadening during `agent.revision.promote` is gated. Hig
 
 ## Post-Promotion Review
 
-Controls the background review of promoted agents (Phase 4 Tier 1). Reviews operational drift daily: tool failure rates, authorization denials, suspension counts, and new sentinel findings.
+Controls the background review of promoted agents (Phase 4 Tier 1). Reviews operational drift per agent: tool failure rates, authorization denials, suspension counts, and new sentinel findings.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `post_promotion_review.enabled` | bool | `true` | Enable daily post-promotion review |
-| `post_promotion_review.interval_secs` | u64 | `86400` | Review interval in seconds (default: 24 hours) |
-| `post_promotion_review.tool_failure_rate_warning` | f64 | `1.5` | Multiplier threshold for warning (current / previous) |
-| `post_promotion_review.tool_failure_rate_critical` | f64 | `3.0` | Multiplier threshold for critical escalation |
-| `post_promotion_review.sentinel_findings_warning` | u64 | `0` | Sentinel findings count for warning |
-| `post_promotion_review.sentinel_findings_critical` | u64 | `2` | Sentinel findings count for critical escalation |
+| `post_promotion_review.enabled` | bool | `true` | Enable post-promotion review |
+| `post_promotion_review.interval_secs` | u64 | `86400` | Minimum seconds between reviews **of the same agent** — and therefore the measurement window (default: 24 hours) |
+| `post_promotion_review.tool_failure_rate_warning` | f64 | `1.5` | `current / previous` tool-failure ratio that raises a warning |
+| `post_promotion_review.tool_failure_rate_critical` | f64 | `3.0` | Ratio that raises a critical finding |
+| `post_promotion_review.sentinel_findings_warning` | u64 | `0` | New sentinel findings above which a warning is raised |
+| `post_promotion_review.sentinel_findings_critical` | u64 | `2` | New sentinel findings above which the finding is critical |
+
+> **`interval_secs` is the measurement window, not just a cadence.** Counters are
+> counted since each agent's *previous* review, so shortening the interval does
+> not merely review more often — it makes every trend a comparison of two short
+> windows, which is noise rather than drift. Before #1046 the sweep ran on every
+> scheduler tick with no gate, which is exactly what that looked like: ~33 rows
+> every 5 seconds (14,553 rows in 37 minutes of uptime) and ratios computed over
+> 5-second windows.
+
+Cadence is tracked **per agent**, so a newly promoted agent is reviewed on its
+own schedule rather than inheriting whenever the last unrelated review happened.
+
+An agent whose stored `reviewed_at` cannot be read as a past instant — malformed,
+or dated in the future after clock skew or a manual DB edit — is **skipped**, with
+one aggregated warning per sweep naming the affected agents. It is not reviewed
+"to be safe": the last-review lookup is `ORDER BY reviewed_at DESC` over TEXT, so
+a malformed or future value outranks every well-formed one and no new row can
+displace it, which would mean a write on every tick. Ordinary clock skew
+self-heals once wall-clock passes the stored value; a corrupt row needs the
+operator, which is what the warning is for. An `interval_secs` too large to
+represent as a duration is likewise refused outright rather than wrapping into a
+negative interval that would make every agent look overdue.
 
 Example:
 
@@ -389,7 +411,9 @@ post_promotion_review:
   sentinel_findings_critical: 2
 ```
 
-> Critical findings trigger an `EscalationMessage` visible in `autonoetic gateway escalations list`.
+> Critical findings emit an `operator_alert` **timeline event**, not an
+> `escalations` row (#739 Part C): an anomaly is something to see, not a
+> decision to resolve, so it must not appear in `operator.pending`.
 
 ---
 
@@ -939,6 +963,7 @@ Controls pruning of historical data. Values are in days; `0` means retain foreve
 |-------|------|---------|-------------|
 | `retention.execution_traces_days` | u32 | `30` | Days to retain `execution_traces` (full code execution results: stdout, stderr, exit_code). |
 | `retention.causal_events_days` | u32 | `90` | Days to retain `causal_events` (hash-chained audit trail in SQLite). |
+| `retention.post_promotion_reviews_days` | u32 | `90` | Days to retain `post_promotion_reviews`. Matches `causal_events_days`: these rows *are* the drift trend derived from those events, so outliving their evidence would leave unauditable numbers behind. |
 
 Example:
 
@@ -946,6 +971,7 @@ Example:
 retention:
   execution_traces_days: 30
   causal_events_days: 90
+  post_promotion_reviews_days: 90
 ```
 
 ---
@@ -1487,6 +1513,7 @@ prompt_budget:
 retention:
   execution_traces_days: 30
   causal_events_days: 90
+  post_promotion_reviews_days: 90
 
 digest_agent:
   enabled: true

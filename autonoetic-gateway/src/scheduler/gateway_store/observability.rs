@@ -123,6 +123,22 @@ impl GatewayStore {
         Ok(n as u64)
     }
 
+    /// Prune post_promotion_reviews older than cutoff. None = no pruning.
+    pub fn prune_post_promotion_reviews_with_cutoff(
+        &self,
+        cutoff: &Option<String>,
+    ) -> Result<u64> {
+        let Some(cutoff) = cutoff else {
+            return Ok(0);
+        };
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM post_promotion_reviews WHERE reviewed_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(n as u64)
+    }
+
     /// Apply retention policy from config. Call once on gateway startup.
     /// Emits a `retention.pruned` causal event with counts of pruned rows.
     pub fn apply_retention_policy(&self, retention: &RetentionConfig) -> Result<()> {
@@ -137,6 +153,14 @@ impl GatewayStore {
         };
         let events_cutoff = if retention.causal_events_days > 0 {
             Some((now - chrono::Duration::days(retention.causal_events_days as i64)).to_rfc3339())
+        } else {
+            None
+        };
+        let reviews_cutoff = if retention.post_promotion_reviews_days > 0 {
+            Some(
+                (now - chrono::Duration::days(retention.post_promotion_reviews_days as i64))
+                    .to_rfc3339(),
+            )
         } else {
             None
         };
@@ -164,18 +188,33 @@ impl GatewayStore {
             }
         };
 
-        if traces_pruned > 0 || events_pruned > 0 {
+        let reviews_pruned = match self.prune_post_promotion_reviews_with_cutoff(&reviews_cutoff) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    target: "gateway_store",
+                    error = %e,
+                    "Failed to prune post_promotion_reviews"
+                );
+                0
+            }
+        };
+
+        if traces_pruned > 0 || events_pruned > 0 || reviews_pruned > 0 {
             let mut rules = autonoetic_types::causal_chain::default_enforced_rules();
             rules.push("P-8.17".to_string());
 
             let payload = serde_json::json!({
                 "execution_traces_pruned": traces_pruned,
                 "causal_events_pruned": events_pruned,
+                "post_promotion_reviews_pruned": reviews_pruned,
                 "execution_traces_cutoff": traces_cutoff,
                 "causal_events_cutoff": events_cutoff,
+                "post_promotion_reviews_cutoff": reviews_cutoff,
                 "retention_config": {
                     "execution_traces_days": retention.execution_traces_days,
                     "causal_events_days": retention.causal_events_days,
+                    "post_promotion_reviews_days": retention.post_promotion_reviews_days,
                 },
             });
             if let Err(e) =
