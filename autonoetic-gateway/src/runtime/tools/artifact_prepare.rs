@@ -4,7 +4,7 @@ use crate::runtime::active_execution_registry::NativeToolRunContext;
 use crate::runtime::approved_exec_cache::{
     compute_fingerprint, normalize_targets, ApprovedExecCache,
 };
-use crate::runtime::remote_access::{classify_network_coverage, RemoteAccessAnalyzer};
+use crate::runtime::remote_access::{classify_network_coverage, default_remote_access_detector};
 use crate::runtime::tools::{
     build_approval_details, CredentialEnvMapping, NativeTool, NativeToolRegistry,
 };
@@ -160,7 +160,8 @@ impl NativeTool for ArtifactPrepareTool {
         );
 
         let remote_analysis =
-            RemoteAccessAnalyzer::analyze_code_with_workspace(&artifact_code, &workspace_files);
+            default_remote_access_detector()
+                .analyze_code_with_workspace(&artifact_code, &workspace_files);
 
         let agent_has_network_access = manifest
             .capabilities

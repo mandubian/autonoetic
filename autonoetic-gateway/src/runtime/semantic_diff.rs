@@ -21,7 +21,7 @@
 //!   `mod.rs`, `agent.toml` (also capability), or path segment `bin/`,
 //!   `src/bin/`, `agents/<id>/agent.toml`.
 //! - `network_access`: file content matches the
-//!   `RemoteAccessAnalyzer::analyze_code` patterns. Only applied to
+//!   remote-access detector patterns. Only applied to
 //!   source-code files to avoid false positives on config schemas.
 //! - `credential`: filename is `credentials.yaml`, `*.pem`, `*.key`,
 //!   `*.crt`, `*.p12`, `*.pfx`, or path segment `secrets/`.
@@ -69,7 +69,7 @@ use autonoetic_types::semantic_diff::{
 };
 use autonoetic_types::workbench::{FileChangeType, WorkbenchFileDiff};
 
-use crate::runtime::remote_access::RemoteAccessAnalyzer;
+use crate::runtime::remote_access::default_remote_access_detector;
 
 const ID: &str = "rule_based_v1";
 
@@ -283,7 +283,11 @@ fn classify_role(
     if network_check_extensions.iter().any(|e| e == ext) {
         if let Some(bytes) = content {
             if let Ok(text) = std::str::from_utf8(bytes) {
-                if !RemoteAccessAnalyzer::analyze_code(text).detected_patterns.is_empty() {
+                if !default_remote_access_detector()
+                    .analyze_code(text)
+                    .detected_patterns
+                    .is_empty()
+                {
                     return FileRole::NetworkAccess;
                 }
             }
@@ -334,7 +338,7 @@ fn rationale_for(
         FileRole::NetworkAccess => {
             let n = content
                 .and_then(|b| std::str::from_utf8(b).ok())
-                .map(RemoteAccessAnalyzer::analyze_code)
+                .map(|text| default_remote_access_detector().analyze_code(text))
                 .map(|a| a.detected_patterns.len())
                 .unwrap_or(0);
             format!("source file with {n} remote-access pattern(s) ({name})")
