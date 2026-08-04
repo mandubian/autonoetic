@@ -28,11 +28,13 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
             );
         }
         apply_prompt_budget_overrides(&config);
+        apply_llm_request_timeout(&config);
         Ok(config)
     } else {
         tracing::warn!("Config not found at {}, using defaults", path.display());
         let config = GatewayConfig::default();
         apply_prompt_budget_overrides(&config);
+        apply_llm_request_timeout(&config);
         Ok(config)
     }
 }
@@ -55,6 +57,31 @@ pub fn save_config(path: &Path, config: &GatewayConfig) -> anyhow::Result<()> {
 /// process-wide atomic that the prompt-budget estimator reads. Called from
 /// `load_config` so every code path that consumes a `GatewayConfig` ends up
 /// with a consistent estimator calibration before the first LLM call.
+/// Publish `llm_request_timeout_secs` to the LLM layer.
+///
+/// Applied here rather than at each CLI entry point so no command can start the
+/// runtime with the config's timeout unread.
+fn apply_llm_request_timeout(config: &GatewayConfig) {
+    let Some(secs) = config.llm_request_timeout_secs else {
+        return;
+    };
+    if secs < 5 {
+        tracing::warn!(
+            target: "autonoetic::llm",
+            requested = secs,
+            "llm_request_timeout_secs below the 5s floor; using default ({}s)",
+            crate::llm::DEFAULT_REQUEST_TIMEOUT_SECS
+        );
+        return;
+    }
+    crate::llm::set_configured_request_timeout_secs(Some(secs));
+    tracing::info!(
+        target: "autonoetic::llm",
+        applied_secs = secs,
+        "Configured per-request LLM timeout applied"
+    );
+}
+
 fn apply_prompt_budget_overrides(config: &GatewayConfig) {
     if let Some(cpt) = config.prompt_budget.chars_per_token {
         if cpt.is_finite() && cpt > 0.0 {
@@ -134,6 +161,25 @@ pub fn load_persona(config: &GatewayConfig, config_dir: &Path) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GatewayConfig` is `deny_unknown_fields`, so a config naming a key the
+    /// binary doesn't know fails to load and the gateway won't start. This pins
+    /// that an operator can write `llm_request_timeout_secs` and be parsed.
+    #[test]
+    fn llm_request_timeout_secs_is_an_accepted_config_key() {
+        let cfg: GatewayConfig =
+            serde_yaml::from_str("agents_dir: /tmp/agents\nllm_request_timeout_secs: 600\n")
+                .expect("config with llm_request_timeout_secs must parse");
+        assert_eq!(cfg.llm_request_timeout_secs, Some(600));
+    }
+
+    /// Omitting it must stay valid — the field is an override, not a requirement.
+    #[test]
+    fn llm_request_timeout_secs_is_optional() {
+        let cfg: GatewayConfig =
+            serde_yaml::from_str("agents_dir: /tmp/agents\n").expect("config must parse");
+        assert_eq!(cfg.llm_request_timeout_secs, None);
+    }
 
     #[test]
     fn role_mapping_fallback_populates_context_compression_preset() {

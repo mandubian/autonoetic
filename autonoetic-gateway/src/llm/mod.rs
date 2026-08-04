@@ -82,18 +82,55 @@ pub const MAX_5XX_RETRIES: u32 = 2;
 /// Default per-request timeout for a non-streaming `complete()` call.
 /// Lowered from a previous 300s: 5 minutes per attempt let a slow/overloaded
 /// endpoint burn ~20 min/turn (timeout × retries) before failing. Override with
-/// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`.
+/// `llm_request_timeout_secs` in the gateway config, or
+/// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` for a one-off run.
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 
-/// The per-request completion timeout, from `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`
-/// (clamped to a sane floor) or [`DEFAULT_REQUEST_TIMEOUT_SECS`].
+/// Lowest accepted per-request timeout. Anything below this is a
+/// misconfiguration rather than an intent, and falls back to the default.
+const MIN_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+/// The configured per-request timeout, published once at gateway startup from
+/// [`autonoetic_types::config::GatewayConfig::llm_request_timeout_secs`].
+///
+/// A process-wide cell rather than a threaded parameter because
+/// [`request_timeout`] is called deep inside the drivers, which resolve their
+/// endpoint from a `ResolvedProvider` and have no view of gateway config. Moving
+/// the value onto `ResolvedProvider` — which would also allow a per-preset
+/// timeout, so a `coding` preset could outlast a `haiku` one — is the follow-up
+/// tracked separately.
+static CONFIGURED_REQUEST_TIMEOUT_SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Publish the configured per-request timeout. Called once during gateway
+/// startup; later calls are ignored, so a running process keeps one timeout for
+/// its whole life rather than changing budget mid-turn.
+pub fn set_configured_request_timeout_secs(secs: Option<u64>) {
+    if let Some(secs) = secs {
+        let _ = CONFIGURED_REQUEST_TIMEOUT_SECS.set(secs);
+    }
+}
+
+/// The per-request completion timeout.
+///
+/// Precedence: `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (ad-hoc override) →
+/// configured `llm_request_timeout_secs` → [`DEFAULT_REQUEST_TIMEOUT_SECS`].
 pub fn request_timeout() -> std::time::Duration {
-    let secs = std::env::var("AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .filter(|s| *s >= 5)
-        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS);
+    let secs = resolve_request_timeout_secs(
+        std::env::var("AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+        CONFIGURED_REQUEST_TIMEOUT_SECS.get().copied(),
+    );
     std::time::Duration::from_secs(secs)
+}
+
+/// Pure resolution core of [`request_timeout`], split out so precedence and
+/// clamping are testable without mutating process env or the `OnceLock`.
+pub(crate) fn resolve_request_timeout_secs(env: Option<&str>, configured: Option<u64>) -> u64 {
+    env.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS)
+        .or_else(|| configured.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
+        .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
 }
 
 pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {

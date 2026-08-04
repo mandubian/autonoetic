@@ -623,7 +623,7 @@ turn for many minutes.
 
 | Setting | Value | Notes |
 |---|---|---|
-| per-request timeout | `120s` default | Override with env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (floor 5s). |
+| per-request timeout | `120s` default | Set `llm_request_timeout_secs` (below), or env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` for a one-off run. Floor 5s. |
 | connect timeout | `15s` | Fail fast on unreachable endpoints (vs ~2min OS TCP timeout). |
 | retries — fast connection errors (refused/reset) | up to `3` | Quick backoff; these fail in well under the timeout. |
 | retries — request **timeout** | at most `1` | A timeout already consumed a full attempt; retrying it is how a degraded endpoint compounds. |
@@ -636,6 +636,28 @@ default), not the previous ~`4 × 300s` (≈20 min).
 > separate: at very low `request_timeout` settings (near the 5s floor) a single
 > connect attempt can exceed `2 × timeout`. The deadline still caps the number
 > of retries; it does not shorten an in-flight connect attempt.
+
+### Raising the per-request timeout
+
+```yaml
+llm_request_timeout_secs: 600   # unset ⇒ 120s; values below 5 are ignored
+```
+
+Applies process-wide, published at config load, so every entry point
+(`gateway start`, `run`, `chat`) uses one budget. Precedence:
+`AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` → `llm_request_timeout_secs` → `120s` —
+the env var stays an ad-hoc override, and a malformed or sub-floor env value
+falls through to the configured value rather than erasing it.
+
+Raise it when the upstream **queues** requests under load. Because a
+timed-out attempt consumes its full budget and the retry deadline is
+`2 × timeout`, a single stalled attempt eats the whole retry allowance: at the
+default, one stall costs 4 minutes and ends the turn. A larger value trades
+slower failure detection for surviving upstream latency spikes — it does not
+help if the endpoint never answers at all.
+
+Note this is *not* a per-preset setting: a long-generating `coding` preset and a
+short `haiku` one share the same budget.
 
 ## LLM Presets
 
