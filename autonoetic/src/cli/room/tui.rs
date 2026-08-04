@@ -6312,7 +6312,7 @@ pub fn run(
                                     Ok(_) => {
                                         session_paused = false;
                                         status = Some(
-                                            "⏵ resumed — send a message (i) to continue the turn"
+                                            "⏵ pause cancelled — if the turn already parked, send a message (i) to continue"
                                                 .to_string(),
                                         );
                                     }
@@ -6332,7 +6332,7 @@ pub fn run(
                                         force_timeline_refresh = true;
                                         status = Some(
                                             "⏸ pause requested — the turn parks at the next tool \
-                                             boundary (p again or send a message to resume)"
+                                             boundary (p again cancels; once parked, send a message (i) to resume)"
                                                 .to_string(),
                                         );
                                     }
