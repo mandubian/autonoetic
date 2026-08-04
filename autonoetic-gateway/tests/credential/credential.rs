@@ -61,11 +61,18 @@ fn spawn_one_shot_http_server(
 
 fn setup_vault(_secret_name: &str, _secret_value: &str) -> tempfile::TempDir {
     let temp = tempdir().unwrap();
-    let vault_path = temp.path().join("vault.enc.json");
+    let vault_path = vault_file(&temp);
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
     std::env::set_var("AUTONOETIC_VAULT_PATH", &vault_path);
     temp
+}
+
+/// The vault file [`setup_vault`] pointed the gateway at. Read it back through
+/// this instead of `AUTONOETIC_VAULT_PATH`: that env var is process-global and
+/// a sibling test in this binary can retarget it mid-run.
+fn vault_file(vault_temp: &tempfile::TempDir) -> std::path::PathBuf {
+    vault_temp.path().join("vault.enc.json")
 }
 
 fn write_remote_access_any(agent_dir: &std::path::Path) {
@@ -100,6 +107,7 @@ fn tempdir() -> std::io::Result<tempfile::TempDir> {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn test_credential_crud() -> anyhow::Result<()> {
     let temp_dir = tempdir()?;
     let store = GatewayStore::open(temp_dir.path())?;
@@ -144,6 +152,7 @@ fn test_credential_crud() -> anyhow::Result<()> {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_expiry_check() -> anyhow::Result<()> {
     let temp_dir = tempdir()?;
     let store = GatewayStore::open(temp_dir.path())?;
@@ -200,6 +209,7 @@ fn test_credential_expiry_check() -> anyhow::Result<()> {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_expiry_parsing() -> anyhow::Result<()> {
     let temp_dir = tempdir()?;
     let store = GatewayStore::open(temp_dir.path())?;
@@ -242,6 +252,7 @@ fn test_credential_expiry_parsing() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial_test::serial]
 fn test_credential_check_available_with_credential_access() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
@@ -253,6 +264,7 @@ fn test_credential_check_available_with_credential_access() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_check_denied_without_credential_access() {
     let manifest = test_manifest(vec![Capability::ReadAccess {
         scopes: vec!["*".to_string()],
@@ -264,7 +276,8 @@ fn test_credential_check_denied_without_credential_access() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+#[serial_test::serial]
+#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_check_service_scoped_denial() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
@@ -297,6 +310,7 @@ fn test_credential_check_service_scoped_denial() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_request_denied_wrong_service() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
@@ -353,6 +367,7 @@ fn test_credential_request_denied_wrong_service() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_request_denied_host_not_in_allowed_hosts() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -419,7 +434,8 @@ fn test_credential_request_denied_host_not_in_allowed_hosts() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+#[serial_test::serial]
+#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_request_allowed_when_host_matches() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -491,7 +507,8 @@ fn test_credential_request_allowed_when_host_matches() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+#[serial_test::serial]
+#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_request_stored_inject_as_takes_precedence() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -563,7 +580,8 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+#[serial_test::serial]
+#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -638,6 +656,7 @@ fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_request_denied_expired() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -706,6 +725,7 @@ fn test_credential_request_denied_expired() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_request_denied_malformed_expiry() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -772,6 +792,7 @@ fn test_credential_request_denied_malformed_expiry() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_request_denied_network_policy() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -834,6 +855,7 @@ fn test_credential_request_denied_network_policy() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_available_with_credential_access() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
@@ -845,6 +867,7 @@ fn test_credential_setup_available_with_credential_access() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_denied_without_credential_access() {
     let manifest = test_manifest(vec![Capability::ReadAccess {
         scopes: vec!["*".to_string()],
@@ -856,6 +879,7 @@ fn test_credential_setup_denied_without_credential_access() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_denied_wrong_service() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
@@ -900,6 +924,7 @@ fn test_credential_setup_denied_wrong_service() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_denied_network_policy() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -946,6 +971,7 @@ fn test_credential_setup_denied_network_policy() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_user_action_succeeds() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -992,6 +1018,7 @@ fn test_credential_setup_user_action_succeeds() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_defaults_inject_as_to_service_derived_env_var() {
     // A flow that does not pass `inject_as` must still store a credential that
     // resolves by service at spawn time: `resolve_credential_env` matches
@@ -1073,6 +1100,7 @@ fn test_credential_setup_defaults_inject_as_to_service_derived_env_var() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_user_prompt_suspends_no_further_steps() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -1140,6 +1168,7 @@ fn test_credential_setup_user_prompt_suspends_no_further_steps() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -1205,7 +1234,7 @@ fn test_credential_setup_extract_public_blocks_overlapping_secret_path() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+#[serial_test::serial]
 fn test_credential_setup_user_prompt_full_lifecycle() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -1333,8 +1362,7 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
     assert_eq!(resumed["credential_id"], creds[0].credential_id);
 
     // Step 5: Verify the secret is in the vault
-    let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").unwrap();
-    let vault = autonoetic_gateway::vault::Vault::load_from_file(std::path::Path::new(&vault_path))
+    let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_file(&_vault_temp))
         .expect("load vault");
     assert_eq!(
         vault
@@ -1346,7 +1374,210 @@ fn test_credential_setup_user_prompt_full_lifecycle() {
 }
 
 #[test]
-#[ignore = "flaky due to process-wide AUTONOETIC_VAULT_PATH env race; run standalone"]
+#[serial_test::serial]
+fn test_credential_setup_user_prompt_multi_field_stores_combined_blob() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["photos".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("DUMMY", "dummy");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // Step 1: start a two-field user_prompt flow, with a dedup label.
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "photos",
+                "label": "default",
+                "steps": [{
+                    "step_type": "user_prompt",
+                    "message": "Enter your account name and app token",
+                    "secret_fields": [
+                        {"name": "account_name", "label": "Account name", "masked": false},
+                        {"name": "app_token", "label": "App token", "masked": true}
+                    ]
+                }]
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("credential_setup should succeed");
+
+    let suspended: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(suspended["ok"], false);
+    assert_eq!(suspended["suspended"], true);
+    let request_id = suspended["request_id"]
+        .as_str()
+        .expect("request_id should be present");
+    let credential_id = suspended["credential_id"]
+        .as_str()
+        .expect("credential_id should be present")
+        .to_string();
+
+    // Step 2: approve with both secret fields (simulating operator action).
+    let mut approve_config = autonoetic_types::config::GatewayConfig::default();
+    approve_config.approval_dwell_multiplier = 0.0;
+    approve_config.agents_dir = temp.path().to_path_buf();
+    let confirm_phrase = format!("register photos {}", credential_id);
+    autonoetic_gateway::scheduler::approve_request_with_options(
+        &approve_config,
+        Some(&store),
+        request_id,
+        "test",
+        None,
+        Some(vec![
+            ("account_name".to_string(), "acct-1".to_string()),
+            ("app_token".to_string(), "tok-9".to_string()),
+        ]),
+        None,
+        None,
+        autonoetic_gateway::scheduler::ApproveOptions {
+            grant_scope: None,
+            grant_targets: Vec::new(),
+            grant_expires_at: None,
+            acknowledged_capabilities: Vec::new(),
+            confirm_phrase: Some(confirm_phrase),
+            decider_session_id: None,
+            create_grant: None,
+        },
+    )
+    .expect("approval should succeed");
+
+    // Step 3: the record points at the combined blob stored under the
+    // credential id, keeps the declared label, and carries the
+    // service-derived default inject_as.
+    let cred = store
+        .get_credential(&credential_id)
+        .expect("get credential")
+        .expect("credential exists");
+    assert_eq!(cred.service, "photos");
+    assert_eq!(cred.secret_name, credential_id);
+    assert_eq!(cred.label.as_deref(), Some("default"));
+    assert_eq!(cred.inject_as.as_deref(), Some("PHOTOS_SECRET"));
+
+    // Step 4: the vault holds the combined JSON object plus the raw fields
+    // (the raw entries keep {{secrets.<field>}} templates working). Load it
+    // from this test's own tempdir rather than the process-global
+    // AUTONOETIC_VAULT_PATH, which a sibling test can retarget mid-run.
+    let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_file(&_vault_temp))
+        .expect("load vault");
+    let blob = vault
+        .get_secret(&credential_id)
+        .expect("combined blob exists")
+        .expose_secret()
+        .to_string();
+    let blob: serde_json::Value = serde_json::from_str(&blob).expect("blob is json");
+    assert_eq!(blob["account_name"], "acct-1");
+    assert_eq!(blob["app_token"], "tok-9");
+    assert_eq!(
+        vault
+            .get_secret("account_name")
+            .expect("raw field exists")
+            .expose_secret(),
+        "acct-1"
+    );
+    assert_eq!(
+        vault
+            .get_secret("app_token")
+            .expect("raw field exists")
+            .expose_secret(),
+        "tok-9"
+    );
+
+    // Step 5: a retry for the same (service, label) dedups — and a new
+    // inject_as is applied instead of silently dropped, with the injection
+    // contract reported back to the caller.
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "photos",
+                "label": "default",
+                "inject_as": "PHOTOS_LOGIN"
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("dedup retry should succeed");
+    let deduped: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(deduped["ok"], true);
+    assert_eq!(deduped["existing"], true);
+    assert_eq!(deduped["credential_id"], credential_id);
+    assert_eq!(deduped["inject_as_updated"], true);
+    assert_eq!(deduped["inject_as"], "PHOTOS_LOGIN");
+    assert_eq!(deduped["injection"]["env_var"], "PHOTOS_LOGIN");
+    assert_eq!(deduped["injection"]["value_shape"], "json_object");
+    assert_eq!(
+        deduped["injection"]["field_env_vars"],
+        serde_json::json!(["PHOTOS_ACCOUNT_NAME", "PHOTOS_APP_TOKEN"])
+    );
+
+    let cred = store
+        .get_credential(&credential_id)
+        .expect("get credential")
+        .expect("credential exists");
+    assert_eq!(
+        cred.inject_as.as_deref(),
+        Some("PHOTOS_LOGIN"),
+        "the inject_as update must persist"
+    );
+
+    // Step 6: repeating the same update is a no-op (no spurious update flag).
+    let result = registry
+        .execute(
+            "credential_setup",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "service": "photos",
+                "label": "default",
+                "inject_as": "PHOTOS_LOGIN"
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::clone(&store)),
+            None,
+        )
+        .expect("second dedup retry should succeed");
+    let deduped: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(deduped["existing"], true);
+    assert!(
+        deduped.get("inject_as_updated").is_none(),
+        "an unchanged inject_as must not be reported as updated"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn test_credential_setup_approval_fails_with_missing_secrets() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -1432,6 +1663,7 @@ fn test_credential_setup_approval_fails_with_missing_secrets() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_prompt_approval_carries_secret_fields_for_inspect() {
     // The TUI's in-modal credential entry flow reads `secret_fields` from the
     // stored approval action (surfaced via `approvals.inspect`). This test
@@ -1511,6 +1743,7 @@ fn test_credential_prompt_approval_carries_secret_fields_for_inspect() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_json_path_dollar_prefix() {
     let _value: serde_json::Value = serde_json::json!({
         "data": {
@@ -1530,6 +1763,7 @@ fn test_credential_setup_json_path_dollar_prefix() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_user_input_with_secret_fields_rejected() {
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["gmail".to_string()],
@@ -1591,6 +1825,7 @@ fn test_credential_setup_user_input_with_secret_fields_rejected() {
 }
 
 #[test]
+#[serial_test::serial]
 fn test_credential_setup_missing_secret_capture_fails_loudly() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -1676,8 +1911,9 @@ autonoetic:
         .list_credentials_by_service("gmail")
         .expect("list creds");
     assert!(creds.is_empty(), "no credential record should exist");
-    let vault_path = std::env::var("AUTONOETIC_VAULT_PATH").unwrap();
-    let vault = autonoetic_gateway::vault::Vault::load_from_file(std::path::Path::new(&vault_path))
+    // This test's own vault — an absence assertion against an ambient path
+    // some other test retargeted would pass vacuously.
+    let vault = autonoetic_gateway::vault::Vault::load_from_file(&vault_file(&_vault_temp))
         .expect("load vault");
     assert!(
         vault.get_secret("app_password").is_none(),

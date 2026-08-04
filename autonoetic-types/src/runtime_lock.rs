@@ -3,11 +3,13 @@
 use crate::layer::LayerApprovalScope;
 use serde::{Deserialize, Serialize};
 
-/// Derive the default env-var injection name from a service identifier.
-/// Mirrors the gateway's `inject_as_for_service()` used by `skill_normalize`.
+/// Derive the env-var prefix from a service identifier, without any suffix.
+/// `"moltbook"` → `"MOLTBOOK"`, `"my-api"` → `"MY_API"`, `""` → `"SERVICE"`.
 ///
-/// `"moltbook"` → `"MOLTBOOK_SECRET"`, `"my-api"` → `"MY_API_SECRET"`.
-pub fn inject_as_for_service(service: &str) -> String {
+/// Used by [`inject_as_for_service`] for the single-value name and by the
+/// gateway's spawn-time injection to derive per-field env vars
+/// (`<PREFIX>_<FIELD>`) for multi-field credentials.
+pub fn env_prefix_for_service(service: &str) -> String {
     let mut s = String::new();
     for c in service.chars() {
         if c.is_ascii_alphanumeric() {
@@ -18,10 +20,18 @@ pub fn inject_as_for_service(service: &str) -> String {
     }
     let s = s.trim_matches('_');
     if s.is_empty() {
-        "SERVICE_SECRET".to_string()
+        "SERVICE".to_string()
     } else {
-        format!("{s}_SECRET")
+        s.to_string()
     }
+}
+
+/// Derive the default env-var injection name from a service identifier.
+/// Mirrors the gateway's `inject_as_for_service()` used by `skill_normalize`.
+///
+/// `"moltbook"` → `"MOLTBOOK_SECRET"`, `"my-api"` → `"MY_API_SECRET"`.
+pub fn inject_as_for_service(service: &str) -> String {
+    format!("{}_SECRET", env_prefix_for_service(service))
 }
 
 /// A credential requirement declared in the runtime lock.

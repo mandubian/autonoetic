@@ -30,6 +30,88 @@ fn vault_dir(gateway_dir: Option<&Path>, agent_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| agent_dir.to_path_buf())
 }
 
+/// Best-effort read-only vault load for shape/presence probes. Never creates
+/// vault state; `None` when the vault cannot be read.
+fn load_vault_readonly(gateway_dir: Option<&Path>, agent_dir: &Path) -> Option<crate::vault::Vault> {
+    let vdir = vault_dir(gateway_dir, agent_dir);
+    let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::vault::default_vault_path(&vdir));
+    crate::vault::Vault::load_from_file(&vault_path).ok()
+}
+
+/// Build the `injection` report block returned to agents: the env-var name
+/// the credential's value will be injected under at spawn time, the stored
+/// value's shape, and — for multi-field credentials stored as a flat JSON
+/// object — the per-field env vars (`<SERVICE>_<FIELD>`) that are also
+/// injected. Reports the *shape* only; the secret value is never exposed.
+fn injection_info(
+    cred: &autonoetic_types::agent::CredentialRecord,
+    service: &str,
+    vault: Option<&crate::vault::Vault>,
+) -> serde_json::Value {
+    let (env_var, _) = crate::runtime::script_execute::env_var_name_for_credential(cred, service);
+    let mut info = json!({ "env_var": env_var });
+    match vault.and_then(|v| v.get_secret(&cred.secret_name)) {
+        Some(secret) => {
+            if let Some(fields) =
+                crate::runtime::script_execute::flat_json_object_fields(secret.expose_secret())
+            {
+                let field_names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+                let field_env_vars: Vec<String> = field_names
+                    .iter()
+                    .filter_map(|f| crate::runtime::script_execute::field_env_var_name(service, f))
+                    .collect();
+                info["value_shape"] = json!("json_object");
+                info["fields"] = json!(field_names);
+                info["field_env_vars"] = json!(field_env_vars);
+            } else {
+                info["value_shape"] = json!("scalar");
+            }
+        }
+        None => {
+            info["value_shape"] = serde_json::Value::Null;
+        }
+    }
+    info
+}
+
+/// Persist interactively collected credential field values into the vault
+/// and return the secret name the credential record should point at.
+///
+/// Single-field flows store the raw value under the field name (legacy
+/// contract — `{{secrets.<field>}}` templates rely on it). Multi-field flows
+/// additionally store a combined flat JSON object under the credential id and
+/// point the record at it, so spawn-time env injection delivers the whole
+/// credential as one value (plus per-field env vars); the raw per-field
+/// entries are kept for template resolution.
+pub(crate) fn store_collected_secret_values(
+    vault: &mut crate::vault::Vault,
+    credential_id: &str,
+    fields: &[(String, String)],
+) -> String {
+    for (name, value) in fields {
+        vault.set_secret(name, value.clone());
+    }
+    if fields.len() > 1 {
+        let blob: serde_json::Map<String, serde_json::Value> = fields
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        vault.set_secret(
+            credential_id,
+            serde_json::Value::Object(blob).to_string(),
+        );
+        credential_id.to_string()
+    } else {
+        fields
+            .first()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// Execute a blocking HTTP request inside `block_in_place` to avoid deadlocking
 /// the tokio runtime. `reqwest::blocking::Client` creates its own internal runtime,
 /// which can deadlock when called directly from an async context.
@@ -145,14 +227,7 @@ impl NativeTool for CredentialCheckTool {
         // stored), and agents diagnosing onboarding need the distinction
         // without ever seeing the secret value. Null when the vault cannot
         // be read; never creates vault state (read-only check).
-        let vault = {
-            let vdir = vault_dir(_gateway_dir, _agent_dir);
-            let vault_path = std::env::var("AUTONOETIC_VAULT_PATH")
-                .ok()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| crate::vault::default_vault_path(&vdir));
-            crate::vault::Vault::load_from_file(&vault_path).ok()
-        };
+        let vault = load_vault_readonly(_gateway_dir, _agent_dir);
 
         let results: Vec<serde_json::Value> = credentials
             .iter()
@@ -165,6 +240,7 @@ impl NativeTool for CredentialCheckTool {
                     "secret_present": vault
                         .as_ref()
                         .map(|v| v.get_secret(&c.secret_name).is_some()),
+                    "injection": injection_info(c, &args.service, vault.as_ref()),
                 });
                 // Check expiry using proper DateTime parsing
                 if let Some(ref exp_str) = c.expires_at {
@@ -2063,18 +2139,64 @@ impl NativeTool for CredentialSetupTool {
         }
 
         // Dedup: if a credential already exists for this (service, label),
-        // return it instead of creating a duplicate.
+        // return it instead of creating a duplicate. A retry may pass a new
+        // `inject_as` to fix the env-var name the credential is injected
+        // under — apply it instead of silently dropping the update. Only the
+        // metadata changes; the secret value is untouched, and env-name
+        // safety is enforced at injection time.
         {
             let existing = store.list_credentials_by_service(&service)?;
             let matched = existing.iter().find(|c| c.label == args.label);
             if let Some(cred) = matched {
+                let requested_inject_as = args
+                    .inject_as
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let mut cred = cred.clone();
+                let mut inject_as_updated = false;
+                // A 0-row update means the record disappeared between the
+                // dedup lookup and the write. Report the miss — never claim a
+                // persistence that did not happen.
+                let mut inject_as_update_lost = false;
+                if let Some(new_name) = requested_inject_as {
+                    if cred.inject_as.as_deref() != Some(new_name) {
+                        if store.update_credential_inject_as(&cred.credential_id, new_name)? {
+                            cred.inject_as = Some(new_name.to_string());
+                            inject_as_updated = true;
+                        } else {
+                            inject_as_update_lost = true;
+                            tracing::warn!(
+                                target: "credential",
+                                credential_id = %cred.credential_id,
+                                service = %service,
+                                requested_inject_as = %new_name,
+                                "inject_as update matched no credential row — the record vanished after the dedup lookup"
+                            );
+                        }
+                    }
+                }
+                let vault = load_vault_readonly(_gateway_dir, _agent_dir);
+                let note = if inject_as_updated {
+                    "Credential already exists for this service/label — reusing existing credential; inject_as updated."
+                } else if inject_as_update_lost {
+                    "A credential matched this service/label but its record vanished before the inject_as update could persist — re-run credential_setup to re-onboard it."
+                } else {
+                    "Credential already exists for this service/label — reusing existing credential."
+                };
                 let mut response = json!({
                     "ok": true,
                     "credential_id": cred.credential_id,
                     "service": cred.service,
                     "existing": true,
-                    "note": "Credential already exists for this service/label — reusing existing credential.",
+                    "note": note,
+                    "injection": injection_info(&cred, &service, vault.as_ref()),
                 });
+                if inject_as_updated {
+                    response["inject_as_updated"] = json!(true);
+                } else if inject_as_update_lost {
+                    response["inject_as_updated"] = json!(false);
+                }
                 if let Some(inject_as) = &cred.inject_as {
                     response["inject_as"] = json!(inject_as);
                 }
@@ -2501,6 +2623,7 @@ fn execute_steps(
                         "inject_as": inject_as,
                         "allowed_hosts": allowed_hosts,
                         "expires_at": expires_at,
+                        "label": label,
                     })),
                 };
 
@@ -2643,13 +2766,21 @@ fn execute_steps(
     // If secret_names was populated by ApiCall extract_secrets, use those.
     // Otherwise, if the flow only had UserInput steps, treat all collected
     // vars as secrets (they're the credential values the user provided).
+    // Multi-value flows additionally store a combined flat JSON object under
+    // the credential id and point the record at it, so spawn-time env
+    // injection delivers every value (plus per-field env vars) instead of
+    // only the first one; single-value flows keep the raw-value contract.
+    let mut combined_secret_name: Option<String> = None;
     if secret_names.is_empty() && !vars.is_empty() {
-        for (name, value) in &vars {
-            vault.set_secret(name, value.clone());
+        let mut fields: Vec<(String, String)> =
+            vars.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, _) in &fields {
             if !secret_names.contains(name) {
                 secret_names.push(name.clone());
             }
         }
+        combined_secret_name = Some(store_collected_secret_values(vault, credential_id, &fields));
     }
 
     // Completeness gate (mechanical, no reasoning): a flow that declared an
@@ -2710,6 +2841,7 @@ fn execute_steps(
     vault.persist_to_file(vault_path)?;
     let _ = store.delete_credential_setup_state(credential_id);
 
+    let mut created_cred: Option<CredentialRecord> = None;
     if !secret_names.is_empty() {
         // Default `inject_as` to the service-derived env var when the flow did
         // not pass one explicitly: at spawn time `resolve_credential_env`
@@ -2726,7 +2858,8 @@ fn execute_steps(
         let cred = CredentialRecord {
             credential_id: credential_id.to_string(),
             service: service.to_string(),
-            secret_name: secret_names[0].clone(),
+            secret_name: combined_secret_name
+                .unwrap_or_else(|| secret_names[0].clone()),
             inject_as: Some(effective_inject_as),
             created_by_agent: Some(manifest.agent.id.clone()),
             expires_at: expires_at.map(str::to_string),
@@ -2742,17 +2875,21 @@ fn execute_steps(
             label: label.map(str::to_string),
         };
         store.upsert_credential(&cred)?;
+        created_cred = Some(cred);
     }
 
-    Ok(json!({
+    let mut response = json!({
         "ok": true,
         "credential_id": credential_id,
         "service": service,
         "secrets_stored": secret_names.len(),
         "public_data": public_data,
         "steps": step_results,
-    })
-    .to_string())
+    });
+    if let Some(cred) = &created_cred {
+        response["injection"] = injection_info(cred, service, Some(&*vault));
+    }
+    Ok(response.to_string())
 }
 
 // ---------------------------------------------------------------------------

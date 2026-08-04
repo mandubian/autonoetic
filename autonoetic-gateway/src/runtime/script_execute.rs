@@ -488,7 +488,7 @@ pub(crate) fn resolve_credential_env(
 /// fallback (`false`). `inject_as` is overloaded: HTTP injection styles
 /// (`bearer`, `Authorization`, `header:X-…`) belong to `credential_request`,
 /// not env injection, so they take the fallback.
-fn env_var_name_for_credential(
+pub(crate) fn env_var_name_for_credential(
     cred: &autonoetic_types::agent::CredentialRecord,
     service: &str,
 ) -> (String, bool) {
@@ -534,6 +534,50 @@ fn is_injectable_env_var_name(name: &str) -> bool {
             | "PYTHONPATH"
             | "NODE_PATH"
     )
+}
+
+/// If `secret` is a flat JSON object whose values are all strings, return its
+/// (field, value) pairs. Multi-field credentials (e.g. a `user_prompt` flow
+/// that collected several secret fields) are stored in this shape under the
+/// credential id, so spawn-time injection can expose both the combined object
+/// and each field individually. Returns `None` for scalars, nested objects,
+/// and non-JSON values.
+pub(crate) fn flat_json_object_fields(secret: &str) -> Option<Vec<(String, String)>> {
+    let value: serde_json::Value = serde_json::from_str(secret).ok()?;
+    let obj = value.as_object()?;
+    if obj.is_empty() {
+        return None;
+    }
+    let mut fields = Vec::with_capacity(obj.len());
+    for (k, v) in obj {
+        fields.push((k.clone(), v.as_str()?.to_string()));
+    }
+    Some(fields)
+}
+
+/// Env-var name for one field of a multi-field credential:
+/// `<SERVICE>_<FIELD>`, both parts uppercase-sanitized. `None` when the field
+/// name has no usable characters or the composed name is not a safe injection
+/// target.
+pub(crate) fn field_env_var_name(service: &str, field: &str) -> Option<String> {
+    let mut f = String::new();
+    for c in field.chars() {
+        if c.is_ascii_alphanumeric() {
+            f.push(c.to_ascii_uppercase());
+        } else {
+            f.push('_');
+        }
+    }
+    let f = f.trim_matches('_');
+    if f.is_empty() {
+        return None;
+    }
+    let name = format!(
+        "{}_{}",
+        autonoetic_types::runtime_lock::env_prefix_for_service(service),
+        f
+    );
+    is_injectable_env_var_name(&name).then_some(name)
 }
 
 /// A resolved credential env var, with the provenance needed for deterministic
@@ -591,6 +635,36 @@ fn push_credential_env(
         explicit,
         credential_id: credential_id.to_string(),
     });
+}
+
+/// Push a credential's secret under its env-var name, and — when the secret
+/// is a multi-field blob (flat JSON object) — additionally push each field
+/// under `<SERVICE>_<FIELD>` so scripts can consume either the combined value
+/// or individual variables. The combined value is always pushed under the
+/// primary name; field vars are additive.
+///
+/// Order matters: the combined value goes in **first** so that a primary name
+/// which happens to collide with a derived field name (`inject_as:
+/// SERVICE_FIELD`) keeps the combined value — `push_credential_env` resolves
+/// same-provenance collisions first-match-wins, so pushing fields first would
+/// silently drop the primary contract.
+fn push_credential_secret_env(
+    resolved: &mut Vec<ResolvedCredentialEnv>,
+    env_var: String,
+    secret: String,
+    explicit: bool,
+    credential_id: &str,
+    service: &str,
+) {
+    let fields = flat_json_object_fields(&secret);
+    push_credential_env(resolved, env_var, secret, explicit, credential_id);
+    if let Some(fields) = fields {
+        for (field, value) in fields {
+            if let Some(field_env) = field_env_var_name(service, &field) {
+                push_credential_env(resolved, field_env, value, explicit, credential_id);
+            }
+        }
+    }
 }
 
 /// Like [`resolve_credential_env`] but accepts spawn-time credential bindings
@@ -675,12 +749,13 @@ pub(crate) fn resolve_credential_env_with_bindings(
                             env_var = %env_var,
                             "Resolved credential by ID for script agent"
                         );
-                        push_credential_env(
+                        push_credential_secret_env(
                             &mut resolved,
                             env_var,
                             secret.expose_secret().to_string(),
                             explicit,
                             cred_id,
+                            &cm.service,
                         );
                         mount_resolved += 1;
                     } else {
@@ -752,12 +827,13 @@ pub(crate) fn resolve_credential_env_with_bindings(
                         env_var = %env_var,
                         "Resolved credential for script agent"
                     );
-                    push_credential_env(
+                    push_credential_secret_env(
                         &mut resolved,
                         env_var,
                         secret.expose_secret().to_string(),
                         explicit,
                         &cred.credential_id,
+                        &cm.service,
                     );
                     mount_resolved += 1;
                 }
@@ -1140,6 +1216,171 @@ mod tests {
         assert!(
             err.to_string().contains("credential_injection_failed"),
             "missing vault secret for a pinned credential must fail closed, got: {err}"
+        );
+    }
+
+    /// Multi-field credentials are stored as a flat JSON object under the
+    /// credential id. Injection must deliver the combined value under the
+    /// credential's env-var name AND each field under `<SERVICE>_<FIELD>`,
+    /// so scripts can consume either shape.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_multi_field_blob_injects_each_field() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let blob = r#"{"account_name":"acct-1","app-token":"tok-9"}"#;
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("cred_multi", blob)],
+            r#"[{"service":"photos"}]"#,
+        );
+        // NULL inject_as → combined value under the service-derived name.
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_multi",
+                "photos",
+                "cred_multi",
+                None,
+            ))
+            .unwrap();
+
+        let mut resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap();
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("PHOTOS_ACCOUNT_NAME".to_string(), "acct-1".to_string()),
+                ("PHOTOS_APP_TOKEN".to_string(), "tok-9".to_string()),
+                ("PHOTOS_SECRET".to_string(), blob.to_string()),
+            ],
+            "the combined value and each <SERVICE>_<FIELD> var must all be injected"
+        );
+    }
+
+    /// An explicit env-var `inject_as` on a multi-field credential retargets
+    /// the combined value; per-field vars still derive from the service.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_multi_field_blob_honors_explicit_inject_as() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let blob = r#"{"account_name":"acct-1","app_token":"tok-9"}"#;
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("cred_multi", blob)],
+            r#"[{"service":"photos","credential_id":"cred_multi"}]"#,
+        );
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_multi",
+                "photos",
+                "cred_multi",
+                Some("PHOTOS_LOGIN"),
+            ))
+            .unwrap();
+
+        let mut resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap();
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("PHOTOS_ACCOUNT_NAME".to_string(), "acct-1".to_string()),
+                ("PHOTOS_APP_TOKEN".to_string(), "tok-9".to_string()),
+                ("PHOTOS_LOGIN".to_string(), blob.to_string()),
+            ],
+            "explicit inject_as retargets the combined value; fields keep the service prefix"
+        );
+    }
+
+    /// Non-flat secrets (nested objects, arrays, scalars that happen to be
+    /// JSON) are injected only under the primary name — no field expansion.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_non_flat_secret_gets_no_field_expansion() {
+        let _guard = VaultKeyGuard::set_test_key();
+        for secret in [
+            r#"{"outer":{"inner":"v"}}"#,
+            r#"["a","b"]"#,
+            r#""just-a-string""#,
+            r#"{"ok": "v", "count": 3}"#,
+            r#"{}"#,
+        ] {
+            let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+                &[("cred_json", secret)],
+                r#"[{"service":"photos"}]"#,
+            );
+            store
+                .upsert_credential(&resolver_test_credential(
+                    "cred_json", "photos", "cred_json", None,
+                ))
+                .unwrap();
+            assert_eq!(
+                resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap(),
+                vec![("PHOTOS_SECRET".to_string(), secret.to_string())],
+                "secret {secret} must not get per-field expansion"
+            );
+        }
+    }
+
+    /// An explicit `inject_as` that collides with one of the credential's own
+    /// derived field names must keep the combined value — the primary name is
+    /// the injection contract, so the field var is the one that yields.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_explicit_inject_as_wins_over_own_field_var() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let blob = r#"{"account_name":"acct-1","app_token":"tok-9"}"#;
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("cred_multi", blob)],
+            r#"[{"service":"photos","credential_id":"cred_multi"}]"#,
+        );
+        // inject_as is exactly the env var the `account_name` field derives.
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_multi",
+                "photos",
+                "cred_multi",
+                Some("PHOTOS_ACCOUNT_NAME"),
+            ))
+            .unwrap();
+
+        let mut resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap();
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("PHOTOS_ACCOUNT_NAME".to_string(), blob.to_string()),
+                ("PHOTOS_APP_TOKEN".to_string(), "tok-9".to_string()),
+            ],
+            "the combined value must survive a collision with its own field var"
+        );
+    }
+
+    /// A field name with no usable characters is skipped; the combined value
+    /// and other fields still inject.
+    #[test]
+    #[serial_test::serial]
+    fn resolve_credential_env_skips_unnameable_fields() {
+        let _guard = VaultKeyGuard::set_test_key();
+        let blob = r#"{"!!!":"v0","token":"t1"}"#;
+        let (_temp, gateway_dir, agent_dir, store) = credential_resolver_fixture(
+            &[("cred_multi", blob)],
+            r#"[{"service":"photos"}]"#,
+        );
+        store
+            .upsert_credential(&resolver_test_credential(
+                "cred_multi",
+                "photos",
+                "cred_multi",
+                None,
+            ))
+            .unwrap();
+
+        let mut resolved = resolve_credential_env(&agent_dir, &gateway_dir, &store).unwrap();
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("PHOTOS_SECRET".to_string(), blob.to_string()),
+                ("PHOTOS_TOKEN".to_string(), "t1".to_string()),
+            ],
+            "unnameable fields are skipped without losing the combined value"
         );
     }
 

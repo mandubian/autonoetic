@@ -119,6 +119,19 @@ impl GatewayStore {
         }
     }
 
+    /// Update only the `inject_as` metadata of an existing credential.
+    /// Returns `true` when a row was updated. The secret value is untouched;
+    /// env-var safety of the name is enforced at injection time
+    /// (`is_injectable_env_var_name`), not here.
+    pub fn update_credential_inject_as(&self, credential_id: &str, inject_as: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE credentials SET inject_as = ?1, updated_at = ?2 WHERE credential_id = ?3",
+            params![inject_as, chrono::Utc::now().to_rfc3339(), credential_id],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn list_credentials_by_service(
         &self,
         service: &str,
