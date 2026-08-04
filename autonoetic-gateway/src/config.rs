@@ -53,10 +53,6 @@ pub fn save_config(path: &Path, config: &GatewayConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Push the configured `chars_per_token` override (if any) into the
-/// process-wide atomic that the prompt-budget estimator reads. Called from
-/// `load_config` so every code path that consumes a `GatewayConfig` ends up
-/// with a consistent estimator calibration before the first LLM call.
 /// Publish `llm_request_timeout_secs` to the LLM layer.
 ///
 /// Applied here rather than at each CLI entry point so no command can start the
@@ -82,6 +78,10 @@ fn apply_llm_request_timeout(config: &GatewayConfig) {
     );
 }
 
+/// Push the configured `chars_per_token` override (if any) into the
+/// process-wide atomic that the prompt-budget estimator reads. Called from
+/// `load_config` so every code path that consumes a `GatewayConfig` ends up
+/// with a consistent estimator calibration before the first LLM call.
 fn apply_prompt_budget_overrides(config: &GatewayConfig) {
     if let Some(cpt) = config.prompt_budget.chars_per_token {
         if cpt.is_finite() && cpt > 0.0 {
@@ -171,6 +171,24 @@ mod tests {
             serde_yaml::from_str("agents_dir: /tmp/agents\nllm_request_timeout_secs: 600\n")
                 .expect("config with llm_request_timeout_secs must parse");
         assert_eq!(cfg.llm_request_timeout_secs, Some(600));
+    }
+
+    /// Setting the key twice is rejected, not silently resolved to one of the
+    /// values. Pinned because it is an easy edit to make — raise the timeout by
+    /// adding a line, leave the old one behind — and the failure lands on config
+    /// load, which takes out the gateway *and* every CLI command with it. A
+    /// future "last wins" would be worse than the error: the file would read one
+    /// way and behave another.
+    #[test]
+    fn duplicating_llm_request_timeout_secs_is_rejected() {
+        let err = serde_yaml::from_str::<GatewayConfig>(
+            "agents_dir: /tmp/agents\nllm_request_timeout_secs: 600\nllm_request_timeout_secs: 300\n",
+        )
+        .expect_err("a duplicated key must not parse");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "error should name the duplication, got: {err}"
+        );
     }
 
     /// Omitting it must stay valid — the field is an override, not a requirement.

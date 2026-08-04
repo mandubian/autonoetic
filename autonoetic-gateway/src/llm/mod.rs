@@ -104,7 +104,7 @@ static CONFIGURED_REQUEST_TIMEOUT_SECS: std::sync::OnceLock<u64> = std::sync::On
 /// Publish the configured per-request timeout. Called once during gateway
 /// startup; later calls are ignored, so a running process keeps one timeout for
 /// its whole life rather than changing budget mid-turn.
-pub fn set_configured_request_timeout_secs(secs: Option<u64>) {
+pub(crate) fn set_configured_request_timeout_secs(secs: Option<u64>) {
     if let Some(secs) = secs {
         let _ = CONFIGURED_REQUEST_TIMEOUT_SECS.set(secs);
     }

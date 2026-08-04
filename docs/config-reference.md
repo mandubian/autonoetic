@@ -640,8 +640,13 @@ default), not the previous ~`4 × 300s` (≈20 min).
 ### Raising the per-request timeout
 
 ```yaml
-llm_request_timeout_secs: 600   # unset ⇒ 120s; values below 5 are ignored
+llm_request_timeout_secs: 300   # built-in default is 120; below 5 is ignored
 ```
+
+Set it **once**. `GatewayConfig` rejects a duplicated key outright
+(`duplicate field llm_request_timeout_secs`), and because config load happens in
+every CLI command, a leftover second line stops `chat`, `room` and `agent list`
+as well as the gateway.
 
 Applies process-wide, published at config load, so every entry point
 (`gateway start`, `run`, `chat`) uses one budget. Precedence:
