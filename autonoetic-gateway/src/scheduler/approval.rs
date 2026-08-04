@@ -1012,6 +1012,41 @@ fn emit_wiki_timeline(
     }
 }
 
+/// One decision per request: fail if this request already carries a *terminal*
+/// one.
+///
+/// Decidable states are **no status** (pending — `ApprovalStatus` has no
+/// `Pending` variant, pendingness is the absence of a status) and
+/// [`ApprovalStatus::Stale`].
+///
+/// `Stale` must pass. An expired approval is suspended awaiting the operator,
+/// not concluded: `execution.rs` re-suspends the session "until operator
+/// resolves", and the store's `record_decision` deliberately accepts it —
+/// `WHERE request_id = ?6 AND status IN ('pending', 'stale')`, with an error
+/// message that names both. Rejecting `Stale` here contradicted both and left
+/// no way to resolve one: nothing anywhere resets `stale` back to `pending`, so
+/// the request could be neither approved nor rejected and its session
+/// re-suspended forever. (Raised in the #1047 review; the pre-existing guards
+/// this helper replaced all had the same hole.)
+///
+/// Deliberately an error rather than a silent success for terminal states. A
+/// second decision on the same `request_id` means a caller double-submitted, a
+/// waiter serviced a record another waiter had already resolved, or a retry fired
+/// after the first attempt actually succeeded — all worth surfacing, and none of
+/// them safe to report as a fresh approval. Every caller must run this *before*
+/// any side effect, since returning the error afterwards does not undo the writes.
+fn ensure_decidable(request: &autonoetic_types::background::ApprovalRequest) -> anyhow::Result<()> {
+    match request.status {
+        None | Some(ApprovalStatus::Stale) => Ok(()),
+        Some(ref terminal) => anyhow::bail!(
+            "Approval {} already decided as '{}' (by {})",
+            request.request_id,
+            terminal.as_str(),
+            request.decided_by.as_deref().unwrap_or("unknown")
+        ),
+    }
+}
+
 pub fn approve_request(
     config: &GatewayConfig,
     gateway_store: Option<&crate::scheduler::gateway_store::GatewayStore>,
@@ -1051,6 +1086,46 @@ pub fn approve_request_with_options(
     let req = store
         .get_approval(request_id)?
         .ok_or_else(|| anyhow::anyhow!("Approval request not found in store: {}", request_id))?;
+
+    // Idempotency, checked *before* any side effect (#1047).
+    //
+    // `decide_request_with_options` performs the same check, but it runs at the
+    // end of this function — after the vault write, the credential upsert and
+    // wiki materialization. A duplicate approval therefore re-ran every one of
+    // those and only then failed, which is how one operator response produced
+    // five "Stored secrets and created credential record" entries 3 seconds
+    // apart for the same `request_id`. The downstream check stays as the
+    // backstop for `reject`/`cancel`; this one is what makes the effects
+    // unreachable.
+    ensure_decidable(&req)?;
+
+    // Same defect, second instance: the §O motivation obligation was also only
+    // enforced inside `decide_request_with_options`, so an approval submitted
+    // without a reason banked the vault write and credential upsert and *then*
+    // refused — inviting exactly the retry loop that produced the duplicates.
+    // `enforce_decider_motivation` is pure, so pre-flighting it costs nothing.
+    //
+    // The refusal must still be recorded here. Contract-health tallies
+    // `decider_obligation.refused` (see `emit_decider_obligation_event`), and the
+    // downstream call emitted it on this path; returning early without emitting
+    // would drop the O-1 refusal from the ledger. The *satisfied* emission stays
+    // downstream, so a successful decision is still recorded exactly once.
+    if let Err(e) = enforce_decider_motivation(
+        config,
+        &req,
+        decided_by,
+        &ApprovalStatus::Approved,
+        reason.as_deref(),
+    ) {
+        emit_decider_obligation_event(
+            Some(store),
+            &req,
+            decided_by,
+            &ApprovalStatus::Approved,
+            "refused",
+        );
+        return Err(e);
+    }
 
     // Level validation is always enforced. Missing level defaults to Operator.
     let provided_level = approver_level.cloned().unwrap_or(ApprovalLevel::Operator);
@@ -1512,16 +1587,8 @@ pub(crate) fn cancel_approval_request(
         anyhow::bail!("GatewayStore is required to cancel approvals");
     };
 
-    // Idempotency guard
-    if let Some(ref current_status) = request.status {
-        let status_str = current_status.as_str();
-        anyhow::bail!(
-            "Approval {} already decided as '{}' (by {})",
-            request_id,
-            status_str,
-            request.decided_by.as_deref().unwrap_or("unknown")
-        );
-    }
+    // Idempotency guard — already ahead of this function's writes.
+    ensure_decidable(&request)?;
 
     let decided_at = chrono::Utc::now().to_rfc3339();
 
@@ -1959,16 +2026,10 @@ fn decide_request_with_options(
         anyhow::bail!("GatewayStore is required to decide approvals");
     };
 
-    // Idempotency guard: reject duplicate decisions
-    if let Some(ref current_status) = request.status {
-        let status_str = current_status.as_str();
-        anyhow::bail!(
-            "Approval {} already decided as '{}' (by {})",
-            request_id,
-            status_str,
-            request.decided_by.as_deref().unwrap_or("unknown")
-        );
-    }
+    // Idempotency guard: reject duplicate decisions. Callers that perform side
+    // effects before deciding must check this themselves first — see
+    // `ensure_decidable`.
+    ensure_decidable(&request)?;
 
     // P-2.20 / R-10.7: agent-decider capability and spawn-tree boundary check.
     // Human operators (decided_by not matching a loaded agent manifest) bypass this.
@@ -2137,6 +2198,343 @@ mod tests {
     use autonoetic_types::notification::NotificationType;
     use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
     use tempfile::tempdir;
+
+    /// #1047: a duplicate approval must not re-run the side effects.
+    ///
+    /// The guard already existed, but in `decide_request_with_options`, which runs
+    /// *after* the vault write, the credential upsert and wiki materialization. So
+    /// the second call did all of that and only then failed — which is how one
+    /// operator response produced five "Stored secrets and created credential
+    /// record" entries 3 seconds apart for the same `request_id`.
+    ///
+    /// Asserting the error alone would not catch a regression, because the error
+    /// was already there. This asserts *ordering*: the second call supplies a
+    /// different secret value, so if the effects still ran before the guard the
+    /// vault would hold `"second"`.
+    #[test]
+    #[serial_test::serial] // mutates AUTONOETIC_VAULT_KEY* (process-global)
+    fn duplicate_credential_approval_does_not_rewrite_the_vault() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        // `ensure_default_key` early-returns when a key var is already set and
+        // otherwise exports a path into its own tempdir — so in parallel these
+        // tests encrypt with each other's (already-deleted) keys. Pin an explicit
+        // key, per the `vault::tests` convention.
+        std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+        std::env::set_var("AUTONOETIC_VAULT_KEY", "1".repeat(64));
+
+        let mut request = ApprovalRequest {
+            request_id: "apr-dup1047".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root-session".to_string(),
+            action: ScheduledAction::CredentialPrompt {
+                service: "gmail".to_string(),
+                credential_id: "cred_gmail_1047".to_string(),
+                message: "Gmail app password".to_string(),
+                secret_fields: vec![autonoetic_types::agent::SecretFieldSpec {
+                    name: "GMAIL_TOKEN".to_string(),
+                    label: "Token".to_string(),
+                    masked: true,
+                }],
+                payload: None,
+            },
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+        store.create_approval(&mut request).unwrap();
+
+        // Credential prompts carry an R++4 confirmation phrase, derived on
+        // create; both calls supply it so the phrase gate is not what refuses
+        // the duplicate.
+        let phrase = store
+            .get_approval(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .confirm_phrase
+            .expect("credential prompt should carry a confirm phrase");
+
+        let approve = |value: &str| {
+            approve_request_with_options(
+                &cfg,
+                Some(&store),
+                &request.request_id,
+                "operator",
+                Some("operator registered the gmail credential".to_string()),
+                Some(vec![("GMAIL_TOKEN".to_string(), value.to_string())]),
+                None,
+                None,
+                ApproveOptions {
+                    confirm_phrase: Some(phrase.clone()),
+                    ..Default::default()
+                },
+            )
+        };
+
+        approve("first").expect("first approval succeeds");
+
+        let err = approve("second").expect_err("second approval must be refused");
+        assert!(
+            err.to_string().contains("already decided"),
+            "unexpected error: {err}"
+        );
+
+        // The discriminating assertion: had the effects run before the guard,
+        // this would now be "second".
+        let vault_path = crate::vault::default_vault_path(&agents_dir);
+        let vault = crate::vault::Vault::load_from_file(&vault_path).unwrap();
+        use secrecy::ExposeSecret;
+        assert_eq!(
+            vault.get_secret("GMAIL_TOKEN").map(|s| s.expose_secret()),
+            Some("first"),
+            "a refused duplicate must not overwrite the stored secret"
+        );
+        std::env::remove_var("AUTONOETIC_VAULT_KEY");
+
+        // And exactly one credential record, still from the first decision.
+        let creds = store.list_all_credentials().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].credential_id, "cred_gmail_1047");
+    }
+
+    /// The same ordering defect, second instance (#1047): the §O motivation
+    /// obligation was enforced only in `decide_request_with_options`, so an
+    /// approval submitted without a reason wrote the secret to the vault, upserted
+    /// the credential, and *then* refused — telling the caller to "retry", which
+    /// re-ran the writes. That is a plausible reading of the five duplicates in
+    /// the field log: a validation failure downstream of the effects, retried.
+    #[test]
+    #[serial_test::serial] // mutates AUTONOETIC_VAULT_KEY* (process-global)
+    fn approval_missing_motivation_does_not_write_the_vault() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        assert!(
+            cfg.decider_obligations.enabled,
+            "test presumes §O obligations are on by default"
+        );
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+        // `ensure_default_key` early-returns when a key var is already set and
+        // otherwise exports a path into its own tempdir — so in parallel these
+        // tests encrypt with each other's (already-deleted) keys. Pin an explicit
+        // key, per the `vault::tests` convention.
+        std::env::remove_var("AUTONOETIC_VAULT_KEY_PATH");
+        std::env::set_var("AUTONOETIC_VAULT_KEY", "1".repeat(64));
+
+        let mut request = ApprovalRequest {
+            request_id: "apr-nomotive".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root-session".to_string(),
+            action: ScheduledAction::CredentialPrompt {
+                service: "gmail".to_string(),
+                credential_id: "cred_gmail_nomotive".to_string(),
+                message: "Gmail app password".to_string(),
+                secret_fields: vec![autonoetic_types::agent::SecretFieldSpec {
+                    name: "NOMOTIVE_TOKEN".to_string(),
+                    label: "Token".to_string(),
+                    masked: true,
+                }],
+                payload: None,
+            },
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            expires_at: None,
+        };
+        store.create_approval(&mut request).unwrap();
+        let phrase = store
+            .get_approval(&request.request_id)
+            .unwrap()
+            .unwrap()
+            .confirm_phrase
+            .expect("credential prompt should carry a confirm phrase");
+
+        let err = approve_request_with_options(
+            &cfg,
+            Some(&store),
+            &request.request_id,
+            "operator",
+            None, // no motivation
+            Some(vec![("NOMOTIVE_TOKEN".to_string(), "leaked".to_string())]),
+            None,
+            None,
+            ApproveOptions {
+                confirm_phrase: Some(phrase),
+                ..Default::default()
+            },
+        )
+        .expect_err("a motivation-less approval must be refused");
+        assert!(
+            err.to_string().contains("decider obligation"),
+            "unexpected error: {err}"
+        );
+
+        let vault_path = crate::vault::default_vault_path(&agents_dir);
+        // No vault file at all, or one without the secret — either proves the
+        // refusal happened before the write.
+        if let Ok(vault) = crate::vault::Vault::load_from_file(&vault_path) {
+            assert!(
+                vault.get_secret("NOMOTIVE_TOKEN").is_none(),
+                "refused approval must not have persisted the secret"
+            );
+        }
+        assert!(
+            store
+                .get_credential("cred_gmail_nomotive")
+                .unwrap()
+                .is_none(),
+            "refused approval must not have created the credential record"
+        );
+
+        // The refusal must still reach the ledger. Contract-health tallies
+        // `decider_obligation.refused` by its O-1 rule id, so pre-flighting the
+        // check must not swallow the event the downstream call used to emit
+        // (raised in the #1047 review).
+        let events = store.search_causal_events(None, None, 50).unwrap();
+        let refused = events
+            .iter()
+            .find(|e| e.category == "decider_obligation" && e.action == "refused")
+            .expect("O-1 refusal must be recorded even though we refused early");
+        assert_eq!(refused.target.as_deref(), Some("apr-nomotive"));
+        assert!(
+            refused.enforced_rules.iter().any(|r| r == "O-1"),
+            "refusal must carry its rule id for contract-health attribution"
+        );
+        std::env::remove_var("AUTONOETIC_VAULT_KEY");
+    }
+
+    /// A `Stale` approval must stay resolvable (#1047 review).
+    ///
+    /// Expiry suspends an approval awaiting the operator; it does not conclude
+    /// it. `flag_expired_standalone_approvals` says so — "the approvals are NOT
+    /// cancelled — they remain resolvable if the operator chooses to act" — and
+    /// `record_decision` accepts `status IN ('pending', 'stale')`. The guard used
+    /// to reject any non-`None` status, so a stale request could be neither
+    /// approved nor rejected, and since nothing anywhere resets `stale` back to
+    /// `pending`, its session re-suspended "until operator resolves" forever.
+    #[test]
+    fn stale_approval_remains_resolvable_by_the_operator() {
+        let dir = tempdir().unwrap();
+        let agents_dir = dir.path().join("agents");
+        let gateway_dir = agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let cfg = GatewayConfig {
+            agents_dir: agents_dir.clone(),
+            ..Default::default()
+        };
+        let store = crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap();
+
+        let mut request = ApprovalRequest {
+            request_id: "apr-stale47".to_string(),
+            agent_id: "coder.default".to_string(),
+            session_id: "root-session".to_string(),
+            action: ScheduledAction::SandboxExec {
+                command: "python3 x".to_string(),
+                dependencies: None,
+                requires_approval: true,
+                evidence_ref: None,
+                detected_hosts: None,
+                intent: None,
+            },
+            created_at: "2020-01-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            root_session_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            approval_level: ApprovalLevel::Operator,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+            // Standalone and already expired, so the sweep flags it stale.
+            expires_at: Some("2020-01-02T00:00:00Z".to_string()),
+        };
+        store.create_approval(&mut request).unwrap();
+
+        let flagged = store.flag_expired_standalone_approvals().unwrap();
+        assert_eq!(flagged, vec!["apr-stale47".to_string()]);
+        assert_eq!(
+            store
+                .get_approval("apr-stale47")
+                .unwrap()
+                .unwrap()
+                .status
+                .unwrap(),
+            ApprovalStatus::Stale
+        );
+
+        let decision = super::approve_request(
+            &cfg,
+            Some(&store),
+            "apr-stale47",
+            "operator",
+            Some("operator resolved the expired request".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("an operator must be able to resolve a stale approval");
+        assert_eq!(decision.status, ApprovalStatus::Approved);
+
+        // And it is terminal afterwards: the duplicate guard still applies.
+        let err = super::approve_request(
+            &cfg,
+            Some(&store),
+            "apr-stale47",
+            "operator",
+            Some("again".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect_err("resolving it once makes it terminal");
+        assert!(
+            err.to_string().contains("already decided as 'approved'"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn load_approval_requests_skips_payload_companion_files() {
