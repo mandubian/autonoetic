@@ -322,9 +322,13 @@ pub trait RemoteAccessDetector {
     }
 }
 
-/// Process-wide default detector. Swap this only in tests or a carefully
-/// reviewed config path — production should keep the mechanical analyzer
-/// (or an ensemble that unions with it).
+/// Production entry point for remote-access analysis.
+///
+/// Always returns the mechanical [`RemoteAccessAnalyzer`]. There is no runtime
+/// swap hook here — alternate detectors (tests, future ensembles) are injected
+/// by taking `&dyn RemoteAccessDetector` at the call site and passing a
+/// different implementor. This function exists so orchestration can depend on
+/// the trait without naming the concrete analyzer (#1039).
 pub fn default_remote_access_detector() -> &'static dyn RemoteAccessDetector {
     &RemoteAccessAnalyzer
 }
@@ -1458,22 +1462,45 @@ mod tests {
     #[derive(Debug, Default)]
     struct UnionExtraHostDetector;
 
+    fn union_synthetic_host(mut analysis: RemoteAccessAnalysis) -> RemoteAccessAnalysis {
+        analysis.detected_patterns.push(DetectedPattern {
+            category: DetectedPatternCategory::UrlLiteral,
+            pattern: "https://seam-test.example/".to_string(),
+            line_number: None,
+            reason: "synthetic union signal from alternate detector".to_string(),
+        });
+        // Keep RemoteAccessAnalysis fields consistent: requires_approval and
+        // summary must reflect the final pattern set (operator-facing metadata).
+        analysis.requires_approval = !analysis.detected_patterns.is_empty();
+        analysis.summary = if analysis.detected_patterns.is_empty() {
+            "No remote access patterns detected".to_string()
+        } else {
+            let mut cats: Vec<&str> = analysis
+                .detected_patterns
+                .iter()
+                .map(|p| p.category.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            cats.sort_unstable();
+            format!(
+                "Detected {} remote access pattern(s) in categories: {}",
+                analysis.detected_patterns.len(),
+                cats.join(", ")
+            )
+        };
+        analysis
+    }
+
     impl RemoteAccessDetector for UnionExtraHostDetector {
         fn analyze_code_with_declaration(
             &self,
             code: &str,
             declaration: Option<&RemoteAccessDeclaration>,
         ) -> RemoteAccessAnalysis {
-            let mut analysis =
-                RemoteAccessAnalyzer.analyze_code_with_declaration(code, declaration);
-            analysis.detected_patterns.push(DetectedPattern {
-                category: DetectedPatternCategory::UrlLiteral,
-                pattern: "https://seam-test.example/".to_string(),
-                line_number: None,
-                reason: "synthetic union signal from alternate detector".to_string(),
-            });
-            analysis.requires_approval = true;
-            analysis
+            union_synthetic_host(
+                RemoteAccessAnalyzer.analyze_code_with_declaration(code, declaration),
+            )
         }
 
         fn analyze_command_and_dependencies_with_declaration(
@@ -1482,20 +1509,13 @@ mod tests {
             dep_packages: Option<&[String]>,
             declaration: Option<&RemoteAccessDeclaration>,
         ) -> RemoteAccessAnalysis {
-            let mut analysis = RemoteAccessAnalyzer
-                .analyze_command_and_dependencies_with_declaration(
+            union_synthetic_host(
+                RemoteAccessAnalyzer.analyze_command_and_dependencies_with_declaration(
                     code,
                     dep_packages,
                     declaration,
-                );
-            analysis.detected_patterns.push(DetectedPattern {
-                category: DetectedPatternCategory::UrlLiteral,
-                pattern: "https://seam-test.example/".to_string(),
-                line_number: None,
-                reason: "synthetic union signal from alternate detector".to_string(),
-            });
-            analysis.requires_approval = true;
-            analysis
+                ),
+            )
         }
 
         fn analyze_code_with_workspace(
@@ -1545,6 +1565,7 @@ mod tests {
         }
         let via_default = run(default_remote_access_detector());
         assert!(!via_default.requires_approval);
+        assert_eq!(via_default.summary, "No remote access patterns detected");
 
         let via_union = run(&UnionExtraHostDetector);
         assert!(via_union.requires_approval);
@@ -1553,6 +1574,16 @@ mod tests {
             .iter()
             .any(|p| p.category == DetectedPatternCategory::UrlLiteral
                 && p.pattern.contains("seam-test.example")));
+        assert!(
+            via_union.summary.contains("url_literal"),
+            "summary must stay consistent with detected_patterns after union: {}",
+            via_union.summary
+        );
+        assert!(
+            !via_union.summary.contains("No remote access patterns detected"),
+            "stale empty summary after adding patterns: {}",
+            via_union.summary
+        );
     }
 
     #[test]
