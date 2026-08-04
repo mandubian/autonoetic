@@ -40,7 +40,9 @@ instead of *"does this code name a library we happen to know about?"*
 
 ## How resolution works
 
-Two passes, in `autonoetic-gateway/src/runtime/network_sinks.rs`:
+In `autonoetic-gateway/src/runtime/network_sinks.rs`. Comments and string bodies
+are blanked first — replaced by spaces, with newlines preserved so reported line
+numbers still match the original — then two passes:
 
 1. **Collect bindings** introduced by imports.
    `import urllib.request as u` → `u → urllib.request`;
@@ -63,6 +65,33 @@ property name-matching lacks:
 The `mail.fetch(` false positive from #1019 is therefore impossible *by
 construction* here, rather than by the byte-boundary special case that still
 guards the name-based `fetch(` heuristic.
+
+### Masking, and why the two passes differ
+
+Sink-shaped *text* is not a sink *call*. Without masking, a comment reading
+`# never call socket.socket() here`, or `print("socket.socket(")`, raised a real
+`network_sink` signal — an approval gate, and a hard refuse under a taint that
+excludes `Sink::Network`. (Found in the #1033 review; fixed with the masker.)
+
+The passes read differently-masked source, which is not an accident:
+
+| pass | comments | string bodies | why |
+|---|---|---|---|
+| bindings | masked | **kept** | a JS module specifier lives *inside* the quotes — `require("net")`. Blanking it would erase every JS binding and silently disable detection |
+| calls | masked | masked | sink-shaped text inside a literal must not read as a call |
+
+Consequences that fall out of this, each pinned by a test: a commented-out import
+binds nothing; a `#` or `//` inside a string does not open a comment; template
+literal `${…}` interpolations stay unmasked because they hold real code
+(`` `${net.connect(80)}` `` is a genuine call); and an unterminated quote recovers
+at end of line rather than swallowing the rest of the file.
+
+What masking guarantees is a **line count, not a byte offset**. Each masked
+character becomes one space and newlines survive, so the result has the same
+character count as the input and its lines align — all a reported line number
+needs, since it is counted inside the masked string that was scanned. Byte
+offsets do *not* survive on non-ASCII source, where a masked multi-byte character
+collapses to a one-byte space; nothing consumes them.
 
 ## What it changed, measured
 
@@ -148,6 +177,9 @@ too, so none is a new gap:
   a precision layer rather than a boundary: the per-exec network grant, not the
   analyzer, is what keeps an undetected exec off the network.
 * Node's unanchored globals (`fetch`, `WebSocket`, `XMLHttpRequest`)
+* JS regex literals are not masked — they cannot be told from division without
+  parsing — so `/net\.connect\(/` after `require("net")` still reads as a call.
+  A false positive, not a missed detection.
 
 What is gone is the *library enumeration* treadmill: adding a client library no
 longer requires a code change. `PythonImportDetector`'s list should not be
@@ -156,9 +188,14 @@ imported at all" signal and matching the `python_imports` declaration field.
 
 ## Tests
 
-* `runtime/network_sinks.rs` — 17 unit tests: alias/`from`-import/namespace/rename
+* `runtime/network_sinks.rs` — 27 unit tests: alias/`from`-import/namespace/rename
   resolution per language, `node:` normalisation, unbound heads rejected,
-  cross-language isolation, dedup.
+  cross-language isolation, dedup; plus the masking set — sink text in
+  strings/comments/docstrings/template literals rejected, module specifiers
+  surviving masking, `${…}` interpolations still detected, commented-out imports
+  binding nothing, comment markers inside strings, line numbers exact (including
+  on non-ASCII source, where byte offsets shift) and character count preserved,
+  unterminated strings recovering.
 * `runtime/remote_access.rs` — 7 analyzer-level tests: the stdlib-sink gap,
   unlisted library via its sink, alias reported in the operator-facing reason,
   `network_sink` not gated as undeclared, `enabled_languages` scoping,

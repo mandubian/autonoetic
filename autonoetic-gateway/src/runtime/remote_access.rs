@@ -1846,14 +1846,22 @@ def send(payload, host):
 
     /// Inert code stays inert — sink resolution must not manufacture signals,
     /// since every new signal can turn a silent exec into an approval gate.
+    ///
+    /// Deliberately imports a **bound** network module. An earlier version of
+    /// this test used only `json`/`math`, which bind to no sink, so it passed
+    /// without ever exercising the string/comment path and gave false confidence
+    /// (caught in the #1033 review). Here `socket` *is* imported, so the only
+    /// thing keeping this clean is that sink-shaped text is not read as a call.
     #[test]
     fn test_sinks_add_no_false_positives_to_inert_code() {
         let code = r#"
+import socket
 import json
-import math
+# this module never calls socket.socket() itself
+USAGE = "call socket.create_connection((host, port)) to connect"
 data = {}
 data.get("http")
-print(json.dumps({"a": math.sqrt(4)}))
+print(json.dumps({"usage": USAGE}))
 "#;
         let analysis = RemoteAccessAnalyzer::analyze_code(code);
         assert!(
@@ -1861,9 +1869,16 @@ print(json.dumps({"a": math.sqrt(4)}))
                 .detected_patterns
                 .iter()
                 .any(|p| p.category == "network_sink"),
-            "no sinks expected: {:?}",
+            "sink-shaped text in a comment or string must not be detected: {:?}",
             analysis.detected_patterns
         );
+
+        // Control: the same module with a real call is still detected.
+        let real = "import socket\nsocket.create_connection((host, port))\n";
+        assert!(RemoteAccessAnalyzer::analyze_code(real)
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_sink" && p.pattern == "socket.create_connection"));
     }
 
     // --- Network command detection tests ---
