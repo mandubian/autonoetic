@@ -102,6 +102,10 @@ pub struct DetectedSink {
     pub line: usize,
     /// Why this is a network sink (operator-facing).
     pub reason: String,
+    /// Raw argument text between the call's outer parens, taken from the
+    /// string-masked source: identifiers survive, string bodies are blanked.
+    /// Empty when the parens are unbalanced (unterminated call).
+    pub args: String,
 }
 
 /// Python stdlib network sinks. Closed set: every third-party Python client
@@ -576,6 +580,27 @@ fn resolve_call(head: &str, bindings: &HashMap<String, String>) -> Option<String
     }
 }
 
+/// Extract the text between the outer parens of a call, given the source
+/// starting just after the opening `(`. Tracks nested parens; returns `None`
+/// when the call is unterminated (unbalanced), so callers don't resolve
+/// "arguments" out of the entire rest of the file.
+fn extract_paren_args(after_open_paren: &str) -> Option<String> {
+    let mut depth = 1usize;
+    for (idx, c) in after_open_paren.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(after_open_paren[..idx].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Find every `<dotted.head>(` call in `code`, resolve it, and match against
 /// `sinks`.
 fn detect_sinks(
@@ -611,11 +636,16 @@ fn detect_sinks(
         {
             continue;
         }
+        let args = caps
+            .get(0)
+            .and_then(|m| extract_paren_args(&code[m.end()..]))
+            .unwrap_or_default();
         found.push(DetectedSink {
             sink: sink.to_string(),
             matched: head.to_string(),
             line,
             reason: reason.to_string(),
+            args,
         });
     }
     found
@@ -652,6 +682,171 @@ pub fn detect_javascript_sinks(code: &str) -> Vec<DetectedSink> {
         &for_calls,
         &javascript_bindings(&for_bindings),
         JAVASCRIPT_SINKS,
+    )
+}
+
+/// A hostname-valued constant resolved as an argument to a network sink call,
+/// e.g. `HOST = "imap.gmail.com"` + `imaplib.IMAP4_SSL(HOST)`.
+///
+/// This is what lets the approval machinery key on `imap.gmail.com` as a
+/// concrete target (session grants, exec cache) instead of seeing only an
+/// unresolvable `network_sink` signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHostConstant {
+    /// Normalized (lowercase, trailing dot trimmed) hostname.
+    pub host: String,
+    /// The constant identifier as written, e.g. `HOST`.
+    pub ident: String,
+    /// Canonical sink path the constant was passed to, e.g. `imaplib.IMAP4_SSL`.
+    pub sink: String,
+    /// 1-indexed line of the sink call.
+    pub line: usize,
+}
+
+/// Whether a string literal value reads as a DNS hostname worth treating as a
+/// concrete network target.
+///
+/// Conservative by design: requires at least one dot (so `HOST = "mailserver"`
+/// stays unresolved), rejects IPs (the IP-literal detector owns those), and
+/// rejects the local/documentation names the URL-literal detector also skips.
+fn looks_like_hostname(value: &str) -> bool {
+    // Trim a trailing root dot first: `imap.gmail.com.` is a valid FQDN.
+    let v = value.trim().trim_end_matches('.');
+    if v.is_empty() || v.len() > 253 || !v.contains('.') {
+        return false;
+    }
+    let lower = v.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") || lower.contains("example.com") {
+        return false;
+    }
+    if lower.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    lower.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
+/// Parse simple `IDENT = "literal"` / `IDENT = 'literal'` assignments
+/// (optional `IDENT: type =` annotation) from comment-masked Python source and
+/// keep those whose value looks like a hostname. Deliberately literal-only:
+/// f-strings, concatenation, and calls are not resolved.
+fn python_host_constants(masked_code: &str) -> HashMap<String, String> {
+    let re = Regex::new(
+        r#"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*[A-Za-z_][A-Za-z0-9_.\[\]]*)?\s*=\s*(?:"([^"]*)"|'([^']*)')\s*$"#,
+    )
+    .expect("static python constant regex");
+    let mut out = HashMap::new();
+    for caps in re.captures_iter(masked_code) {
+        let ident = caps[1].to_string();
+        let value = caps
+            .get(2)
+            .or_else(|| caps.get(3))
+            .map(|m| m.as_str())
+            .unwrap_or("");
+        if looks_like_hostname(value) {
+            out.insert(ident, value.trim().trim_end_matches('.').to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Parse simple `const|let|var IDENT = "literal"` assignments from
+/// comment-masked JavaScript source and keep hostname-valued ones.
+fn javascript_host_constants(masked_code: &str) -> HashMap<String, String> {
+    let re = Regex::new(
+        r#"(?m)^\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:"([^"]*)"|'([^']*)')\s*;?\s*$"#,
+    )
+    .expect("static javascript constant regex");
+    let mut out = HashMap::new();
+    for caps in re.captures_iter(masked_code) {
+        let ident = caps[1].to_string();
+        let value = caps
+            .get(2)
+            .or_else(|| caps.get(3))
+            .map(|m| m.as_str())
+            .unwrap_or("");
+        if looks_like_hostname(value) {
+            out.insert(ident, value.trim().trim_end_matches('.').to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Whether the identifier ending at byte offset `end` in `args` labels the
+/// argument instead of being its value: a Python keyword-argument name
+/// (`host=RELAY`) or a JS object key (`{host: RELAY}`). Resolving those
+/// would attribute a constant the call never passed — a constant named
+/// `host` would "resolve" every `host=` call site. `==` is a comparison,
+/// not a keyword name. JS shorthand (`{HOST}`) is NOT a name position —
+/// there the identifier is the value.
+fn is_arg_name_position(args: &str, end: usize) -> bool {
+    let rest = args[end..].trim_start();
+    if let Some(r) = rest.strip_prefix('=') {
+        return !r.starts_with('=');
+    }
+    rest.starts_with(':')
+}
+
+/// Match sink-call arguments against the constant table: every identifier in
+/// a sink's argument list that names a hostname-valued constant yields one
+/// resolution. Identifiers in name position (keyword-argument names, JS
+/// object keys) are skipped — see [`is_arg_name_position`].
+fn resolve_host_constants(
+    sinks: Vec<DetectedSink>,
+    constants: &HashMap<String, String>,
+) -> Vec<ResolvedHostConstant> {
+    if constants.is_empty() {
+        return Vec::new();
+    }
+    let ident_re = Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("static ident regex");
+    let mut out: Vec<ResolvedHostConstant> = Vec::new();
+    for sink in sinks {
+        for ident in ident_re.find_iter(&sink.args) {
+            if is_arg_name_position(&sink.args, ident.end()) {
+                continue;
+            }
+            let Some(host) = constants.get(ident.as_str()) else {
+                continue;
+            };
+            let rc = ResolvedHostConstant {
+                host: host.clone(),
+                ident: ident.as_str().to_string(),
+                sink: sink.sink.clone(),
+                line: sink.line,
+            };
+            if !out.contains(&rc) {
+                out.push(rc);
+            }
+        }
+    }
+    out
+}
+
+/// Resolve hostname-valued Python constants passed to network sink calls.
+///
+/// Only simple module- or function-level `HOST = "literal"` assignments are
+/// considered, and only when the constant appears in a sink call's argument
+/// list — a hostname constant that is never passed to a sink resolves
+/// nothing, so an unused `EVIL_HOST = "evil.com"` cannot launder a grant.
+pub fn resolve_python_host_constants(code: &str) -> Vec<ResolvedHostConstant> {
+    let for_bindings = mask_strings_and_comments(code, MaskDialect::Python, MaskScope::Comments);
+    resolve_host_constants(detect_python_sinks(code), &python_host_constants(&for_bindings))
+}
+
+/// Resolve hostname-valued JavaScript constants (`const HOST = "…"`) passed
+/// to network sink calls. Same literal-only, sink-arg-only discipline as the
+/// Python resolver.
+pub fn resolve_javascript_host_constants(code: &str) -> Vec<ResolvedHostConstant> {
+    let for_bindings =
+        mask_strings_and_comments(code, MaskDialect::JavaScript, MaskScope::Comments);
+    resolve_host_constants(
+        detect_javascript_sinks(code),
+        &javascript_host_constants(&for_bindings),
     )
 }
 
@@ -1065,5 +1260,161 @@ http.request({});
     fn unterminated_string_recovers_at_end_of_line() {
         let code = "import socket\nbad = 'oops\nsocket.socket()\n";
         assert_eq!(sinks_of(&detect_python_sinks(code)), vec!["socket.socket"]);
+    }
+
+    // --- Host constant resolution ---
+
+    /// The session-1a32cf14 shape: an IMAP host in a module constant, passed
+    /// to the sink by name. The host must resolve to a concrete target.
+    #[test]
+    fn python_imap_host_constant_resolves() {
+        let code = r#"
+import imaplib
+HOST = "imap.gmail.com"
+mail = imaplib.IMAP4_SSL(HOST)
+"#;
+        let found = resolve_python_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
+        assert_eq!(found[0].ident, "HOST");
+        assert_eq!(found[0].sink, "imaplib.IMAP4_SSL");
+        assert_eq!(found[0].line, 4);
+    }
+
+    #[test]
+    fn python_host_constant_resolves_keyword_arg_and_annotation() {
+        let code = r#"
+import smtplib
+RELAY: str = 'smtp.fastmail.com'
+client = smtplib.SMTP(host=RELAY, port=587)
+"#;
+        let found = resolve_python_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "smtp.fastmail.com");
+    }
+
+    /// A hostname constant that is never passed to a sink resolves nothing —
+    /// an unused `EVIL_HOST` must not launder a grant target into an approval.
+    #[test]
+    fn python_unused_host_constant_resolves_nothing() {
+        let code = r#"
+import imaplib
+EVIL_HOST = "evil.example.org"
+mail = imaplib.IMAP4_SSL("imap.gmail.com")
+"#;
+        assert!(resolve_python_host_constants(code).is_empty());
+    }
+
+    #[test]
+    fn python_commented_out_constant_does_not_bind() {
+        let code = r#"
+import imaplib
+# HOST = "imap.gmail.com"
+mail = imaplib.IMAP4_SSL(HOST)
+"#;
+        assert!(resolve_python_host_constants(code).is_empty());
+    }
+
+    #[test]
+    fn python_non_host_constant_values_are_ignored() {
+        let code = r#"
+import socket
+NAME = "not a host"
+BARE = "mailserver"
+LOCAL = "localhost"
+IP = "10.0.0.1"
+DOC = "example.com"
+socket.create_connection((NAME, 80))
+socket.create_connection((BARE, 80))
+socket.create_connection((LOCAL, 80))
+socket.create_connection((IP, 80))
+socket.create_connection((DOC, 80))
+"#;
+        assert!(resolve_python_host_constants(code).is_empty());
+    }
+
+    #[test]
+    fn python_constant_case_normalizes_and_trailing_dot_trims() {
+        let code = "import imaplib\nHOST = \"IMAP.Gmail.COM.\"\nimaplib.IMAP4_SSL(HOST)\n";
+        let found = resolve_python_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
+    }
+
+    #[test]
+    fn javascript_host_constant_resolves() {
+        let code = r#"
+const net = require("net");
+const HOST = "imap.gmail.com";
+const s = net.connect(993, HOST);
+"#;
+        let found = resolve_javascript_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
+        assert_eq!(found[0].sink, "net.connect");
+    }
+
+    #[test]
+    fn javascript_unused_host_constant_resolves_nothing() {
+        let code = r#"
+const net = require("net");
+const EVIL_HOST = "evil.example.org";
+const s = net.connect(993, "imap.gmail.com");
+"#;
+        assert!(resolve_javascript_host_constants(code).is_empty());
+    }
+
+    /// A constant named after a keyword parameter must not "resolve" when it
+    /// appears as the kwarg NAME: `host=RELAY` passes RELAY, not whatever a
+    /// `host` constant holds. Review-caught laundering vector.
+    #[test]
+    fn python_kwarg_name_does_not_resolve_constant() {
+        let code = r#"
+import smtplib
+host = "evil.example.org"
+RELAY = "smtp.fastmail.com"
+client = smtplib.SMTP(host=RELAY, port=587)
+"#;
+        let found = resolve_python_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "smtp.fastmail.com");
+        assert_eq!(found[0].ident, "RELAY");
+    }
+
+    #[test]
+    fn python_kwarg_name_with_string_value_resolves_nothing() {
+        let code = "import smtplib\nhost = \"evil.example.org\"\nsmtplib.SMTP(host=\"smtp.fastmail.com\")\n";
+        assert!(resolve_python_host_constants(code).is_empty());
+    }
+
+    /// A constant named `host` must not resolve from a JS object key either:
+    /// `{host: RELAY}` passes RELAY. But shorthand `{HOST}` passes HOST.
+    #[test]
+    fn javascript_object_key_does_not_resolve_constant_but_shorthand_does() {
+        let code = r#"
+const net = require("net");
+const host = "evil.example.org";
+const RELAY = "imap.gmail.com";
+net.connect({host: RELAY, port: 993});
+"#;
+        let found = resolve_javascript_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
+
+        let shorthand = "const net = require(\"net\");\nconst HOST = \"imap.gmail.com\";\nnet.connect({HOST});\n";
+        let found = resolve_javascript_host_constants(shorthand);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
+    }
+
+    /// Sink call args are captured from the string-masked source: identifiers
+    /// survive, string bodies are blanked.
+    #[test]
+    fn sink_args_capture_identifiers_not_strings() {
+        let code = "import imaplib\nimaplib.IMAP4_SSL(HOST, \"literal text\")\n";
+        let found = detect_python_sinks(code);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].args.contains("HOST"));
+        assert!(!found[0].args.contains("literal text"));
     }
 }

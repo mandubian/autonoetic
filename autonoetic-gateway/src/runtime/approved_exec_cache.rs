@@ -202,6 +202,8 @@ impl ApprovedExecCache {
 ///
 /// For URL literals: extracts the host (e.g., "https://api.example.com/path" → "api.example.com")
 /// For IP addresses: uses the IP as-is (e.g., "192.168.1.100")
+/// For host constants (a `HOST = "imap.gmail.com"` constant passed to a network
+/// sink): uses the resolved hostname as-is.
 ///
 /// Returns sorted, deduplicated list of hosts.
 pub fn normalize_targets(patterns: &[DetectedPattern]) -> Vec<String> {
@@ -221,6 +223,14 @@ pub fn normalize_targets(patterns: &[DetectedPattern]) -> Vec<String> {
                 // IP address is already a host
                 if !hosts.contains(&pattern.pattern) {
                     hosts.push(pattern.pattern.clone());
+                }
+            }
+            crate::runtime::remote_access::DetectedPatternCategory::HostConstant => {
+                // Resolved hostname constant — already normalized lowercase by
+                // the resolver; trim defensively.
+                let host = pattern.pattern.trim().trim_end_matches('.').to_ascii_lowercase();
+                if !host.is_empty() && !hosts.contains(&host) {
+                    hosts.push(host);
                 }
             }
             _ => {
