@@ -5147,49 +5147,62 @@ impl JsonRpcRouter {
                             decision.root_session_id.as_deref(),
                         ).await;
 
+                        let response_request_id = decision.request_id.clone();
+                        let response_status = format!("{:?}", decision.status);
+
                         // Directly trigger session resume for non-workflow-bound
                         // approvals.  Without this, sessions that ended their
                         // turn (Hibernation / HumanEscalation checkpoint) after
                         // requesting an approval stay stuck until the operator
                         // manually sends a "continue" message — the async
                         // notification pump is best-effort and may lag.
+                        //
+                        // The resume runs in a detached task: it drives a full
+                        // agent turn (LLM calls, tool execution) and routinely
+                        // outlives the caller's RPC timeout (the Session Room
+                        // TUI gives up after 30s). The decision is already
+                        // committed at this point, so the success response must
+                        // not wait on the resumed turn finishing.
                         if crate::scheduler::approval::should_resume_waiting_session(&decision) {
-                            let resume_msg = format!(
-                                "approval_resolved:{}:{}",
-                                decision.request_id,
-                                decision.status.as_str()
-                            );
-                            let metadata = serde_json::json!({
-                                "sender_id": "approval-resume",
-                                "signal_delivered": true,
-                                "approval_request_id": decision.request_id,
-                                "approval_status": decision.status.as_str(),
-                            });
-                            if let Err(e) = self.spawn_agent_once(
-                                &decision.agent_id,
-                                &resume_msg,
-                                &decision.session_id,
-                                None,
-                                false,
-                                Some("approval_resolved"),
-                                Some(&metadata),
-                            ).await {
-                                tracing::warn!(
-                                    target: "router",
-                                    request_id = %decision.request_id,
-                                    session_id = %decision.session_id,
-                                    error = %e,
-                                    "Direct session resume after approval failed; \
-                                     falling back to async notification pump",
+                            let router = self.clone();
+                            tokio::spawn(async move {
+                                let resume_msg = format!(
+                                    "approval_resolved:{}:{}",
+                                    decision.request_id,
+                                    decision.status.as_str()
                                 );
-                            }
+                                let metadata = serde_json::json!({
+                                    "sender_id": "approval-resume",
+                                    "signal_delivered": true,
+                                    "approval_request_id": decision.request_id,
+                                    "approval_status": decision.status.as_str(),
+                                });
+                                if let Err(e) = router.spawn_agent_once(
+                                    &decision.agent_id,
+                                    &resume_msg,
+                                    &decision.session_id,
+                                    None,
+                                    false,
+                                    Some("approval_resolved"),
+                                    Some(&metadata),
+                                ).await {
+                                    tracing::warn!(
+                                        target: "router",
+                                        request_id = %decision.request_id,
+                                        session_id = %decision.session_id,
+                                        error = %e,
+                                        "Direct session resume after approval failed; \
+                                         falling back to async notification pump",
+                                    );
+                                }
+                            });
                         }
 
                         JsonRpcResponse::success(
                             req.id,
                             serde_json::json!({
-                                "request_id": decision.request_id,
-                                "status": format!("{:?}", decision.status),
+                                "request_id": response_request_id,
+                                "status": response_status,
                             }),
                         )
                     }
