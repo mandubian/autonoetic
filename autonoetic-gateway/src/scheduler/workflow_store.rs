@@ -4507,7 +4507,13 @@ mod tests {
 
         let entry = named_outputs
             .iter()
-            .find(|o| o["name"] == serde_json::json!("agent_reply.json"))
+            .find(|o| {
+                o["name"]
+                    == serde_json::json!(crate::scheduler::child_reply_spill_name(
+                        child_session,
+                        true
+                    ))
+            })
             .expect("the spilled reply must be listed as a named output");
         assert_eq!(
             entry["ref"],
@@ -4515,10 +4521,17 @@ mod tests {
             "the listed ref must be the one the parent was handed"
         );
 
-        // The point of the whole exercise: the parent can read the full payload.
-        let recovered =
-            String::from_utf8(store.read_by_name(parent_session, "agent_reply.json").unwrap())
-                .unwrap();
+        // The point of the whole exercise: the parent can read the full payload,
+        // through the `named_outputs[*].ref` the tool description points at.
+        // Ref-based, not name-based — the ref is content-addressed and is the
+        // addressing that survives several children spilling under one root.
+        let listed_ref = entry["ref"].as_str().unwrap();
+        let recovered = String::from_utf8(
+            store
+                .read_by_name_or_handle(parent_session, listed_ref)
+                .expect("the listed ref must resolve for the parent"),
+        )
+        .unwrap();
         assert_eq!(
             recovered, reply,
             "the parent must recover the untruncated reply"
