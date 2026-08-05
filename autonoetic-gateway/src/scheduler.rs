@@ -1899,6 +1899,166 @@ fn truncate_to_byte_boundary(s: &str, max_bytes: usize) -> String {
     s[..cut].to_string()
 }
 
+/// The name a spilled child reply is registered under in the content store.
+/// Stable so a parent can `content.read` it by name as well as by `cnt_` ref.
+pub(crate) const CHILD_REPLY_SPILL_NAME: &str = "agent_reply";
+
+/// Budget for `TaskRun::result_summary`, the parent-visible copy of a child's
+/// reply. Anything longer is spilled whole to the content store (see
+/// [`prepare_child_reply`]) rather than cut.
+pub(crate) const CHILD_SUMMARY_MAX_CHARS: usize = 512;
+
+/// Budget for the copy embedded in the task checkpoint. Tighter than
+/// [`CHILD_SUMMARY_MAX_CHARS`] because checkpoints are rewritten on every step
+/// and the full reply is reachable through the spill ref recorded alongside it.
+pub(crate) const CHILD_CHECKPOINT_SUMMARY_MAX_CHARS: usize = 200;
+
+/// A child's reply, prepared for the size-capped fields the parent reads.
+pub(crate) struct PreparedChildReply {
+    /// Goes into `TaskRun::result_summary` — the parent-visible field.
+    pub summary: String,
+    /// `cnt_` ref of the **full** reply, when it did not fit and was spilled to
+    /// the content store. `None` means `summary` is the complete reply.
+    pub full_ref: Option<String>,
+}
+
+/// Prepare a child's assistant reply for `result_summary`, which the parent
+/// reads back through `workflow.wait`.
+///
+/// The reply is the child's entire work product, and `result_summary` is the
+/// only in-band channel carrying it. Cutting it at a character count destroys
+/// two things at once: the payload past the cut, and the *structure* of what
+/// survives — a JSON reply cut mid-object no longer parses, so the parent can
+/// neither read the data nor run `extract_agent_outcome` over it, and is left
+/// re-doing work the child already completed.
+///
+/// So instead:
+/// - Replies within budget pass through untouched.
+/// - Oversized replies are spilled in full to the content store, registered
+///   under the child session with `Session` visibility so the parent can resolve
+///   the handle — which also makes them appear in the implicit artifact's
+///   `named_outputs`, the channel `workflow.wait`'s own tool description already
+///   tells agents to use for the full payload.
+/// - The summary itself is shortened with [`truncate_tool_result`], which keeps
+///   JSON parseable by shortening string *values* rather than the document.
+///
+/// Spilling is best-effort: if the content store write fails the task still
+/// completes with a structure-preserving summary, which is no worse than a cut
+/// and never worse than before.
+pub(crate) fn prepare_child_reply(
+    config: &autonoetic_types::config::GatewayConfig,
+    child_session_id: &str,
+    reply: &str,
+    max_chars: usize,
+) -> PreparedChildReply {
+    if reply.chars().count() <= max_chars {
+        return PreparedChildReply {
+            summary: reply.to_string(),
+            full_ref: None,
+        };
+    }
+
+    let full_ref = spill_child_reply(config, child_session_id, reply)
+        .inspect_err(|e| {
+            tracing::warn!(
+                target: "workflow",
+                session_id = %child_session_id,
+                reply_chars = reply.chars().count(),
+                error = %e,
+                "Could not spill an oversized child reply to the content store; \
+                 the parent will only see the shortened summary"
+            );
+        })
+        .ok();
+
+    let summary = summarize_oversized_reply(reply, max_chars, full_ref.as_deref());
+
+    tracing::info!(
+        target: "workflow",
+        session_id = %child_session_id,
+        reply_chars = reply.chars().count(),
+        summary_chars = summary.chars().count(),
+        full_ref = full_ref.as_deref().unwrap_or("<spill failed>"),
+        "Child reply exceeded the summary budget"
+    );
+
+    PreparedChildReply { summary, full_ref }
+}
+
+/// Build the parent-visible summary for a reply that did not fit.
+///
+/// Prefers [`truncate_tool_result`], which shortens string *values* and leaves
+/// the document parseable — the parent then still sees every record and can run
+/// `extract_agent_outcome` over it. That only works while the payload's own
+/// structure fits the budget: ten records with three keys each need more than
+/// 512 characters of braces and keys alone, and the helper then falls back to
+/// whole-string truncation, which produces a JSON fragment that parses as
+/// nothing.
+///
+/// So the result is accepted only if it fits the budget *and* is still valid
+/// JSON whenever the reply was. Otherwise the summary becomes a compact
+/// envelope: valid JSON, inside budget, naming the handle that holds the whole
+/// reply. A parseable pointer beats a mangled copy — the copy is what made the
+/// parent re-run work it had already completed.
+fn summarize_oversized_reply(reply: &str, max_chars: usize, full_ref: Option<&str>) -> String {
+    let reply_was_json = serde_json::from_str::<serde_json::Value>(reply).is_ok();
+    let candidate = crate::runtime::prompt_budget::truncate_tool_result(reply, max_chars);
+    let candidate_fits = candidate.chars().count() <= max_chars;
+    let candidate_kept_shape =
+        !reply_was_json || serde_json::from_str::<serde_json::Value>(&candidate).is_ok();
+    if candidate_fits && candidate_kept_shape {
+        return candidate;
+    }
+
+    let mut envelope = serde_json::json!({
+        "result_truncated": true,
+        "reply_chars": reply.chars().count(),
+        "full_result_ref": full_ref,
+        "note": "The child's full reply did not fit this field. Read full_result_ref \
+                 with content.read instead of acting on preview or re-running the work.",
+    });
+    // Whatever budget is left after the envelope's own keys goes to a preview.
+    let envelope_chars = envelope.to_string().chars().count();
+    let preview_budget = max_chars.saturating_sub(envelope_chars + "\"preview\":\"\",".len());
+    if preview_budget > 0 {
+        let preview: String = reply.chars().take(preview_budget).collect();
+        envelope["preview"] = serde_json::Value::String(preview);
+    }
+    let rendered = envelope.to_string();
+    if rendered.chars().count() <= max_chars {
+        return rendered;
+    }
+    // Escaping (quotes, newlines) can still push it over; drop the preview.
+    envelope["preview"] = serde_json::Value::Null;
+    envelope.to_string()
+}
+
+/// Write `reply` to the content store under the child session, visible to the
+/// parent, and return its short `cnt_` ref.
+fn spill_child_reply(
+    config: &autonoetic_types::config::GatewayConfig,
+    child_session_id: &str,
+    reply: &str,
+) -> anyhow::Result<String> {
+    use crate::runtime::content_store::{ContentStore, ContentVisibility};
+
+    let store = ContentStore::new(&crate::execution::gateway_root_dir(config))?;
+    let handle = store.write(reply.as_bytes())?;
+    // `.json` when the reply is JSON, so a reader knows how to parse it.
+    let name = if serde_json::from_str::<serde_json::Value>(reply).is_ok() {
+        format!("{CHILD_REPLY_SPILL_NAME}.json")
+    } else {
+        format!("{CHILD_REPLY_SPILL_NAME}.txt")
+    };
+    store.register_name_with_visibility(
+        child_session_id,
+        &name,
+        &handle,
+        ContentVisibility::Session,
+    )?;
+    Ok(format!("cnt_{}", ContentStore::get_short_alias(&handle)))
+}
+
 /// Execute a task: spawn agent, update status, checkpoint, dequeue on completion.
 /// Shared by normal execution, crash recovery, and approval-resume paths.
 async fn spawn_task_execution(
@@ -2343,15 +2503,16 @@ async fn spawn_task_execution(
                 return;
             }
 
-            let summary = spawn_result.assistant_reply.as_ref().map(|s| {
-                const MAX: usize = 512;
-                if s.chars().count() <= MAX {
-                    s.clone()
-                } else {
-                    let safe: String = s.chars().take(MAX).collect();
-                    format!("{}…", safe)
-                }
-            });
+            // The child's full reply lands in the content store when it exceeds
+            // the summary budget; `prepared.full_ref` is the handle the parent
+            // can read it back with. Computed once and reused for the task row,
+            // the checkpoint, and the task metadata below.
+            let prepared = spawn_result
+                .assistant_reply
+                .as_ref()
+                .map(|s| prepare_child_reply(&cfg, &session_id, s, CHILD_SUMMARY_MAX_CHARS));
+            let summary = prepared.as_ref().map(|p| p.summary.clone());
+            let full_reply_ref = prepared.as_ref().and_then(|p| p.full_ref.clone());
 
             // RFC #776 Part B.1: existence check — verify declared
             // expected_outputs resolve to produced content/artifact handles.
@@ -2376,6 +2537,7 @@ async fn spawn_task_execution(
                     }
                 };
                 if let Some(mut task) = task {
+                    let mut needs_save = false;
                     let expected: Vec<String> = task.metadata
                         .as_ref()
                         .and_then(|m| m.get("expected_outputs"))
@@ -2407,12 +2569,26 @@ async fn spawn_task_execution(
                             );
                         }
                         workflow_store::record_output_contract_check(&mut task, unmet);
+                        needs_save = true;
+                    }
+
+                    // Persist the spill handle so `workflow.wait` can point the
+                    // parent at the full reply rather than only the shortened
+                    // summary. Written before update_task_run_status, which
+                    // reloads the task.
+                    if let Some(ref cnt_ref) = full_reply_ref {
+                        workflow_store::record_full_result_ref(&mut task, cnt_ref);
+                        needs_save = true;
+                    }
+
+                    if needs_save {
                         if let Err(e) = workflow_store::save_task_run(&cfg, store, &task) {
                             tracing::warn!(
                                 target: "workflow",
                                 task_id = %t_id,
                                 error = %e,
-                                "Failed to persist output contract check — stamping may be skipped"
+                                "Failed to persist task metadata — output-contract stamping \
+                                 and/or the full-result handle may be missing"
                             );
                         }
                     }
@@ -2441,13 +2617,14 @@ async fn spawn_task_execution(
                 serde_json::json!({
                     "status": "succeeded",
                     "result_summary": spawn_result.assistant_reply.as_ref().map(|s| {
-                        let max = 200;
-                        if s.chars().count() <= max {
-                            s.clone()
-                        } else {
-                            s.chars().take(max).collect::<String>()
-                        }
+                        crate::runtime::prompt_budget::truncate_tool_result(
+                            s,
+                            CHILD_CHECKPOINT_SUMMARY_MAX_CHARS,
+                        )
                     }),
+                    // Where the untruncated reply lives, so a reader of this
+                    // checkpoint is never left with only the shortened copy.
+                    "full_result_ref": full_reply_ref,
                 }),
             );
             let _ = workflow_store::dequeue_task(&cfg, store, &wf_id, &t_id);
@@ -3347,6 +3524,198 @@ pub fn enqueue_scheduled_job_fire(
         triggered_at: now_rfc,
         scheduled_for: next_run_at,
     })
+}
+
+#[cfg(test)]
+mod child_reply_spill_tests {
+    use super::*;
+    use autonoetic_types::config::GatewayConfig;
+
+    fn cfg(agents_dir: &std::path::Path) -> GatewayConfig {
+        GatewayConfig {
+            agents_dir: agents_dir.to_path_buf(),
+            ..GatewayConfig::default()
+        }
+    }
+
+    /// A record-per-entry payload shaped like a real child reply: a JSON object
+    /// wrapping an array, each element carrying one long string field.
+    fn json_reply(records: usize) -> String {
+        let items: Vec<serde_json::Value> = (0..records)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("{}", 888 - i),
+                    "subject": format!("subject number {i}"),
+                    "preview": "x".repeat(400),
+                })
+            })
+            .collect();
+        serde_json::json!({ "ok": true, "emails": items }).to_string()
+    }
+
+    fn read_ref(config: &GatewayConfig, session_id: &str, name: &str) -> String {
+        let store =
+            crate::runtime::content_store::ContentStore::new(&crate::execution::gateway_root_dir(
+                config,
+            ))
+            .unwrap();
+        String::from_utf8(store.read_by_name(session_id, name).unwrap()).unwrap()
+    }
+
+    /// Within budget the reply must cross to the parent byte-for-byte, and
+    /// nothing is written to the content store.
+    #[test]
+    fn reply_within_budget_passes_through_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let reply = r#"{"ok": true, "emails": []}"#;
+
+        let prepared = prepare_child_reply(&config, "root/child-1", reply, 512);
+
+        assert_eq!(prepared.summary, reply);
+        assert!(
+            prepared.full_ref.is_none(),
+            "a reply that fits needs no spill"
+        );
+    }
+
+    /// When the payload's structure fits the budget, every record must survive.
+    /// A character cut kept only the first one and left the JSON unparseable, so
+    /// the parent could neither read the data nor run `extract_agent_outcome`.
+    #[test]
+    fn oversized_json_reply_keeps_every_record_when_structure_fits() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let session_id = "root/child-2";
+        let reply = json_reply(10);
+        assert!(
+            reply.chars().count() > 4000,
+            "fixture must exceed the budget"
+        );
+
+        let prepared = prepare_child_reply(&config, session_id, &reply, 4000);
+
+        assert!(prepared.summary.chars().count() <= 4000, "must fit budget");
+        let parsed: serde_json::Value = serde_json::from_str(&prepared.summary)
+            .expect("the shortened summary must still be valid JSON");
+        let emails = parsed["emails"]
+            .as_array()
+            .expect("the emails array must survive");
+        assert_eq!(
+            emails.len(),
+            10,
+            "every record must survive; a character cut kept only the first"
+        );
+        assert_eq!(emails[9]["id"], "879", "the last record must be intact");
+
+        let cnt_ref = prepared
+            .full_ref
+            .expect("an oversized reply must be spilled");
+        assert!(cnt_ref.starts_with("cnt_"), "got {cnt_ref}");
+        assert_eq!(
+            read_ref(&config, session_id, "agent_reply.json"),
+            reply,
+            "the spilled copy must be the untouched original"
+        );
+    }
+
+    /// At the production budget a ten-record payload cannot even fit its own
+    /// braces and keys, so no shortened *copy* can be valid. The summary must
+    /// then be a valid pointer envelope — never a JSON fragment that parses as
+    /// nothing, which is what sent the parent off to re-run the work.
+    #[test]
+    fn json_reply_too_large_for_its_own_shape_becomes_a_valid_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let session_id = "root/child-4";
+        let reply = json_reply(10);
+
+        let prepared =
+            prepare_child_reply(&config, session_id, &reply, CHILD_SUMMARY_MAX_CHARS);
+
+        assert!(
+            prepared.summary.chars().count() <= CHILD_SUMMARY_MAX_CHARS,
+            "summary must respect the budget, got {}",
+            prepared.summary.chars().count()
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&prepared.summary)
+            .expect("the summary must be valid JSON, not a fragment");
+        assert_eq!(parsed["result_truncated"], serde_json::json!(true));
+        assert_eq!(
+            parsed["full_result_ref"],
+            serde_json::json!(prepared.full_ref.as_deref().unwrap()),
+            "the envelope must name the handle holding the full reply"
+        );
+        assert_eq!(
+            parsed["reply_chars"],
+            serde_json::json!(reply.chars().count())
+        );
+        assert_eq!(
+            read_ref(&config, session_id, "agent_reply.json"),
+            reply,
+            "the spilled copy must be the untouched original"
+        );
+    }
+
+    /// Non-JSON replies cannot be shortened structurally, but must still spill —
+    /// otherwise the payload past the cut is simply gone.
+    #[test]
+    fn oversized_non_json_reply_still_spills() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(dir.path());
+        let session_id = "root/child-3";
+        let reply = "plain prose ".repeat(200);
+
+        let prepared =
+            prepare_child_reply(&config, session_id, &reply, CHILD_SUMMARY_MAX_CHARS);
+
+        assert!(
+            prepared.summary.chars().count() <= CHILD_SUMMARY_MAX_CHARS,
+            "summary must respect the budget, got {}",
+            prepared.summary.chars().count()
+        );
+        assert!(prepared.full_ref.is_some(), "non-JSON must spill too");
+        assert_eq!(
+            read_ref(&config, session_id, "agent_reply.txt"),
+            reply,
+            "the spilled copy must be the untouched original"
+        );
+    }
+
+    /// The handle must round-trip through task metadata, which is how
+    /// `workflow.wait` finds it.
+    #[test]
+    fn full_result_ref_round_trips_through_task_metadata() {
+        use autonoetic_types::workflow::{TaskRun, TaskRunStatus};
+
+        let mut task = TaskRun {
+            task_id: "task-spill".to_string(),
+            workflow_id: "wf-spill".to_string(),
+            agent_id: "gmail".to_string(),
+            session_id: "root/gmail-1".to_string(),
+            parent_session_id: "root".to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: "t0".to_string(),
+            updated_at: "t0".to_string(),
+            source_agent_id: None,
+            result_summary: None,
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        assert_eq!(workflow_store::full_result_ref(&task), None);
+        workflow_store::record_full_result_ref(&mut task, "cnt_abcd1234");
+        assert_eq!(
+            workflow_store::full_result_ref(&task),
+            Some("cnt_abcd1234")
+        );
+    }
 }
 
 #[cfg(test)]

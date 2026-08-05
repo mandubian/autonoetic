@@ -436,7 +436,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
+            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. When a task entry carries 'result_summary_truncated': true, its 'result_summary' is a shortened copy and 'full_result_ref' holds the complete reply — read that ref instead of acting on the summary or re-running the work. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -751,6 +751,15 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 "result_summary": task.result_summary,
                 "implicit_artifact_id": implicit_artifact_id,
             });
+
+            // The child's reply exceeded the summary budget, so `result_summary`
+            // is a shortened copy. Name the handle holding the whole thing —
+            // without it the parent sees a partial payload with no way to tell
+            // that a complete one exists, and re-does work already done.
+            if let Some(cnt_ref) = crate::scheduler::workflow_store::full_result_ref(task) {
+                entry["result_summary_truncated"] = serde_json::Value::Bool(true);
+                entry["full_result_ref"] = serde_json::Value::String(cnt_ref.to_string());
+            }
 
             if task.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
                 autonoetic_types::task_completion::enrich_task_status_entry(
