@@ -3655,6 +3655,20 @@ mod child_reply_spill_tests {
             reply,
             "the spilled copy must be the untouched original"
         );
+
+        // The `cnt_` ref must resolve on its own — that is how `content.read`
+        // and the advisory claim scan reach the payload, with no name to go on.
+        let store = crate::runtime::content_store::ContentStore::new(
+            &crate::execution::gateway_root_dir(&config),
+        )
+        .unwrap();
+        let via_ref = String::from_utf8(
+            store
+                .read_by_name_or_handle(session_id, prepared.full_ref.as_deref().unwrap())
+                .expect("the returned ref must resolve"),
+        )
+        .unwrap();
+        assert_eq!(via_ref, reply, "the ref must yield the untouched original");
     }
 
     /// Non-JSON replies cannot be shortened structurally, but must still spill —

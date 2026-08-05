@@ -776,10 +776,27 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                     // result path. This is intentionally non-blocking: the full
                     // child `SpawnResult` was already validated against
                     // `io.returns` before the task was marked complete. We
-                    // re-check the summary that crosses to the parent to catch
-                    // any fabricated claim that survived truncation.
+                    // re-check what crosses to the parent to catch any
+                    // fabricated claim that survived shortening.
+                    //
+                    // Scan the spilled reply when there is one. The shortened
+                    // summary carries only part of the child's references (and,
+                    // when the payload could not fit its own shape, only an
+                    // envelope), so scanning it alone would leave later claims
+                    // unchecked — reading the spill keeps this pass over the
+                    // whole reply.
+                    let spilled_reply = crate::scheduler::workflow_store::full_result_ref(task)
+                        .and_then(|cnt_ref| {
+                            crate::runtime::content_store::ContentStore::new(
+                                &agents_dir.join(".gateway"),
+                            )
+                            .ok()?
+                            .read_by_name_or_handle(&task.session_id, cnt_ref)
+                            .ok()
+                        })
+                        .and_then(|bytes| String::from_utf8(bytes).ok());
                     let _ = crate::runtime::response_validation::advisory_reconcile_child_result_summary(
-                        task.result_summary.as_deref(),
+                        spilled_reply.as_deref().or(task.result_summary.as_deref()),
                         &task.session_id,
                         session_id.unwrap_or_else(|| task.parent_session_id.as_str()),
                         &task.agent_id,
