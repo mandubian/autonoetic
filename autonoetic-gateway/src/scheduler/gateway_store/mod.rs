@@ -1420,6 +1420,109 @@ mod tests {
         Ok(())
     }
 
+    /// Seed one `active` transcript and park it at `lifecycle`.
+    fn seed_parked_transcript(
+        store: &GatewayStore,
+        session_id: &str,
+        lifecycle: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        store.upsert_session_transcript(&SessionTranscriptRecord {
+            transcript_id: format!("stx-{session_id}"),
+            session_id: session_id.to_string(),
+            root_session_id: "root1".to_string(),
+            agent_id: "agent1".to_string(),
+            revision_id: None,
+            user_id: None,
+            started_at: now,
+            ended_at: None,
+            status: "active".to_string(),
+            turn_count: 1,
+            transcript_handle: None,
+            excerpt: None,
+            origin_node_id: None,
+        })?;
+        store.set_session_lifecycle_state(session_id, lifecycle)?;
+        Ok(())
+    }
+
+    /// The polite path must keep preserving a between-turn `hibernated` yield:
+    /// `close_session` reports `completed` at the end of every turn, and the
+    /// session resumes on the next operator message.
+    #[test]
+    fn finalize_completed_preserves_resumable_lifecycle() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for state in ["hibernated", "awaiting_gate"] {
+            let sid = format!("sess-{state}");
+            seed_parked_transcript(&store, &sid, state)?;
+            store.finalize_session_transcript(&sid, &now, "completed")?;
+            assert_eq!(
+                store.get_session_lifecycle_state(&sid)?.as_deref(),
+                Some(state),
+                "finalize(completed) must not terminate a {state} session"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// A session the caller knows is unreachable must reach `terminated:*` even
+    /// from a resumable lifecycle — otherwise `find_orphaned_sessions` keeps
+    /// selecting it and the reaper spins forever.
+    #[test]
+    fn terminate_clears_resumable_lifecycle() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for state in ["hibernated", "awaiting_gate", "idle", "paused", "active"] {
+            let sid = format!("sess-{state}");
+            seed_parked_transcript(&store, &sid, state)?;
+            store.terminate_session_transcript(&sid, &now, "failed")?;
+            assert_eq!(
+                store.get_session_lifecycle_state(&sid)?.as_deref(),
+                Some("terminated:failed"),
+                "terminate must clear a {state} lifecycle"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// The first terminal verdict wins, so repeated sweeps are idempotent and
+    /// `ended_at` keeps recording when the session actually died.
+    #[test]
+    fn terminate_preserves_first_terminal_verdict() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+
+        seed_parked_transcript(&store, "sess1", "hibernated")?;
+        let died_at = chrono::Utc::now().to_rfc3339();
+        store.terminate_session_transcript("sess1", &died_at, "failed")?;
+
+        let later = (chrono::Utc::now() + chrono::Duration::minutes(20)).to_rfc3339();
+        store.terminate_session_transcript("sess1", &later, "completed")?;
+
+        let row = store
+            .find_transcript_by_session_id("sess1")?
+            .expect("transcript should exist");
+        assert_eq!(row.status, "failed", "later verdict must not overwrite");
+        assert_eq!(
+            row.ended_at.as_deref(),
+            Some(died_at.as_str()),
+            "ended_at must keep the real time of death, not the last sweep"
+        );
+        assert_eq!(
+            store.get_session_lifecycle_state("sess1")?.as_deref(),
+            Some("terminated:failed")
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn active_upsert_does_not_reopen_terminal_transcript() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;

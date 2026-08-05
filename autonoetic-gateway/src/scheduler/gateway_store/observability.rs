@@ -1141,6 +1141,13 @@ impl GatewayStore {
         // For "completed", avoid overwriting "hibernated" (between-turn yield)
         // — only set "terminated:completed" when the current state is not
         // already a resumable lifecycle state.
+        //
+        // This is the *polite* path, used by callers that cannot tell "this
+        // turn ended" from "this session ended" — chiefly `close_session`,
+        // where a between-turn yield closes with `completed` while its
+        // lifecycle is `hibernated`. Callers that have already established that
+        // the session can never run again must use
+        // [`Self::terminate_session_transcript`] instead.
         let lifecycle = match status {
             "completed" => Some("terminated:completed"),
             "failed" => Some("terminated:failed"),
@@ -1160,6 +1167,49 @@ impl GatewayStore {
                 params![lifecycle, session_id],
             )?;
         }
+        Ok(())
+    }
+
+    /// Finalize a session that is **definitively unreachable**, stamping a
+    /// terminal lifecycle state over any resumable state left behind.
+    ///
+    /// [`Self::finalize_session_transcript`] deliberately refuses to overwrite
+    /// `hibernated`/`awaiting_gate`, because it cannot distinguish a session
+    /// that merely ended a turn from one that ended for good. Callers that
+    /// *have* established unreachability — the orphan reaper (parent
+    /// terminated), emergency stop, and terminal workflow-task transitions —
+    /// must not inherit that caution. A dead session left at `hibernated` is
+    /// permanently re-selectable by [`Self::find_orphaned_sessions`] (which
+    /// excludes only `terminated:%`) yet unfixable by the polite path, so the
+    /// reaper re-reaps it on every scheduler tick, forever.
+    ///
+    /// The first terminal verdict wins: a row already at `terminated:*` is left
+    /// untouched, so repeated calls are idempotent and `ended_at` keeps
+    /// recording when the session actually died rather than when a sweeper last
+    /// looked at it.
+    ///
+    /// `status` must be a terminal transcript status; anything other than
+    /// `"completed"` is recorded as a failure.
+    pub fn terminate_session_transcript(
+        &self,
+        session_id: &str,
+        ended_at: &str,
+        status: &str,
+    ) -> Result<()> {
+        let lifecycle = if status == "completed" {
+            "terminated:completed"
+        } else {
+            "terminated:failed"
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE session_transcripts
+                SET ended_at = ?1, status = ?2, lifecycle_state = ?3
+              WHERE session_id = ?4
+                AND (lifecycle_state IS NULL
+                     OR lifecycle_state NOT LIKE 'terminated:%')",
+            params![ended_at, status, lifecycle, session_id],
+        )?;
         Ok(())
     }
 

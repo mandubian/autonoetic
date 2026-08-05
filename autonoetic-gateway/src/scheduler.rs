@@ -1381,7 +1381,15 @@ pub async fn reap_orphaned_sessions(
             "Reaping orphaned session (R+12)"
         );
 
-        let _ = store.finalize_session_transcript(&child_session_id, &now_rfc, "failed");
+        // Force the terminal lifecycle rather than going through the polite
+        // `finalize_session_transcript`, which preserves `hibernated`/
+        // `awaiting_gate`. A child killed between turns keeps a resumable
+        // lifecycle, and the polite path cannot clear it — so the child stays
+        // selectable by `find_orphaned_sessions` and the reaper spins on it on
+        // every tick. Unreachability is already established here: the parent is
+        // `terminated:*`, and any pending gate this child held is cancelled
+        // below.
+        let _ = store.terminate_session_transcript(&child_session_id, &now_rfc, "failed");
 
         let event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: uuid::Uuid::new_v4().to_string(),

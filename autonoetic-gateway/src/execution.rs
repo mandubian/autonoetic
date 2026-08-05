@@ -1950,11 +1950,19 @@ impl GatewayExecutionService {
             Some(&details.to_string()),
         )?;
 
-        // GAP-1C: finalize the root session transcript so it doesn't stay
+        // GAP-1C: terminate the root session transcript so it doesn't stay
         // 'active' forever. The orphan reaper checks parent transcript status
         // and can't reap children if the parent looks alive.
+        //
+        // This must force the terminal lifecycle. An emergency stop typically
+        // lands on a session parked at `awaiting_gate` or `hibernated`, and the
+        // polite `finalize_session_transcript` preserves both — the root would
+        // keep advertising a resumable lifecycle, `find_orphaned_sessions` would
+        // never see `terminated:*`, and its children would leak unreaped:
+        // exactly what GAP-1C exists to prevent. The stop has already cancelled
+        // this session's pending gates.
         let now = chrono::Utc::now().to_rfc3339();
-        if let Err(e) = store.finalize_session_transcript(root_session_id, &now, "failed") {
+        if let Err(e) = store.terminate_session_transcript(root_session_id, &now, "failed") {
             tracing::warn!(
                 target: "execution",
                 root_session_id = %root_session_id,

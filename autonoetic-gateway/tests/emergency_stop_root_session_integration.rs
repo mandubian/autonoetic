@@ -1005,3 +1005,102 @@ async fn emergency_stop_then_root_error_keeps_workflow_emergency_stopped() -> an
 
     Ok(())
 }
+
+/// GAP-1C regression: an emergency stop almost always lands on a session that
+/// is *parked* — at an approval gate (`awaiting_gate`) or between turns
+/// (`hibernated`). The polite `finalize_session_transcript` preserves both, so
+/// the stopped root kept advertising a resumable lifecycle; because
+/// `find_orphaned_sessions` resolves the parent through
+/// `COALESCE(lifecycle_state, …)` it never saw `terminated:*`, and the root's
+/// children leaked unreaped — the exact failure GAP-1C exists to prevent.
+#[serial_test::serial]
+#[tokio::test]
+async fn emergency_stop_terminates_parked_root_so_children_are_reapable() -> anyhow::Result<()> {
+    use autonoetic_gateway::scheduler::reap_orphaned_sessions;
+    use autonoetic_types::causal_chain::SessionTranscriptRecord;
+
+    for parked_state in ["awaiting_gate", "hibernated"] {
+        let workspace = TestWorkspace::new()?;
+        let config = workspace.gateway_config();
+        write_planner_agent(&workspace.agents_dir)?;
+
+        let gateway_dir = workspace.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir)?;
+
+        let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+        let execution = Arc::new(GatewayExecutionService::new(
+            config.clone(),
+            Some(store.clone()),
+        ));
+
+        let root_session = "root-estop-parked";
+        // A child with no workflow task of its own: nothing but the root's
+        // lifecycle can make it reapable.
+        let child_session = "root-estop-parked/coder.default-deadbeef";
+
+        let mut wf = ensure_workflow_for_root_session(
+            &config,
+            Some(store.as_ref()),
+            root_session,
+            Some("planner.default"),
+        )?;
+        wf.status = WorkflowRunStatus::WaitingChildren;
+        wf.updated_at = Utc::now().to_rfc3339();
+        save_workflow_run(&config, Some(store.as_ref()), &wf)?;
+
+        let now = Utc::now().to_rfc3339();
+        for (sid, status) in [(root_session, "active"), (child_session, "active")] {
+            store.upsert_session_transcript(&SessionTranscriptRecord {
+                transcript_id: format!("stx-{sid}"),
+                session_id: sid.to_string(),
+                root_session_id: root_session.to_string(),
+                agent_id: "planner.default".to_string(),
+                revision_id: None,
+                user_id: None,
+                started_at: now.clone(),
+                ended_at: None,
+                status: status.to_string(),
+                turn_count: 1,
+                transcript_handle: None,
+                excerpt: None,
+                origin_node_id: None,
+            })?;
+        }
+        // The root is parked, exactly as it would be when an operator hits the
+        // circuit breaker.
+        store.set_session_lifecycle_state(root_session, parked_state)?;
+
+        let out = execution
+            .emergency_stop_root_session(
+                root_session,
+                "integration test",
+                "user",
+                "tester",
+                "manual",
+                None,
+            )
+            .await?;
+        assert_eq!(out["ok"], true);
+
+        assert_eq!(
+            store.get_session_lifecycle_state(root_session)?.as_deref(),
+            Some("terminated:failed"),
+            "an emergency-stopped root parked at {parked_state} must be terminal"
+        );
+
+        let orphans = store.find_orphaned_sessions()?;
+        assert!(
+            orphans.iter().any(|(sid, _, _, _)| sid == child_session),
+            "children of a root stopped at {parked_state} must become reapable"
+        );
+
+        reap_orphaned_sessions(execution.clone()).await?;
+        assert_eq!(
+            store.get_session_lifecycle_state(child_session)?.as_deref(),
+            Some("terminated:failed"),
+            "the child of a {parked_state} stopped root must be reaped"
+        );
+    }
+
+    Ok(())
+}

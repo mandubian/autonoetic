@@ -501,3 +501,98 @@ async fn orphan_reaper_skips_workflow_task_when_parent_between_turns() {
         "no reap event should be emitted for a workflow-active child with parent between turns"
     );
 }
+
+/// Regression: a child killed **between turns** keeps a resumable lifecycle
+/// (`hibernated` from its last yield checkpoint) even after its own termination
+/// path marked it `failed`. Once its parent terminates it becomes an orphan —
+/// and because `find_orphaned_sessions` excludes only `terminated:%` while the
+/// polite `finalize_session_transcript` refuses to overwrite `hibernated`, the
+/// reaper used to re-select and "reap" it on every scheduler tick, forever,
+/// inserting a fresh `parent_terminated` event and rewriting `ended_at` each
+/// pass. The reap must be terminal on the first pass and a no-op thereafter.
+#[tokio::test]
+async fn orphan_reaper_converges_on_child_killed_between_turns() {
+    for parked_state in ["hibernated", "awaiting_gate"] {
+        let ws = TestWorkspace::new().unwrap();
+        let gateway_dir = ws.agents_dir.join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let store = std::sync::Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+
+        let root_id = "root-converge-001";
+        let child_id = "root-converge-001/static_evaluator.default-1bb42ccd";
+
+        store
+            .upsert_session_transcript(&make_transcript(
+                root_id,
+                root_id,
+                "planner.default",
+                "completed",
+            ))
+            .unwrap();
+        store
+            .set_session_lifecycle_state(root_id, "terminated:completed")
+            .unwrap();
+
+        // The child is already dead (its kill path set `failed`) but still
+        // advertises a resumable lifecycle from its last yield.
+        store
+            .upsert_session_transcript(&make_transcript(
+                child_id,
+                root_id,
+                "static_evaluator.default",
+                "failed",
+            ))
+            .unwrap();
+        store
+            .set_session_lifecycle_state(child_id, parked_state)
+            .unwrap();
+
+        let config = ws.gateway_config();
+        let execution =
+            std::sync::Arc::new(GatewayExecutionService::new(config, Some(store.clone())));
+
+        reap_orphaned_sessions(execution.clone())
+            .await
+            .expect("first reap should succeed");
+
+        assert_eq!(
+            store
+                .get_session_lifecycle_state(child_id)
+                .unwrap()
+                .as_deref(),
+            Some("terminated:failed"),
+            "reaping a {parked_state} child must leave it terminal"
+        );
+        assert!(
+            store.find_orphaned_sessions().unwrap().is_empty(),
+            "a reaped {parked_state} child must not remain selectable as an orphan"
+        );
+
+        let after_first = store
+            .search_causal_events(Some(child_id), None, 100)
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "parent_terminated")
+            .count();
+        assert_eq!(
+            after_first, 1,
+            "first pass should emit exactly one parent_terminated event"
+        );
+
+        reap_orphaned_sessions(execution)
+            .await
+            .expect("second reap should succeed");
+
+        let after_second = store
+            .search_causal_events(Some(child_id), None, 100)
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "parent_terminated")
+            .count();
+        assert_eq!(
+            after_second, 1,
+            "second pass must be a no-op — the reaper must not re-reap a {parked_state} child"
+        );
+    }
+}
