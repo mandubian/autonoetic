@@ -96,6 +96,14 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
         &agents_dir.join(target_agent_id),
     )?;
 
+    // The spawn path touches the constitution digest/profile APIs, which
+    // require the process-global constitution runtime. Best-effort init here
+    // (idempotent, shared with sibling suites) so the test also passes when
+    // run isolated under nextest.
+    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    );
+
     let execution = GatewayExecutionService::new(config, Some(store));
     let mismatched_session_id = "session-schema-mismatch";
     let valid_session_id = "session-schema-valid";
