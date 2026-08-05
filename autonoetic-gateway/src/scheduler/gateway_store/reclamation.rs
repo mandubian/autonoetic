@@ -51,6 +51,17 @@ impl GatewayStore {
     /// Mark sessions as closed if they are still `active` and their `started_at`
     /// is older than `max_age_days`. Sets `ended_at` to `now`.
     /// 0 = skip. Returns the number of updated rows.
+    ///
+    /// Also stamps the terminal lifecycle. Writing `status = 'closed'` while
+    /// leaving `lifecycle_state` at `active` produces a row the read paths
+    /// disagree about: `find_orphaned_sessions` resolves a parent through
+    /// `COALESCE(lifecycle_state, …)`, so it would keep seeing `active` and
+    /// never reap that session's children. `closed` is a terminal success in
+    /// the status→lifecycle mapping used everywhere else (and in v64's
+    /// backfill), so it maps to `terminated:completed`. Rows reaching this
+    /// sweep have been stuck `active` for `max_age_days` (default 30) — a
+    /// crashed mid-turn session, not a parked one, which holds `completed`/
+    /// `suspended` instead.
     pub fn close_orphaned_sessions(
         &self,
         max_age_days: u64,
@@ -62,7 +73,10 @@ impl GatewayStore {
         let cutoff = (*now - chrono::Duration::days(max_age_days as i64)).to_rfc3339();
         let now_rfc = now.to_rfc3339();
         let conn = self.conn.lock().unwrap();
-        let sql = "UPDATE session_transcripts SET status = 'closed', ended_at = ?1
+        let sql = "UPDATE session_transcripts
+                      SET status = 'closed',
+                          ended_at = ?1,
+                          lifecycle_state = 'terminated:completed'
                    WHERE status = 'active' AND started_at < ?2";
         let n = conn.execute(sql, params![now_rfc, cutoff])?;
         Ok(n as u64)
@@ -231,6 +245,54 @@ mod tests {
         let now = chrono::Utc::now();
         let closed = store.close_orphaned_sessions(0, &now).unwrap();
         assert_eq!(closed, 0);
+    }
+
+    /// A session closed by the sweep must also reach a terminal lifecycle.
+    /// Writing `status='closed'` while leaving `lifecycle_state='active'` makes
+    /// the read paths disagree: `find_orphaned_sessions` resolves a parent via
+    /// `COALESCE(lifecycle_state, …)`, so it would keep seeing `active` and
+    /// never reap that session's children.
+    #[test]
+    fn test_close_orphaned_sessions_stamps_terminal_lifecycle() {
+        use autonoetic_types::causal_chain::SessionTranscriptRecord;
+
+        let (store, _dir) = make_store();
+        let now = chrono::Utc::now();
+        let long_ago = (now - chrono::Duration::days(90)).to_rfc3339();
+
+        store
+            .upsert_session_transcript(&SessionTranscriptRecord {
+                transcript_id: "stx-stale".to_string(),
+                session_id: "root-stale".to_string(),
+                root_session_id: "root-stale".to_string(),
+                agent_id: "planner.default".to_string(),
+                revision_id: None,
+                user_id: None,
+                started_at: long_ago,
+                ended_at: None,
+                status: "active".to_string(),
+                turn_count: 1,
+                transcript_handle: None,
+                excerpt: None,
+                origin_node_id: None,
+            })
+            .unwrap();
+
+        let closed = store.close_orphaned_sessions(30, &now).unwrap();
+        assert_eq!(closed, 1, "the stale active session should be closed");
+
+        assert_eq!(
+            store
+                .get_session_lifecycle_state("root-stale")
+                .unwrap()
+                .as_deref(),
+            Some("terminated:completed"),
+            "a swept session must not keep advertising a non-terminal lifecycle"
+        );
+        assert!(
+            store.find_orphaned_sessions().unwrap().is_empty(),
+            "sanity: the swept root itself is not a child and is never an orphan"
+        );
     }
 
     #[test]

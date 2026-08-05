@@ -1169,20 +1169,22 @@ pub fn update_task_run_status(
     }
     save_task_run(config, store, &task)?;
 
-    // Session-workflow sync (#673 GAP-2A): finalize the bound session's
+    // Session-workflow sync (#673 GAP-2A): close out the bound session's
     // transcript BEFORE emitting any signals/events so that a woken parent
     // querying child state sees the correct terminal status, not stale
     // 'active'/'suspended'. In the normal spawn-completion path the
-    // executor's close_session has already done this (harmless overwrite).
-    // In external paths (stuck sweeper, approval timeout, cancel, force-
-    // complete) this is the ONLY place the session gets finalized.
+    // executor's close_session has already recorded a status (this overwrites
+    // it harmlessly). In external paths (stuck sweeper, approval timeout,
+    // cancel, force-complete) this is the ONLY place the session is closed out
+    // at all.
     //
-    // A session bound to a task that just reached a terminal status can never
-    // run again — a retried stage gets a fresh task and a fresh session id. So
-    // this terminates rather than politely finalizes: the polite path preserves
-    // `hibernated`/`awaiting_gate`, which would leave a dead child advertising a
-    // resumable lifecycle. That lie is invisible while the parent is alive and
-    // becomes an endless reap loop the moment the parent ends.
+    // It *terminates* rather than politely finalizes. A session bound to a task
+    // that just reached a terminal status can never run again — a retried stage
+    // gets a fresh task and a fresh session id — whereas
+    // `finalize_session_transcript` preserves `hibernated`/`awaiting_gate` and
+    // would leave a dead child advertising a resumable lifecycle. That lie is
+    // invisible while the parent is alive and becomes an endless reap loop the
+    // moment the parent ends.
     {
         let is_terminal = status.is_terminal();
         let was_non_terminal = !previous_status.is_terminal();

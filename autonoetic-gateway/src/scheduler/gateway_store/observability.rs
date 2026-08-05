@@ -1188,18 +1188,36 @@ impl GatewayStore {
     /// recording when the session actually died rather than when a sweeper last
     /// looked at it.
     ///
-    /// `status` must be a terminal transcript status; anything other than
-    /// `"completed"` is recorded as a failure.
+    /// `status` must be a terminal transcript status. The mapping matches the
+    /// one the read paths already use (`find_orphaned_sessions`,
+    /// `search_session_transcripts`, migration v64): `completed` and `closed`
+    /// are terminal *successes*, `failed` is a terminal failure. `closed` is
+    /// written by the reclamation sweep, so omitting it here would mis-stamp
+    /// those rows as failures.
+    ///
+    /// An unrecognised status still terminates — recorded as a failure, with a
+    /// warning. Never leaving the row terminal is the one outcome that must not
+    /// happen: a wrong-but-terminal verdict is legible and correctable, while a
+    /// non-terminal one is the livelock this function exists to prevent.
     pub fn terminate_session_transcript(
         &self,
         session_id: &str,
         ended_at: &str,
         status: &str,
     ) -> Result<()> {
-        let lifecycle = if status == "completed" {
-            "terminated:completed"
-        } else {
-            "terminated:failed"
+        let lifecycle = match status {
+            "completed" | "closed" => "terminated:completed",
+            "failed" => "terminated:failed",
+            other => {
+                tracing::warn!(
+                    target: "lifecycle",
+                    session_id = %session_id,
+                    status = %other,
+                    "terminate_session_transcript called with a non-terminal status; \
+                     recording terminated:failed"
+                );
+                "terminated:failed"
+            }
         };
         let conn = self.conn.lock().unwrap();
         conn.execute(

@@ -1492,6 +1492,38 @@ mod tests {
         Ok(())
     }
 
+    /// The status→lifecycle mapping must match what the read paths already use
+    /// (`find_orphaned_sessions`, `search_session_transcripts`, migration v64):
+    /// `closed` is a terminal *success*, not a failure. The reclamation sweep
+    /// writes `closed`, so getting this wrong would mis-record those sessions.
+    /// An unrecognised status must still land terminal — never leaving the row
+    /// resumable is the property that prevents the reap livelock.
+    #[test]
+    fn terminate_maps_status_to_lifecycle_like_the_read_paths() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let store = GatewayStore::open(temp_dir.path())?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for (status, expected) in [
+            ("completed", "terminated:completed"),
+            ("closed", "terminated:completed"),
+            ("failed", "terminated:failed"),
+            // Not a terminal status: still terminated, recorded as a failure.
+            ("suspended", "terminated:failed"),
+        ] {
+            let sid = format!("sess-status-{status}");
+            seed_parked_transcript(&store, &sid, "hibernated")?;
+            store.terminate_session_transcript(&sid, &now, status)?;
+            assert_eq!(
+                store.get_session_lifecycle_state(&sid)?.as_deref(),
+                Some(expected),
+                "status {status:?} must map to {expected}"
+            );
+        }
+
+        Ok(())
+    }
+
     /// The first terminal verdict wins, so repeated sweeps are idempotent and
     /// `ended_at` keeps recording when the session actually died.
     #[test]
