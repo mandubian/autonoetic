@@ -570,6 +570,7 @@ impl NativeTool for WorkflowWaitTool {
                     any_failed,
                     any_not_found,
                     any_gate_fail,
+                    autonoetic_types::task_completion::any_result_truncated(&tasks_status),
                     0,
                 ),
             }))
@@ -593,6 +594,7 @@ impl NativeTool for WorkflowWaitTool {
                 any_failed,
                 any_not_found,
                 any_gate_fail,
+                autonoetic_types::task_completion::any_result_truncated(&tasks_status),
                 0,
             ),
         }))
