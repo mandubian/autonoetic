@@ -828,6 +828,47 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Body-read failure retry (connection dropped mid-body after HTTP 200)
+    // -----------------------------------------------------------------------
+    mod body_read_retry {
+        use crate::llm::{next_body_read_retry_wait, MAX_CONNECTION_RETRIES, MAX_TIMEOUT_RETRIES};
+        use std::time::Duration;
+
+        const DEADLINE: Duration = Duration::from_secs(240);
+
+        #[test]
+        fn body_read_blip_retries_up_to_connection_cap() {
+            for attempt in 0..MAX_CONNECTION_RETRIES {
+                assert!(
+                    next_body_read_retry_wait(false, attempt, Duration::ZERO, DEADLINE).is_some(),
+                    "attempt {attempt} should retry"
+                );
+            }
+            assert_eq!(
+                next_body_read_retry_wait(false, MAX_CONNECTION_RETRIES, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn body_read_timeout_retries_at_most_once() {
+            assert!(next_body_read_retry_wait(true, 0, Duration::ZERO, DEADLINE).is_some());
+            assert_eq!(
+                next_body_read_retry_wait(true, MAX_TIMEOUT_RETRIES, Duration::ZERO, DEADLINE),
+                None
+            );
+        }
+
+        #[test]
+        fn body_read_retry_respects_deadline() {
+            assert_eq!(
+                next_body_read_retry_wait(false, 0, Duration::from_secs(241), DEADLINE),
+                None
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Transient server-error (HTTP 5xx body) retry
     // -----------------------------------------------------------------------
     mod server_error_retry {

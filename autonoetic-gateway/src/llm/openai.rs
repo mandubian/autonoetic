@@ -565,9 +565,27 @@ impl LlmDriver for OpenAiDriver {
                 anyhow::bail!("OpenAI API error {}: {}", status, text);
             }
 
-            let body_text = response.text().await.map_err(|e| {
-                anyhow::anyhow!("error reading LLM response body: {}", e)
-            })?;
+            let body_text = match response.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(wait_ms) = crate::llm::next_body_read_retry_wait(
+                        e.is_timeout(),
+                        attempt,
+                        loop_start.elapsed(),
+                        retry_deadline,
+                    ) {
+                        tracing::warn!(
+                            attempt,
+                            wait_ms,
+                            error = %e,
+                            "LLM response body read failed, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!("error reading LLM response body: {}", e));
+                }
+            };
             let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
                 tracing::warn!(
                     target: "llm::openai",
@@ -613,7 +631,7 @@ impl LlmDriver for OpenAiDriver {
         let complete_timeout = crate::llm::request_timeout();
         let retry_deadline = complete_timeout.saturating_mul(2);
         let loop_start = std::time::Instant::now();
-        for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
+        'retry: for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
                 self.client
                     .post(&self.provider.base_url)
@@ -680,7 +698,33 @@ impl LlmDriver for OpenAiDriver {
             let mut byte_stream = response.bytes_stream();
 
             while let Some(chunk) = byte_stream.next().await {
-                let chunk = chunk?;
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // Retry only if no TextDelta has been emitted on `tx`
+                        // yet — otherwise a retry would replay duplicated
+                        // deltas to the consumer.
+                        if text_accum.is_empty() {
+                            if let Some(wait_ms) = crate::llm::next_body_read_retry_wait(
+                                e.is_timeout(),
+                                attempt,
+                                loop_start.elapsed(),
+                                retry_deadline,
+                            ) {
+                                tracing::warn!(
+                                    attempt,
+                                    wait_ms,
+                                    error = %e,
+                                    "LLM stream body read failed before any delta, retrying"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(wait_ms))
+                                    .await;
+                                continue 'retry;
+                            }
+                        }
+                        return Err(e.into());
+                    }
+                };
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 while let Some(pos) = buffer.find("\n\n") {

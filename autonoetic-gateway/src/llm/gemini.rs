@@ -252,9 +252,27 @@ impl LlmDriver for GeminiDriver {
                 anyhow::bail!("Gemini API error {}: {}", status, text);
             }
 
-            let body_text = response.text().await.map_err(|e| {
-                anyhow::anyhow!("error reading LLM response body: {}", e)
-            })?;
+            let body_text = match response.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    if let Some(wait_ms) = crate::llm::next_body_read_retry_wait(
+                        e.is_timeout(),
+                        attempt,
+                        loop_start.elapsed(),
+                        retry_deadline,
+                    ) {
+                        tracing::warn!(
+                            attempt,
+                            wait_ms,
+                            error = %e,
+                            "LLM response body read failed, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!("error reading LLM response body: {}", e));
+                }
+            };
             let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
                 tracing::warn!(
                     target: "llm::gemini",

@@ -169,6 +169,24 @@ pub fn next_connection_retry_wait(
     )
 }
 
+/// Retry decision for a response-body read failure after a successful HTTP
+/// status: connection dropped mid-body, truncated chunked transfer, or a
+/// decode error. These are treated as transient delivery failures — the
+/// request was accepted and processed, only the body transfer broke — so
+/// they retry within the provider under the same caps and wall-clock
+/// deadline as connection errors. Deliberately NOT wired into
+/// [`is_failover_eligible_error`]: the provider already consumed the request
+/// (and may have billed it), so cross-provider failover on a delivery blip
+/// risks paying twice.
+pub fn next_body_read_retry_wait(
+    is_timeout: bool,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    retry_wait_decision(true, is_timeout, attempt, elapsed, deadline)
+}
+
 /// Pure decision core of [`next_connection_retry_wait`], split out so it can be
 /// unit-tested without fabricating a `reqwest::Error`.
 pub(crate) fn retry_wait_decision(
