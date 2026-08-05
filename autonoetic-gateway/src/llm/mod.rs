@@ -152,6 +152,13 @@ pub fn server_error_retry_backoff_ms(attempt: u32) -> u64 {
 ///   multiply the timeout across retries.
 /// - **timeout vs blip**: a request timeout (`is_timeout`) retries at most
 ///   [`MAX_TIMEOUT_RETRIES`]; fast-failing connection errors retry up to
+/// Whether a reqwest error is a timeout. reqwest does not always set the
+/// `is_timeout` flag, so the message is matched too — applied uniformly to
+/// send()-phase and body-read-phase errors.
+pub(crate) fn error_is_timeout(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.to_string().to_lowercase().contains("timed out")
+}
+
 ///   [`MAX_CONNECTION_RETRIES`].
 pub fn next_connection_retry_wait(
     err: &reqwest::Error,
@@ -159,14 +166,31 @@ pub fn next_connection_retry_wait(
     elapsed: std::time::Duration,
     deadline: std::time::Duration,
 ) -> Option<u64> {
-    let is_timeout = err.is_timeout() || err.to_string().to_lowercase().contains("timed out");
     retry_wait_decision(
         is_transient_connection_error(err),
-        is_timeout,
+        error_is_timeout(err),
         attempt,
         elapsed,
         deadline,
     )
+}
+
+/// Retry decision for a response-body read failure after a successful HTTP
+/// status: connection dropped mid-body, truncated chunked transfer, or a
+/// decode error. These are treated as transient delivery failures — the
+/// request was accepted and processed, only the body transfer broke — so
+/// they retry within the provider under the same caps and wall-clock
+/// deadline as connection errors. Deliberately NOT wired into
+/// [`is_failover_eligible_error`]: the provider already consumed the request
+/// (and may have billed it), so cross-provider failover on a delivery blip
+/// risks paying twice.
+pub(crate) fn next_body_read_retry_wait(
+    is_timeout: bool,
+    attempt: u32,
+    elapsed: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Option<u64> {
+    retry_wait_decision(true, is_timeout, attempt, elapsed, deadline)
 }
 
 /// Pure decision core of [`next_connection_retry_wait`], split out so it can be
