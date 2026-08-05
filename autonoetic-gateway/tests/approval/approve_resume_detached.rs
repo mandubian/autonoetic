@@ -131,15 +131,21 @@ async fn approve_returns_before_detached_resume_finishes_impl() -> anyhow::Resul
     std::fs::create_dir_all(&gateway_dir)?;
     let store = Arc::new(GatewayStore::open(&gateway_dir)?);
 
-    // Vault for the secret handed over at approval time.
+    // Vault for the secret handed over at approval time. EnvGuard restores
+    // the process-global vault settings on drop so sibling tests in the same
+    // binary never observe them (same pattern as the LLM overrides below).
     let vault_temp = tempfile::tempdir()?;
-    std::env::set_var(
+    let _vault_key = support::EnvGuard::set(
         "AUTONOETIC_VAULT_KEY",
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
-    std::env::set_var(
+    let _vault_path = support::EnvGuard::set(
         "AUTONOETIC_VAULT_PATH",
-        vault_temp.path().join("vault.enc.json"),
+        vault_temp
+            .path()
+            .join("vault.enc.json")
+            .to_string_lossy()
+            .into_owned(),
     );
 
     // Seed the agent (SKILL.md + runtime.lock + ready revision + alias).

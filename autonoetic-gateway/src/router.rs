@@ -5165,7 +5165,10 @@ impl JsonRpcRouter {
                         // not wait on the resumed turn finishing.
                         if crate::scheduler::approval::should_resume_waiting_session(&decision) {
                             let router = self.clone();
-                            tokio::spawn(async move {
+                            // JoinHandle intentionally dropped — the resume is
+                            // fire-and-forget; failure falls back to the async
+                            // notification pump (logged below).
+                            let _resume_task = tokio::spawn(async move {
                                 let resume_msg = format!(
                                     "approval_resolved:{}:{}",
                                     decision.request_id,

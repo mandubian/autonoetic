@@ -97,12 +97,17 @@ async fn test_spawn_runs_for_plain_text_and_schema_matching_json_inputs() -> any
     )?;
 
     // The spawn path touches the constitution digest/profile APIs, which
-    // require the process-global constitution runtime. Best-effort init here
-    // (idempotent, shared with sibling suites) so the test also passes when
-    // run isolated under nextest.
-    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+    // require the process-global constitution runtime. A config-mismatch
+    // error only means a neighbor test initialized first — that runtime
+    // satisfies the read; anything else must surface here, not at the digest.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
         &autonoetic_types::config::GatewayConfig::default(),
-    );
+    ) {
+        anyhow::ensure!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize and no neighbor initialized it either: {e}"
+        );
+    }
 
     let execution = GatewayExecutionService::new(config, Some(store));
     let mismatched_session_id = "session-schema-mismatch";
