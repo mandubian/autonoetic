@@ -256,7 +256,7 @@ impl LlmDriver for GeminiDriver {
                 Ok(t) => t,
                 Err(e) => {
                     if let Some(wait_ms) = crate::llm::next_body_read_retry_wait(
-                        e.is_timeout(),
+                        crate::llm::error_is_timeout(&e),
                         attempt,
                         loop_start.elapsed(),
                         retry_deadline,
