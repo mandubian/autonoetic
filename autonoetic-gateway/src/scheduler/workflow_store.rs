@@ -1169,13 +1169,22 @@ pub fn update_task_run_status(
     }
     save_task_run(config, store, &task)?;
 
-    // Session-workflow sync (#673 GAP-2A): finalize the bound session's
+    // Session-workflow sync (#673 GAP-2A): close out the bound session's
     // transcript BEFORE emitting any signals/events so that a woken parent
     // querying child state sees the correct terminal status, not stale
     // 'active'/'suspended'. In the normal spawn-completion path the
-    // executor's close_session has already done this (harmless overwrite).
-    // In external paths (stuck sweeper, approval timeout, cancel, force-
-    // complete) this is the ONLY place the session gets finalized.
+    // executor's close_session has already recorded a status (this overwrites
+    // it harmlessly). In external paths (stuck sweeper, approval timeout,
+    // cancel, force-complete) this is the ONLY place the session is closed out
+    // at all.
+    //
+    // It *terminates* rather than politely finalizes. A session bound to a task
+    // that just reached a terminal status can never run again — a retried stage
+    // gets a fresh task and a fresh session id — whereas
+    // `finalize_session_transcript` preserves `hibernated`/`awaiting_gate` and
+    // would leave a dead child advertising a resumable lifecycle. That lie is
+    // invisible while the parent is alive and becomes an endless reap loop the
+    // moment the parent ends.
     {
         let is_terminal = status.is_terminal();
         let was_non_terminal = !previous_status.is_terminal();
@@ -1187,7 +1196,7 @@ pub fn update_task_run_status(
                 };
                 let ended_at = now_rfc3339();
                 if let Err(e) =
-                    store.finalize_session_transcript(&task.session_id, &ended_at, session_status)
+                    store.terminate_session_transcript(&task.session_id, &ended_at, session_status)
                 {
                     tracing::warn!(
                         target: "workflow",
@@ -2551,11 +2560,13 @@ pub fn fail_workflow_for_root_session(
         }
         failed += 1;
 
-        // Finalize the bound session transcript (mirrors GAP-2A in update_task_run_status,
-        // but without the signal emission that would wake an already-dead root).
+        // Terminate the bound session transcript (mirrors GAP-2A in
+        // update_task_run_status, but without the signal emission that would
+        // wake an already-dead root). The root is gone, so a resumable
+        // lifecycle on this child would only feed the orphan reaper forever.
         if !task.session_id.is_empty() {
             if let Some(store) = store {
-                if let Err(e) = store.finalize_session_transcript(&task.session_id, &now, "failed")
+                if let Err(e) = store.terminate_session_transcript(&task.session_id, &now, "failed")
                 {
                     tracing::warn!(
                         target: "workflow",
@@ -3331,13 +3342,16 @@ pub fn apply_emergency_stop_to_workflow(
         task.result_summary = Some(format!("emergency_stop:{stop_id}"));
         save_task_run(config, store, &task)?;
 
-        // GAP-1C: finalize the bound session transcript so it doesn't
+        // GAP-1C: terminate the bound session transcript so it doesn't
         // leak as 'active' forever. The orphan reaper can't see it
         // because the parent session is also emergency-stopped (active).
+        // An emergency stop cancels this task's pending gates, so a
+        // resumable `awaiting_gate`/`hibernated` lifecycle must not
+        // survive it — hence terminate, not the polite finalize.
         if !task.session_id.is_empty() {
             if let Some(store) = store {
                 let now = now_rfc3339();
-                if let Err(e) = store.finalize_session_transcript(&task.session_id, &now, "failed")
+                if let Err(e) = store.terminate_session_transcript(&task.session_id, &now, "failed")
                 {
                     tracing::warn!(
                         target: "workflow",
