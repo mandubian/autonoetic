@@ -108,7 +108,11 @@ pub fn detect_network_hosts_from_file_map(file_map: &BTreeMap<String, Vec<u8>>) 
                     }
                 }
                 crate::runtime::remote_access::DetectedPatternCategory::HostConstant => {
-                    let host = pattern.pattern.trim().to_ascii_lowercase();
+                    let host = pattern
+                        .pattern
+                        .trim()
+                        .trim_end_matches('.')
+                        .to_ascii_lowercase();
                     if !host.is_empty() && host != "localhost" && !host.ends_with(".localhost") {
                         detected_hosts.insert(host);
                     }

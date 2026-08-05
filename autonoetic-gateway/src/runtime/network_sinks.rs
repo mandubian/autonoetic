@@ -777,9 +777,25 @@ fn javascript_host_constants(masked_code: &str) -> HashMap<String, String> {
     out
 }
 
+/// Whether the identifier ending at byte offset `end` in `args` labels the
+/// argument instead of being its value: a Python keyword-argument name
+/// (`host=RELAY`) or a JS object key (`{host: RELAY}`). Resolving those
+/// would attribute a constant the call never passed — a constant named
+/// `host` would "resolve" every `host=` call site. `==` is a comparison,
+/// not a keyword name. JS shorthand (`{HOST}`) is NOT a name position —
+/// there the identifier is the value.
+fn is_arg_name_position(args: &str, end: usize) -> bool {
+    let rest = args[end..].trim_start();
+    if let Some(r) = rest.strip_prefix('=') {
+        return !r.starts_with('=');
+    }
+    rest.starts_with(':')
+}
+
 /// Match sink-call arguments against the constant table: every identifier in
 /// a sink's argument list that names a hostname-valued constant yields one
-/// resolution.
+/// resolution. Identifiers in name position (keyword-argument names, JS
+/// object keys) are skipped — see [`is_arg_name_position`].
 fn resolve_host_constants(
     sinks: Vec<DetectedSink>,
     constants: &HashMap<String, String>,
@@ -791,6 +807,9 @@ fn resolve_host_constants(
     let mut out: Vec<ResolvedHostConstant> = Vec::new();
     for sink in sinks {
         for ident in ident_re.find_iter(&sink.args) {
+            if is_arg_name_position(&sink.args, ident.end()) {
+                continue;
+            }
             let Some(host) = constants.get(ident.as_str()) else {
                 continue;
             };
@@ -1343,6 +1362,49 @@ const EVIL_HOST = "evil.example.org";
 const s = net.connect(993, "imap.gmail.com");
 "#;
         assert!(resolve_javascript_host_constants(code).is_empty());
+    }
+
+    /// A constant named after a keyword parameter must not "resolve" when it
+    /// appears as the kwarg NAME: `host=RELAY` passes RELAY, not whatever a
+    /// `host` constant holds. Review-caught laundering vector.
+    #[test]
+    fn python_kwarg_name_does_not_resolve_constant() {
+        let code = r#"
+import smtplib
+host = "evil.example.org"
+RELAY = "smtp.fastmail.com"
+client = smtplib.SMTP(host=RELAY, port=587)
+"#;
+        let found = resolve_python_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "smtp.fastmail.com");
+        assert_eq!(found[0].ident, "RELAY");
+    }
+
+    #[test]
+    fn python_kwarg_name_with_string_value_resolves_nothing() {
+        let code = "import smtplib\nhost = \"evil.example.org\"\nsmtplib.SMTP(host=\"smtp.fastmail.com\")\n";
+        assert!(resolve_python_host_constants(code).is_empty());
+    }
+
+    /// A constant named `host` must not resolve from a JS object key either:
+    /// `{host: RELAY}` passes RELAY. But shorthand `{HOST}` passes HOST.
+    #[test]
+    fn javascript_object_key_does_not_resolve_constant_but_shorthand_does() {
+        let code = r#"
+const net = require("net");
+const host = "evil.example.org";
+const RELAY = "imap.gmail.com";
+net.connect({host: RELAY, port: 993});
+"#;
+        let found = resolve_javascript_host_constants(code);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
+
+        let shorthand = "const net = require(\"net\");\nconst HOST = \"imap.gmail.com\";\nnet.connect({HOST});\n";
+        let found = resolve_javascript_host_constants(shorthand);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].host, "imap.gmail.com");
     }
 
     /// Sink call args are captured from the string-masked source: identifiers
