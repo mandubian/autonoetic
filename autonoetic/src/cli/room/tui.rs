@@ -7019,10 +7019,40 @@ pub fn run(
                         // `msg` here comes from `call_with_timeout` (client.rs),
                         // whose timeout error template is "{method} timed out
                         // after {n}s (gateway not responding)" — the
-                        // `contains("timed out")` test below is coupled to that
+                        // `contains("timed out")` tests below are coupled to that
                         // template and must be revisited if it ever changes.
+                        let gate_timed_out = msg.contains("timed out");
                         let answer_timed_out =
-                            gi.action == GateAction::Answer && msg.contains("timed out");
+                            gi.action == GateAction::Answer && gate_timed_out;
+                        // `approvals.approve` / `approvals.reject` commit the
+                        // decision gateway-side *before* the session resume runs
+                        // (and the approve-side resume now runs detached), so a
+                        // timeout usually means the decision landed and only the
+                        // response was lost. Ask the gateway for the real status
+                        // instead of guessing: if `approvals.inspect` shows the
+                        // decision we attempted, treat the gate as acted; if it
+                        // is genuinely still pending (or inspect fails), fall
+                        // through to the normal retry path below.
+                        let decision_landed = gate_timed_out
+                            && matches!(gi.action, GateAction::Approve | GateAction::Reject)
+                            && {
+                                let expected = match gi.action {
+                                    GateAction::Approve => "approved",
+                                    GateAction::Reject => "rejected",
+                                    GateAction::Answer => unreachable!(),
+                                };
+                                rpc(
+                                    client,
+                                    "approvals.inspect",
+                                    serde_json::json!({ "request_id": gi.id }),
+                                )
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("status").and_then(|s| s.as_str()).map(str::to_string)
+                                })
+                                .as_deref()
+                                    == Some(expected)
+                            };
                         if answer_timed_out {
                             acted.insert(gi.id.clone());
                             gate_modal = None;
@@ -7031,6 +7061,19 @@ pub fn run(
                                  running (watch the timeline). If the question \
                                  re-appears, press r to answer again."
                             ));
+                        } else if decision_landed {
+                            acted.insert(gi.id.clone());
+                            gate_modal = None;
+                            status = Some(match gi.action {
+                                GateAction::Approve => format!(
+                                    "{msg} — approval recorded; the agent turn is resuming \
+                                     in the background (watch the timeline)"
+                                ),
+                                GateAction::Reject => format!("{msg} — rejection recorded"),
+                                GateAction::Answer => unreachable!(),
+                            });
+                            follow = true;
+                            force_timeline_refresh = true;
                         } else {
                             // Restore the input for an in-place retry only while
                             // the modal is still up (or the input never lived in

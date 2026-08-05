@@ -37,8 +37,10 @@ async fn test_openrouter_simple_completion() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Model from agent_config.toml → balanced_gfl
-    let model = "google/gemini-3-flash-preview";
+    // Free-tier model that does not depend on the account's provider
+    // allowlist (google/gemini-3-flash-preview 404s when Google providers
+    // are excluded).
+    let model = "poolside/laguna-s-2.1:free";
     let driver = make_openrouter_driver(model)?;
 
     let req = CompletionRequest::simple(
@@ -76,7 +78,7 @@ async fn test_openrouter_tool_call() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let model = "google/gemini-3-flash-preview";
+    let model = "poolside/laguna-s-2.1:free";
     let driver = make_openrouter_driver(model)?;
 
     use autonoetic_gateway::llm::ToolDefinition;
@@ -155,7 +157,7 @@ async fn test_openrouter_tool_caching() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let model = "google/gemini-3-flash-preview";
+    let model = "poolside/laguna-s-2.1:free";
     let driver = make_openrouter_driver(model)?;
 
     use autonoetic_gateway::llm::ToolDefinition;
