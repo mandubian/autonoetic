@@ -34,7 +34,8 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// `Capability::NetworkAccess.hosts` (never LLM-judged). Wildcards
 /// (`"*"`) are skipped because they don't materialize to a concrete,
 /// matchable grant and would defeat the dedup's concreteness rule (the exec
-/// cache only auto-approves when all patterns are `url_literal`/`ip_address`).
+/// cache only auto-approves when all patterns are
+/// `url_literal`/`ip_address`/`host_constant`).
 ///
 /// Best-effort: any failure (missing config, agent not installed, DB error)
 /// returns 0 and the approval still succeeds. The grant carries

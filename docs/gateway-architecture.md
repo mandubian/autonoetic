@@ -624,7 +624,7 @@ Tool Call
 
 ```
 1. Exec Cache (fingerprint-level, cross-session)
-   └─ Only when all patterns are concrete (url_literal/ip_address)
+   └─ Only when all patterns are concrete (url_literal/ip_address/host_constant)
 
 2. Plan Grants (operator-approved plan envelope)
    └─ Materialized as session grant

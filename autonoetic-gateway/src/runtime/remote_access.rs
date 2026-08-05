@@ -39,6 +39,12 @@ pub enum DetectedPatternCategory {
     NetworkCommand,
     DependencyInstall,
     NetworkSink,
+    /// A hostname-valued constant resolved as a network-sink argument, e.g.
+    /// `HOST = "imap.gmail.com"` passed to `imaplib.IMAP4_SSL(HOST)`.
+    /// Gateway-resolved like `NetworkSink`, but it names a concrete target,
+    /// so it participates in declaration gating and approval reuse exactly
+    /// like `IpAddress`.
+    HostConstant,
 }
 
 impl DetectedPatternCategory {
@@ -52,18 +58,23 @@ impl DetectedPatternCategory {
             Self::NetworkCommand => "network_command",
             Self::DependencyInstall => "dependency_install",
             Self::NetworkSink => "network_sink",
+            Self::HostConstant => "host_constant",
         }
     }
 
     /// Categories the declaration **gates**: undeclared ⇒ `undeclared_remote_pattern`.
     ///
-    /// Hosts (`UrlLiteral`/`IpAddress`) and shell/package surfaces
+    /// Hosts (`UrlLiteral`/`IpAddress`/`HostConstant`) and shell/package surfaces
     /// (`NetworkCommand`/`DependencyInstall`) — intent an agent can state
     /// without knowing analyzer internals.
     pub const fn is_gating(self) -> bool {
         matches!(
             self,
-            Self::UrlLiteral | Self::IpAddress | Self::NetworkCommand | Self::DependencyInstall
+            Self::UrlLiteral
+                | Self::IpAddress
+                | Self::HostConstant
+                | Self::NetworkCommand
+                | Self::DependencyInstall
         )
     }
 
@@ -96,6 +107,7 @@ impl FromStr for DetectedPatternCategory {
             "network_command" => Ok(Self::NetworkCommand),
             "dependency_install" => Ok(Self::DependencyInstall),
             "network_sink" => Ok(Self::NetworkSink),
+            "host_constant" => Ok(Self::HostConstant),
             other => Err(format!("unknown DetectedPatternCategory: {other}")),
         }
     }
@@ -671,7 +683,9 @@ fn declaration_covers_pattern(decl: &RemoteAccessDeclaration, p: &DetectedPatter
         DetectedPatternCategory::UrlLiteral => extract_host_from_url_literal(&p.pattern)
             .map(|host| declaration_allows_target(decl, &host, Some(&p.pattern)))
             .unwrap_or(false),
-        DetectedPatternCategory::IpAddress => declaration_allows_target(decl, &p.pattern, None),
+        DetectedPatternCategory::IpAddress | DetectedPatternCategory::HostConstant => {
+            declaration_allows_target(decl, &p.pattern, None)
+        }
         DetectedPatternCategory::NetworkCommand => {
             if is_package_manager_command_pattern(&p.pattern) {
                 observed_matches_declared(&p.pattern, &decl.package_manager_commands)
@@ -792,6 +806,8 @@ impl RemoteAccessAnalyzer {
     /// 3. URL literals (http://, https://, ftp://)
     /// 4. IP address literals
     /// 5. Network shell commands (pip install, curl, git clone, etc.)
+    /// 6. Hostname-valued constants passed to network sinks
+    ///    (`HOST = "imap.gmail.com"` + `imaplib.IMAP4_SSL(HOST)`)
     pub fn analyze_code(code: &str) -> RemoteAccessAnalysis {
         Self::analyze_code_with_declaration(code, None)
     }
@@ -828,6 +844,13 @@ impl RemoteAccessAnalyzer {
         // sink set. Scoped by the same active-language set as the call
         // heuristics.
         patterns.extend(Self::detect_network_sinks(code, active_languages.as_ref()));
+
+        // Hostname-valued constants passed to those sinks (e.g.
+        // `HOST = "imap.gmail.com"` + `imaplib.IMAP4_SSL(HOST)`). Resolves the
+        // sink's target to a concrete host so approval reuse — session grants,
+        // exec cache, coverage classification — can key on it instead of
+        // seeing only an Unresolved network_sink signal.
+        patterns.extend(Self::detect_host_constants(code, active_languages.as_ref()));
 
         // Check for URL literals
         patterns.extend(Self::detect_url_literals(code));
@@ -945,6 +968,47 @@ impl RemoteAccessAnalyzer {
                 DetectedPatternCategory::NetworkSink,
                 &sink.sink,
                 sink.line,
+                &reason,
+            );
+        }
+        patterns
+    }
+
+    /// Detects hostname-valued constants passed as arguments to network sink
+    /// calls (see [`crate::runtime::network_sinks::resolve_python_host_constants`]).
+    ///
+    /// Emitted under the `host_constant` category, which is a concrete target:
+    /// [`crate::runtime::approved_exec_cache::normalize_targets`] picks it up,
+    /// so `NetworkCoverage` becomes `Concrete` and one operator approval can
+    /// materialize a session grant covering sibling sessions running
+    /// differently-shaped scripts against the same host.
+    fn detect_host_constants(
+        code: &str,
+        active: Option<&HashSet<RemoteAccessLanguage>>,
+    ) -> Vec<DetectedPattern> {
+        use crate::runtime::network_sinks::{
+            resolve_javascript_host_constants, resolve_python_host_constants,
+        };
+
+        let mut found = Vec::new();
+        if pattern_applies_in_scope(Some(RemoteAccessLanguage::Python), active) {
+            found.extend(resolve_python_host_constants(code));
+        }
+        if pattern_applies_in_scope(Some(RemoteAccessLanguage::Javascript), active) {
+            found.extend(resolve_javascript_host_constants(code));
+        }
+
+        let mut patterns: Vec<DetectedPattern> = Vec::new();
+        for rc in found {
+            let reason = format!(
+                "Hostname constant `{}` passed to {} resolves a concrete target",
+                rc.ident, rc.sink
+            );
+            push_unique_pattern(
+                &mut patterns,
+                DetectedPatternCategory::HostConstant,
+                &rc.host,
+                rc.line,
                 &reason,
             );
         }
@@ -1681,6 +1745,66 @@ PORT = 8080
             .detected_patterns
             .iter()
             .any(|p| p.category == "ip_address"));
+    }
+
+    /// The session-1a32cf14 shape: IMAP host in a module constant passed to
+    /// the sink by name. The analysis must surface `imap.gmail.com` as a
+    /// concrete `host_constant` target so coverage classifies Concrete and
+    /// approval reuse (session grants, exec cache) can key on it.
+    #[test]
+    fn test_host_constant_detected_and_classified_concrete() {
+        let code = r#"
+import imaplib
+import email
+
+HOST = "imap.gmail.com"
+
+mail = imaplib.IMAP4_SSL(HOST)
+mail.login("user@gmail.com", "app-password")
+"#;
+        let analysis = RemoteAccessAnalyzer::analyze_code(code);
+        assert!(analysis.requires_approval);
+        assert!(analysis
+            .detected_patterns
+            .iter()
+            .any(|p| p.category == "network_sink" && p.pattern == "imaplib.IMAP4_SSL"));
+        let host_constants: Vec<&DetectedPattern> = analysis
+            .detected_patterns
+            .iter()
+            .filter(|p| p.category == "host_constant")
+            .collect();
+        assert_eq!(host_constants.len(), 1);
+        assert_eq!(host_constants[0].pattern, "imap.gmail.com");
+
+        let targets = crate::runtime::approved_exec_cache::normalize_targets(
+            &analysis.detected_patterns,
+        );
+        assert_eq!(targets, vec!["imap.gmail.com".to_string()]);
+        assert_eq!(
+            classify_network_coverage(&analysis.detected_patterns, targets.clone()),
+            NetworkCoverage::Concrete { targets }
+        );
+    }
+
+    /// A declared `remote_access.targets` entry must cover a resolved host
+    /// constant exactly like it covers an IP literal.
+    #[test]
+    fn test_declaration_covers_host_constant() {
+        let decl = decl_with_targets(vec![autonoetic_types::background::GrantTarget::ExactHost(
+            "imap.gmail.com".to_string(),
+        )]);
+        let p = DetectedPattern {
+            category: DetectedPatternCategory::HostConstant,
+            pattern: "imap.gmail.com".to_string(),
+            line_number: Some(4),
+            reason: "test".to_string(),
+        };
+        assert!(declaration_covers_pattern(&decl, &p));
+
+        let other = decl_with_targets(vec![autonoetic_types::background::GrantTarget::ExactHost(
+            "smtp.fastmail.com".to_string(),
+        )]);
+        assert!(!declaration_covers_pattern(&other, &p));
     }
 
     #[test]
