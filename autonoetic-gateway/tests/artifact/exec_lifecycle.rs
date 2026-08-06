@@ -218,7 +218,7 @@ fn test_lifecycle_cache_reuse_simulated() {
         "fingerprint should match on second run"
     );
 
-    let found = cache.find(&fingerprint_second);
+    let found = cache.find(&fingerprint_second, 86400);
     assert!(
         found.is_some(),
         "cache should hit on second run — approval reuse works"

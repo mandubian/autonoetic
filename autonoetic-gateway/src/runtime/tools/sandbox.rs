@@ -1542,7 +1542,10 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                         &manifest.capabilities,
                     );
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                        if let Some(entry) = cache.find(&fingerprint) {
+                        if let Some(entry) = cache.find(
+                            &fingerprint,
+                            crate::runtime::approved_exec_cache::cache_ttl_secs(config),
+                        ) {
                             tracing::info!(
                                 target: "sandbox_exec",
                                 fingerprint = %fingerprint,
@@ -2665,7 +2668,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                 // false `locked:true` would tell the agent not to seek approval
                 // it still needs.
                 Ok(Some(result)) if !result.hosts.is_empty() => {
-                    let covered = gs.session_grants_cover_targets(root, &result.hosts);
+                    let covered =
+                        gs.session_grants_cover_targets(root, &manifest.agent.id, &result.hosts);
                     body["network_grant"] = serde_json::json!({
                         "hosts": result.hosts,
                         "locked": covered,

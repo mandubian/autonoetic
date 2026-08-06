@@ -56,6 +56,17 @@ pub struct ApprovedExecCache {
     entries: Arc<Mutex<HashMap<String, ApprovedExecEntry>>>,
 }
 
+/// TTL for exec-cache lookups: the operator-configured
+/// `default_grant_ttl_secs`, or the shared 24h default when the tool ran
+/// without gateway config (tests, one-off drivers). Keeping the cache on the
+/// grant TTL is the alignment decided under "Gap 3" of the grant-strategy
+/// review: the two approval-reuse layers must not have different horizons.
+pub fn cache_ttl_secs(config: Option<&autonoetic_types::config::GatewayConfig>) -> u64 {
+    config
+        .map(|c| c.default_grant_ttl_secs)
+        .unwrap_or(autonoetic_types::config::DEFAULT_GRANT_TTL_SECS)
+}
+
 /// Data needed to backfill the approved-exec cache when a sandbox exec gate is
 /// cleared without a cache hit (e.g. by session grant or approval_ref).
 #[derive(Debug, Clone)]
@@ -75,7 +86,9 @@ impl ApprovedExecCacheBackfill {
     /// validation path route through it.
     pub fn record_if_missing(&self) -> anyhow::Result<()> {
         let cache = ApprovedExecCache::new(&self.gateway_dir)?;
-        if cache.find(&self.fingerprint).is_some() {
+        // Existence check only (ttl 0): an expired-but-present entry must not
+        // block recording the fresh approval; gated lookups prune by age.
+        if cache.find(&self.fingerprint, 0).is_some() {
             return Ok(());
         }
         let entry = ApprovedExecEntry {
@@ -129,10 +142,61 @@ impl ApprovedExecCache {
         Ok(())
     }
 
-    /// Looks up an entry by fingerprint.
-    pub fn find(&self, fingerprint: &str) -> Option<ApprovedExecEntry> {
-        let entries = self.entries.lock().unwrap();
-        entries.get(fingerprint).cloned()
+    /// Whether an entry is older than `ttl_secs` (measured from `approved_at`,
+    /// mirroring grant expiry which measures from `granted_at`). `ttl_secs ==
+    /// 0` disables expiry, matching `default_grant_ttl_secs = 0`. An
+    /// unparseable `approved_at` fails closed (treated as expired): the cost
+    /// is one re-approval, the benefit is a corrupt entry never mints a
+    /// permanent bypass.
+    fn is_expired(entry: &ApprovedExecEntry, ttl_secs: u64, now: chrono::DateTime<chrono::Utc>) -> bool {
+        if ttl_secs == 0 {
+            return false;
+        }
+        let Ok(approved) = chrono::DateTime::parse_from_rfc3339(&entry.approved_at) else {
+            return true;
+        };
+        let ttl = chrono::Duration::seconds(i64::try_from(ttl_secs).unwrap_or(i64::MAX));
+        approved.with_timezone(&chrono::Utc) + ttl <= now
+    }
+
+    /// Looks up an entry by fingerprint, honoring `ttl_secs` (aligned with
+    /// `GatewayConfig::default_grant_ttl_secs` — the same budget that expires
+    /// session grants expires cache entries). An expired entry is pruned and
+    /// persisted, so the next matching exec goes back through approval.
+    /// Pass `0` for a pure existence check that ignores age.
+    pub fn find(&self, fingerprint: &str, ttl_secs: u64) -> Option<ApprovedExecEntry> {
+        let now = chrono::Utc::now();
+        let expired = {
+            let entries = self.entries.lock().unwrap();
+            entries
+                .get(fingerprint)
+                .map(|e| Self::is_expired(e, ttl_secs, now))
+        };
+        match expired {
+            None => None,
+            Some(false) => {
+                let entries = self.entries.lock().unwrap();
+                entries.get(fingerprint).cloned()
+            }
+            Some(true) => {
+                let mut entries = self.entries.lock().unwrap();
+                entries.remove(fingerprint);
+                if let Err(e) = self.flush(&entries) {
+                    tracing::warn!(
+                        target: "approved_exec_cache",
+                        error = %e,
+                        "Failed to persist exec-cache expiry prune"
+                    );
+                }
+                tracing::info!(
+                    target: "approved_exec_cache",
+                    fingerprint = %fingerprint,
+                    ttl_secs,
+                    "Approved exec cache entry expired — next exec requires approval"
+                );
+                None
+            }
+        }
     }
 
     /// Returns all cached entries (cloned), sorted by `approved_at`. For
@@ -510,6 +574,83 @@ mod tests {
         assert_eq!(
             extract_host_from_url("https://status.github.com"),
             Some("status.github.com".to_string())
+        );
+    }
+
+    fn entry_with_age(approved_at: chrono::DateTime<chrono::Utc>) -> ApprovedExecEntry {
+        ApprovedExecEntry {
+            fingerprint: "sha256:test".to_string(),
+            agent_id: "agent.id".to_string(),
+            remote_targets: vec!["host.com".to_string()],
+            code_content: "code".to_string(),
+            approval_request_id: "apr-test".to_string(),
+            approved_at: approved_at.to_rfc3339(),
+            approved_by: "operator".to_string(),
+            last_used_at: approved_at.to_rfc3339(),
+        }
+    }
+
+    #[test]
+    fn find_expires_entries_past_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ApprovedExecCache::new(tmp.path()).unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::hours(25);
+        cache.record(entry_with_age(old)).unwrap();
+
+        // 24h TTL: the 25h-old entry is a miss and gets pruned.
+        assert!(cache.find("sha256:test", 86400).is_none());
+        assert_eq!(cache.len(), 0, "expired entry must be pruned");
+    }
+
+    #[test]
+    fn find_returns_entries_within_ttl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ApprovedExecCache::new(tmp.path()).unwrap();
+        let recent = chrono::Utc::now() - chrono::Duration::hours(1);
+        cache.record(entry_with_age(recent)).unwrap();
+
+        assert!(cache.find("sha256:test", 86400).is_some());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn find_ttl_zero_never_expires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ApprovedExecCache::new(tmp.path()).unwrap();
+        let ancient = chrono::Utc::now() - chrono::Duration::days(365);
+        cache.record(entry_with_age(ancient)).unwrap();
+
+        assert!(
+            cache.find("sha256:test", 0).is_some(),
+            "ttl 0 disables expiry, matching default_grant_ttl_secs = 0"
+        );
+    }
+
+    #[test]
+    fn find_unparseable_approved_at_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ApprovedExecCache::new(tmp.path()).unwrap();
+        let mut entry = entry_with_age(chrono::Utc::now());
+        entry.approved_at = "not-a-timestamp".to_string();
+        cache.record(entry).unwrap();
+
+        assert!(
+            cache.find("sha256:test", 86400).is_none(),
+            "corrupt timestamp must not mint a permanent bypass"
+        );
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn cache_ttl_secs_aligns_with_grant_config() {
+        let cfg = autonoetic_types::config::GatewayConfig {
+            default_grant_ttl_secs: 3600,
+            ..Default::default()
+        };
+        assert_eq!(cache_ttl_secs(Some(&cfg)), 3600);
+        assert_eq!(
+            cache_ttl_secs(None),
+            autonoetic_types::config::DEFAULT_GRANT_TTL_SECS
         );
     }
 }

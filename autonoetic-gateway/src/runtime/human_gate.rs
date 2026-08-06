@@ -371,7 +371,11 @@ impl GateService {
             if let Some(sid) = req.session_id {
                 if !sid.is_empty() {
                     let root_sid = content_store::root_session_id(sid);
-                    if self.store.session_grants_cover_targets(root_sid, targets) {
+                    if self.store.session_grants_cover_targets(
+                        root_sid,
+                        &req.manifest.agent.id,
+                        targets,
+                    ) {
                         let result = GateResult::Cleared {
                             source: ClearanceSource::SessionGrant,
                             enforced_rules: vec!["P-2.4"],
@@ -2579,7 +2583,7 @@ mod tests {
         // The cache should have been backfilled automatically.
         let cache = ApprovedExecCache::new(tmp.path())?;
         let entry = cache
-            .find(&fingerprint)
+            .find(&fingerprint, 0)
             .expect("cache entry was backfilled");
         assert_eq!(entry.remote_targets, targets);
         assert_eq!(entry.code_content, code_content);

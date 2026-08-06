@@ -251,7 +251,10 @@ impl NativeTool for ArtifactPrepareTool {
             );
             fingerprint_for_backfill = Some(fingerprint.clone());
             if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                if cache.find(&fingerprint).is_some() {
+                if cache
+                    .find(&fingerprint, cfg.default_grant_ttl_secs)
+                    .is_some()
+                {
                     pre_validated = true;
                 }
             }
@@ -336,7 +339,7 @@ impl NativeTool for ArtifactPrepareTool {
                 if source == crate::runtime::human_gate::ClearanceSource::SessionGrant {
                     if let Some(fp) = fingerprint_for_backfill {
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                            if cache.find(&fp).is_none() {
+                            if cache.find(&fp, 0).is_none() {
                                 let entry =
                                     crate::runtime::approved_exec_cache::ApprovedExecEntry {
                                         fingerprint: fp,
