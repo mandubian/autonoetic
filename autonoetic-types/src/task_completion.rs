@@ -185,12 +185,28 @@ pub fn any_gate_unsatisfied(tasks: &[Value]) -> bool {
     })
 }
 
+/// True if any task entry's `result_summary` is a shortened copy, i.e. its full
+/// reply lives behind `full_result_ref`.
+pub fn any_result_truncated(tasks: &[Value]) -> bool {
+    tasks.iter().any(|t| {
+        t.get("result_summary_truncated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    })
+}
+
 /// Neutral join message for `workflow.wait` (no transport formatting).
+///
+/// `any_truncated` matters because "you may proceed with the results" is a
+/// licence to act on `result_summary`. When a reply was too large to inline,
+/// that field is a shortened copy and acting on it means acting on partial data —
+/// so the message has to say where the whole thing is instead.
 pub fn workflow_wait_join_message(
     all_done: bool,
     any_failed: bool,
     any_not_found: bool,
     any_gate_fail: bool,
+    any_truncated: bool,
     waited_secs: u64,
 ) -> String {
     if all_done {
@@ -211,6 +227,16 @@ pub fn workflow_wait_join_message(
                     "All tasks finished after {}s; some gate verdicts did not pass. Review agent_outcome on each task.",
                     waited_secs
                 )
+            }
+        } else if any_truncated {
+            let suffix = "Some replies were too large to inline: those tasks carry \
+                          result_summary_truncated=true, and their full payload is at \
+                          full_result_ref — read it with content.read rather than acting on \
+                          result_summary or repeating the work.";
+            if waited_secs == 0 {
+                format!("All tasks completed successfully. {suffix}")
+            } else {
+                format!("All tasks completed successfully after {waited_secs}s. {suffix}")
             }
         } else if waited_secs == 0 {
             "All tasks completed successfully. You may proceed with the results.".to_string()
@@ -358,7 +384,36 @@ mod tests {
 
     #[test]
     fn workflow_wait_message_gate_fail() {
-        let msg = workflow_wait_join_message(true, false, false, true, 30);
+        let msg = workflow_wait_join_message(true, false, false, true, false, 30);
         assert!(msg.contains("gate verdicts"));
+    }
+
+    /// "You may proceed with the results" is a licence to act on
+    /// `result_summary`. When a reply was too large to inline, that field holds a
+    /// shortened copy, so the message must point at the full payload instead —
+    /// otherwise the parent acts on partial data or redoes the work.
+    #[test]
+    fn workflow_wait_message_points_at_the_full_payload_when_truncated() {
+        let msg = workflow_wait_join_message(true, false, false, false, true, 0);
+        assert!(msg.contains("full_result_ref"), "got {msg}");
+        assert!(
+            !msg.contains("may proceed with the results"),
+            "must not license acting on a shortened summary: {msg}"
+        );
+
+        let untruncated = workflow_wait_join_message(true, false, false, false, false, 0);
+        assert!(untruncated.contains("may proceed with the results"));
+    }
+
+    #[test]
+    fn any_result_truncated_reads_the_task_flag() {
+        let clean = vec![serde_json::json!({"task_id": "t1"})];
+        assert!(!any_result_truncated(&clean));
+
+        let flagged = vec![
+            serde_json::json!({"task_id": "t1"}),
+            serde_json::json!({"task_id": "t2", "result_summary_truncated": true}),
+        ];
+        assert!(any_result_truncated(&flagged));
     }
 }

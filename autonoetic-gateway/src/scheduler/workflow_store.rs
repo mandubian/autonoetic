@@ -2160,6 +2160,27 @@ pub fn record_output_contract_check(
     }
 }
 
+/// Record where a child's full reply was spilled when it exceeded the
+/// `result_summary` budget, so `workflow.wait` can hand the parent a handle to
+/// the complete payload instead of only the shortened copy.
+pub fn record_full_result_ref(task: &mut TaskRun, cnt_ref: &str) {
+    let metadata = task.metadata.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "full_result_ref".to_string(),
+            serde_json::Value::String(cnt_ref.to_string()),
+        );
+    }
+}
+
+/// The `cnt_` ref of a child's full reply, if it was spilled.
+pub fn full_result_ref(task: &TaskRun) -> Option<&str> {
+    task.metadata
+        .as_ref()?
+        .get("full_result_ref")?
+        .as_str()
+}
+
 fn build_child_state_notification(
     task: &TaskRun,
     status: TaskRunStatus,
@@ -4420,6 +4441,115 @@ mod tests {
         assert!(loaded.retry_policy.is_none());
         assert!(loaded.side_effect_state.is_none());
         assert!(loaded.dedupe_key.is_none());
+    }
+
+    /// `workflow.wait`'s own tool description tells agents that a succeeded
+    /// task's `implicit_artifact_id` and `named_outputs` are how you "inspect
+    /// full payload". For a script-mode agent that prints its result to stdout,
+    /// both used to come back empty — the handle existed and pointed at nothing,
+    /// so a planner that followed the documented path found no data and re-ran
+    /// the work. Spilling the oversized reply into the child's content namespace
+    /// makes that promise true.
+    #[test]
+    fn implicit_artifact_carries_the_spilled_child_reply() {
+        let dir = tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let cfg = test_config(&agents);
+
+        let gw_dir = crate::execution::gateway_root_dir(&cfg);
+        let parent_session = "root-spill";
+        let child_session = "root-spill/gmail-1";
+        crate::runtime::content_store::ContentStore::new(&gw_dir)
+            .unwrap()
+            .set_root_session(child_session, parent_session)
+            .unwrap();
+
+        // A payload too large for the summary field, as a script agent would
+        // print it: one JSON document on stdout.
+        let reply = serde_json::json!({
+            "ok": true,
+            "emails": (0..10)
+                .map(|i| serde_json::json!({
+                    "id": format!("{}", 888 - i),
+                    "preview": "y".repeat(400),
+                }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string();
+
+        let prepared = crate::scheduler::prepare_child_reply(
+            &cfg,
+            child_session,
+            &reply,
+            crate::scheduler::CHILD_SUMMARY_MAX_CHARS,
+        );
+        let spilled_ref = prepared.full_ref.clone().expect("reply must spill");
+
+        let ts = now_rfc3339();
+        let task = TaskRun {
+            task_id: "task-spill-artifact".to_string(),
+            workflow_id: "wf-spill-artifact".to_string(),
+            agent_id: "gmail".to_string(),
+            session_id: child_session.to_string(),
+            parent_session_id: parent_session.to_string(),
+            status: TaskRunStatus::Succeeded,
+            created_at: ts.clone(),
+            updated_at: ts,
+            source_agent_id: Some("planner.default".to_string()),
+            result_summary: Some(prepared.summary.clone()),
+            join_group: None,
+            message: None,
+            metadata: None,
+            retry_count: 0,
+            last_failure_class: None,
+            retry_policy: None,
+            side_effect_state: None,
+            dedupe_key: None,
+        };
+
+        create_implicit_artifact(&cfg, None, &task, Some(&prepared.summary)).unwrap();
+
+        let store = crate::runtime::content_store::ContentStore::new(&gw_dir).unwrap();
+        let artifact_bytes = store
+            .read_by_name(parent_session, &format!("impl_{}", task.task_id))
+            .unwrap();
+        let artifact_json: serde_json::Value = serde_json::from_slice(&artifact_bytes).unwrap();
+        let named_outputs = artifact_json["content"]["named_outputs"]
+            .as_array()
+            .expect("named_outputs must be present");
+
+        let entry = named_outputs
+            .iter()
+            .find(|o| {
+                o["name"]
+                    == serde_json::json!(crate::scheduler::child_reply_spill_name(
+                        child_session,
+                        true
+                    ))
+            })
+            .expect("the spilled reply must be listed as a named output");
+        assert_eq!(
+            entry["ref"],
+            serde_json::json!(spilled_ref),
+            "the listed ref must be the one the parent was handed"
+        );
+
+        // The point of the whole exercise: the parent can read the full payload,
+        // through the `named_outputs[*].ref` the tool description points at.
+        // Ref-based, not name-based — the ref is content-addressed and is the
+        // addressing that survives several children spilling under one root.
+        let listed_ref = entry["ref"].as_str().unwrap();
+        let recovered = String::from_utf8(
+            store
+                .read_by_name_or_handle(parent_session, listed_ref)
+                .expect("the listed ref must resolve for the parent"),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered, reply,
+            "the parent must recover the untruncated reply"
+        );
     }
 
     #[test]

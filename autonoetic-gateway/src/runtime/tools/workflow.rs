@@ -436,7 +436,7 @@ impl NativeTool for WorkflowWaitTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
+            description: "Checks whether watched task_ids have reached a terminal state (Succeeded, Failed, Cancelled, Aborted). When the join is not yet satisfied, the gateway suspends the session as WaitingForChild and re-checks automatically on the next child-state wake; no in-tool blocking or LLM round is consumed. Pass task_ids from agent.spawn(async=true). Returns structured status for each task. Succeeded tasks include an 'output' field with 'implicit_artifact_id' (e.g., 'impl_task-abc123') plus 'named_outputs' and 'artifacts'. Use content.read with named_outputs[*].ref (preferred) or with implicit_artifact_id to inspect full payload. When a task entry carries 'result_summary_truncated': true, its 'result_summary' is a shortened copy and 'full_result_ref' holds the complete reply — read that ref instead of acting on the summary or re-running the work. Pass timeout_secs=0 to probe current status without suspending.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -570,6 +570,7 @@ impl NativeTool for WorkflowWaitTool {
                     any_failed,
                     any_not_found,
                     any_gate_fail,
+                    autonoetic_types::task_completion::any_result_truncated(&tasks_status),
                     0,
                 ),
             }))
@@ -593,6 +594,7 @@ impl NativeTool for WorkflowWaitTool {
                 any_failed,
                 any_not_found,
                 any_gate_fail,
+                autonoetic_types::task_completion::any_result_truncated(&tasks_status),
                 0,
             ),
         }))
@@ -752,6 +754,15 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                 "implicit_artifact_id": implicit_artifact_id,
             });
 
+            // The child's reply exceeded the summary budget, so `result_summary`
+            // is a shortened copy. Name the handle holding the whole thing —
+            // without it the parent sees a partial payload with no way to tell
+            // that a complete one exists, and re-does work already done.
+            if let Some(cnt_ref) = crate::scheduler::workflow_store::full_result_ref(task) {
+                entry["result_summary_truncated"] = serde_json::Value::Bool(true);
+                entry["full_result_ref"] = serde_json::Value::String(cnt_ref.to_string());
+            }
+
             if task.status == autonoetic_types::workflow::TaskRunStatus::Succeeded {
                 autonoetic_types::task_completion::enrich_task_status_entry(
                     &mut entry,
@@ -765,10 +776,27 @@ done. Read child outputs from `named_outputs` (don't guess content names)."
                     // result path. This is intentionally non-blocking: the full
                     // child `SpawnResult` was already validated against
                     // `io.returns` before the task was marked complete. We
-                    // re-check the summary that crosses to the parent to catch
-                    // any fabricated claim that survived truncation.
+                    // re-check what crosses to the parent to catch any
+                    // fabricated claim that survived shortening.
+                    //
+                    // Scan the spilled reply when there is one. The shortened
+                    // summary carries only part of the child's references (and,
+                    // when the payload could not fit its own shape, only an
+                    // envelope), so scanning it alone would leave later claims
+                    // unchecked — reading the spill keeps this pass over the
+                    // whole reply.
+                    let spilled_reply = crate::scheduler::workflow_store::full_result_ref(task)
+                        .and_then(|cnt_ref| {
+                            crate::runtime::content_store::ContentStore::new(
+                                &agents_dir.join(".gateway"),
+                            )
+                            .ok()?
+                            .read_by_name_or_handle(&task.session_id, cnt_ref)
+                            .ok()
+                        })
+                        .and_then(|bytes| String::from_utf8(bytes).ok());
                     let _ = crate::runtime::response_validation::advisory_reconcile_child_result_summary(
-                        task.result_summary.as_deref(),
+                        spilled_reply.as_deref().or(task.result_summary.as_deref()),
                         &task.session_id,
                         session_id.unwrap_or_else(|| task.parent_session_id.as_str()),
                         &task.agent_id,
