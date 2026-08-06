@@ -134,7 +134,7 @@ async fn child_session_close_preserves_root_session_grant() {
     let host = "api.open-meteo.com";
     seed_root_grant(&store, root_sid, host);
 
-    assert!(store.session_grants_cover_targets(root_sid, &[host.to_string()]));
+    assert!(store.session_grants_cover_targets(root_sid, "grant.tester", &[host.to_string()]));
 
     let child_dir = agents_dir.join("grant.tester");
     let mut runtime = build_child_runtime(
@@ -146,13 +146,14 @@ async fn child_session_close_preserves_root_session_grant() {
     run_one_turn_and_close(&mut runtime, SessionCloseOutcome::ExecuteLoopComplete).await;
 
     assert!(
-        store.session_grants_cover_targets(root_sid, &[host.to_string()]),
+        store.session_grants_cover_targets(root_sid, "grant.tester", &[host.to_string()]),
         "RootSession grant must survive child-session close"
     );
     assert!(
         store.grants_cover_targets(
             &format!("{root_sid}/grant.tester-def"),
             root_sid,
+            "grant.tester",
             &[host.to_string()]
         ),
         "sibling child session must still be covered after another child closed"
@@ -173,7 +174,7 @@ async fn root_session_close_clears_grants() {
     let host = "api.open-meteo.com";
     seed_root_grant(&store, root_sid, host);
 
-    assert!(store.session_grants_cover_targets(root_sid, &[host.to_string()]));
+    assert!(store.session_grants_cover_targets(root_sid, "grant.tester", &[host.to_string()]));
 
     let root_dir = agents_dir.join("grant.tester");
     let mut runtime =
@@ -181,7 +182,7 @@ async fn root_session_close_clears_grants() {
     run_one_turn_and_close(&mut runtime, SessionCloseOutcome::ExecuteLoopComplete).await;
 
     assert!(
-        !store.session_grants_cover_targets(root_sid, &[host.to_string()]),
+        !store.session_grants_cover_targets(root_sid, "grant.tester", &[host.to_string()]),
         "root-session close must clear grants"
     );
 }
@@ -210,7 +211,7 @@ async fn suspended_child_session_close_preserves_grants() {
     run_one_turn_and_close(&mut runtime, SessionCloseOutcome::ExecuteLoopSuspended).await;
 
     assert!(
-        store.session_grants_cover_targets(root_sid, &[host.to_string()]),
+        store.session_grants_cover_targets(root_sid, "grant.tester", &[host.to_string()]),
         "suspended close must never clear grants (session will resume)"
     );
 }

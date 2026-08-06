@@ -639,7 +639,7 @@ fn test_web_fetch_denied_by_netconnect_mints_approval_and_grant_allows_retry() {
     .expect("approval should succeed");
 
     assert!(
-        gateway_store.session_grants_cover_targets("root-test", &[String::from("127.0.0.1")]),
+        gateway_store.session_grants_cover_targets("root-test", "test-agent", &[String::from("127.0.0.1")]),
         "approval should create a session grant for 127.0.0.1"
     );
 

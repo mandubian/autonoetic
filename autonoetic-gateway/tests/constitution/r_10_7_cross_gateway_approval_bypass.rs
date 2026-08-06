@@ -25,11 +25,11 @@ fn r_10_7_cross_root_grant_reuse_is_rejected() -> anyhow::Result<()> {
     )?;
 
     assert!(
-        store.grants_cover_targets("root-a/child", "root-a", std::slice::from_ref(&host)),
+        store.grants_cover_targets("root-a/child", "root-a", "agent-a", std::slice::from_ref(&host)),
         "grant should cover descendants in the original root session"
     );
     assert!(
-        !store.grants_cover_targets("root-b/child", "root-b", std::slice::from_ref(&host)),
+        !store.grants_cover_targets("root-b/child", "root-b", "agent-a", std::slice::from_ref(&host)),
         "grant from root-a must not bypass approvals in a different root session"
     );
 

@@ -1038,18 +1038,32 @@ impl GatewayStore {
     pub fn session_grants_cover_targets(
         &self,
         root_session_id: &str,
+        agent_id: &str,
         required_targets: &[String],
     ) -> bool {
-        self.grants_cover_targets(root_session_id, root_session_id, required_targets)
+        self.grants_cover_targets(root_session_id, root_session_id, agent_id, required_targets)
     }
 
     /// Scope-aware grant coverage check.  A request is covered when every
     /// required target is matched by at least one active (non-revoked,
-    /// non-expired) grant whose scope covers the requesting session.
+    /// non-expired) grant whose scope covers the requesting session **and
+    /// whose agent column matches the requesting agent**.
+    ///
+    /// Agent scoping: a grant minted from an approval records the agent whose
+    /// action was approved, and covers that agent only — a sibling session
+    /// running a *different* agent (e.g. a freshly built candidate in the
+    /// evolution pipeline) does not inherit the approval. The exception is
+    /// the root-wide sentinel: envelope/plan grants minted with
+    /// `agent_id == root_session_id` (see
+    /// `session_envelope::materialize_network_grant`) deliberately cover
+    /// every agent under the root. Agent ids are dotted (`executor.default`),
+    /// root session ids are `session-*`, so the sentinel cannot collide with
+    /// a real agent id.
     pub fn grants_cover_targets(
         &self,
         session_id: &str,
         root_session_id: &str,
+        agent_id: &str,
         required_targets: &[String],
     ) -> bool {
         if required_targets.is_empty() {
@@ -1074,6 +1088,11 @@ impl GatewayStore {
                     if expires_at < now {
                         return false;
                     }
+                }
+                let agent_covers =
+                    g.agent_id == agent_id || g.agent_id == root_session_id;
+                if !agent_covers {
+                    return false;
                 }
                 match g.scope {
                     GrantScope::RootSession => true,

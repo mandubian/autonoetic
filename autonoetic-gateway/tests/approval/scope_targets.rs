@@ -59,8 +59,8 @@ fn test_session_scoped_grant_covers_only_own_session() {
         None,
     );
 
-    assert!(store.grants_cover_targets("child-A", "root-1", &["api.example.com".to_string()]));
-    assert!(!store.grants_cover_targets("child-B", "root-1", &["api.example.com".to_string()]));
+    assert!(store.grants_cover_targets("child-A", "root-1", "agent-1", &["api.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("child-B", "root-1", "agent-1", &["api.example.com".to_string()]));
 }
 
 #[test]
@@ -81,9 +81,9 @@ fn test_root_scoped_grant_covers_all_children() {
         None,
     );
 
-    assert!(store.grants_cover_targets("child-A", "root-1", &["api.example.com".to_string()]));
-    assert!(store.grants_cover_targets("child-B", "root-1", &["api.example.com".to_string()]));
-    assert!(store.grants_cover_targets("root-1", "root-1", &["api.example.com".to_string()]));
+    assert!(store.grants_cover_targets("child-A", "root-1", "agent-1", &["api.example.com".to_string()]));
+    assert!(store.grants_cover_targets("child-B", "root-1", "agent-1", &["api.example.com".to_string()]));
+    assert!(store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com".to_string()]));
 }
 
 #[test]
@@ -104,11 +104,12 @@ fn test_host_suffix_matches_subdomain() {
         None,
     );
 
-    assert!(store.grants_cover_targets("root-1", "root-1", &["api.github.com".to_string()]));
-    assert!(store.grants_cover_targets("root-1", "root-1", &["v2.api.github.com".to_string()]));
+    assert!(store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.github.com".to_string()]));
+    assert!(store.grants_cover_targets("root-1", "root-1", "agent-1", &["v2.api.github.com".to_string()]));
     assert!(!store.grants_cover_targets(
         "root-1",
         "root-1",
+        "agent-1",
         &["github.com.evil.example".to_string()]
     ));
 }
@@ -134,9 +135,9 @@ fn test_host_and_port_target() {
         None,
     );
 
-    assert!(store.grants_cover_targets("root-1", "root-1", &["api.example.com:443".to_string()]));
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["api.example.com".to_string()]));
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["api.example.com:8080".to_string()]));
+    assert!(store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com:443".to_string()]));
+    assert!(!store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com:8080".to_string()]));
 }
 
 #[test]
@@ -162,11 +163,13 @@ fn test_url_prefix_target() {
     assert!(store.grants_cover_targets(
         "root-1",
         "root-1",
+        "agent-1",
         &["https://api.example.com/public/x".to_string()]
     ));
     assert!(!store.grants_cover_targets(
         "root-1",
         "root-1",
+        "agent-1",
         &["https://api.example.com/admin".to_string()]
     ));
 }
@@ -190,7 +193,7 @@ fn test_expired_grant_excluded() {
         Some(past),
     );
 
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["api.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com".to_string()]));
 }
 
 #[test]
@@ -212,7 +215,7 @@ fn test_future_expiry_still_covers() {
         Some(future),
     );
 
-    assert!(store.grants_cover_targets("root-1", "root-1", &["api.example.com".to_string()]));
+    assert!(store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com".to_string()]));
 }
 
 #[test]
@@ -249,8 +252,8 @@ fn test_prune_expired_grants() {
     let pruned = store.prune_expired_grants().unwrap();
     assert_eq!(pruned, 1);
 
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["expired.example.com".to_string()]));
-    assert!(store.grants_cover_targets("root-1", "root-1", &["active.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("root-1", "root-1", "agent-1", &["expired.example.com".to_string()]));
+    assert!(store.grants_cover_targets("root-1", "root-1", "agent-1", &["active.example.com".to_string()]));
 }
 
 #[test]
@@ -282,8 +285,8 @@ fn test_emergency_stop_cleans_up_all_scopes() {
 
     store.delete_session_grants("root-1").unwrap();
 
-    assert!(!store.grants_cover_targets("child-A", "root-1", &["api.example.com".to_string()]));
-    assert!(!store.grants_cover_targets("root-1", "root-1", &["api.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("child-A", "root-1", "agent-1", &["api.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("root-1", "root-1", "agent-1", &["api.example.com".to_string()]));
 }
 
 #[test]
@@ -315,10 +318,10 @@ fn test_two_children_one_root_session_vs_root_scope() {
         None,
     );
 
-    assert!(store.grants_cover_targets("child-A", "root-1", &["host-a.example.com".to_string()]));
-    assert!(!store.grants_cover_targets("child-A", "root-1", &["host-b.example.com".to_string()]));
-    assert!(store.grants_cover_targets("child-B", "root-1", &["host-b.example.com".to_string()]));
-    assert!(!store.grants_cover_targets("child-B", "root-1", &["host-a.example.com".to_string()]));
+    assert!(store.grants_cover_targets("child-A", "root-1", "agent-1", &["host-a.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("child-A", "root-1", "agent-1", &["host-b.example.com".to_string()]));
+    assert!(store.grants_cover_targets("child-B", "root-1", "agent-1", &["host-b.example.com".to_string()]));
+    assert!(!store.grants_cover_targets("child-B", "root-1", "agent-1", &["host-a.example.com".to_string()]));
 }
 
 #[test]
@@ -345,11 +348,13 @@ fn test_multi_target_grant() {
     assert!(store.grants_cover_targets(
         "root-1",
         "root-1",
+        "agent-1",
         &["api.example.com".to_string(), "cdn.example.com".to_string(),]
     ));
     assert!(!store.grants_cover_targets(
         "root-1",
         "root-1",
+        "agent-1",
         &[
             "api.example.com".to_string(),
             "other.example.com".to_string(),

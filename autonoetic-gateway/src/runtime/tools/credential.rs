@@ -461,7 +461,11 @@ impl NativeTool for CredentialRequestTool {
         } else if let Some(sid) = _session_id {
             let root_sid = crate::runtime::content_store::root_session_id(sid);
             if !url_host.is_empty()
-                && store.session_grants_cover_targets(&root_sid, &[url_host.clone()])
+                && store.session_grants_cover_targets(
+                    &root_sid,
+                    &manifest.agent.id,
+                    &[url_host.clone()],
+                )
             {
                 tracing::info!(
                     target: "credential_request",

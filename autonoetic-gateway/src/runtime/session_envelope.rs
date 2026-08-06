@@ -749,7 +749,7 @@ mod tests {
         assert!(!proposal.skipped);
         assert_eq!(proposal.hosts, vec!["api.open-meteo.com".to_string()]);
 
-        assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+        assert!(store.session_grants_cover_targets(root, "executor.default", &["api.open-meteo.com".to_string()]));
         assert_eq!(store.get_active_envelopes(root)?.len(), 1);
         Ok(())
     }
@@ -771,7 +771,7 @@ mod tests {
         // A subdomain wildcard must actually cover concrete subdomains, not be
         // dropped as a dead ExactHost("*.example.com").
         assert!(
-            store.session_grants_cover_targets(root, &["api.example.com".to_string()]),
+            store.session_grants_cover_targets(root, "executor.default", &["api.example.com".to_string()]),
             "subdomain wildcard grant should cover a concrete subdomain"
         );
         // Stored as the canonical bare suffix (CLI prepends `*.` on display).

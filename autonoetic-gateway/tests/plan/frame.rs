@@ -1420,7 +1420,7 @@ fn plan_approval_materializes_declared_capability_envelope() {
         .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&approve_result).unwrap();
     assert_eq!(parsed["grants_materialized"].as_u64().unwrap(), 1);
-    assert!(store.session_grants_cover_targets(root, &["api.example.com".to_string()]));
+    assert!(store.session_grants_cover_targets(root, "coder.default", &["api.example.com".to_string()]));
 
     let proposed = store.get_proposed_envelopes(root).unwrap();
     assert_eq!(proposed.len(), 1);
