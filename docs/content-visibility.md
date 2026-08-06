@@ -32,8 +32,8 @@ promotion gates can read what the coder built.
 ## Writes
 
 `register_name_with_visibility(session, name, handle, visibility)` always
-registers the `name` **and** an 8-hex short alias (`cnt_<alias>`) in the writing
-session's manifest, then propagates both:
+registers the `name` **and** a short alias in the writing session's manifest, then
+propagates both:
 
 - `Session` → also into the **root** session's manifest
 - `Global` → also into the root's and the global manifest
@@ -62,10 +62,19 @@ rather than a name, over the same three manifests. `create_implicit_artifact`
 uses it to decide which of a child's named outputs to list for the parent, which
 is why a child's `Private` content never appears in `named_outputs`.
 
-Prefer refs. Names are a **shared namespace with no owner**: the root manifest is
-keyed by name, so two sessions under one root that write `notes.md` overwrite each
-other's entry there, and a later read by name gets whichever wrote last. A `cnt_`
-ref is derived from the content hash and cannot collide.
+### Aliases and the `cnt_` ref
+
+The alias stored in a manifest is the bare first 8 hex characters of the handle
+(`handle_to_short_alias`). The `cnt_` prefix is the *agent-facing* form: it is
+what `content.write` returns and what `content.read` accepts, and the resolver
+strips it before looking the alias up. So `cnt_3fc9d2bb` in a tool result and
+`3fc9d2bb` as a manifest key are the same thing in two dresses; both, plus a full
+`sha256:…` handle, resolve through `resolve_name_or_handle_to_handle`.
+
+Prefer refs over names. Names are a **shared namespace with no owner**: the root
+manifest is keyed by name, so two sessions under one root that write `notes.md`
+overwrite each other's entry there, and a later read by name gets whichever wrote
+last. An alias is derived from the content hash and cannot collide.
 
 ## Parent, or root?
 

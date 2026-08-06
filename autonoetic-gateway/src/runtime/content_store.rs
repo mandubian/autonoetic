@@ -382,8 +382,10 @@ impl ContentStore {
 
         Err(anyhow::anyhow!(
             "Content name '{}' not found in session '{}', its root session, or global. \
-             Content written by another session is reachable by name only if it was \
-             written with session or global visibility.",
+             Content written by another session is reachable by name only when that \
+             write declared visibility=\"session\" (shared with every session under \
+             the same root) or visibility=\"global\"; \"session\" is the default for \
+             content.write.",
             name,
             session_id
         ))
