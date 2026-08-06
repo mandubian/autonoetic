@@ -342,6 +342,17 @@ impl ContentStore {
     /// Resolves a name by checking current session, then root session, then global manifest.
     ///
     /// This enables session-visible and global content to be read by any session.
+    ///
+    /// Reachability is decided entirely by *where a write propagated*, never by
+    /// searching other sessions: [`Self::register_name_with_visibility`] puts
+    /// `Session` content in the root manifest and `Global` content in the global
+    /// one, and this walk reads those two. Sharing is therefore something a
+    /// writer declares, not something a reader discovers — which is what makes
+    /// `Private` an actual guarantee rather than a hint.
+    ///
+    /// A sibling handoff (an architect writing a design doc that the coder reads
+    /// by name) resolves at step 2: the architect's `Session` write already
+    /// registered the name in the shared root manifest.
     pub fn resolve_name_with_root(
         &self,
         session_id: &str,
@@ -352,20 +363,11 @@ impl ContentStore {
             return Ok(handle);
         }
 
-        // 2. Try the root session (for root-level content)
+        // 2. Try the root session — where session-visible content is published
         let manifest = self.load_manifest(session_id)?;
         if let Some(root_id) = manifest.root_session_id {
             if root_id != session_id {
                 if let Ok(handle) = self.resolve_name(&root_id, name) {
-                    return Ok(handle);
-                }
-
-                // 2b. Try sibling sessions under the same root
-                // Content written by sibling agents (e.g., architect) should be
-                // visible to other agents in the same workflow by name.
-                if let Ok(handle) =
-                    self.resolve_name_in_sibling_sessions(&root_id, name, session_id)
-                {
                     return Ok(handle);
                 }
             }
@@ -379,45 +381,13 @@ impl ContentStore {
         }
 
         Err(anyhow::anyhow!(
-            "Content name '{}' not found in session '{}', root session, or siblings",
+            "Content name '{}' not found in session '{}', its root session, or global. \
+             Content written by another session is reachable by name only when that \
+             write declared visibility=\"session\" (shared with every session under \
+             the same root) or visibility=\"global\"; \"session\" is the default for \
+             content.write.",
             name,
             session_id
-        ))
-    }
-
-    /// Search for a content name across sibling sessions under the same root.
-    fn resolve_name_in_sibling_sessions(
-        &self,
-        root_id: &str,
-        name: &str,
-        caller_id: &str,
-    ) -> anyhow::Result<ContentHandle> {
-        let root_dir = self.sessions_dir.join(root_id);
-        if !root_dir.is_dir() {
-            return Err(anyhow::anyhow!("no sibling sessions"));
-        }
-
-        // Scan subdirectories of the root session directory
-        if let Ok(entries) = std::fs::read_dir(&root_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let child_id = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if child_id.is_empty() || child_id == root_id || child_id == caller_id {
-                    continue;
-                }
-                // Check if this sibling has the named content
-                if let Ok(handle) = self.resolve_name(child_id, name) {
-                    return Ok(handle);
-                }
-            }
-        }
-        Err(anyhow::anyhow!(
-            "name '{}' not found in any sibling session under '{}'",
-            name,
-            root_id
         ))
     }
 
@@ -1267,6 +1237,109 @@ mod tests {
         assert_eq!(manifest.names.get("weather.py"), Some(&h));
     }
 
+    /// Set up a root with two children linked to it, as the gateway does at
+    /// spawn (`set_root_session`). Without that link `Session` visibility has no
+    /// root manifest to publish into and none of these paths behave as intended.
+    fn siblings_under_root(temp: &std::path::Path) -> (ContentStore, &'static str, &'static str) {
+        let store = ContentStore::new(temp).unwrap();
+        let (writer, reader) = ("root-sib/architect-1", "root-sib/coder-2");
+        store.set_root_session(writer, "root-sib").unwrap();
+        store.set_root_session(reader, "root-sib").unwrap();
+        (store, writer, reader)
+    }
+
+    /// The handoff that motivated cross-session name lookup: an architect writes
+    /// a design doc, the coder reads it by name. It resolves through the shared
+    /// root manifest, where the architect's `Session` write published it.
+    #[test]
+    fn sibling_reads_declared_session_content_via_root() {
+        let temp = tempdir().unwrap();
+        let (store, writer, reader) = siblings_under_root(temp.path());
+
+        let handle = store.write(b"# design").unwrap();
+        store
+            .register_name_with_visibility(writer, "design.md", &handle, ContentVisibility::Session)
+            .unwrap();
+
+        assert_eq!(
+            store.read_by_name_or_handle(reader, "design.md").unwrap(),
+            b"# design".to_vec(),
+            "a sibling must still resolve content declared session-visible"
+        );
+    }
+
+    /// `Private` means "visible only to the writing session", and it holds
+    /// because a private write propagates nowhere — not because any reader
+    /// filters it. Locks that in: a peer must not reach it by name even though
+    /// the name is guessable.
+    #[test]
+    fn sibling_cannot_read_private_content_by_name() {
+        let temp = tempdir().unwrap();
+        let (store, writer, reader) = siblings_under_root(temp.path());
+
+        let handle = store.write(b"raw evaluator notes").unwrap();
+        store
+            .register_name_with_visibility(writer, "notes.md", &handle, ContentVisibility::Private)
+            .unwrap();
+
+        // The writer still reads its own content.
+        assert_eq!(
+            store.read_by_name_or_handle(writer, "notes.md").unwrap(),
+            b"raw evaluator notes".to_vec()
+        );
+        assert!(
+            store.read_by_name_or_handle(reader, "notes.md").is_err(),
+            "a sibling must not reach content the writer kept private"
+        );
+    }
+
+    /// Content registered without declaring a visibility is internal
+    /// bookkeeping, not a shared output — `session_history`, a session's entire
+    /// transcript, is registered this way for every session under a well-known
+    /// name. It must stay unreachable from a peer.
+    #[test]
+    fn sibling_cannot_read_undeclared_content_by_name() {
+        let temp = tempdir().unwrap();
+        let (store, writer, reader) = siblings_under_root(temp.path());
+
+        let handle = store.write(b"[{\"role\":\"user\"}]").unwrap();
+        store.register_name(writer, "session_history", &handle).unwrap();
+
+        assert!(
+            store
+                .read_by_name_or_handle(writer, "session_history")
+                .is_ok(),
+            "the owning session must still read its own history"
+        );
+        assert!(
+            store
+                .read_by_name_or_handle(reader, "session_history")
+                .is_err(),
+            "a sibling must not read another session's transcript by name"
+        );
+    }
+
+    /// The ref path must agree with the name path: `resolve_alias_with_root`
+    /// walks caller → root → global, so a private alias is not reachable either.
+    /// Pinned so the two resolvers cannot drift apart.
+    #[test]
+    fn sibling_cannot_read_private_content_by_ref() {
+        let temp = tempdir().unwrap();
+        let (store, writer, reader) = siblings_under_root(temp.path());
+
+        let handle = store.write(b"secret").unwrap();
+        store
+            .register_name_with_visibility(writer, "s.md", &handle, ContentVisibility::Private)
+            .unwrap();
+        let cnt_ref = format!("cnt_{}", ContentStore::get_short_alias(&handle));
+
+        assert!(store.read_by_name_or_handle(writer, &cnt_ref).is_ok());
+        assert!(
+            store.read_by_name_or_handle(reader, &cnt_ref).is_err(),
+            "a private handle must not resolve for a sibling by ref"
+        );
+    }
+
     #[test]
     fn test_root_session_id_helper() {
         assert_eq!(root_session_id("demo-session"), "demo-session");
@@ -1423,3 +1496,4 @@ mod tests {
         );
     }
 }
+
