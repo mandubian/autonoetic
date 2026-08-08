@@ -2562,6 +2562,7 @@ mod tests {
                 remote_targets: targets.clone(),
                 code_content: code_content.to_string(),
                 approval_request_id: String::new(),
+                ttl_secs: autonoetic_types::config::DEFAULT_GRANT_TTL_SECS,
             }),
             request_id: None,
             turn_id: None,

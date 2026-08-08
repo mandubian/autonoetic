@@ -1566,6 +1566,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
                                 remote_targets: normalized_targets.clone(),
                                 code_content: code_to_analyze.clone(),
                                 approval_request_id: String::new(),
+                                ttl_secs:
+                                    crate::runtime::approved_exec_cache::cache_ttl_secs(config),
                             },
                         );
                     }

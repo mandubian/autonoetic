@@ -77,18 +77,27 @@ pub struct ApprovedExecCacheBackfill {
     pub remote_targets: Vec<String>,
     pub code_content: String,
     pub approval_request_id: String,
+    /// The TTL the existing-entry check is evaluated against — the same
+    /// `cache_ttl_secs(config)` the gated lookup used. Carried on the backfill
+    /// so `record_if_missing` decides for itself rather than inheriting
+    /// whatever a prior lookup happened to prune.
+    pub ttl_secs: u64,
 }
 
 impl ApprovedExecCacheBackfill {
-    /// Records the entry if no entry with the same fingerprint already exists.
-    /// This is the single implementation of exec-cache backfill; both the
-    /// `GateService` clearance path and the `sandbox_exec` approval_ref
-    /// validation path route through it.
+    /// Records the entry unless a *still-valid* entry with the same
+    /// fingerprint already exists. This is the single implementation of
+    /// exec-cache backfill; both the `GateService` clearance path and the
+    /// `sandbox_exec` approval_ref validation path route through it.
+    ///
+    /// The lookup runs at the backfill's own `ttl_secs`, so a stale entry is
+    /// pruned and replaced by the approval that just cleared — otherwise the
+    /// fresh approval would be dropped on the floor and the entry would keep
+    /// its long-expired `approved_at`, re-prompting the operator on every
+    /// subsequent exec.
     pub fn record_if_missing(&self) -> anyhow::Result<()> {
         let cache = ApprovedExecCache::new(&self.gateway_dir)?;
-        // Existence check only (ttl 0): an expired-but-present entry must not
-        // block recording the fresh approval; gated lookups prune by age.
-        if cache.find(&self.fingerprint, 0).is_some() {
+        if cache.find(&self.fingerprint, self.ttl_secs).is_some() {
             return Ok(());
         }
         let entry = ApprovedExecEntry {
@@ -577,6 +586,11 @@ mod tests {
         );
     }
 
+    /// The shipped grant TTL, which is what the gated lookups pass. Expiry
+    /// tests derive their ages from it rather than hard-coding 24h, so they
+    /// keep testing "past/within the TTL" if the default ever moves.
+    const TTL: u64 = autonoetic_types::config::DEFAULT_GRANT_TTL_SECS;
+
     fn entry_with_age(approved_at: chrono::DateTime<chrono::Utc>) -> ApprovedExecEntry {
         ApprovedExecEntry {
             fingerprint: "sha256:test".to_string(),
@@ -594,11 +608,11 @@ mod tests {
     fn find_expires_entries_past_ttl() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = ApprovedExecCache::new(tmp.path()).unwrap();
-        let old = chrono::Utc::now() - chrono::Duration::hours(25);
+        let old = chrono::Utc::now() - chrono::Duration::seconds(TTL as i64 + 3600);
         cache.record(entry_with_age(old)).unwrap();
 
-        // 24h TTL: the 25h-old entry is a miss and gets pruned.
-        assert!(cache.find("sha256:test", 86400).is_none());
+        // An entry an hour past the TTL is a miss and gets pruned.
+        assert!(cache.find("sha256:test", TTL).is_none());
         assert_eq!(cache.len(), 0, "expired entry must be pruned");
     }
 
@@ -606,10 +620,10 @@ mod tests {
     fn find_returns_entries_within_ttl() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = ApprovedExecCache::new(tmp.path()).unwrap();
-        let recent = chrono::Utc::now() - chrono::Duration::hours(1);
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(TTL as i64 / 2);
         cache.record(entry_with_age(recent)).unwrap();
 
-        assert!(cache.find("sha256:test", 86400).is_some());
+        assert!(cache.find("sha256:test", TTL).is_some());
         assert_eq!(cache.len(), 1);
     }
 
@@ -635,7 +649,7 @@ mod tests {
         cache.record(entry).unwrap();
 
         assert!(
-            cache.find("sha256:test", 86400).is_none(),
+            cache.find("sha256:test", TTL).is_none(),
             "corrupt timestamp must not mint a permanent bypass"
         );
         assert_eq!(cache.len(), 0);
@@ -652,5 +666,54 @@ mod tests {
             cache_ttl_secs(None),
             autonoetic_types::config::DEFAULT_GRANT_TTL_SECS
         );
+    }
+
+    fn backfill_for(dir: &std::path::Path, ttl_secs: u64) -> ApprovedExecCacheBackfill {
+        ApprovedExecCacheBackfill {
+            gateway_dir: dir.to_path_buf(),
+            fingerprint: "sha256:test".to_string(),
+            agent_id: "agent.id".to_string(),
+            remote_targets: vec!["host.com".to_string()],
+            code_content: "code".to_string(),
+            approval_request_id: "apr-fresh".to_string(),
+            ttl_secs,
+        }
+    }
+
+    /// A fresh operator approval must replace a stale entry. Skipping the
+    /// write would leave the long-expired `approved_at` in place, so the very
+    /// next exec would expire it again and re-prompt the operator forever.
+    #[test]
+    fn backfill_replaces_an_expired_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ApprovedExecCache::new(tmp.path()).unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::seconds(TTL as i64 + 3600);
+        cache.record(entry_with_age(old)).unwrap();
+
+        backfill_for(tmp.path(), TTL).record_if_missing().unwrap();
+
+        let reloaded = ApprovedExecCache::new(tmp.path()).unwrap();
+        let entry = reloaded
+            .find("sha256:test", TTL)
+            .expect("re-approval must be cached under a current timestamp");
+        assert_eq!(entry.approval_request_id, "apr-fresh");
+    }
+
+    /// A live entry is left alone: backfill is a repair, not a refresh, so it
+    /// must not extend an unexpired approval's horizon.
+    #[test]
+    fn backfill_leaves_a_live_entry_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = ApprovedExecCache::new(tmp.path()).unwrap();
+        let recent = chrono::Utc::now() - chrono::Duration::seconds(TTL as i64 / 2);
+        cache.record(entry_with_age(recent)).unwrap();
+
+        backfill_for(tmp.path(), TTL).record_if_missing().unwrap();
+
+        let entry = ApprovedExecCache::new(tmp.path())
+            .unwrap()
+            .find("sha256:test", TTL)
+            .expect("live entry survives");
+        assert_eq!(entry.approval_request_id, "apr-test");
     }
 }

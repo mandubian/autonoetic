@@ -67,13 +67,16 @@ fn manifest_with(agent_id: &str) -> AgentManifest {
     }
 }
 
+/// Seeds the grant an envelope lock would mint: root-scoped and root-*wide*,
+/// i.e. carrying the `ROOT_WIDE_GRANT_AGENT` sentinel rather than a concrete
+/// agent id. These tests are about close/preservation, not agent scoping.
 fn seed_root_grant(store: &GatewayStore, root_sid: &str, host: &str) {
     let targets = vec![GrantTarget::ExactHost(host.to_string())];
     store
         .insert_session_grant(
             root_sid,
             root_sid,
-            root_sid,
+            autonoetic_types::background::ROOT_WIDE_GRANT_AGENT,
             &GrantScope::RootSession,
             &targets,
             "test-envelope",

@@ -1052,13 +1052,13 @@ impl GatewayStore {
     /// Agent scoping: a grant minted from an approval records the agent whose
     /// action was approved, and covers that agent only — a sibling session
     /// running a *different* agent (e.g. a freshly built candidate in the
-    /// evolution pipeline) does not inherit the approval. The exception is
-    /// the root-wide sentinel: envelope/plan grants minted with
-    /// `agent_id == root_session_id` (see
-    /// `session_envelope::materialize_network_grant`) deliberately cover
-    /// every agent under the root. Agent ids are dotted (`executor.default`),
-    /// root session ids are `session-*`, so the sentinel cannot collide with
-    /// a real agent id.
+    /// evolution pipeline) does not inherit the approval. The one exception is
+    /// `ROOT_WIDE_GRANT_AGENT`, the sentinel that envelope locks mint under
+    /// (see `session_envelope::materialize_network_grant`): those deliberately
+    /// cover every agent under the root, because the operator authorized the
+    /// root before the agent set was known. The sentinel is `*`, which
+    /// `validate_agent_id` excludes from the agent-id character set, so a real
+    /// agent id can never alias it into root-wide coverage.
     pub fn grants_cover_targets(
         &self,
         session_id: &str,
@@ -1089,8 +1089,8 @@ impl GatewayStore {
                         return false;
                     }
                 }
-                let agent_covers =
-                    g.agent_id == agent_id || g.agent_id == root_session_id;
+                let agent_covers = g.agent_id == agent_id
+                    || g.agent_id == autonoetic_types::background::ROOT_WIDE_GRANT_AGENT;
                 if !agent_covers {
                     return false;
                 }

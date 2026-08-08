@@ -218,7 +218,10 @@ fn test_lifecycle_cache_reuse_simulated() {
         "fingerprint should match on second run"
     );
 
-    let found = cache.find(&fingerprint_second, 86400);
+    let found = cache.find(
+        &fingerprint_second,
+        autonoetic_types::config::DEFAULT_GRANT_TTL_SECS,
+    );
     assert!(
         found.is_some(),
         "cache should hit on second run — approval reuse works"
