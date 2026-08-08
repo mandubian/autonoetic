@@ -15,6 +15,7 @@ use crate::runtime::failure_classification::{
 use crate::runtime::live_digest::base_session_id;
 use crate::scheduler::gateway_store::{GatewayStore, TaskExecutionClaim};
 use crate::scheduler::store::{read_json_file, write_json_file};
+use autonoetic_types::agent::SessionLifecycleState;
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::{FailureClass, RetryAdvice, SideEffectState};
@@ -1181,10 +1182,11 @@ pub fn update_task_run_status(
     // It *terminates* rather than politely finalizes. A session bound to a task
     // that just reached a terminal status can never run again — a retried stage
     // gets a fresh task and a fresh session id — whereas
-    // `finalize_session_transcript` preserves `hibernated`/`awaiting_gate` and
-    // would leave a dead child advertising a resumable lifecycle. That lie is
-    // invisible while the parent is alive and becomes an endless reap loop the
-    // moment the parent ends.
+    // `finalize_session_transcript` preserves resumable states
+    // (`hibernated`/`awaiting_gate`/`idle`/`paused`) and would leave a dead
+    // child advertising a resumable lifecycle. That lie is invisible while the
+    // parent is alive and becomes an endless reap loop the moment the parent
+    // ends.
     {
         let is_terminal = status.is_terminal();
         let was_non_terminal = !previous_status.is_terminal();
@@ -2316,31 +2318,43 @@ pub fn try_complete_workflow(
         return Ok(false);
     }
 
-    // #742: don't complete the workflow unless the root session lifecycle
-    // indicates the session will not resume for new work. "terminated:*" means
-    // the session ended; "hibernated" means between turns (close_session ran
-    // but the session will resume on the next operator message — completing
-    // the workflow is fine since all join/active conditions are checked below).
-    // "awaiting_gate" means an operator decision is pending — the workflow
-    // must not complete because the plan may have more steps to run.
+    // #742/#1057: don't complete the workflow unless the root session lifecycle
+    // indicates the session has no further planned work. The set of states that
+    // permit completion is owned by `SessionLifecycleState::permits_workflow_completion`:
+    // `terminated:*` (ended), `hibernated` (between turns — completing is fine since
+    // all join/active conditions are independently checked above), and `idle`
+    // (finished its task, parked only for peer reachability). `awaiting_gate`
+    // (an operator decision is pending) and `paused` (operator may redirect)
+    // block completion, as does `active`.
     // Pre-migration rows with no lifecycle_state fall through to the legacy
-    // transcript-status + pending-escalation check below.
+    // pending-escalation check below.
     if let Some(gw_store) = store {
         match gw_store.get_session_lifecycle_state(root_session_id)? {
-            Some(ref state) if state == "hibernated" || state.starts_with("terminated:") => {
-                /* proceed */
-            }
-            Some(ref state) => {
-                tracing::debug!(
-                    target: "workflow",
-                    workflow_id = %wf_id,
-                    root_session_id = %root_session_id,
-                    lifecycle_state = %state,
-                    "Workflow not completing: root session lifecycle is {}",
-                    state
-                );
-                return Ok(false);
-            }
+            Some(ref raw) => match raw.parse::<SessionLifecycleState>() {
+                Ok(state) if state.permits_workflow_completion() => { /* proceed */ }
+                Ok(state) => {
+                    tracing::debug!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        root_session_id = %root_session_id,
+                        lifecycle_state = %state,
+                        "Workflow not completing: root session lifecycle is {}",
+                        state
+                    );
+                    return Ok(false);
+                }
+                // An unparseable value: block (safe default) and surface it.
+                Err(_) => {
+                    tracing::warn!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        root_session_id = %root_session_id,
+                        lifecycle_state = %raw,
+                        "Workflow not completing: unparseable root session lifecycle_state"
+                    );
+                    return Ok(false);
+                }
+            },
             // Pre-migration fallback: no lifecycle_state — use legacy checks.
             None => {
                 if gw_store.has_pending_escalations_for_session(root_session_id)? {

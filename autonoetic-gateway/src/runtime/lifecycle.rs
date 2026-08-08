@@ -28,7 +28,7 @@ use crate::runtime::session_budget::SessionBudgetRegistry;
 use crate::runtime::session_tracer::{EvidenceMode, SessionTracer};
 use crate::runtime::store::SecretStoreRuntime;
 use crate::runtime::tool_call_processor::ToolCallProcessor;
-use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware};
+use autonoetic_types::agent::{AgentManifest, LlmExchangeUsage, Middleware, SessionLifecycleState};
 use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::config::{GatewayConfig, TrajectoryConfig};
 use autonoetic_types::disclosure::DisclosurePolicy;
@@ -1835,27 +1835,35 @@ impl AgentExecutor {
                 );
             }
         }
-        // #742: set the session lifecycle state based on the yield reason.
+        // #742/#1057: set the session lifecycle state based on the yield reason.
+        // The mapping lives here (the single author); every reader classifies the
+        // stored value through `SessionLifecycleState` rather than restating a
+        // subset of the vocabulary as string literals.
         if let Some(gs) = self.gateway_store.as_ref() {
             let lifecycle = match &cp.yield_reason {
                 YieldReason::ApprovalRequired { .. }
                 | YieldReason::UserInputRequired { .. }
-                | YieldReason::HumanEscalation { .. } => "awaiting_gate",
-                // Distinct from "hibernated": nothing is being waited on. The
-                // session is finished with its task and parked only so peers
-                // can still reach it.
-                YieldReason::Idle { .. } => "idle",
+                | YieldReason::HumanEscalation { .. } => {
+                    SessionLifecycleState::AwaitingGate
+                }
+                // Distinct from `Hibernated`: nothing is being waited on. The
+                // session is finished with its task and parked only so peers can
+                // still reach it.
+                YieldReason::Idle { .. } => SessionLifecycleState::Idle,
                 // Operator-initiated cooperative pause: the turn parked at a
                 // tool boundary via `root_session.pause`. "paused" renders as a
                 // distinct status so the room TUI knows `p` toggles to resume
                 // rather than re-issuing a pause. It hibernates-like on resume
-                // (next message). Do NOT collapse this into "hibernated" —
+                // (next message). Do NOT collapse this into `Hibernated` —
                 // that state means *the agent* finished, this means *the
                 // operator* paused.
-                YieldReason::ManualStop => "paused",
-                _ => "hibernated", // Hibernation, WaitingForChild, Error, BudgetExhausted, etc.
+                YieldReason::ManualStop => SessionLifecycleState::Paused,
+                // Hibernation, WaitingForChild, Error, BudgetExhausted, etc.
+                _ => SessionLifecycleState::Hibernated,
             };
-            if let Err(e) = gs.set_session_lifecycle_state(&cp.session_id, lifecycle) {
+            if let Err(e) =
+                gs.set_session_lifecycle_state(&cp.session_id, lifecycle.as_str())
+            {
                 tracing::warn!(
                     target: "lifecycle",
                     session_id = %cp.session_id,
@@ -5167,8 +5175,10 @@ impl AgentExecutor {
                     }
                 }
                 if let Some(gs) = self.gateway_store.as_ref() {
-                    let lifecycle = "hibernated";
-                    if let Err(e) = gs.set_session_lifecycle_state(&cp.session_id, lifecycle) {
+                    let lifecycle = SessionLifecycleState::Hibernated;
+                    if let Err(e) =
+                        gs.set_session_lifecycle_state(&cp.session_id, lifecycle.as_str())
+                    {
                         tracing::warn!(
                             target: "lifecycle",
                             session_id = %cp.session_id,
