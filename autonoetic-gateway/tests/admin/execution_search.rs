@@ -1,5 +1,10 @@
 //! Integration test: sandbox.exec → fails → execution_traces has full error →
 //! agent uses execution_search to find the error → gets structured result
+//!
+//! Also pins the ownership scope (#1062): the caller's root session is both the
+//! default and the ceiling for `session_id`. Before that, omitting `session_id`
+//! searched every session in the store and returned other roots' raw `stdout`
+//! verbatim — and every agent has this tool (`is_available` is unconditional).
 
 
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
@@ -120,7 +125,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         temp.path(),
         Some(&gateway_dir),
         &args.to_string(),
-        None,
+        Some("sess-error-test"),
         None,
         Some(&config),
         Some(store.clone()),
@@ -171,7 +176,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         temp.path(),
         Some(&gateway_dir),
         &args_all.to_string(),
-        None,
+        Some("sess-error-test"),
         None,
         Some(&config),
         Some(store.clone()),
@@ -261,7 +266,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         temp.path(),
         Some(&gateway_dir),
         &args.to_string(),
-        None,
+        Some("sess-pattern"),
         None,
         Some(&config),
         Some(store.clone()),
@@ -276,5 +281,240 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         Some("trace-rust")
     );
 
+    Ok(())
+}
+
+// ── ownership scope (#1062) ─────────────────────────────────────────────────
+
+/// A minimal trace in `session_id` whose stdout is a distinctive canary.
+fn trace_in(session_id: &str, trace_id: &str, stdout: &str) -> ExecutionTraceRecord {
+    ExecutionTraceRecord {
+        trace_id: trace_id.to_string(),
+        event_id: None,
+        agent_id: "coder.default".to_string(),
+        session_id: session_id.to_string(),
+        turn_id: None,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        tool_name: "sandbox_exec".to_string(),
+        command: Some("python3 fetch.py".to_string()),
+        exit_code: Some(0),
+        stdout: Some(stdout.to_string()),
+        stderr: None,
+        duration_ms: 10,
+        success: 1,
+        error_type: None,
+        error_summary: None,
+        approval_required: None,
+        approval_request_id: None,
+        arguments: None,
+        result: None,
+        egress_label: None,
+    }
+}
+
+/// Two roots, one trace each, plus a child session under root A.
+fn two_root_store(gateway_dir: &std::path::Path) -> anyhow::Result<Arc<GatewayStore>> {
+    let store = Arc::new(GatewayStore::open(gateway_dir)?);
+    store.create_execution_trace(&trace_in("root-a", "trace-a", "MINE"))?;
+    store.create_execution_trace(&trace_in("root-a/child-1", "trace-a-child", "MINE-CHILD"))?;
+    store.create_execution_trace(&trace_in("root-b", "trace-b", "OTHER-OPERATOR-SECRET"))?;
+    Ok(store)
+}
+
+fn search(
+    store: &Arc<GatewayStore>,
+    gateway_dir: &std::path::Path,
+    temp: &std::path::Path,
+    session_id: Option<&str>,
+    args: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let registry = autonoetic_gateway::runtime::tools::default_registry();
+    let manifest = test_manifest();
+    let policy = autonoetic_gateway::policy::PolicyEngine::new(manifest.clone());
+    let config = GatewayConfig::default();
+    let raw = registry.execute(
+        "execution_search",
+        &manifest,
+        &policy,
+        temp,
+        Some(gateway_dir),
+        &args.to_string(),
+        session_id,
+        None,
+        Some(&config),
+        Some(store.clone()),
+        None,
+    )?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+fn trace_ids(parsed: &serde_json::Value) -> Vec<String> {
+    parsed
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| r.get("trace_id").and_then(|v| v.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The core of #1062: an omitted `session_id` no longer means "every session in
+/// the store". It means the caller's own root — so another root's raw stdout is
+/// not reachable at all, whatever the sink would have allowed.
+#[test]
+fn execution_search_defaults_to_the_callers_root_session() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = two_root_store(&gateway_dir)?;
+
+    let parsed = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        Some("root-a"),
+        serde_json::json!({ "limit": 100 }),
+    )?;
+
+    let mut ids = trace_ids(&parsed);
+    ids.sort();
+    assert_eq!(ids, vec!["trace-a", "trace-a-child"]);
+    assert!(
+        !parsed.to_string().contains("OTHER-OPERATOR-SECRET"),
+        "another root's stdout must not be reachable: {parsed}"
+    );
+    assert_eq!(
+        parsed.get("session_scope").and_then(|v| v.as_str()),
+        Some("root-a"),
+        "the response must say what was actually searched"
+    );
+    Ok(())
+}
+
+/// A child session searches its whole root, not just itself — peers under one
+/// root are one trust domain (#1061), which is the boundary this scope encodes.
+#[test]
+fn execution_search_from_a_child_session_scopes_to_its_root() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = two_root_store(&gateway_dir)?;
+
+    let parsed = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        Some("root-a/child-1"),
+        serde_json::json!({ "limit": 100 }),
+    )?;
+
+    let mut ids = trace_ids(&parsed);
+    ids.sort();
+    assert_eq!(ids, vec!["trace-a", "trace-a-child"]);
+    Ok(())
+}
+
+/// An explicit `session_id` may narrow within the caller's root.
+#[test]
+fn execution_search_allows_narrowing_within_the_callers_root() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = two_root_store(&gateway_dir)?;
+
+    let parsed = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        Some("root-a"),
+        serde_json::json!({ "session_id": "root-a/child-1", "limit": 100 }),
+    )?;
+
+    assert_eq!(trace_ids(&parsed), vec!["trace-a-child"]);
+    Ok(())
+}
+
+/// …but never widen past it. An explicit foreign root is refused rather than
+/// silently returning nothing, so the boundary is legible to the agent.
+#[test]
+fn execution_search_refuses_a_session_outside_the_callers_root() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = two_root_store(&gateway_dir)?;
+
+    let parsed = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        Some("root-a"),
+        serde_json::json!({ "session_id": "root-b", "limit": 100 }),
+    )?;
+
+    assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        !parsed.to_string().contains("OTHER-OPERATOR-SECRET"),
+        "refusal must not leak the other root's content: {parsed}"
+    );
+    Ok(())
+}
+
+/// A prefix of the root is not the root: `root-a` must not open up `root-ab`.
+#[test]
+fn execution_search_refuses_a_root_that_merely_shares_a_prefix() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    store.create_execution_trace(&trace_in("root-a", "trace-a", "MINE"))?;
+    store.create_execution_trace(&trace_in("root-ab", "trace-ab", "NEIGHBOUR-SECRET"))?;
+
+    let parsed = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        Some("root-a"),
+        serde_json::json!({ "session_id": "root-ab", "limit": 100 }),
+    )?;
+    assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
+
+    // And the default scope must not sweep it in either.
+    let defaulted = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        Some("root-a"),
+        serde_json::json!({ "limit": 100 }),
+    )?;
+    assert_eq!(trace_ids(&defaulted), vec!["trace-a"]);
+    Ok(())
+}
+
+/// No establishable caller ⇒ refuse. This tool is available to every agent and
+/// survives the clarification/degraded tier filters, so an unscoped fallback
+/// would be reachable from every session in the system.
+#[test]
+fn execution_search_refuses_without_a_session_context() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = two_root_store(&gateway_dir)?;
+
+    let parsed = search(
+        &store,
+        &gateway_dir,
+        temp.path(),
+        None,
+        serde_json::json!({ "limit": 100 }),
+    )?;
+
+    assert_eq!(parsed.get("ok").and_then(|v| v.as_bool()), Some(false));
+    assert!(
+        !parsed.to_string().contains("OTHER-OPERATOR-SECRET")
+            && !parsed.to_string().contains("MINE"),
+        "an unscoped call must return no trace content: {parsed}"
+    );
     Ok(())
 }

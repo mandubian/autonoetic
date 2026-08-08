@@ -76,6 +76,22 @@ Rationale: Slice 1 closes the highest-risk hole (prompt priming + knowledge). Sl
 
 **PR title:** `feat(egress): label execution_traces + filter execution_search (#908 slice 2)`
 
+> **Follow-up (#1062):** "write from tool-result label in `tool_call_processor`"
+> covered the LLM path only. **Script agents** (`execution_mode: script`) run
+> through the fast path in `execution.rs`, which has no tool-call processor and
+> wrote its `sandbox_exec` trace with `egress_label: None` — resolved by
+> `legacy_unlabeled` to `unrestricted`, i.e. full stdout to any sink. Script
+> agents are the ones returning raw external data, so the path that most needed
+> a label was the one that had none. Closed by
+> `egress_labeler::resolve_script_exec_label`, which runs the same exec-shaped
+> resolution and intersects it with the turn's ingest label; the result is
+> stamped on both the success and failure trace and recorded as the session's
+> §5.5 taint so a parent surfacing the script's output inherits it.
+>
+> The same issue's other half: `execution_search` had no ownership scope at all,
+> so the filter was the *only* gate. It is now bounded by the caller's root
+> session — see [agent-learning.md](agent-learning.md#ownership-scope-1062).
+
 ---
 
 ## Slice 3 — `post_session_digest`

@@ -1327,6 +1327,61 @@ impl GatewayExecutionService {
         )
     }
 
+    /// Resolve the egress label for a **script-agent run** (RFC §4, #1062).
+    ///
+    /// The LLM path labels every tool result at the commit boundary
+    /// ([`crate::runtime::tool_call_processor`] → `EgressLabeler::label_tool_result`)
+    /// and stamps the resulting label onto the durable `execution_traces` row.
+    /// The script fast path has no tool-call processor, so its `sandbox_exec`
+    /// trace was written with `egress_label: None` — and an unlabeled row
+    /// resolves through `egress.legacy_unlabeled`, which defaults to
+    /// `unrestricted`. Script agents are precisely the ones returning raw
+    /// external data (an IMAP fetch, a scraped page), so the one path that most
+    /// needs a label was the one path that had none.
+    ///
+    /// The label is *derived*, never blanket: it is the intersection of
+    ///
+    /// - the exec-shaped resolution over the script the agent actually runs
+    ///   (operator `egress.rules`, labeled path patterns matched against the
+    ///   script source, workspace taint, artifact taint), and
+    /// - the ingest label for this turn (session policy default, the operator's
+    ///   per-message mark, a peer's inbound federation label).
+    ///
+    /// `None` ⇒ unrestricted, which is how absence is encoded everywhere else
+    /// in the plane. A session-policy read failure fails closed to `local_only`
+    /// for the run, matching [`Self::resolve_ingest_egress_label`] and the
+    /// turn-scoped narrowing in `build_egress_labeler` (RFC §2.2).
+    fn resolve_script_exec_egress_label(
+        &self,
+        manifest: &autonoetic_types::agent::AgentManifest,
+        agent_dir: &std::path::Path,
+        gateway_dir: &std::path::Path,
+        session_id: &str,
+        agent_id: &str,
+        script_entry: &str,
+        metadata: Option<&serde_json::Value>,
+    ) -> Option<autonoetic_types::egress::EgressLabel> {
+        crate::runtime::egress_labeler::resolve_script_exec_label(
+            &crate::runtime::egress_labeler::ScriptExecLabelRequest {
+                egress_config: &self.config.egress,
+                // Bundle-declared output floor (RFC §4.1 path 2) — a script
+                // bundle can restrict its own outputs; a floor only narrows.
+                manifest_floor: manifest
+                    .egress
+                    .as_ref()
+                    .and_then(|e| e.output_label)
+                    .map(|named| named.to_label()),
+                ingest: self.resolve_ingest_egress_label(session_id, metadata),
+                agent_dir,
+                gateway_dir,
+                session_id,
+                agent_id,
+                script_entry,
+            },
+            self.gateway_store.as_ref(),
+        )
+    }
+
     pub fn get_session_egress_policy(
         &self,
         session_id: &str,
@@ -3391,6 +3446,33 @@ impl GatewayExecutionService {
                     }),
                 );
 
+                // Egress label for this run (#1062). Resolved before execution
+                // so both the success and failure trace carry it, and recorded
+                // as the session's §5.5 taint so a parent that surfaces this
+                // script's output inherits the restriction instead of treating
+                // it as unrestricted.
+                let script_egress_label = self.resolve_script_exec_egress_label(
+                    &loaded.manifest,
+                    &loaded.dir,
+                    &gateway_dir,
+                    session_id,
+                    agent_id,
+                    script_entry,
+                    metadata,
+                );
+                if let (Some(ref gs), Some(ref label)) =
+                    (self.gateway_store.as_ref(), script_egress_label.as_ref())
+                {
+                    if let Err(e) = gs.set_session_egress_taint(session_id, label) {
+                        tracing::warn!(
+                            target: "egress",
+                            error = %e,
+                            session_id = %session_id,
+                            "failed to record script session egress taint (§5.5)"
+                        );
+                    }
+                }
+
                 // Execute script directly in sandbox
                 let trace_started_at = std::time::Instant::now();
                 let script_kill_scope = Some((
@@ -3490,7 +3572,7 @@ impl GatewayExecutionService {
                                 approval_request_id: None,
                                 arguments: Some(format!("run {}", script_entry)),
                                 result: Some(output.clone()),
-                                egress_label: None,
+                                egress_label: script_egress_label.clone(),
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
@@ -3550,7 +3632,7 @@ impl GatewayExecutionService {
                                 approval_request_id: None,
                                 arguments: Some(format!("run {}", script_entry)),
                                 result: None,
-                                egress_label: None,
+                                egress_label: script_egress_label.clone(),
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }

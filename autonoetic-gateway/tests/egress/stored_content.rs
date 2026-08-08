@@ -263,7 +263,7 @@ fn execution_search_filters_stdout_for_remote() -> anyhow::Result<()> {
         trace_id: "trc-canary".into(),
         event_id: None,
         agent_id: "coder.default".into(),
-        session_id: "sess-908".into(),
+        session_id: "root-908/coder".into(),
         turn_id: None,
         timestamp: chrono::Utc::now().to_rfc3339(),
         tool_name: "sandbox_exec".into(),
@@ -295,13 +295,20 @@ fn execution_search_filters_stdout_for_remote() -> anyhow::Result<()> {
         &policy,
         &agent_dir,
         None,
-        r#"{"session_id":"sess-908","limit":10}"#,
-        Some("sess-908"),
+        r#"{"limit":10}"#,
+        Some("root-908/coder"),
         None,
         Some(&config),
         Some(store),
         Some(&ctx),
     )?;
+    // The trace must actually be *found* — otherwise "no canary" would also be
+    // satisfied by a scope refusal or an empty result set, and this test would
+    // stop proving that the label filter is what withheld it.
+    assert!(
+        out.contains("trc-canary"),
+        "the trace should be in scope and returned: {out}"
+    );
     assert!(
         !out.contains(CANARY),
         "execution_search leaked canary to remote sink: {out}"
@@ -317,7 +324,7 @@ fn execution_search_filters_error_summary_for_remote() -> anyhow::Result<()> {
         trace_id: "trc-canary-err".into(),
         event_id: None,
         agent_id: "coder.default".into(),
-        session_id: "sess-908".into(),
+        session_id: "root-908/coder".into(),
         turn_id: None,
         timestamp: chrono::Utc::now().to_rfc3339(),
         tool_name: "sandbox_exec".into(),
@@ -348,13 +355,17 @@ fn execution_search_filters_error_summary_for_remote() -> anyhow::Result<()> {
         &policy,
         &agent_dir,
         None,
-        r#"{"session_id":"sess-908","limit":10}"#,
-        Some("sess-908"),
+        r#"{"limit":10}"#,
+        Some("root-908/coder"),
         None,
         Some(&config),
         Some(store.clone()),
         Some(&run_ctx(Some(Sink::RemoteModel), None)),
     )?;
+    assert!(
+        remote_out.contains("trc-canary-err"),
+        "the trace should be in scope and returned: {remote_out}"
+    );
     assert!(
         !remote_out.contains(CANARY),
         "execution_search leaked error_summary to remote sink: {remote_out}"
@@ -370,8 +381,8 @@ fn execution_search_filters_error_summary_for_remote() -> anyhow::Result<()> {
         &policy,
         &agent_dir,
         None,
-        r#"{"session_id":"sess-908","limit":10}"#,
-        Some("sess-908"),
+        r#"{"limit":10}"#,
+        Some("root-908/coder"),
         None,
         Some(&config),
         Some(store),

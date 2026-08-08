@@ -38,7 +38,27 @@ Query past code executions to find patterns, errors, and successful commands.
 | `error_type` | string | Error classification: compilation, runtime, permission, timeout |
 | `command_pattern` | string | SQL LIKE pattern for command |
 | `agent_id` | string | Filter by agent |
+| `session_id` | string | Narrow to this session and its nested sessions. **Defaults to the caller's root session; may only narrow within it** |
 | `limit` | number | Max results (default: 10) |
+
+### Ownership scope (#1062)
+
+`execution_search` reads raw `stdout`/`stderr` out of the trace store, so it is
+bounded by the caller's **root session** — the trust domain peers already share
+for content visibility (see [content-visibility.md](content-visibility.md)).
+
+- Omit `session_id` and you search your own root plus everything nested under it.
+- Pass a `session_id` inside your root to narrow further (e.g. one child).
+- Pass one outside your root and the call is refused — cross-root search is an
+  operator privilege, not an agent one.
+- The response echoes `session_scope`, so an empty result set reads as "not in
+  your root" rather than "no such trace".
+
+Scope is the first gate, the egress label below is the second: scope decides
+which traces exist for you at all; the label decides how much of each one your
+sink may see. Before #1062 there was no first gate — an omitted `session_id`
+searched every session in the store, and `execution_search` is available to
+every agent regardless of capabilities.
 
 ### Example: Find Compilation Errors
 
