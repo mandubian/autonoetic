@@ -497,6 +497,16 @@ pub(crate) fn validate_agent_id(agent_id: &str) -> anyhow::Result<()> {
         !agent_id.starts_with("gateway."),
         "the 'gateway.' agent_id namespace is reserved for the gateway itself"
     );
+    // Reserved sentinel: `session_approval_grants.agent_id == ROOT_WIDE_GRANT_AGENT`
+    // means "covers every agent under the root" (`grants_cover_targets`). An
+    // agent bearing that id would inherit every envelope-locked grant. The
+    // charset rule below already excludes it; this check names the coupling so
+    // it fails loudly if either side ever moves.
+    anyhow::ensure!(
+        agent_id != autonoetic_types::background::ROOT_WIDE_GRANT_AGENT,
+        "the '{}' agent_id is reserved as the root-wide grant sentinel",
+        autonoetic_types::background::ROOT_WIDE_GRANT_AGENT
+    );
     anyhow::ensure!(
         agent_id
             .chars()
@@ -1261,6 +1271,19 @@ pub fn default_registry() -> NativeToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The root-wide grant sentinel must never be installable as an agent id —
+    /// `grants_cover_targets` reads it as "covers every agent under the root".
+    #[test]
+    fn validate_agent_id_rejects_the_root_wide_grant_sentinel() {
+        let err = validate_agent_id(autonoetic_types::background::ROOT_WIDE_GRANT_AGENT)
+            .expect_err("the grant sentinel must not be a valid agent id");
+        assert!(
+            err.to_string().contains("reserved"),
+            "unexpected error: {err}"
+        );
+        assert!(validate_agent_id("executor.default").is_ok());
+    }
 
     #[test]
     fn test_tool_tier_filter_allows_all_when_empty() {

@@ -393,7 +393,7 @@ impl NativeTool for ArtifactExecTool {
                         &manifest.capabilities,
                     );
                     if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                        if cache.find(&fingerprint).is_none() {
+                        if cache.find(&fingerprint, 0).is_none() {
                             let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
                                 fingerprint: fingerprint.clone(),
                                 agent_id: manifest.agent.id.clone(),
@@ -547,7 +547,10 @@ impl NativeTool for ArtifactExecTool {
                             &manifest.capabilities,
                         );
                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                            if let Some(entry) = cache.find(&fingerprint) {
+                            if let Some(entry) = cache.find(
+                                &fingerprint,
+                                crate::runtime::approved_exec_cache::cache_ttl_secs(config),
+                            ) {
                                 tracing::info!(
                                     target: "artifact_exec",
                                     fingerprint = %fingerprint,
@@ -651,7 +654,7 @@ impl NativeTool for ArtifactExecTool {
                                 if let Some(fp) = fingerprint_for_backfill {
                                     if let Some(gw_dir) = gateway_dir {
                                         if let Ok(cache) = ApprovedExecCache::new(gw_dir) {
-                                            if cache.find(&fp).is_none() {
+                                            if cache.find(&fp, 0).is_none() {
                                                 let entry = crate::runtime::approved_exec_cache::ApprovedExecEntry {
                                                     fingerprint: fp,
                                                     agent_id: manifest.agent.id.clone(),

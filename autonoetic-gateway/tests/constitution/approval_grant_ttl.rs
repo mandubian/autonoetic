@@ -86,7 +86,7 @@ fn r_plus_13_expired_grant_does_not_cover_targets() -> anyhow::Result<()> {
     )?;
 
     let targets = vec!["expired.example.com".to_string()];
-    let covers = store.session_grants_cover_targets("root-2", &targets);
+    let covers = store.session_grants_cover_targets("root-2", "agent-2", &targets);
 
     assert!(
         !covers,
@@ -112,7 +112,7 @@ fn r_plus_13_valid_grant_covers_targets() -> anyhow::Result<()> {
     )?;
 
     let targets = vec!["valid.example.com".to_string()];
-    let covers = store.session_grants_cover_targets("root-3", &targets);
+    let covers = store.session_grants_cover_targets("root-3", "agent-3", &targets);
 
     assert!(covers, "non-expired grant must cover targets");
 
@@ -134,7 +134,7 @@ fn r_plus_13_grant_without_expiry_covers_targets_forever() -> anyhow::Result<()>
     )?;
 
     let targets = vec!["permanent.example.com".to_string()];
-    let covers = store.session_grants_cover_targets("root-4", &targets);
+    let covers = store.session_grants_cover_targets("root-4", "agent-4", &targets);
 
     assert!(
         covers,

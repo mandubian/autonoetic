@@ -38,8 +38,8 @@ fn test_revoke_grant_by_host() {
     let grants = store.get_session_grants("root-1").unwrap();
     assert_eq!(grants, vec!["crates.io", "github.com"]);
 
-    assert!(!store.session_grants_cover_targets("root-1", &["pypi.org".to_string()]));
-    assert!(store.session_grants_cover_targets("root-1", &["github.com".to_string()]));
+    assert!(!store.session_grants_cover_targets("root-1", "agent-a", &["pypi.org".to_string()]));
+    assert!(store.session_grants_cover_targets("root-1", "agent-a", &["github.com".to_string()]));
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn test_grants_cover_targets_after_partial_revoke() {
     seed_grant(&store, "root-4", "agent-e", "c.com");
 
     assert!(
-        store.session_grants_cover_targets("root-4", &["a.com".to_string(), "b.com".to_string()])
+        store.session_grants_cover_targets("root-4", "agent-e", &["a.com".to_string(), "b.com".to_string()])
     );
 
     store
@@ -104,10 +104,10 @@ fn test_grants_cover_targets_after_partial_revoke() {
         .unwrap();
 
     assert!(
-        !store.session_grants_cover_targets("root-4", &["a.com".to_string(), "b.com".to_string()])
+        !store.session_grants_cover_targets("root-4", "agent-e", &["a.com".to_string(), "b.com".to_string()])
     );
-    assert!(store.session_grants_cover_targets("root-4", &["a.com".to_string()]));
-    assert!(store.session_grants_cover_targets("root-4", &["c.com".to_string()]));
+    assert!(store.session_grants_cover_targets("root-4", "agent-e", &["a.com".to_string()]));
+    assert!(store.session_grants_cover_targets("root-4", "agent-e", &["c.com".to_string()]));
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn test_revoke_grant_by_id_is_scoped_to_owning_root() {
             .unwrap(),
         "a foreign root's by-id revoke must not land"
     );
-    assert!(store.session_grants_cover_targets("root-owner", &["owned.io".to_string()]));
+    assert!(store.session_grants_cover_targets("root-owner", "agent-h", &["owned.io".to_string()]));
     assert_eq!(
         store.get_session_grants("root-owner").unwrap(),
         vec!["owned.io"]
@@ -164,8 +164,8 @@ fn test_revoke_grant_by_id_is_scoped_to_owning_root() {
     assert!(store
         .revoke_session_grant_by_id("root-owner", gid, "operator: tui revoke")
         .unwrap());
-    assert!(!store.session_grants_cover_targets("root-owner", &["owned.io".to_string()]));
-    assert!(store.session_grants_cover_targets("root-stranger", &["other.io".to_string()]));
+    assert!(!store.session_grants_cover_targets("root-owner", "agent-h", &["owned.io".to_string()]));
+    assert!(store.session_grants_cover_targets("root-stranger", "agent-i", &["other.io".to_string()]));
 
     // Second revoke by the owner is an idempotent no-op.
     assert!(!store
@@ -200,14 +200,14 @@ fn test_revoke_then_reapprove_restores_coverage() {
 
     seed_grant(&store, "root-7", "agent-h", "regranted.io");
 
-    assert!(store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+    assert!(store.session_grants_cover_targets("root-7", "agent-h", &["regranted.io".to_string()]));
 
     store
         .revoke_session_grants("root-7", Some("regranted.io"), "temp revoke")
         .unwrap();
 
     assert!(store.get_session_grants("root-7").unwrap().is_empty());
-    assert!(!store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+    assert!(!store.session_grants_cover_targets("root-7", "agent-h", &["regranted.io".to_string()]));
 
     seed_grant(&store, "root-7", "agent-h", "regranted.io");
 
@@ -215,7 +215,7 @@ fn test_revoke_then_reapprove_restores_coverage() {
         store.get_session_grants("root-7").unwrap(),
         vec!["regranted.io"]
     );
-    assert!(store.session_grants_cover_targets("root-7", &["regranted.io".to_string()]));
+    assert!(store.session_grants_cover_targets("root-7", "agent-h", &["regranted.io".to_string()]));
 }
 
 /// Pillar C: surgical revoke of every active grant whose
@@ -282,10 +282,12 @@ fn test_revoke_session_grants_by_source_is_surgical() {
         )
         .unwrap();
 
-    // Before revoke: coverage holds for all 5 hosts.
-    for h in ["alpha.com", "beta.com", "gamma.com", "delta.com", "epsilon.com"] {
-        assert!(store.session_grants_cover_targets("root-surg", &[h.to_string()]));
+    // Before revoke: coverage holds for each host under its owning agent.
+    for h in ["alpha.com", "beta.com", "gamma.com"] {
+        assert!(store.session_grants_cover_targets("root-surg", "a", &[h.to_string()]));
     }
+    assert!(store.session_grants_cover_targets("root-surg", "b", &["delta.com".to_string()]));
+    assert!(store.session_grants_cover_targets("root-surg", "op", &["epsilon.com".to_string()]));
 
     // Revoke plan-A's grants only.
     let n = store
@@ -296,13 +298,13 @@ fn test_revoke_session_grants_by_source_is_surgical() {
     // Coverage: plan-A hosts no longer covered; plan-B + operator still covered.
     for h in ["alpha.com", "beta.com", "gamma.com"] {
         assert!(
-            !store.session_grants_cover_targets("root-surg", &[h.to_string()]),
+            !store.session_grants_cover_targets("root-surg", "a", &[h.to_string()]),
             "plan-A host {h} should be uncovered after revoke"
         );
     }
-    for h in ["delta.com", "epsilon.com"] {
+    for (agent, h) in [("b", "delta.com"), ("op", "epsilon.com")] {
         assert!(
-            store.session_grants_cover_targets("root-surg", &[h.to_string()]),
+            store.session_grants_cover_targets("root-surg", agent, &[h.to_string()]),
             "non-plan-A host {h} must remain covered"
         );
     }

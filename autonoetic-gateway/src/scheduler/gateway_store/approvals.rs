@@ -1038,18 +1038,32 @@ impl GatewayStore {
     pub fn session_grants_cover_targets(
         &self,
         root_session_id: &str,
+        agent_id: &str,
         required_targets: &[String],
     ) -> bool {
-        self.grants_cover_targets(root_session_id, root_session_id, required_targets)
+        self.grants_cover_targets(root_session_id, root_session_id, agent_id, required_targets)
     }
 
     /// Scope-aware grant coverage check.  A request is covered when every
     /// required target is matched by at least one active (non-revoked,
-    /// non-expired) grant whose scope covers the requesting session.
+    /// non-expired) grant whose scope covers the requesting session **and
+    /// whose agent column matches the requesting agent**.
+    ///
+    /// Agent scoping: a grant minted from an approval records the agent whose
+    /// action was approved, and covers that agent only — a sibling session
+    /// running a *different* agent (e.g. a freshly built candidate in the
+    /// evolution pipeline) does not inherit the approval. The one exception is
+    /// `ROOT_WIDE_GRANT_AGENT`, the sentinel that envelope locks mint under
+    /// (see `session_envelope::materialize_network_grant`): those deliberately
+    /// cover every agent under the root, because the operator authorized the
+    /// root before the agent set was known. The sentinel is `*`, which
+    /// `validate_agent_id` excludes from the agent-id character set, so a real
+    /// agent id can never alias it into root-wide coverage.
     pub fn grants_cover_targets(
         &self,
         session_id: &str,
         root_session_id: &str,
+        agent_id: &str,
         required_targets: &[String],
     ) -> bool {
         if required_targets.is_empty() {
@@ -1074,6 +1088,11 @@ impl GatewayStore {
                     if expires_at < now {
                         return false;
                     }
+                }
+                let agent_covers = g.agent_id == agent_id
+                    || g.agent_id == autonoetic_types::background::ROOT_WIDE_GRANT_AGENT;
+                if !agent_covers {
+                    return false;
                 }
                 match g.scope {
                     GrantScope::RootSession => true,

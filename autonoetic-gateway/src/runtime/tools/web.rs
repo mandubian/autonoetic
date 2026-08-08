@@ -178,13 +178,14 @@ fn validate_approval_ref_context(
 fn session_grants_allow_host(
     store: &crate::scheduler::gateway_store::GatewayStore,
     session_id: Option<&str>,
+    agent_id: &str,
     host: &str,
 ) -> bool {
     let Some(sid) = session_id else {
         return false;
     };
     let root_sid = crate::runtime::content_store::root_session_id(sid);
-    store.session_grants_cover_targets(root_sid, &[host.to_string()])
+    store.session_grants_cover_targets(root_sid, agent_id, &[host.to_string()])
 }
 
 /// Session-taint network egress gate (#909 slice 2b). Returns a JSON refusal when
@@ -969,7 +970,9 @@ impl NativeTool for WebSearchTool {
             policy.can_connect_net(host).is_allowed()
                 || _gateway_store
                     .as_ref()
-                    .is_some_and(|s| session_grants_allow_host(s.as_ref(), _session_id, host))
+                    .is_some_and(|s| {
+                        session_grants_allow_host(s.as_ref(), _session_id, &manifest.agent.id, host)
+                    })
                 || approved_host_override.as_deref() == Some(host)
         };
 
@@ -1406,7 +1409,7 @@ fn gate_web_fetch_host(
     let host_allowed = policy.can_connect_net(host).is_allowed()
         || gateway_store
             .as_ref()
-            .is_some_and(|s| session_grants_allow_host(s.as_ref(), session_id, host))
+            .is_some_and(|s| session_grants_allow_host(s.as_ref(), session_id, &manifest.agent.id, host))
         || approval_validated;
 
     if host_allowed {
@@ -2116,7 +2119,9 @@ impl NativeTool for WebCallTool {
         let host_allowed = policy.can_connect_net(&host).is_allowed()
             || _gateway_store
                 .as_ref()
-                .is_some_and(|s| session_grants_allow_host(s.as_ref(), _session_id, &host))
+                .is_some_and(|s| {
+                    session_grants_allow_host(s.as_ref(), _session_id, &manifest.agent.id, &host)
+                })
             || approval_validated;
 
         if !host_allowed {

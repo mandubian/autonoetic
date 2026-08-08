@@ -793,10 +793,19 @@ pub async fn handle_gateway_grants(
                     } else {
                         g.session_id.clone()
                     };
+                    // The root-wide sentinel is not an agent id — spell it out
+                    // so the column never reads as a scoping that isn't there.
+                    let agent = if g.agent_id
+                        == autonoetic_types::background::ROOT_WIDE_GRANT_AGENT
+                    {
+                        "* (all agents)".to_string()
+                    } else {
+                        g.agent_id.clone()
+                    };
                     println!("{:<6} {:<36} {:<14} {:<12} {:<12} {}",
                         g.id,
                         short_session,
-                        g.agent_id,
+                        agent,
                         match g.scope {
                             autonoetic_types::background::GrantScope::RootSession => "root",
                             autonoetic_types::background::GrantScope::Session => "session",

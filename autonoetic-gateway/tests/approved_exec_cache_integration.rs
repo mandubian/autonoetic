@@ -108,7 +108,7 @@ fn test_cache_record_and_find() {
     cache.record(entry.clone()).expect("record should succeed");
     assert_eq!(cache.len(), 1);
 
-    let found = cache.find("sha256:abc123");
+    let found = cache.find("sha256:abc123", 0);
     assert!(found.is_some());
     assert_eq!(found.unwrap().agent_id, "test.agent");
 }
@@ -138,7 +138,7 @@ fn test_cache_persistence() {
     // Reopen cache and verify persistence
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache should reopen");
     assert_eq!(cache.len(), 1);
-    let found = cache.find("sha256:persistent");
+    let found = cache.find("sha256:persistent", 0);
     assert!(found.is_some());
 }
 
@@ -165,7 +165,7 @@ fn test_cache_update_last_used() {
         .update_last_used("sha256:update")
         .expect("update should succeed");
 
-    let found = cache.find("sha256:update").expect("should find entry");
+    let found = cache.find("sha256:update", 0).expect("should find entry");
     // Verify last_used_at was updated (it should be close to now)
     assert!(found.last_used_at >= now);
 }
@@ -176,7 +176,7 @@ fn test_cache_not_found() {
     let gateway_dir = temp.path();
 
     let cache = ApprovedExecCache::new(gateway_dir).expect("cache should create");
-    assert!(cache.find("sha256:nonexistent").is_none());
+    assert!(cache.find("sha256:nonexistent", 0).is_none());
 }
 
 #[test]
@@ -208,8 +208,8 @@ fn test_cache_all_remove_clear() {
     // remove() revokes one and persists; a no-op remove returns false.
     assert!(cache.remove("sha256:aaa").unwrap());
     assert!(!cache.remove("sha256:aaa").unwrap());
-    assert!(cache.find("sha256:aaa").is_none());
-    assert!(cache.find("sha256:bbb").is_some());
+    assert!(cache.find("sha256:aaa", 0).is_none());
+    assert!(cache.find("sha256:bbb", 0).is_some());
 
     // Revocation survives reopen (persisted).
     let reopened = ApprovedExecCache::new(gateway_dir).expect("reopen");
@@ -345,7 +345,7 @@ fn test_cache_full_cycle() {
         None,
         &[],
     );
-    assert!(cache.find(&fingerprint).is_none());
+    assert!(cache.find(&fingerprint, 0).is_none());
 
     // 2. Record after approval
     let now = chrono::Utc::now().to_rfc3339();
@@ -362,7 +362,7 @@ fn test_cache_full_cycle() {
     cache.record(entry).expect("record should succeed");
 
     // 3. Cache hit
-    assert!(cache.find(&fingerprint).is_some());
+    assert!(cache.find(&fingerprint, 0).is_some());
 
     // 4. Different code = different fingerprint
     let different_fingerprint = compute_fingerprint(
@@ -372,7 +372,7 @@ fn test_cache_full_cycle() {
         None,
         &[],
     );
-    assert!(cache.find(&different_fingerprint).is_none());
+    assert!(cache.find(&different_fingerprint, 0).is_none());
 }
 
 #[test]
@@ -556,7 +556,7 @@ fn test_capability_change_misses_cache_recorded_under_old_scope() {
 
     // Under the ORIGINAL (narrow) scope the entry is reusable…
     assert!(
-        cache.find(&narrow_fp).is_some(),
+        cache.find(&narrow_fp, 0).is_some(),
         "approval recorded under the narrow scope must be found under that same scope"
     );
 
@@ -569,7 +569,7 @@ fn test_capability_change_misses_cache_recorded_under_old_scope() {
         compute_fingerprint("test.agent", &targets, code_content, None, &wide_manifest.capabilities);
     assert_ne!(narrow_fp, wide_fp, "a capability change must change the fingerprint");
     assert!(
-        cache.find(&wide_fp).is_none(),
+        cache.find(&wide_fp, 0).is_none(),
         "a changed capability scope must NOT reuse the approval cached under the old scope"
     );
 }

@@ -2871,8 +2871,13 @@ fn default_max_probes_per_host() -> u32 {
     3
 }
 
+/// Default time-to-live for approval-minted session grants and approved-exec
+/// cache entries: 24h. Both approval-reuse layers share this budget so one
+/// cannot silently outlive the other; 0 disables expiry for both.
+pub const DEFAULT_GRANT_TTL_SECS: u64 = 86400;
+
 fn default_grant_ttl_secs() -> u64 {
-    86400
+    DEFAULT_GRANT_TTL_SECS
 }
 
 fn default_escape_attempt_degrade_threshold() -> usize {

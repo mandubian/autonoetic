@@ -186,8 +186,17 @@ This complements the exec cache: the cache handles identical code, while session
 
 ### Security Considerations
 
-- Grants are scoped by root session (not by agent) — all agents in the session benefit from the grant
-- The `agent_id` column is stored for audit/forensics but not used in the authorization check
+> **Superseded — the first two bullets no longer describe the shipped
+> behaviour.** `grants_cover_targets` now requires the grant's `agent_id` to
+> match the requesting agent: approving one agent's action no longer
+> pre-authorizes every other agent under the root (notably an unaudited
+> candidate built mid-session by the evolution pipeline). The single exception
+> is `ROOT_WIDE_GRANT_AGENT` (`*`), the sentinel session-envelope locks mint
+> under, which does cover the whole root by design — the operator authorized
+> the root before the agent set was known.
+
+- ~~Grants are scoped by root session (not by agent) — all agents in the session benefit from the grant~~
+- ~~The `agent_id` column is stored for audit/forensics but not used in the authorization check~~
 - Host normalization is consistent: both `normalize_targets()` and `extract_host_from_url()` lowercase and strip trailing dots
 - Grants are cleaned up on session close (completed/failed) and emergency stop, but preserved for suspended sessions
 
@@ -204,10 +213,19 @@ This complements the exec cache: the cache handles identical code, while session
 
 These features are deferred to Phase 2:
 
-### TTL / Expiry
+### TTL / Expiry — **shipped**
+
+Cache entries expire on the grant TTL budget rather than a separate knob:
+`ApprovedExecCache::find` takes `ttl_secs`, gate-skip lookups pass
+`cache_ttl_secs(config)` (= `GatewayConfig::default_grant_ttl_secs`, default
+`DEFAULT_GRANT_TTL_SECS` = 24h), and an expired entry is pruned and persisted
+so the next matching exec goes back through approval. `0` disables expiry,
+matching `default_grant_ttl_secs = 0`. The two approval-reuse layers — session
+grants and the exec cache — deliberately share one horizon.
+
 ```yaml
-resource_approval:
-  ttl_secs: 86400  # 24 hours, None = no expiry
+# config.yaml (top level)
+default_grant_ttl_secs: 86400  # 24 hours; 0 = no expiry
 ```
 
 ### Capability Change Detection

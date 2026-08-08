@@ -51,7 +51,7 @@ fn lock_flow_materializes_grants_for_observed_host() -> anyhow::Result<()> {
     // propose_discovered_envelope now auto-locks and materializes grants.
     let proposal = propose_discovered_envelope(&store, root, "discovered", None, "operator")?
         .expect("proposal");
-    assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+    assert!(store.session_grants_cover_targets(root, "researcher.default", &["api.open-meteo.com".to_string()]));
     // The envelope should be locked (active), not pending (proposed).
     assert!(store.get_proposed_envelopes(root)?.is_empty());
     assert_eq!(store.get_active_envelopes(root)?.len(), 1);
@@ -74,9 +74,9 @@ fn locked_envelope_covers_host_outside_lock_still_needs_approval() -> anyhow::Re
     let proposal =
         propose_session_envelope(&store, root, "operator", None, "operator")?.expect("proposal");
 
-    assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+    assert!(store.session_grants_cover_targets(root, "researcher.default", &["api.open-meteo.com".to_string()]));
     assert!(
-        !store.session_grants_cover_targets(root, &["geocoding-api.open-meteo.com".to_string()])
+        !store.session_grants_cover_targets(root, "researcher.default", &["geocoding-api.open-meteo.com".to_string()])
     );
 
     let hint = envelope_expansion_hint(
@@ -196,14 +196,14 @@ fn revoke_locked_envelope_revokes_grants_and_removes_row() -> anyhow::Result<()>
     // propose_discovered_envelope auto-locks — no manual lock needed.
     let proposal = propose_discovered_envelope(&store, root, "discovered", None, "operator")?
         .expect("proposal");
-    assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+    assert!(store.session_grants_cover_targets(root, "researcher.default", &["api.open-meteo.com".to_string()]));
 
     let revoked =
         revoke_session_envelope(&store, proposal.envelope_id, "operator")?.expect("revoked record");
     assert_eq!(revoked.root_session_id, root);
     assert!(revoked.locked_at.is_some());
     assert!(store.get_envelope_by_id(proposal.envelope_id)?.is_none());
-    assert!(!store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+    assert!(!store.session_grants_cover_targets(root, "researcher.default", &["api.open-meteo.com".to_string()]));
     Ok(())
 }
 

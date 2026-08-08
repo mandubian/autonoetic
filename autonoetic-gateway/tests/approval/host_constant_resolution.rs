@@ -100,7 +100,8 @@ fn host_constant_flows_to_concrete_targets_and_sibling_grant_coverage() {
         )
         .unwrap();
 
-    // 5. The second sibling — different script, same host — is covered.
+    // 5. The second sibling — different script, same host, SAME agent — is
+    //    covered.
     let second_targets = normalize_targets(
         &RemoteAccessAnalyzer::analyze_code(GMAIL_LATEST_PY).detected_patterns,
     );
@@ -108,8 +109,22 @@ fn host_constant_flows_to_concrete_targets_and_sibling_grant_coverage() {
         store.grants_cover_targets(
             "root-1/executor.default-3e64a716",
             "root-1",
+            "executor.default",
             &second_targets,
         ),
-        "sibling session running a different script against the same host must be grant-covered"
+        "sibling session of the same agent running a different script against the same host must be grant-covered"
+    );
+
+    // 6. …but a DIFFERENT agent under the same root is NOT covered: approval
+    //    is per-agent, so an unaudited candidate agent cannot inherit the
+    //    operator's grant to executor.default (grant-strategy review, Gap 2).
+    assert!(
+        !store.grants_cover_targets(
+            "root-1/gmail-a2435db5",
+            "root-1",
+            "gmail",
+            &second_targets,
+        ),
+        "a different agent under the same root must not inherit executor.default's grant"
     );
 }

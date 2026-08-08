@@ -55,7 +55,7 @@ fn envelope_grants_cover_observed_hosts() {
     assert!(!proposal.skipped);
 
     assert!(
-        store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]),
+        store.session_grants_cover_targets(root, "researcher.default", &["api.open-meteo.com".to_string()]),
         "auto-locked discovered envelope must cover observed host"
     );
     assert_eq!(store.get_active_envelopes(root).unwrap().len(), 1);

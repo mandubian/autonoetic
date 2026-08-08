@@ -70,7 +70,11 @@ pub fn materialize_network_grant(
             None => GrantTarget::ExactHost(h.clone()),
         })
         .collect();
-    let grant_agent = agent_id.unwrap_or(root_session_id);
+    // No agent attributed ⇒ the operator locked the envelope for the root
+    // before the agent set was known: mint a root-wide grant under the
+    // dedicated sentinel, never under a string that could alias a real agent
+    // id (see `ROOT_WIDE_GRANT_AGENT`).
+    let grant_agent = agent_id.unwrap_or(autonoetic_types::background::ROOT_WIDE_GRANT_AGENT);
     if let Err(e) = store.insert_session_grant(
         root_session_id,
         root_session_id,
@@ -749,7 +753,7 @@ mod tests {
         assert!(!proposal.skipped);
         assert_eq!(proposal.hosts, vec!["api.open-meteo.com".to_string()]);
 
-        assert!(store.session_grants_cover_targets(root, &["api.open-meteo.com".to_string()]));
+        assert!(store.session_grants_cover_targets(root, "executor.default", &["api.open-meteo.com".to_string()]));
         assert_eq!(store.get_active_envelopes(root)?.len(), 1);
         Ok(())
     }
@@ -771,7 +775,7 @@ mod tests {
         // A subdomain wildcard must actually cover concrete subdomains, not be
         // dropped as a dead ExactHost("*.example.com").
         assert!(
-            store.session_grants_cover_targets(root, &["api.example.com".to_string()]),
+            store.session_grants_cover_targets(root, "executor.default", &["api.example.com".to_string()]),
             "subdomain wildcard grant should cover a concrete subdomain"
         );
         // Stored as the canonical bare suffix (CLI prepends `*.` on display).
@@ -783,6 +787,80 @@ mod tests {
             )),
             "wildcard host should be stored as HostSuffix(\"example.com\"), got: {:?}",
             grants.iter().map(|g| &g.targets).collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    /// Root-wide envelope grants are minted under the dedicated `*` sentinel,
+    /// never under the root session id. The distinction matters: agent ids are
+    /// free-form strings, so if the sentinel *were* the root session id, an
+    /// agent installed under that name would silently turn every one of its
+    /// own per-agent grants into root-wide coverage.
+    #[test]
+    fn envelope_lock_mints_root_wide_grants_under_the_sentinel() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-root-wide-sentinel";
+
+        let caps = vec![Capability::NetworkAccess {
+            hosts: vec!["api.example.com".to_string()],
+        }];
+        let proposal =
+            propose_envelope_from_capabilities(&store, root, &caps, "plan:test", None, "operator")?
+                .expect("proposal");
+        lock_session_envelope(&store, proposal.envelope_id, "operator")?;
+
+        let grants = store.get_session_grants_structured(root)?;
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].agent_id,
+            autonoetic_types::background::ROOT_WIDE_GRANT_AGENT,
+            "envelope-lock grants must carry the sentinel, not the root session id"
+        );
+
+        // Root-wide really is root-wide: any agent under the root is covered.
+        assert!(store.session_grants_cover_targets(
+            root,
+            "executor.default",
+            &["api.example.com".to_string()]
+        ));
+        assert!(store.session_grants_cover_targets(
+            root,
+            "some-unaudited-candidate",
+            &["api.example.com".to_string()]
+        ));
+        Ok(())
+    }
+
+    /// An agent whose id happens to equal the root session id gets no special
+    /// treatment: its grant covers itself and nobody else.
+    #[test]
+    fn agent_named_like_the_root_session_gets_no_root_wide_coverage() -> Result<()> {
+        let dir = tempdir()?;
+        let store = GatewayStore::open(dir.path())?;
+        let root = "session-collision-probe";
+
+        // A per-agent grant for an agent whose id is the root session id.
+        materialize_network_grant(
+            &store,
+            root,
+            &["api.example.com".to_string()],
+            "operator",
+            "plan:collision",
+            Some(root),
+        );
+
+        assert!(
+            store.session_grants_cover_targets(root, root, &["api.example.com".to_string()]),
+            "the owning agent is still covered by its own grant"
+        );
+        assert!(
+            !store.session_grants_cover_targets(
+                root,
+                "executor.default",
+                &["api.example.com".to_string()]
+            ),
+            "an agent id equal to the root session id must not become root-wide"
         );
         Ok(())
     }

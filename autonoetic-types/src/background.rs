@@ -1097,6 +1097,21 @@ impl GrantTarget {
     }
 }
 
+/// Sentinel `agent_id` marking a session approval grant as **root-wide**: it
+/// covers every agent running under the root session, not just one.
+///
+/// Only the session-envelope lock path mints these (an operator locking a
+/// network envelope authorizes the *root*, before the agent set is known —
+/// see `session_envelope::materialize_network_grant`). Every other grant
+/// records the concrete agent whose action was approved and covers that agent
+/// alone.
+///
+/// `*` is deliberately outside the agent-id character set enforced by the
+/// gateway's `validate_agent_id` (ASCII alphanumerics, `.`, `-`, `_`), so no
+/// real agent id can ever alias the sentinel and silently widen its own
+/// grants to the whole root.
+pub const ROOT_WIDE_GRANT_AGENT: &str = "*";
+
 /// A structured grant row returned from the store for display and matching.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionApprovalGrant {
