@@ -15,7 +15,7 @@ use crate::runtime::failure_classification::{
 use crate::runtime::live_digest::base_session_id;
 use crate::scheduler::gateway_store::{GatewayStore, TaskExecutionClaim};
 use crate::scheduler::store::{read_json_file, write_json_file};
-use autonoetic_types::agent::SessionLifecycleState;
+use autonoetic_types::agent::{SessionLifecycleState, StoredLifecycle};
 use autonoetic_types::causal_chain::EntryStatus;
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::tool_error::{FailureClass, RetryAdvice, SideEffectState};
@@ -2330,9 +2330,24 @@ pub fn try_complete_workflow(
     // pending-escalation check below.
     if let Some(gw_store) = store {
         match gw_store.get_session_lifecycle_state(root_session_id)? {
-            Some(ref raw) => match raw.parse::<SessionLifecycleState>() {
-                Ok(state) if state.permits_workflow_completion() => { /* proceed */ }
-                Ok(state) => {
+            // `classify_stored`, not a bare `parse()`: a `terminated:<reason>`
+            // written by a newer gateway must release the workflow on the
+            // prefix contract, or a rolling upgrade parks it forever.
+            Some(ref raw) => match SessionLifecycleState::classify_stored(raw) {
+                StoredLifecycle::Known(state) if state.permits_workflow_completion() => {
+                    /* proceed */
+                }
+                StoredLifecycle::UnknownTerminal => {
+                    tracing::debug!(
+                        target: "workflow",
+                        workflow_id = %wf_id,
+                        root_session_id = %root_session_id,
+                        lifecycle_state = %raw,
+                        "Root session lifecycle is terminal by prefix with a reason unknown to \
+                         this build — permitting workflow completion"
+                    );
+                }
+                StoredLifecycle::Known(state) => {
                     tracing::debug!(
                         target: "workflow",
                         workflow_id = %wf_id,
@@ -2343,14 +2358,15 @@ pub fn try_complete_workflow(
                     );
                     return Ok(false);
                 }
-                // An unparseable value: block (safe default) and surface it.
-                Err(_) => {
+                // Not terminal-by-prefix and not in the vocabulary: no signal
+                // to act on, so block (safe default) and surface it.
+                StoredLifecycle::Unrecognised => {
                     tracing::warn!(
                         target: "workflow",
                         workflow_id = %wf_id,
                         root_session_id = %root_session_id,
                         lifecycle_state = %raw,
-                        "Workflow not completing: unparseable root session lifecycle_state"
+                        "Workflow not completing: unrecognised root session lifecycle_state"
                     );
                     return Ok(false);
                 }

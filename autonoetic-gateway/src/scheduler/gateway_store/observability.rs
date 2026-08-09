@@ -1756,15 +1756,19 @@ impl GatewayStore {
                 )
                 .ok();
             // #742/#1057: a terminal parent orphans its children. Terminalness
-            // is classified by the enum (`is_terminal`), not a restated prefix,
-            // so a future terminal reason can't drift here. Resumable parents
-            // protect their children. Falls back to status-based inference for
-            // pre-migration data. An unparseable value is treated as
-            // non-terminal (protect) — the safe default.
+            // is classified by the enum, not a restated prefix, so a future
+            // terminal reason can't drift here. Resumable parents protect their
+            // children. Falls back to status-based inference for pre-migration
+            // data.
+            //
+            // `classify_stored`, not a bare `parse().ok()`: a strict parse
+            // would read a `terminated:<reason>` written by a newer gateway as
+            // non-terminal and never reap its children — the #1056 livelock.
+            // A value that is not terminal-by-prefix and not in the vocabulary
+            // is still treated as non-terminal (protect), the safe default.
             let parent_is_terminal = parent_lifecycle
                 .as_deref()
-                .and_then(|s| s.parse::<SessionLifecycleState>().ok())
-                .map(|st| st.is_terminal())
+                .map(|s| SessionLifecycleState::classify_stored(s).is_terminal())
                 .unwrap_or(false);
             if parent_is_terminal {
                 orphans.push((
