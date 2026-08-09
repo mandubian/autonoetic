@@ -367,10 +367,24 @@ impl NativeTool for ArtifactBuildTool {
                         match crate::runtime::install_contract::extract_frontmatter_raw(&skill_text) {
                             Ok(frontmatter) => {
                                 if let Err(cap_err) = crate::runtime::tools::agent_revision::parse_frontmatter_capabilities(&frontmatter) {
+                                    // `parse_frontmatter_capabilities` is shared with the seed-time
+                                    // check; its errors come back wrapped as
+                                    // "validation: Promotion gate: <details>". Both prefixes are
+                                    // misleading at build time, so strip them and surface just the
+                                    // parse details.
+                                    let cap_err_msg = cap_err.to_string();
+                                    let cap_err_msg = cap_err_msg
+                                        .strip_prefix("validation: ")
+                                        .unwrap_or(&cap_err_msg)
+                                        .strip_prefix("Promotion gate: ")
+                                        .unwrap_or_else(|| {
+                                            cap_err_msg.strip_prefix("validation: ").unwrap_or(&cap_err_msg)
+                                        })
+                                        .to_string();
                                     return Ok(ToolError::validation(
                                         format!(
                                             "agent_bundle artifact has malformed capabilities in \
-                                             SKILL.md frontmatter: {cap_err}. The artifact cannot \
+                                             SKILL.md frontmatter: {cap_err_msg}. The artifact cannot \
                                              be installed or federation-reviewed until its \
                                              capabilities are valid tagged objects."
                                         ),
@@ -380,7 +394,7 @@ impl NativeTool for ArtifactBuildTool {
                                              `capabilities` list). Every capability requires \
                                              explicit scoping — bare strings are rejected. E.g.:\n\
                                              ---\n\
-                                             metadata:\n  autonoetic:\n    agent_id: my-agent\n    capabilities:\n      - type: CodeExecution\n        patterns:\n          - python*\n      - type: SandboxFunctions\n        allowed:\n          - content.\n\
+                                             metadata:\n  autonoetic:\n    # ...other manifest fields...\n    capabilities:\n      - type: CodeExecution\n        patterns:\n          - python*\n      - type: SandboxFunctions\n        allowed:\n          - content.\n\
                                              ---\n\
                                              Rewrite SKILL.md, content_write the corrected file, \
                                              and call artifact_build again.",
@@ -905,6 +919,12 @@ mod tests {
         assert!(
             message.contains("capabilities"),
             "message should name the capabilities problem: {message}"
+        );
+        // The shared parser prefixes its errors with "Promotion gate:"; that
+        // prefix is misleading at build time, so the build path must strip it.
+        assert!(
+            !message.contains("Promotion gate:"),
+            "build-time message must not leak the seed-time 'Promotion gate:' prefix: {message}"
         );
 
         let refs = gs
