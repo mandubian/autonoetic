@@ -348,7 +348,15 @@ impl NativeTool for ArtifactBuildTool {
         // manifest missing its closing '---' delimiter parses as "no
         // frontmatter" downstream (gray_matter), surfacing dozens of turns
         // later inside federation_escalate's capability load. Validate here so
-        // the builder gets an immediate, actionable error.
+        // the builder gets an immediate, actionable error. We also validate
+        // capability declarations: `parse_frontmatter_capabilities` is the
+        // same check `agent_revision_create` runs at seed time — but seed
+        // happens *after* every federation gate (unit_test_runner +
+        // static_evaluator + auditor) has run on the broken artifact, so a
+        // one-line `capabilities: [CodeExecution]` typo used to cost a full
+        // re-federation round (three rounds observed in session-964ea6d7).
+        // Hoisting the capability check into the build collapses that into a
+        // single coder fix-and-rebuild.
         if kind == autonoetic_types::artifact::ArtifactKind::AgentBundle {
             match store.resolve_files(&bundle.artifact_id) {
                 Ok(files) => {
@@ -356,28 +364,52 @@ impl NativeTool for ArtifactBuildTool {
                         files.iter().find(|(name, _)| name == "SKILL.md")
                     {
                         let skill_text = String::from_utf8_lossy(skill_bytes);
-                        if let Err(e) =
-                            crate::runtime::install_contract::extract_frontmatter_raw(&skill_text)
-                        {
-                            return Ok(ToolError::validation(
-                                format!(
-                                    "agent_bundle artifact has an unreadable SKILL.md — its \
-                                     YAML frontmatter cannot be parsed: {e}. The artifact cannot \
-                                     be installed or federation-reviewed until the manifest is \
-                                     fixed."
-                                ),
-                                Some(
-                                    "Rewrite SKILL.md with valid YAML frontmatter and rebuild. \
-                                     The frontmatter must open with a line containing only '---' \
-                                     and close with a matching '---' line, e.g.:\n\
-                                     ---\n\
-                                     autonoetic:\n  agent_id: my-agent\n  ...\n\
-                                     ---\n\
-                                     Then content_write the corrected SKILL.md and call \
-                                     artifact_build again.",
-                                ),
-                            )
-                            .to_error_response());
+                        match crate::runtime::install_contract::extract_frontmatter_raw(&skill_text) {
+                            Ok(frontmatter) => {
+                                if let Err(cap_err) = crate::runtime::tools::agent_revision::parse_frontmatter_capabilities(&frontmatter) {
+                                    return Ok(ToolError::validation(
+                                        format!(
+                                            "agent_bundle artifact has malformed capabilities in \
+                                             SKILL.md frontmatter: {cap_err}. The artifact cannot \
+                                             be installed or federation-reviewed until its \
+                                             capabilities are valid tagged objects."
+                                        ),
+                                        Some(
+                                            "Capabilities must be a YAML list of tagged objects \
+                                             under metadata.autonoetic.capabilities (or a top-level \
+                                             `capabilities` list). Every capability requires \
+                                             explicit scoping — bare strings are rejected. E.g.:\n\
+                                             ---\n\
+                                             metadata:\n  autonoetic:\n    agent_id: my-agent\n    capabilities:\n      - type: CodeExecution\n        patterns:\n          - python*\n      - type: SandboxFunctions\n        allowed:\n          - content.\n\
+                                             ---\n\
+                                             Rewrite SKILL.md, content_write the corrected file, \
+                                             and call artifact_build again.",
+                                        ),
+                                    )
+                                    .to_error_response());
+                                }
+                            }
+                            Err(e) => {
+                                return Ok(ToolError::validation(
+                                    format!(
+                                        "agent_bundle artifact has an unreadable SKILL.md — its \
+                                         YAML frontmatter cannot be parsed: {e}. The artifact cannot \
+                                         be installed or federation-reviewed until the manifest is \
+                                         fixed."
+                                    ),
+                                    Some(
+                                        "Rewrite SKILL.md with valid YAML frontmatter and rebuild. \
+                                         The frontmatter must open with a line containing only '---' \
+                                         and close with a matching '---' line, e.g.:\n\
+                                         ---\n\
+                                         autonoetic:\n  agent_id: my-agent\n  ...\n\
+                                         ---\n\
+                                         Then content_write the corrected SKILL.md and call \
+                                         artifact_build again.",
+                                    ),
+                                )
+                                .to_error_response());
+                            }
                         }
                     }
                 }
@@ -815,6 +847,120 @@ mod tests {
             .list_artifact_refs_for_scope(ArtifactRefScopeType::Session, "session-1")
             .unwrap();
         assert!(refs.is_empty(), "rejected bundle must not mint a ref");
+    }
+
+    #[test]
+    fn agent_bundle_with_bare_string_capability_is_rejected_at_build_time() {
+        // The exact failure mode from session-964ea6d7: SKILL.md declares
+        // `capabilities: [CodeExecution]` (bare string) instead of the
+        // required object form. Before this check existed, the bundle built
+        // fine and the defect surfaced only at agent_revision_create (seed)
+        // time — after unit_test_runner, static_evaluator, and auditor had
+        // each run on the broken artifact.
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let content_store = ContentStore::new(&gateway_dir).unwrap();
+        let main_handle = content_store.write(b"-- main.py\n").unwrap();
+        content_store
+            .register_name("session-1/coder.default-x", "main.py", &main_handle)
+            .unwrap();
+        let bad_skill = content_store
+            .write(
+                b"---\nmetadata:\n  autonoetic:\n    agent_id: bare-cap\n    capabilities:\n      - CodeExecution\n---\n",
+            )
+            .unwrap();
+        content_store
+            .register_name("session-1/coder.default-x", "SKILL.md", &bad_skill)
+            .unwrap();
+        let gateway_store = GatewayStore::open(&gateway_dir).unwrap();
+        let gs = std::sync::Arc::new(gateway_store);
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactBuildTool;
+
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "inputs": ["main.py", "SKILL.md"],
+                    "entrypoints": ["main.py"],
+                    "kind": "agent_bundle"
+                })
+                .to_string(),
+                Some("session-1/coder.default-x"),
+                None,
+                None,
+                Some(gs.clone()),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], false, "expected rejection: {parsed}");
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("capabilities"),
+            "message should name the capabilities problem: {message}"
+        );
+
+        let refs = gs
+            .list_artifact_refs_for_scope(ArtifactRefScopeType::Session, "session-1")
+            .unwrap();
+        assert!(refs.is_empty(), "rejected bundle must not mint a ref");
+    }
+
+    #[test]
+    fn agent_bundle_with_valid_object_capabilities_builds_successfully() {
+        // Regression guard: well-formed object capabilities must still build.
+        // Mirrors the canonical form documented in the build error hint.
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let content_store = ContentStore::new(&gateway_dir).unwrap();
+        let main_handle = content_store.write(b"-- main.py\n").unwrap();
+        content_store
+            .register_name("session-1/coder.default-x", "main.py", &main_handle)
+            .unwrap();
+        let good_skill = content_store
+            .write(
+                b"---\nmetadata:\n  autonoetic:\n    agent_id: well-formed-cap\n    capabilities:\n      - type: CodeExecution\n        patterns:\n          - python*\n      - type: SandboxFunctions\n        allowed:\n          - content.\n---\n",
+            )
+            .unwrap();
+        content_store
+            .register_name("session-1/coder.default-x", "SKILL.md", &good_skill)
+            .unwrap();
+        let gateway_store = GatewayStore::open(&gateway_dir).unwrap();
+        let gs = std::sync::Arc::new(gateway_store);
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactBuildTool;
+
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({
+                    "inputs": ["main.py", "SKILL.md"],
+                    "entrypoints": ["main.py"],
+                    "kind": "agent_bundle"
+                })
+                .to_string(),
+                Some("session-1/coder.default-x"),
+                None,
+                None,
+                Some(gs.clone()),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], true, "expected success: {parsed}");
     }
 }
 

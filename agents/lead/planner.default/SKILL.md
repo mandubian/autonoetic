@@ -403,6 +403,17 @@ re-run federation on the current `artifact_ref` rather than reseeding.
 
 When an artifact-backed agent needs promotion (after `coder.default` produces an artifact):
 
+**0. Manifest preflight (before any gate):** `artifact_build` already rejects unreadable SKILL.md frontmatter and malformed capabilities, so a successfully built `agent_bundle` ref has sound structure. But the **semantic** defects that most often waste a full gate round (unit_test_runner ‖ static_evaluator ‖ auditor, then re-run after each fix) are not structural — they are field-level mismatches the static_evaluator only surfaces after ~90 s of LLM review. Before spawning any gate, `resolve(ref=<ar.*>, include="content", file="SKILL.md")` and check:
+
+| Field | Must match | If it doesn't |
+|---|---|---|
+| `metadata.autonoetic.entrypoints` | the `entrypoints` list from `artifact_inspect` | `coder.default` — fix the manifest, rebuild (`content_write` + `artifact_build`) |
+| `metadata.autonoetic.script_input_mode` | how the entrypoint actually reads input. `stdin` ⟹ entrypoint reads `sys.stdin`/`input()`; omit (or `env`) ⟹ entrypoint calls `autonoetic_sdk.load_input()` | `coder.default` — this is the #1 cause of avoidable re-federation (session-964ea6d7 ran three full rounds on this single mismatch) |
+| `metadata.autonoetic.remote_access` | every `host:port` the code connects to (from the coder's summary, or your own `resolve` of the entrypoint) | `coder.default` to add the declaration, or `specialized_builder.default`/`agent-factory` if the code is correct and the declaration just needs widening |
+| `metadata.autonoetic.capabilities` | present and object-form (`artifact_build` enforces shape; you are checking the *intent* matches what the agent needs) | rare — only if the coder shipped the wrong capability set |
+
+Route any mismatch back to `coder.default` with the specific field and the fix, then rebuild. **Do not spawn any gate on a manifest you have not read.** This preflight is cheap (two `resolve` calls + your own read) and collapses the common case where gates run, static_evaluator flags a one-line SKILL.md fix, coder fixes only that one finding, gates re-run, and the *next* mismatch surfaces — repeating for every defect because gates batch in parallel.
+
 **1. Correctness gate first (sequential):** For artifact-backed agents, spawn `unit_test_runner.default` alone (`async=true`), join with `workflow_wait(timeout_secs=300)`. If it fails, stop — route to `coder.default` (code bug) or `packager.default` (missing dep). Do not spawn review gates on a known-broken artifact. `unable_to_evaluate` (no test files) is normal for trivial scripts → proceed to Step 2. Tests run in a **no-network** sandbox (P-3.10) — must be hermetic; do not re-spawn hoping network approval appears.
 
 **2. Review gates in parallel:** After unit tests pass/skip, spawn `auditor.default` + `static_evaluator.default` together (`async=true`), join with one `workflow_wait` (parallel fan-out). Same for pure-skill agents (skip Step 1).
@@ -492,7 +503,7 @@ Inform user. If they want to continue, respawn (creates a new approval).
 | Install-state conflict (`already has active revision`, `rollback lineage mismatch`, etc.) | Inspect state (`agent_inspect`, `agent_revision_list`) — NOT a coder bug; escalate |
 | Smoke test failed (`stage: "smoke_test_failed"`) | Route to `coder.default` for fixes, re-run factory. Do NOT skip smoke test |
 | Transient infra failure (5xx, connection) | Environment failure — do NOT restart onboarding or re-spawn coder; escalate if persistent |
-| Static evaluator fails | Route to `coder.default`, re-run full federation before operator review |
+| Static evaluator fails | Read the finding, route to `coder.default` for the specific fix, then **re-run Step 0 manifest preflight** on the rebuilt artifact before re-spawning gates. Do not blindly re-run all gates on a one-field manifest fix without confirming the rest of the manifest still matches the code — that is how a second latent mismatch wastes another full round. |
 | Unit test fails: `ModuleNotFoundError` **third-party** (`pytest`, `requests`…) | `packager.default` (code is correct, needs layered deps) |
 | Unit test fails: **local** module missing | `coder.default` (wrong import path / missing file) |
 | Unit test fails: other | Route test output to `coder.default` |
@@ -508,6 +519,10 @@ Do not route these to `coder.default` or `debugger.default`:
 
 - **`unable_to_evaluate`** — gate couldn't produce a deterministic verdict. Inspect `findings`: dependency layer missing → `packager` then re-run; live network required → don't coerce to fail, `session_escalate` describing the gap; sandbox degraded (P-7.18) → fresh gate on clean session, escalate if recurs.
 - **`clarification_needed`** — gate needs inputs from you (test criteria, scenarios). Read `clarification_request`, supply context in a fresh spawn of the same gate, or relay to operator via `user_ask`. Never invent test criteria.
+
+### Future: partial re-federation (planned, not yet available)
+
+`promotion_record`s are keyed on the full content digest of the artifact, so any rebuild — even a one-line `SKILL.md` fix that leaves the code the gate reviewed unchanged — voids **every** gate's verdict and forces a full re-federation. Step 0 above stops the common case (semantic manifest mismatches) from reaching the gates at all; a deeper future optimization would let gates whose inputs did not change (e.g. auditor + unit_test_runner when only `SKILL.md` changed) reuse their prior verdicts across a manifest-only rebuild. This is tracked as a follow-up because it cuts across the digest-keying design that gives `promotion_record` its tamper-resistance; it is not something the planner can opt into today, so always re-run the full federation on a rebuilt `artifact_ref` until then.
 
 ---
 

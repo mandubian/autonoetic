@@ -241,6 +241,18 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
             "content_digest is gateway-owned and must not be provided to promotion.record"
         );
 
+        // NOTE(optimized-re-federation): `artifact_canonical_digest` covers the
+        // whole bundle, so a rebuild that touches only SKILL.md produces a new
+        // digest and voids every prior promotion_record — forcing the planner
+        // to re-run unit_test_runner, static_evaluator, AND auditor even when
+        // the code two of those gates reviewed did not change (see
+        // session-964ea6d7 for the three-round case). A future optimization:
+        // key each role's record on a per-role input digest (e.g. code files
+        // only for unit_test_runner/auditor, manifest for static_evaluator) so
+        // unchanged-role verdicts survive a manifest-only rebuild. This cuts
+        // across the tamper-resistance story of content-addressed records, so
+        // it is tracked as follow-up rather than changed here.
+
         let findings_with_errors: Vec<String> = args
             .findings
             .iter()
