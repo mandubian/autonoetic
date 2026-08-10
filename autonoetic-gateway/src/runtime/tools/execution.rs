@@ -36,6 +36,37 @@ fn filter_opt_field(
     }
 }
 
+/// Is `requested` the caller's root session or a session nested under it?
+///
+/// The store's `session_branch` filter has the same shape ("exact match or
+/// `id/<suffix>`"), so a request that passes this check can only ever widen to
+/// sessions inside the caller's own root.
+fn session_within_root(requested: &str, root: &str) -> bool {
+    requested == root || requested.starts_with(&format!("{root}/"))
+}
+
+/// The caller's root session — the ownership boundary `execution_search` scopes
+/// to (#1062).
+///
+/// Prefers the run context (authoritative, set by the executor); falls back to
+/// deriving the root from the current session id. `None` means the caller's
+/// identity could not be established at all, which the tool treats as a refusal
+/// rather than a licence to search every session in the store.
+fn caller_root_session(
+    run_context: Option<&NativeToolRunContext>,
+    session_id: Option<&str>,
+) -> Option<String> {
+    run_context
+        .map(|rc| rc.root_session_id.clone())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            session_id
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| crate::runtime::content_store::root_session_id(s).to_string())
+        })
+}
+
 pub struct ExecutionSearchTool;
 
 impl NativeTool for ExecutionSearchTool {
@@ -77,7 +108,7 @@ impl NativeTool for ExecutionSearchTool {
                     },
                     "session_id": {
                         "type": "string",
-                        "description": "Restrict to this session id and nested sessions (exact match or id/<suffix>). Optional."
+                        "description": "Narrow to this session id and its nested sessions (exact match or id/<suffix>). Optional; defaults to your own root session. Must be your root session or one nested under it — other roots are not searchable."
                     },
                     "limit": {
                         "type": "integer",
@@ -96,7 +127,7 @@ impl NativeTool for ExecutionSearchTool {
         _agent_dir: &Path,
         _gateway_dir: Option<&Path>,
         arguments_json: &str,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
         gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
@@ -129,6 +160,37 @@ impl NativeTool for ExecutionSearchTool {
 
         let limit = args.limit.unwrap_or(10).min(100) as i64;
 
+        // Ownership scope (#1062). `session_id` used to be a voluntary filter:
+        // omitting it searched every session in the store — cross-root,
+        // cross-operator, historical — and returned other sessions' raw
+        // `stdout` verbatim. The caller's root session is the trust domain
+        // (#1061), so it is the default and the ceiling: an explicit
+        // `session_id` may only narrow within it.
+        //
+        // No establishable caller ⇒ refuse. This tool is always-available
+        // (`is_available` returns `true` for every manifest, and it is on the
+        // clarification/degraded allowlists), so an unscoped fallback here
+        // would be reachable from every session in the system.
+        let Some(caller_root) = caller_root_session(run_context, session_id) else {
+            return Ok(ToolError::permission(
+                "execution_search requires a session context: the caller's root session is the search scope",
+            )
+            .to_error_response());
+        };
+        let scope = match args.session_id.as_deref() {
+            None => caller_root.clone(),
+            Some(requested) if session_within_root(requested, &caller_root) => {
+                requested.to_string()
+            }
+            Some(requested) => {
+                return Ok(ToolError::permission(format!(
+                    "execution_search is scoped to your root session '{caller_root}'; \
+                     '{requested}' is outside it"
+                ))
+                .to_error_response());
+            }
+        };
+
         let cfg: EgressConfig = config.map(|c| c.egress.clone()).unwrap_or_default();
         let sink = query_sink_or_remote(run_context.and_then(|rc| rc.egress_query_sink));
 
@@ -138,7 +200,7 @@ impl NativeTool for ExecutionSearchTool {
             args.error_type.as_deref(),
             args.command_pattern.as_deref(),
             args.agent_id.as_deref(),
-            args.session_id.as_deref(),
+            Some(scope.as_str()),
             limit,
         )?;
 
@@ -183,6 +245,10 @@ impl NativeTool for ExecutionSearchTool {
             "ok": true,
             "results": items,
             "count": items.len(),
+            // Echo what was actually searched: with the scope defaulted rather
+            // than supplied, an empty result set otherwise reads as "no such
+            // trace" when it means "not in your root session".
+            "session_scope": scope,
         }))
         .map_err(Into::into)
     }

@@ -25,6 +25,7 @@
 //! Labels are **declared metadata, manipulated only by the gateway** — agents
 //! never set, strip, or read them (Lawful-Executor, RFC §14).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use autonoetic_types::background::{
@@ -2352,6 +2353,115 @@ pub fn session_accumulated_taint(
     acc
 }
 
+/// Inputs to [`resolve_script_exec_label`].
+pub struct ScriptExecLabelRequest<'a> {
+    /// Operator-global `egress.rules`.
+    pub egress_config: &'a EgressConfig,
+    /// Bundle-declared output floor (RFC §4.1 path 2), if any.
+    pub manifest_floor: Option<EgressLabel>,
+    /// This turn's ingest label — session-policy default, the operator's
+    /// per-message mark, or a peer's inbound federation label.
+    pub ingest: Option<EgressLabel>,
+    /// The agent bundle directory; the root for relative script paths.
+    pub agent_dir: &'a Path,
+    /// The gateway directory — hosts the content and artifact stores.
+    pub gateway_dir: &'a Path,
+    pub session_id: &'a str,
+    pub agent_id: &'a str,
+    /// The manifest's `script_entry`, e.g. `fetch_mail.py`.
+    pub script_entry: &'a str,
+}
+
+/// Resolve the egress label for a **script-agent run** (RFC §4, #1062).
+///
+/// The LLM path labels every tool result at the commit boundary
+/// ([`EgressLabeler::label_tool_result`], driven by the tool-call processor)
+/// and stamps the label onto the durable `execution_traces` row. The script
+/// fast path in `execution.rs` has no tool-call processor, so its
+/// `sandbox_exec` trace was written with `egress_label: None` — and an
+/// unlabeled row resolves through `egress.legacy_unlabeled`, which defaults to
+/// `unrestricted` (RFC §6.7). Script agents are precisely the ones returning
+/// raw external data (an IMAP fetch, a scraped page), so the path that most
+/// needed a label was the one path that had none.
+///
+/// The label is *derived*, never blanket: the intersection of
+///
+/// - the exec-shaped resolution over the script the agent actually runs
+///   (operator rules, labeled path patterns matched against the script source,
+///   workspace taint, artifact taint), and
+/// - this turn's ingest label.
+///
+/// `None` ⇒ unrestricted, which is how absence is encoded everywhere else in
+/// the plane. A session-policy read failure fails closed to `local_only` for
+/// the run, matching the turn-scoped narrowing in the tool-call processor's
+/// `build_egress_labeler` (RFC §2.2).
+pub fn resolve_script_exec_label(
+    req: &ScriptExecLabelRequest<'_>,
+    store: Option<&Arc<GatewayStore>>,
+) -> Option<EgressLabel> {
+    let mut labeler = EgressLabeler::from_config(req.egress_config)
+        .with_manifest_floor(req.manifest_floor.clone());
+
+    if let Some(store) = store {
+        let root = crate::runtime::content_store::root_session_id(req.session_id);
+        labeler = match store.get_egress_session_policy(root) {
+            Ok(Some(stored)) => labeler.with_session_policy(&stored.policy),
+            Ok(None) => labeler,
+            Err(e) => {
+                tracing::error!(
+                    target: "egress_labeler",
+                    error = %e,
+                    root_session_id = %root,
+                    "unreadable egress session policy for a script run — narrowing the \
+                     default label to local_only"
+                );
+                labeler.with_session_policy(&autonoetic_types::egress::EgressSessionPolicy {
+                    rules: Vec::new(),
+                    default_label: Some(autonoetic_types::egress::NamedEgressLabel::LocalOnly),
+                    provider_constraint: None,
+                })
+            }
+        };
+    }
+
+    // The same argument shape the trace records, so the exec path matcher sees
+    // the script token and reads its source relative to the agent dir —
+    // exactly as it does for an agent-issued `sandbox_exec`.
+    let arguments_json =
+        serde_json::json!({ "command": format!("run {}", req.script_entry) }).to_string();
+    let exec_ctx = crate::runtime::egress_path_matcher::ExecSourceContext {
+        agent_dir: Some(req.agent_dir),
+        gateway_dir: Some(req.gateway_dir),
+        session_id: Some(req.session_id),
+        gateway_store: store.map(|s| s.as_ref()),
+    };
+    let resolved = labeler.label_tool_result(
+        &LabelRequest {
+            tool: "sandbox_exec",
+            arguments_json: &arguments_json,
+            // No tool-call id exists on this path: the script run *is* the
+            // session. Key the envelope to the session so the causal event
+            // still joins to something an operator can follow.
+            tool_call_id: req.session_id,
+            artifact_id: None,
+        },
+        Some(&exec_ctx),
+        req.session_id,
+        req.agent_id,
+        None,
+        store,
+        &std::collections::HashMap::new(),
+    );
+
+    let label = match (req.ingest.clone(), resolved) {
+        (None, None) => return None,
+        (Some(l), None) => l,
+        (None, Some(outcome)) => outcome.label,
+        (Some(ingest), Some(outcome)) => ingest.restrict(&outcome.label),
+    };
+    (!label.is_unrestricted()).then_some(label)
+}
+
 /// The [`Sink`] a preset's completions land in (RFC §5.1): its `egress_class`
 /// mapped to a sink, defaulting to [`Sink::RemoteModel`] when unclassified
 /// (fail-closed).
@@ -3785,5 +3895,163 @@ mod tests {
         assert!(!elig.is_eligible(), "local_only summary must block remote compression");
         let elig_local = compression_preset_eligible(&band, &labels, EgressClass::Local);
         assert!(elig_local.is_eligible(), "local preset may compress the local_only band");
+    }
+
+    // ── script-agent run labeling (#1062) ────────────────────────────────
+
+    /// A script bundle on disk: `<agents>/<agent_id>/<entry>` with `body`.
+    fn script_bundle(root: &Path, agent_id: &str, entry: &str, body: &str) -> std::path::PathBuf {
+        let dir = root.join(agent_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(entry), body).unwrap();
+        dir
+    }
+
+    fn script_req<'a>(
+        egress_config: &'a EgressConfig,
+        agent_dir: &'a Path,
+        gateway_dir: &'a Path,
+        script_entry: &'a str,
+    ) -> ScriptExecLabelRequest<'a> {
+        ScriptExecLabelRequest {
+            egress_config,
+            manifest_floor: None,
+            ingest: None,
+            agent_dir,
+            gateway_dir,
+            session_id: "session-script",
+            agent_id: "mailer.default",
+            script_entry,
+        }
+    }
+
+    /// The regression #1062 names: a script agent's run resolves a real label
+    /// from the operator's path rules instead of writing an unlabeled trace
+    /// that `legacy_unlabeled` resolves to `unrestricted`.
+    ///
+    /// Note what is matched — the labeled *paths the script touches*, read out
+    /// of the script's own source via the same dependency-source analysis an
+    /// agent-issued `sandbox_exec` gets (RFC §4.2). The script filename is only
+    /// how the source is found.
+    #[test]
+    fn script_exec_label_resolves_from_a_path_rule_over_the_script_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(
+            tmp.path(),
+            "mailer.default",
+            "fetch_mail.py",
+            "with open('~/mail/inbox') as f:\n    print(f.read())\n",
+        );
+
+        let config = cfg(vec![rule(
+            "sandbox.exec",
+            Some("~/mail/**"),
+            NamedEgressLabel::LocalOnly,
+        )]);
+        let label = resolve_script_exec_label(
+            &script_req(&config, &agent_dir, &gateway_dir, "fetch_mail.py"),
+            None,
+        )
+        .expect("a matching path rule must label the run");
+        assert_eq!(label, EgressLabel::local_only());
+        assert!(!label.allows(Sink::RemoteModel));
+    }
+
+    /// No rule matches ⇒ `None`, the plane's encoding of unrestricted. The fix
+    /// must not blanket-label every script run.
+    #[test]
+    fn script_exec_label_is_none_when_no_rule_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(
+            tmp.path(),
+            "greeter.default",
+            "hello.py",
+            "with open('~/public/greeting.txt') as f:\n    print(f.read())\n",
+        );
+
+        let config = cfg(vec![rule(
+            "sandbox.exec",
+            Some("~/mail/**"),
+            NamedEgressLabel::LocalOnly,
+        )]);
+        assert!(resolve_script_exec_label(
+            &script_req(&config, &agent_dir, &gateway_dir, "hello.py"),
+            None,
+        )
+        .is_none());
+    }
+
+    /// The ingest label (operator per-message mark, session-policy default,
+    /// inbound federation label) reaches the trace even when no exec rule fires.
+    #[test]
+    fn script_exec_label_carries_the_ingest_label() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(tmp.path(), "greeter.default", "hello.py", "print('hi')\n");
+
+        let config = cfg(vec![]);
+        let mut req = script_req(&config, &agent_dir, &gateway_dir, "hello.py");
+        req.ingest = Some(EgressLabel::local_only());
+        assert_eq!(
+            resolve_script_exec_label(&req, None),
+            Some(EgressLabel::local_only())
+        );
+    }
+
+    /// Ingest and exec resolution intersect — the run carries the *most*
+    /// restrictive of the two, never whichever was resolved last.
+    #[test]
+    fn script_exec_label_intersects_ingest_with_the_exec_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(
+            tmp.path(),
+            "mailer.default",
+            "fetch_mail.py",
+            "with open('~/mail/inbox') as f:\n    print(f.read())\n",
+        );
+
+        let config = cfg(vec![rule(
+            "sandbox.exec",
+            Some("~/mail/**"),
+            NamedEgressLabel::LocalOnly,
+        )]);
+        let mut req = script_req(&config, &agent_dir, &gateway_dir, "fetch_mail.py");
+        // Strictly weaker than the exec resolution, so a result equal to
+        // `local_only` can only come from the exec side having contributed.
+        req.ingest = Some(EgressLabel::no_remote_model());
+        let label = resolve_script_exec_label(&req, None).expect("labeled");
+        assert_eq!(label, EgressLabel::local_only());
+        assert_ne!(
+            label,
+            EgressLabel::no_remote_model(),
+            "the exec resolution must narrow the ingest label, not be shadowed by it"
+        );
+        assert!(!label.allows(Sink::RemoteModel));
+    }
+
+    /// A bundle-declared output floor narrows the run on its own (RFC §4.1
+    /// path 2) — a script bundle can restrict its own outputs with no operator
+    /// rule in play.
+    #[test]
+    fn script_exec_label_applies_the_manifest_output_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gateway_dir = tmp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let agent_dir = script_bundle(tmp.path(), "mailer.default", "fetch_mail.py", "x = 1\n");
+
+        let config = cfg(vec![]);
+        let mut req = script_req(&config, &agent_dir, &gateway_dir, "fetch_mail.py");
+        req.manifest_floor = Some(EgressLabel::local_only());
+        assert_eq!(
+            resolve_script_exec_label(&req, None),
+            Some(EgressLabel::local_only())
+        );
     }
 }

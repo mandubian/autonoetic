@@ -557,7 +557,7 @@ For searching raw tool execution traces within sessions. Returns stdout, stderr,
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `execution_search` | `(tool_name?, success?, error_type?, command_pattern?, agent_id?, session_id?, limit?) → traces` | Search raw execution traces by tool name, success/failure, error type, command pattern, or agent. Returns full execution detail. For cross-session discovery of summaries, use `observability_search`. |
+| `execution_search` | `(tool_name?, success?, error_type?, command_pattern?, agent_id?, session_id?, limit?) → traces` | Search raw execution traces by tool name, success/failure, error type, command pattern, or agent. Returns full execution detail. Bounded by the caller's root session: `session_id` defaults to it and may only narrow within it (#1062). For cross-session discovery of summaries, use `observability_search`. |
 
 ### Artifact Execution Tool (Transient Runs)
 
