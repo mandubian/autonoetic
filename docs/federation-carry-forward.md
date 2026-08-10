@@ -68,10 +68,9 @@ verdict, and without delegating a safety-critical decision to LLM judgment.
    floor.
 
 4. **Provenance is preserved end-to-end.** A carried verdict is never silently
-   aliased. It is recorded with `carried_from: {prior_artifact_id,
-   prior_record_id, verified_at, justification}`, so the audit trail from a
-   live promotion back to the bytes each gate originally reviewed is
-   unbroken.
+   aliased. It is recorded with `carried_from: {prior_artifact_ref, role,
+   verified_at, justification}`, so the audit trail from a live promotion back
+   to the bytes each gate originally reviewed is unbroken.
 
 ## Where the decision lives: gateway verifies, planner reasons
 
@@ -94,51 +93,85 @@ the executor that refuses unsafe moves.
 
 ## The three-digest model
 
-Every `agent_bundle` artifact gets three digests computed at build time, in
+Every `agent_bundle` artifact gets three digests computed from its bytes, in
 addition to the existing whole-artifact `artifact_canonical_digest`:
 
 | Digest | Covers | Which gates care |
 |---|---|---|
-| `code_digest` | Per-file SHA-256 of every file classified as **code**: declared `entrypoints`, `*.py`/`*.js`/`*.rs`/… source, test files, `requirements.txt`/`package.json`/`Cargo.toml` (deps change test execution) | `unit_test_runner`, `auditor` |
-| `contract_digest` | Canonical-JSON SHA-256 of the **semantic** frontmatter fields (see table below) | `unit_test_runner`, `auditor`, `static_evaluator` |
-| `prose_digest` | Per-file SHA-256 of everything else: SKILL.md prose body, `description`, README, examples, comments | `static_evaluator` only |
+| `code_digest` | Per-file SHA-256 of every file classified as **code**: the declared `script_entry`, `*.py`/`*.js`/`*.rs`/… source, test files, `requirements.txt`/`package.json`/`Cargo.toml`, and `runtime.lock`'s `dependencies`/`artifacts`/`layers` (deps change what `unit_test_runner` can import) | `unit_test_runner`, `auditor`, `sealed_evaluator` |
+| `contract_digest` | Canonical-JSON SHA-256 of the **semantic** frontmatter fields (see table below), normalized from **either** accepted frontmatter shape | `unit_test_runner`, `auditor`, `sealed_evaluator`, `static_evaluator` |
+| `prose_digest` | Per-file SHA-256 of everything else: SKILL.md prose body, `name`/`description`/`agent.name`/`agent.description`, README, examples, comments | `static_evaluator` only |
+
+**Digests are deterministic functions of the artifact bytes.** Content-addressed
+artifacts are immutable, so a digest triplet never changes for a given artifact
+— it can be recomputed on demand from the stored bytes rather than persisted
+(we store it on the artifact's metadata sidecar as a cache, and recompute when
+absent). `promotion.record` **copies the artifact's triplet onto the verdict
+record at record time**, so a verdict binds to the exact bytes the gate
+reviewed — not to a recomputation done later against possibly different
+classification rules.
 
 A gate's verdict is reusable across a rebuild **iff the digests of all inputs
 that gate reviews are byte-identical**:
 
 - `unit_test_runner` reviews `code_digest` + `contract_digest`
 - `auditor` reviews `code_digest` + `contract_digest`
+- `sealed_evaluator` reviews `code_digest` + `contract_digest`
 - `static_evaluator` reviews `code_digest` + `contract_digest` + `prose_digest`
 
 This is tighter than "the whole artifact didn't change" and looser than
 "nothing changed". It is exactly "the bytes this gate actually looked at
 didn't change".
 
+> **`static_evaluator` never carries forward.** It reviews all three digests,
+> so its verdict is only reusable when nothing changed — i.e. no rebuild at
+> all. Carry-forward therefore only ever helps `unit_test_runner`, `auditor`,
+> and `sealed_evaluator` (the code-reviewing gates). `static_evaluator` always
+> re-runs on any rebuild, which is correct: it is the manifest gate.
+
 ### Frontmatter field classification
 
 The contract/prose boundary is a **fixed const table** in the gateway, not an
 LLM judgment. Anything not listed defaults to **prose** (fail-safe: an unknown
 field does not get to void code-gate verdicts, but also does not silently
-bypass contract checks).
+bypass contract checks). The table must enumerate the **real** schema (from
+`install_contract::install_schema_description` and `autonoetic-types`), not a
+subset — a missing contract-relevant field is a silent-bypass hole.
 
-| Frontmatter field | Class | Rationale |
+**Canonicalization across both accepted shapes.** The parser accepts two
+frontmatter shapes — top-level `autonoetic:` and metadata-wrapped
+`metadata.autonoetic:` — that are semantically identical. `contract_digest`
+must normalize to a single canonical form **before** hashing, otherwise an
+agent that switches shapes (with no semantic change) would spuriously void
+every verdict. The same applies to list ordering where order is not semantic
+(e.g. `capabilities` entries): hash a canonicalized, order-stable form.
+
+| Field | Class | Rationale |
 |---|---|---|
 | `capabilities` | contract | defines what the agent may do — every gate reviews against this |
 | `remote_access` | contract | auditor + static_evaluator verify code stays within declared hosts |
-| `entrypoints` | contract | unit_test_runner + static_evaluator assume the entry shape |
+| `script_entry` | contract | the manifest's declared entrypoint (distinct from the artifact's `entrypoints` list, which is a build-arg concept and part of `code_digest`) |
 | `script_input_mode` | contract | the round-1 defect in `session-964ea6d7`; determines how code receives input |
-| `io_accepts`, `io_returns` | contract | unit tests assert against this schema |
+| `io.accepts`, `io.returns`, `io.returns_enforcement`, `io.output_policy` | contract | unit tests assert against this schema; enforcement mode changes the contract |
 | `credential_services` | contract | auditor verifies code reads secrets the declared way |
-| `dependencies` / `layers` | contract | unit_test_runner imports through layers |
+| `middleware` (`pre_process` etc.) | contract | names a script that runs on input — it is executable code by reference |
+| `disclosure` | contract | output-filtering rules; auditor verifies no leak path |
+| `egress.*` (`output_label`, session policies) | contract | data-flow posture; auditor + static_evaluator verify |
+| `validation` (`soft`/`strict`) | contract | changes the output-enforcement contract |
 | `execution_mode` | contract | changes sandbox semantics all gates assume |
-| `sandbox_network`, `egress` | contract | auditor + static_evaluator network posture |
-| `background`, `disclosure` | contract | affects what the gates must consider |
-| `name`, `description`, `metadata.autonoetic.agent.{name,description}` | prose | presentation only |
+| `sandbox_network`, `sandbox` backend | contract | auditor + static_evaluator network posture |
+| `gateway_url`, `gateway_token` | contract | remote-gateway binding; `gateway_token` is secret-adjacent and must never be silently carried (flag for operator if it changes) |
+| `runtime.lock`: `dependencies`, `artifacts`, `layers` | contract | unit_test_runner imports through layers; dep changes alter test execution |
+| `llm_preset`, `llm_overrides`, `llm_config` | prose | chooses the reasoning model; gates do not review against the model identity |
+| `background`, `metadata.autonoetic.agent.{name,description}`, `name`, `description` | prose | presentation / scheduling metadata |
 | SKILL.md body prose, examples, comments | prose | guidance text |
 | README, CHANGELOG, doc files | prose | non-executable, non-contract |
 
 A field not in either list defaults to **prose** and is logged at INFO so a
-missing classification is visible during the rollout window.
+missing classification is visible during the rollout window. A sentinel test
+asserts every frontmatter field used by the bundled agents (plus `runtime.lock`
+sections) is classified — the same keep-in-sync discipline as the capability
+table in `docs/AGENTS.md`.
 
 ## The carry-forward lifecycle
 
@@ -174,9 +207,10 @@ missing classification is visible during the rollout window.
  │ federation_escalate({                                        │
  │   artifact_ref: v2,                                          │
  │   role_verdicts: [                                           │
- │     {role: unit_test_runner, carried_from: <v1 record id>,  │
+ │     {role: unit_test_runner, carried_from: {artifact_ref: v1,│
+ │      role: unit_test_runner},                                │
  │      justification: "code+contract unchanged"},              │
- │     {role: auditor, carried_from: <v1 record id>, ...},      │
+ │     {role: auditor, carried_from: {artifact_ref: v1, ...}},  │
  │     {role: static_evaluator, passed: true, ...}  // fresh    │
  │   ]})                                                        │
  └─────────────────────────────────────────────────────────────┘
@@ -184,9 +218,10 @@ missing classification is visible during the rollout window.
                                            ▼
  ┌─────────────────────────────────────────────────────────────┐
  │ GATEWAY VERIFIES (per claim)                                 │
- │  • prior record exists + is terminal-pass                    │
+ │  • prior artifact (v1) record exists + that role passed      │
  │  • code_digest(v1)==code_digest(v2)        ✓                 │
  │  • contract_digest(v1)==contract_digest(v2) ✓                │
+ │  • v2 descends from v1 (lineage check)     ✓                 │
  │  • strictness floor allows carry when only prose differs  ✓  │
  │  → accept; record carried_from provenance                    │
  │  (any failure → reject the claim; that gate must re-run)     │
@@ -198,12 +233,17 @@ missing classification is visible during the rollout window.
 - **Planner omits a required gate entirely** → `federation_escalate` already
   rejects (existing behavior; unchanged).
 - **Planner claims carry but a reviewed digest differs** → gateway rejects
-  the claim with `"carry_forward_rejected: role={role}, reason={code_digest_mismatch | contract_digest_mismatch}, strictness={level}"`. Planner must re-run that gate.
-- **Prior record is not terminal-pass** (e.g. `warning`, `unable_to_evaluate`)
-  → not eligible for carry; must re-run.
+  the claim with `"carry_forward_rejected: role={role}, reason={code_digest_mismatch | contract_digest_mismatch | lineage_mismatch}, strictness={level}"`. Planner must re-run that gate.
+- **Prior artifact has no passing record for that role** (e.g. `warning`,
+  `unable_to_evaluate`, or the role never ran on v1) → not eligible for carry;
+  must re-run. Note the **absent-verdict** case: if `unit_test_runner` recorded
+  nothing on v1 because the artifact had no tests, there is no pass to carry —
+  on a prose-only rebuild the planner re-attests the "no tests" state (or
+  re-runs), it does not carry a non-existent verdict.
+- **Planner hallucinates a prior artifact ref or role** → record not found →
+  rejected.
 - **Strictness floor disallows** (e.g. `off`, or `conservative` and contract
   changed) → rejected even if digests would match.
-- **Planner hallucinates a prior record id** → not found → rejected.
 
 In every rejection the planner gets a structured reason and re-runs only the
 rejected gate, not the whole federation.
@@ -221,24 +261,34 @@ federation:
   # verifies against this floor.
   #
   # off          — every rebuild re-runs every gate (today's behavior; default)
-  # conservative — carry forward only when prose_digest is the only difference
-  # per_role     — carry forward whenever the gate's reviewed input digests match
+  # conservative — carry a code-reviewing gate only when its code_digest and
+  #                contract_digest are both byte-identical to the prior artifact
+  #                (i.e. only prose changed)
   carry_forward_strictness: off
 ```
 
 | Level | Allows carry when… | Does NOT allow carry when… | Use when |
 |---|---|---|---|
 | `off` | (never — full re-federation always) | everything | default; regulated/paranoid environments; until trust is earned |
-| `conservative` | only `prose_digest` differs (code + contract byte-identical) | code OR contract changed at all | the `session-964ea6d7` class — SKILL.md prose fixes after a gate flags them |
-| `per_role` | each gate's reviewed-input digests match its prior record | a gate's inputs changed | high-volume dev loops where contract-stable code edits are common |
+| `conservative` | a code-reviewing gate's `code_digest` + `contract_digest` are byte-identical (only `prose_digest` differs) | code OR contract changed at all | the `session-964ea6d7` class — SKILL.md prose fixes after a gate flags them |
 
 `off` is the initial default so an upgrade produces **zero** behavior change.
 Operators opt in per environment.
 
-The planner is always free to be more conservative — e.g. under `per_role`,
+The planner is always free to be more conservative — e.g. under `conservative`,
 seeing that the prose change was in a security-sensitive section, the planner
 may choose to re-run `auditor` anyway. The floor is a maximum permissiveness,
 not a mandate.
+
+> **Why only two levels (no `per_role`).** A third level that allows carry
+> whenever a gate's own inputs match was considered, but it buys nothing over
+> `conservative` with this digest granularity. `static_evaluator` never carries
+> (it reviews all three digests), and the code-reviewing gates share
+> `code_digest`, so *any* code change re-runs both of them regardless. A
+> `per_role` level would only diverge from `conservative` in the code-changed
+> case, where nothing can carry anyway. We ship `off` + `conservative` and add
+> finer-grained levels only if a finer-grained code digest (e.g. per-file)
+> ever exists.
 
 ## Tamper-resistance analysis
 
@@ -262,7 +312,7 @@ Threats considered:
    visible during rollout.
 3. **Planner claims carry for a digest that doesn't match.** Mitigation:
    gateway recomputes digests itself from the stored artifact bytes; the
-   planner only supplies the prior record id. Mismatch → rejected.
+   planner only supplies `(prior_artifact_ref, role)`. Mismatch → rejected.
 4. **Replay of a stale carried verdict across an unrelated lineage.**
    Mitigation: carry-forward is only honored between artifacts in the **same
    promotion lineage** (the rebuild must descend from the prior artifact via
@@ -279,39 +329,66 @@ nothing else in the artifact is relevant to this gate" — which was always an
 over-approximation (today's whole-artifact digest also covers files the gate
 ignored).
 
-## Data model and migration
+## Data model and persistence
 
-Schema version bump `79 → 80`. Add columns to the gate-verdict records table:
+**Store: `promotion_registry.json`, not SQLite.** Per-role gate verdicts live
+in the file-based `PromotionStore` (`runtime/promotion_store.rs`) — a
+`HashMap<String, PromotionRecord>` keyed by `artifact_id`, persisted to
+`gateway_dir/promotion_registry.json`. Verdicts do **not** live in the SQLite
+`GatewayStore`, so there is **no schema migration** for this design.
 
-```sql
-ALTER TABLE <gate_verdicts> ADD COLUMN code_digest        TEXT;
-ALTER TABLE <gate_verdicts> ADD COLUMN contract_digest    TEXT;
-ALTER TABLE <gate_verdicts> ADD COLUMN prose_digest       TEXT;
-ALTER TABLE <gate_verdicts> ADD COLUMN carried_from_id    TEXT;       -- FK to prior verdict
-ALTER TABLE <gate_verdicts> ADD COLUMN carry_verified_at  TEXT;
-ALTER TABLE <gate_verdicts> ADD COLUMN carry_justification TEXT;
-CREATE INDEX IF NOT EXISTS idx_gate_verdicts_input_digests
-    ON <gate_verdicts>(artifact_id, code_digest, contract_digest, prose_digest);
-```
+Two kinds of state change, both backward-compatible:
 
-(`SCHEMA_VERSION_LATEST` → 80; new `apply_federation_carry_forward_v80()` in
-`migrate.rs`, gated by the standard `if current >= 80 { return Ok(()) }`.)
+1. **On the artifact (digest triplet).** `code_digest` / `contract_digest` /
+   `prose_digest` are deterministic functions of the immutable artifact bytes.
+   They are computed at `artifact_build` and cached on the artifact's metadata
+   sidecar (recomputed from bytes if absent). No migration — the artifact store
+   is content-addressed and the digests are derived, never authoritative beyond
+   the bytes themselves.
 
-Existing records get `NULL` digests → treated as **unverifiable** → must
-re-run. Carry-forward only helps from the first post-migration rebuild onward.
-This is intentional: we do not backfill digests for records we cannot prove
-were computed under the new classification.
+2. **On `PromotionRecord` (per-role verdict provenance).** Add optional fields
+   to the `PromotionRecord` struct (`autonoetic-types/src/promotion.rs`):
+
+   ```rust
+   // Recorded at promotion.record time — copied from the artifact's triplet so
+   // the verdict binds to the bytes the gate reviewed.
+   #[serde(default)] pub code_digest: Option<String>,
+   #[serde(default)] pub contract_digest: Option<String>,
+   #[serde(default)] pub prose_digest: Option<String>,
+   // Set when this verdict was carried forward from a prior artifact in the
+   // same lineage rather than freshly run.
+   #[serde(default)] pub carried_from: Option<CarriedFrom>,
+   #[serde(default)] pub carry_verified_at: Option<String>,
+   #[serde(default)] pub carry_justification: Option<String>,
+
+   pub struct CarriedFrom {
+       pub prior_artifact_ref: String,   // ar.* of the artifact the verdict came from
+       pub prior_artifact_id: String,    // art_* for join-ability
+       pub role: PromotionRole,          // which gate originally recorded it
+   }
+   ```
+
+   All new fields are `Option<_>` with `#[serde(default)]`, so existing
+   `promotion_registry.json` records deserialize with `None`. `None` digests ⇒
+   **unverifiable ⇒ must re-run** — exactly the intended behavior: carry-forward
+   only helps from the first post-deployment rebuild onward. We deliberately do
+   not backfill digests for records computed before the classification existed.
+
+Because verdicts are per-`artifact_id` records (not rows with their own UUIDs),
+provenance references **(prior artifact ref, role)** — the planner names the
+artifact a verdict came from and the gate that recorded it, and the gateway
+looks up that artifact's `PromotionRecord` to verify the role's pass + digests.
 
 ## API / tool surface
 
 | Surface | Change |
 |---|---|
-| `artifact_build` | Also computes + persists `code_digest`, `contract_digest`, `prose_digest` (gateway-owned, like `content_digest` today) |
+| `artifact_build` | Also computes + caches `code_digest`, `contract_digest`, `prose_digest` on the artifact (derived from bytes; gateway-owned, like `content_digest` today) |
 | `artifact_inspect` | Returns the three digests + a `lineage: {source_artifact_ref, prior_verdict_coverage}` block when applicable |
-| `artifact_diff` (new) | `artifact_diff(from: <ar.*>, to: <ar.*>)` → `{code_changed, contract_changed, prose_changed, changed_fields: [...], changed_files: [...], verdicts_eligible_for_carry: [{role, prior_record_id}]}`. The planner's reasoning input. |
-| `promotion.record` | Records the three digests at write time (gateway-computed; agent cannot supply them, mirroring `content_digest` today) |
-| `federation_escalate` | Accepts `carried_from: <prior_record_id>` + `justification` per role-verdict; verifies; records provenance; rejects below-floor claims with a structured error |
-| `promotion_query` | Returns `input_coverage: {code_digest, contract_digest, prose_digest}` and `carried_from` per verdict |
+| `artifact_diff` (new) | `artifact_diff(from: <ar.*>, to: <ar.*>)` → `{code_changed, contract_changed, prose_changed, changed_fields: [...], changed_files: [...], verdicts_eligible_for_carry: [{role, prior_artifact_ref}]}`. **Complements, not duplicates, `agent_revision_diff`:** `agent_revision_diff` gives a raw file-level diff between two *revisions*; `artifact_diff` gives the *digest-classified* answer the planner reasons over ("did the contract change? did code change?"), plus the carry-eligibility mapping. Gated on `ReadAccess` (same as `artifact_inspect`), per the adding-a-tool pattern: register in `runtime/tools/mod.rs`, implement `NativeTool`, add to the registry builder. |
+| `promotion.record` | Copies the artifact's three digests onto the verdict record at write time (gateway-computed from the artifact; agent cannot supply them, mirroring `content_digest` today) |
+| `federation_escalate` | Accepts `carried_from: {prior_artifact_ref, role}` + `justification` per role-verdict; verifies against digests + lineage + strictness; records provenance; rejects below-floor claims with a structured error |
+| `promotion_query` | Returns `input_coverage: {code_digest, contract_digest, prose_digest}` and `carried_from` per role verdict |
 | Config (`config-template.yaml`, `autonoetic-types/src/config.rs`, `docs/config-reference.md`) | New `federation.carry_forward_strictness` enum, default `off` |
 
 `artifact_diff` is the reasoning enabler. Without it the planner would have to
@@ -326,14 +403,18 @@ of unreliability this design avoids.
    `artifact_diff(from=<prior ar.*>, to=<current ar.*>)`.
 2. Read the structured diff. Reason out loud: which gates reviewed inputs that
    did not change? Which did?
-3. For each gate whose reviewed inputs are byte-identical **and** whose prior
-   verdict was a terminal pass, you MAY propose a carry-forward in
+3. For each **code-reviewing** gate (`unit_test_runner`, `auditor`,
+   `sealed_evaluator`) whose reviewed inputs are byte-identical **and** whose
+   prior artifact recorded a terminal pass, you MAY propose a carry-forward in
    `federation_escalate` with a one-sentence `justification`. The gateway
-   verifies; if it rejects, re-run only that gate.
+   verifies; if it rejects, re-run only that gate. (`static_evaluator` never
+   carries — always re-spawn it on any rebuild.) If a gate recorded **nothing**
+   on the prior artifact (e.g. no tests → no `unit_test_runner` verdict), there
+   is no pass to carry: re-attest the "no tests" state or re-run.
 4. You may always choose to re-run a gate you were allowed to carry — do so
    when the change was in a security-adjacent area (capability declarations,
-   remote_access, secret handling) even if the diff says the gate's inputs
-   were stable.
+   remote_access, secret handling, egress/disclosure) even if the diff says the
+   gate's inputs were stable.
 5. Carry-forward never exempts you from the operator escalation or from
    surfacing `carried_from` provenance in your reply.
 
@@ -346,14 +427,14 @@ cases that slip through.
 
 - `promotion_query` output: each role verdict shows
   `input_coverage: {code_digest, contract_digest, prose_digest}` and either
-  `fresh: true` or `carried_from: {record_id, artifact_ref, verified_at,
+  `fresh: true` or `carried_from: {prior_artifact_ref, role, verified_at,
   justification}`. A carried verdict is visually distinct.
 - The escalation surface (`/approvals`, CLI `gateway approvals show <id>`)
   renders carried verdicts with a "↻ carried from `<prior ar.*>`" marker and
   the justification, so the operator cannot mistake a carried verdict for a
   fresh one.
 - A causal event `federation.carry_forward` is emitted on each accepted carry,
-  keyed to `(prior_record_id, new_record_id, role, strictness)` — same shape
+  keyed to `(prior_artifact_ref, role, new_artifact_id, strictness)` — same shape
   as `grant_revocation` for audit queries.
 
 ## Rollout
@@ -363,44 +444,47 @@ strictness at `off` (zero behavior change) until the stage that flips it.
 
 | Stage | Content | Behavior change at `off`? |
 |---|---|---|
-| **1. Compute + store** | Gateway computes the 3 digests at `artifact_build`; `promotion.record` stores them; migration. Strictness still `off`. | None (just extra columns, all `NULL` for old rows) |
+| **1. Compute + store** | Gateway computes the 3 digests at `artifact_build`; `PromotionRecord` gains the optional digest fields (backward-compat `#[serde(default)]`); `promotion.record` copies them at write time. Strictness still `off`. | None (new fields are `None` for old records → unverifiable → re-run) |
 | **2. Diff surface** | `artifact_diff` tool + `artifact_inspect` enhancement. Planner prompt learns to *read* the diff but still re-runs everything. | None (planner gets new info, no carry yet) |
-| **3. Verify + claim** | `federation_escalate` accepts `carried_from`, verifies against digests, records provenance. Strictness floor enforced. Default still `off`. | None unless operator opts in |
+| **3. Verify + claim** | `federation_escalate` accepts `carried_from`, verifies against digests + lineage + strictness, records provenance. Default still `off`. | None unless operator opts in |
 | **4. UI + audit** | `promotion_query` coverage fields, escalation-surface markers, `federation.carry_forward` causal event. | Surface-only |
 
-Operators flip `carry_forward_strictness: conservative` (or `per_role`) in
-their own `config.yaml` when they've watched Stage 2 logs and are satisfied
-the field classification is sound for their agent population.
+Operators flip `carry_forward_strictness: conservative` in their own
+`config.yaml` when they've watched Stage 2 logs and are satisfied the field
+classification is sound for their agent population.
 
 ## Risks and open questions
 
 1. **Layered artifacts (packager).** A layered artifact's `code_digest` must
-   fold in layer file digests, not just the coder's base files. Need to decide
-   whether each layer gets its own digest triplet or the triplet covers the
-   composed bundle. _Lean: triplet over the composed bundle (matches what the
-   gates actually import), with per-layer digests stored for diagnostic
-   surface only._
+   fold in layer file digests, not just the coder's base files — `runtime.lock`'s
+   `layers`/`dependencies` are already classed as contract/code inputs. Decide
+   whether the triplet covers the composed bundle or per-layer. _Lean: triplet
+   over the composed bundle (matches what the gates actually import), with
+   per-layer digests stored for diagnostic surface only._
 2. **The field-classification table is authority.** Any misclassification is a
-   security hole (too strict → wasted re-runs; too loose → silent bypass).
-   Mitigation: default-to-prose + INFO log for unclassified fields + a
-   sentinel test asserting every frontmatter field used by the bundled agents
-   is classified.
+   security hole (too strict → wasted re-runs; too loose → silent bypass). The
+   table above enumerates the real schema, but must be kept in sync as fields
+   are added (same discipline as the capability table in `docs/AGENTS.md`).
+   Mitigation: default-to-prose + INFO log for unclassified fields + a sentinel
+   test asserting every frontmatter field used by the bundled agents (and every
+   `runtime.lock` section) is classified. Also watch the two accepted
+   frontmatter shapes — `contract_digest` must canonicalize both, or a
+   shape-only change spuriously voids every verdict.
 3. **Constitution / enforcement register.** The constitution may cite the
    whole-artifact-digest invariant. Need to check `enforcement_register.rs`
    and `docs/constitution/enforcement-register.md` and update both copies if a
    cited test changes name. The register's `every_parseable_citation_resolves`
-   test will fail loudly if we miss one.
+   test will fail loudly if we miss one. Separately, `promotion_registry.json`
+   is a file store, not SQLite — verify no existing constitutional test assumes
+   the verdict store's shape.
 4. **First-rebuild-only value.** Carry-forward helps from the 2nd rebuild of a
    lineage onward. The first federation always runs fresh. That's the whole
    point (collapse the 2nd/3rd rounds), but worth setting expectations.
-5. **"Big enough to re-run" is genuinely fuzzy for code edits.** Under
-   `per_role`, a one-line code change in a non-entrypoint still trips
-   `code_digest` → both code gates re-run. That's correct (the gates can't know
-   the line was irrelevant), but means `per_role` mostly pays off for
-   contract-stable, prose/manifest-only rebuilds — the same population
-   `conservative` covers. _Open: is `per_role` worth the complexity over
-   `conservative`, or do we ship `off` + `conservative` only and defer
-   `per_role` until there's a demonstrated need?_
+5. **`static_evaluator` never carries** (it reviews all three digests), and the
+   code gates share `code_digest`, so any code change re-runs both. This makes
+   a third `per_role` strictness level pointless at this digest granularity —
+   shipped as `off` + `conservative` only (see Strictness dial). If a finer
+   per-file code digest is ever added, revisit.
 
 ## Alternatives considered
 
