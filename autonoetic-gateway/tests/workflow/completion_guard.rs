@@ -490,3 +490,97 @@ fn try_complete_workflow_blocked_by_pending_escalation() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ── forward compatibility of the lifecycle vocabulary (#1057 review) ────────
+
+/// A transcript row for `root_session_id` carrying `lifecycle_state`.
+/// `set_session_lifecycle_state` is an UPDATE, so without a row it silently
+/// writes nothing and the read falls through to the pre-migration path — which
+/// would make these tests pass without exercising the classifier at all.
+fn seed_root_transcript_with_lifecycle(
+    store: &GatewayStore,
+    root_session_id: &str,
+    lifecycle_state: &str,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    store.upsert_session_transcript(&autonoetic_types::causal_chain::SessionTranscriptRecord {
+        transcript_id: format!("tid-{root_session_id}"),
+        session_id: root_session_id.to_string(),
+        root_session_id: root_session_id.to_string(),
+        agent_id: "planner.default".to_string(),
+        revision_id: None,
+        user_id: None,
+        started_at: now.clone(),
+        ended_at: Some(now),
+        status: "completed".to_string(),
+        turn_count: 0,
+        transcript_handle: None,
+        excerpt: None,
+        origin_node_id: None,
+    })?;
+    store.set_session_lifecycle_state(root_session_id, lifecycle_state)?;
+    assert_eq!(
+        store.get_session_lifecycle_state(root_session_id)?.as_deref(),
+        Some(lifecycle_state),
+        "the lifecycle_state must actually be stored, or the test proves nothing"
+    );
+    Ok(())
+}
+
+/// A root session whose `lifecycle_state` is `terminated:<reason>` written by a
+/// newer gateway must still release its workflow.
+///
+/// `SessionLifecycleState::FromStr` knows only the reasons this build was
+/// compiled with, and adding a `TerminatedReason` is *not* a compile error
+/// there (the `_ => Err` arm absorbs it) — so classifying with a bare
+/// `parse().ok()` would read a forward-written terminal state as "still
+/// running" and park the workflow forever. Terminalness is classified on the
+/// `terminated:` prefix instead.
+#[test]
+fn try_complete_workflow_permits_an_unknown_terminated_reason() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let root_session_id = "root-forward-terminal";
+
+    seed_terminal_workflow(
+        &config,
+        &store,
+        root_session_id,
+        WorkflowRunStatus::Resumable,
+    )?;
+    // A reason this build has never heard of.
+    seed_root_transcript_with_lifecycle(&store, root_session_id, "terminated:cancelled")?;
+    assert!(
+        "terminated:cancelled"
+            .parse::<autonoetic_types::agent::SessionLifecycleState>()
+            .is_err(),
+        "the premise: this build cannot parse the value"
+    );
+
+    assert!(
+        try_complete_workflow(&config, Some(store.as_ref()), root_session_id)?,
+        "a terminated root must release its workflow whatever ended it"
+    );
+    Ok(())
+}
+
+/// A value that is neither known nor terminal-by-prefix carries no signal, so
+/// it blocks completion and is surfaced rather than guessed at.
+#[test]
+fn try_complete_workflow_blocks_on_an_unrecognised_lifecycle() -> anyhow::Result<()> {
+    let (_temp, config, store) = setup()?;
+    let root_session_id = "root-unrecognised-lifecycle";
+
+    seed_terminal_workflow(
+        &config,
+        &store,
+        root_session_id,
+        WorkflowRunStatus::Resumable,
+    )?;
+    seed_root_transcript_with_lifecycle(&store, root_session_id, "wedged")?;
+
+    assert!(
+        !try_complete_workflow(&config, Some(store.as_ref()), root_session_id)?,
+        "an unrecognised lifecycle must not release the workflow"
+    );
+    Ok(())
+}

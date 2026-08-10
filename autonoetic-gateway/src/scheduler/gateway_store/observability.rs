@@ -1,6 +1,7 @@
 use super::{GatewayStore, LiveDigestEventRecord, LIVE_DIGEST_BUFFER_CAPACITY};
 use super::util::decode_egress_label_json;
 use anyhow::Result;
+use autonoetic_types::agent::{SessionLifecycleState, TerminatedReason};
 use autonoetic_types::config::RetentionConfig;
 use rusqlite::params;
 use std::collections::BTreeMap;
@@ -1135,36 +1136,42 @@ impl GatewayStore {
             "UPDATE session_transcripts SET ended_at = ?1, status = ?2 WHERE session_id = ?3",
             params![ended_at, status, session_id],
         )?;
-        // #742: set lifecycle state to match the terminal status.
+        // #742/#1057: set lifecycle state to match the terminal status.
         // Only "completed" and "failed" are truly terminal; "suspended" is
         // resumable (its lifecycle was already set by save_yield_checkpoint).
-        // For "completed", avoid overwriting "hibernated" (between-turn yield)
-        // — only set "terminated:completed" when the current state is not
-        // already a resumable lifecycle state.
+        // For "completed", avoid overwriting a resumable lifecycle (between-turn
+        // yield, idle park, operator pause, gate-suspended) — only stamp the
+        // terminal state when the current state is not resumable.
         //
         // This is the *polite* path, used by callers that cannot tell "this
         // turn ended" from "this session ended" — chiefly `close_session`,
-        // where a between-turn yield closes with `completed` while its
-        // lifecycle is `hibernated`. Callers that have already established that
-        // the session can never run again must use
+        // where a between-turn yield closes with `completed` while its lifecycle
+        // is `hibernated`. Callers that have already established that the
+        // session can never run again must use
         // [`Self::terminate_session_transcript`] instead.
         let lifecycle = match status {
-            "completed" => Some("terminated:completed"),
-            "failed" => Some("terminated:failed"),
+            "completed" => Some(SessionLifecycleState::Terminated(TerminatedReason::Completed)),
+            "failed" => Some(SessionLifecycleState::Terminated(TerminatedReason::Failed)),
             _ => None,
         };
         if let Some(lifecycle) = lifecycle {
-            // Only overwrite if the current lifecycle is not a resumable state.
-            // This preserves "hibernated" between turns and "awaiting_gate"
-            // for gate-suspended sessions. Truly terminal sessions (headless
-            // complete, error, etc.) will have "active" or NULL lifecycle.
+            // Only overwrite if the current lifecycle is not a resumable state
+            // (the set owned by `SessionLifecycleState::is_resumable`, rendered
+            // as a static SQL literal). This preserves `hibernated` between
+            // turns, `awaiting_gate` for gate-suspended sessions, `idle` for
+            // parked resident sessions, and `paused` for operator pauses.
+            // Truly terminal sessions (headless complete, error, etc.) will have
+            // `active` or NULL lifecycle.
             conn.execute(
-                "UPDATE session_transcripts
-                 SET lifecycle_state = ?1
-                 WHERE session_id = ?2
-                   AND (lifecycle_state IS NULL
-                        OR lifecycle_state NOT IN ('hibernated', 'awaiting_gate'))",
-                params![lifecycle, session_id],
+                &format!(
+                    "UPDATE session_transcripts
+                     SET lifecycle_state = ?1
+                     WHERE session_id = ?2
+                       AND (lifecycle_state IS NULL
+                            OR lifecycle_state NOT IN ({}))",
+                    SessionLifecycleState::RESUMABLE_SQL_LIST
+                ),
+                params![lifecycle.as_str(), session_id],
             )?;
         }
         Ok(())
@@ -1206,8 +1213,10 @@ impl GatewayStore {
         status: &str,
     ) -> Result<()> {
         let lifecycle = match status {
-            "completed" | "closed" => "terminated:completed",
-            "failed" => "terminated:failed",
+            "completed" | "closed" => {
+                SessionLifecycleState::Terminated(TerminatedReason::Completed)
+            }
+            "failed" => SessionLifecycleState::Terminated(TerminatedReason::Failed),
             other => {
                 tracing::warn!(
                     target: "lifecycle",
@@ -1216,17 +1225,20 @@ impl GatewayStore {
                     "terminate_session_transcript called with a non-terminal status; \
                      recording terminated:failed"
                 );
-                "terminated:failed"
+                SessionLifecycleState::Terminated(TerminatedReason::Failed)
             }
         };
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE session_transcripts
-                SET ended_at = ?1, status = ?2, lifecycle_state = ?3
-              WHERE session_id = ?4
-                AND (lifecycle_state IS NULL
-                     OR lifecycle_state NOT LIKE 'terminated:%')",
-            params![ended_at, status, lifecycle, session_id],
+            &format!(
+                "UPDATE session_transcripts
+                    SET ended_at = ?1, status = ?2, lifecycle_state = ?3
+                  WHERE session_id = ?4
+                    AND (lifecycle_state IS NULL
+                         OR lifecycle_state NOT LIKE '{}')",
+                SessionLifecycleState::TERMINATED_SQL_PREFIX
+            ),
+            params![ended_at, status, lifecycle.as_str(), session_id],
         )?;
         Ok(())
     }
@@ -1693,19 +1705,25 @@ impl GatewayStore {
     ///
     /// Returns (child_session_id, parent_session_id, root_session_id, agent_id) tuples
     /// for each orphaned child. A child is orphaned if its parent's `lifecycle_state`
-    /// is `terminated:*`. Children of `active`, `hibernated`, or `awaiting_gate`
-    /// parents are protected — the parent is expected to resume and coordinate them.
-    /// Children that are themselves already terminated are excluded.
+    /// is terminal (`terminated:*`). Children of resumable parents — `active`,
+    /// `hibernated`, `awaiting_gate`, `idle`, `paused` — are protected, since the
+    /// parent is expected to resume and coordinate them. Children that are
+    /// themselves already terminal are excluded.
     pub fn find_orphaned_sessions(&self) -> Result<Vec<(String, String, String, String)>> {
         let conn = self.conn.lock().unwrap();
-        // Select non-terminated child sessions (session_id contains '/').
+        // Select non-terminal child sessions (session_id contains '/').
         // Pre-migration rows (lifecycle_state IS NULL) use status as fallback.
+        // The terminal prefix is owned by `SessionLifecycleState::TERMINATED_SQL_PREFIX`.
         let mut stmt = conn.prepare(
-            "SELECT session_id, root_session_id, agent_id
-             FROM session_transcripts
-             WHERE session_id LIKE '%/%'
-               AND (lifecycle_state IS NULL AND status IN ('active', 'suspended')
-                    OR lifecycle_state IS NOT NULL AND lifecycle_state NOT LIKE 'terminated:%')",
+            &format!(
+                "SELECT session_id, root_session_id, agent_id
+                 FROM session_transcripts
+                 WHERE session_id LIKE '%/%'
+                   AND (lifecycle_state IS NULL AND status IN ('active', 'suspended')
+                        OR lifecycle_state IS NOT NULL
+                           AND lifecycle_state NOT LIKE '{}')",
+                SessionLifecycleState::TERMINATED_SQL_PREFIX
+            ),
         )?;
         let children: Vec<(String, String, String, String)> = stmt
             .query_map([], |row| {
@@ -1737,19 +1755,28 @@ impl GatewayStore {
                     |row| row.get(0),
                 )
                 .ok();
-            // #742: parent is terminated → child is orphaned, full stop.
-            // Lifecycle states active, hibernated, awaiting_gate protect children.
-            // Falls back to status-based inference for pre-migration data.
-            match parent_lifecycle.as_deref() {
-                Some(s) if s.starts_with("terminated:") => {
-                    orphans.push((
-                        child_session_id,
-                        parent_session_id,
-                        root_session_id,
-                        agent_id,
-                    ));
-                }
-                _ => {}
+            // #742/#1057: a terminal parent orphans its children. Terminalness
+            // is classified by the enum, not a restated prefix, so a future
+            // terminal reason can't drift here. Resumable parents protect their
+            // children. Falls back to status-based inference for pre-migration
+            // data.
+            //
+            // `classify_stored`, not a bare `parse().ok()`: a strict parse
+            // would read a `terminated:<reason>` written by a newer gateway as
+            // non-terminal and never reap its children — the #1056 livelock.
+            // A value that is not terminal-by-prefix and not in the vocabulary
+            // is still treated as non-terminal (protect), the safe default.
+            let parent_is_terminal = parent_lifecycle
+                .as_deref()
+                .map(|s| SessionLifecycleState::classify_stored(s).is_terminal())
+                .unwrap_or(false);
+            if parent_is_terminal {
+                orphans.push((
+                    child_session_id,
+                    parent_session_id,
+                    root_session_id,
+                    agent_id,
+                ));
             }
         }
         Ok(orphans)

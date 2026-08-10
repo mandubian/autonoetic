@@ -596,3 +596,93 @@ async fn orphan_reaper_converges_on_child_killed_between_turns() {
         );
     }
 }
+
+/// A parent whose `lifecycle_state` is `terminated:<reason>` written by a newer
+/// gateway must still orphan its children.
+///
+/// `SessionLifecycleState::FromStr` knows only the reasons this build was
+/// compiled with, and adding a `TerminatedReason` is *not* a compile error there
+/// (the `_ => Err` arm absorbs it), so classifying with a bare `parse().ok()`
+/// would read a forward-written terminal parent as alive and leave its children
+/// running unattended forever. Terminalness is classified on the `terminated:`
+/// prefix — the forward-compatible marker every reader used before #1057
+/// centralized the vocabulary.
+#[test]
+fn find_orphaned_sessions_treats_an_unknown_terminated_reason_as_terminal() {
+    let ws = TestWorkspace::new().unwrap();
+    let gateway_dir = ws.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = GatewayStore::open(&gateway_dir).unwrap();
+
+    let root_id = "root-forward-terminal";
+    let child_id = "root-forward-terminal/coder.default-aaaa1111";
+
+    store
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
+        .unwrap();
+
+    // Premise: this build cannot parse the value the parent carries.
+    assert!("terminated:cancelled"
+        .parse::<autonoetic_types::agent::SessionLifecycleState>()
+        .is_err());
+    store
+        .set_session_lifecycle_state(root_id, "terminated:cancelled")
+        .unwrap();
+
+    let orphans = store.find_orphaned_sessions().unwrap();
+    assert!(
+        orphans.iter().any(|(child, ..)| child == child_id),
+        "a terminal-by-prefix parent must orphan its children, got: {orphans:?}"
+    );
+}
+
+/// …and a value that is neither known nor terminal-by-prefix stays
+/// conservative: no signal to act on, so the child is left alone rather than
+/// reaped on a guess.
+#[test]
+fn find_orphaned_sessions_protects_children_of_an_unrecognised_parent() {
+    let ws = TestWorkspace::new().unwrap();
+    let gateway_dir = ws.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = GatewayStore::open(&gateway_dir).unwrap();
+
+    let root_id = "root-unrecognised";
+    let child_id = "root-unrecognised/coder.default-bbbb2222";
+
+    store
+        .upsert_session_transcript(&make_transcript(
+            root_id,
+            root_id,
+            "planner.default",
+            "active",
+        ))
+        .unwrap();
+    store
+        .upsert_session_transcript(&make_transcript(
+            child_id,
+            root_id,
+            "coder.default",
+            "active",
+        ))
+        .unwrap();
+    store.set_session_lifecycle_state(root_id, "wedged").unwrap();
+
+    let orphans = store.find_orphaned_sessions().unwrap();
+    assert!(
+        !orphans.iter().any(|(child, ..)| child == child_id),
+        "an unrecognised parent state must not reap its children, got: {orphans:?}"
+    );
+}

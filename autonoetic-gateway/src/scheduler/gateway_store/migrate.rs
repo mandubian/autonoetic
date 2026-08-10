@@ -851,6 +851,12 @@ fn apply_session_lifecycle_state_v64(conn: &mut Connection) -> Result<()> {
     if current >= 64 {
         return Ok(());
     }
+    // The backfill literals below are intentionally frozen: migrations are
+    // append-only and must be byte-stable, so they are NOT routed through
+    // `SessionLifecycleState::as_str()`. They must, however, stay consistent
+    // with that vocabulary (`active` / `terminated:completed` /
+    // `terminated:failed` / `awaiting_gate`); `resumable_sql_list_matches_is_resumable`
+    // and the round-trip test guard the live values.
     conn.execute_batch(
         "ALTER TABLE session_transcripts ADD COLUMN lifecycle_state TEXT;
          UPDATE session_transcripts SET lifecycle_state = 'active'

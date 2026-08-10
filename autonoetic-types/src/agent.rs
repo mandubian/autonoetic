@@ -531,44 +531,199 @@ pub enum SessionState {
     Clarification,
 }
 
-/// Explicit session lifecycle state (issue #742).
+/// Explicit session lifecycle state (issue #742, centralized in #1057).
 ///
 /// Replaces the overloaded transcript `status = "completed"` which conflated
 /// "session terminated normally" with "session hibernated between turns".
 /// The orphan reaper (R+12) and `try_complete_workflow` read this single field
 /// instead of inferring lifecycle position from transcript status plus auxiliary
 /// heuristics.
+///
+/// This enum is the **single owner** of the `session_transcripts.lifecycle_state`
+/// vocabulary. The gateway writes one of these values (via [`Self::as_str`]) and
+/// every reader asks this enum how to classify a state — [`Self::is_terminal`],
+/// [`Self::is_resumable`], [`Self::permits_workflow_completion`] — instead of
+/// restating a subset of the vocabulary as ad-hoc SQL/Rust string literals.
+/// Adding a variant is a compile error at every classification site (each method
+/// is an exhaustive match), and the SQL-literal helpers below are cross-checked
+/// against `is_resumable` by `resumable_sql_list_matches_is_resumable`. That
+/// mechanical link is the point: a new state can no longer be silently
+/// misclassified by a reader in another file.
+///
+/// One asymmetry is deliberate. [`FromStr`](std::str::FromStr) is strict — it
+/// knows only this build's vocabulary — because a writer must never invent a
+/// value. Readers use [`Self::classify_stored`] instead, which honours the
+/// [`Self::TERMINATED_PREFIX`] contract so a row written by a newer gateway is
+/// still classified correctly. Strictness on the read path would re-introduce
+/// exactly the failure this enum exists to prevent, one version boundary out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleState {
     /// Session is actively executing a turn.
     Active,
-    /// Session completed its turn and is hibernated (between turns, will resume).
+    /// Session completed its turn and is hibernated (between turns, will resume
+    /// on the next operator message).
     Hibernated,
     /// Session is suspended awaiting a gate (approval, user input, escalation).
     AwaitingGate,
+    /// Resident session that finished its task and is parked only so peers can
+    /// still reach it (#902). Nothing is being waited on; the session resumes on
+    /// the next inbound message and is reaped once its idle TTL elapses.
+    Idle,
+    /// Operator-initiated cooperative pause (#1026): the turn parked at a tool
+    /// boundary via `root_session.pause`. Distinct from `Hibernated` — that means
+    /// *the agent* finished, this means *the operator* paused. Resumes
+    /// (hibernate-like) on the next message.
+    Paused,
     /// Session has terminated (completed / failed / suspended terminal).
     Terminated(TerminatedReason),
 }
 
 impl SessionLifecycleState {
-    pub fn is_terminated(&self) -> bool {
+    /// Stable wire/SQL representation. Used by every writer so the on-disk
+    /// vocabulary has one source.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Hibernated => "hibernated",
+            Self::AwaitingGate => "awaiting_gate",
+            Self::Idle => "idle",
+            Self::Paused => "paused",
+            Self::Terminated(TerminatedReason::Completed) => "terminated:completed",
+            Self::Terminated(TerminatedReason::Failed) => "terminated:failed",
+            Self::Terminated(TerminatedReason::Suspended) => "terminated:suspended",
+        }
+    }
+
+    /// A truly-ended session that will never resume. Only `Terminated`.
+    ///
+    /// Read by `find_orphaned_sessions` (a terminated parent orphans its
+    /// children) and `terminate_session_transcript`'s idempotency guard.
+    pub fn is_terminal(&self) -> bool {
         matches!(self, Self::Terminated(_))
+    }
+
+    /// A parked session that is expected to resume, and so must be protected
+    /// from the "polite" finalize path (`finalize_session_transcript`), which
+    /// cannot tell a between-turn yield from a real end. `Hibernated`,
+    /// `AwaitingGate`, `Idle`, and `Paused` are resumable; `Active` is not (an
+    /// active session being finalized *is* ending); `Terminated` is not.
+    ///
+    /// Read by `finalize_session_transcript`'s `NOT IN (...)` guard.
+    pub fn is_resumable(&self) -> bool {
+        matches!(
+            self,
+            Self::Hibernated | Self::AwaitingGate | Self::Idle | Self::Paused
+        )
+    }
+
+    /// Whether a root session in this state permits its workflow to complete.
+    ///
+    /// The workflow join fires when the session has no further planned work:
+    /// `Terminated` (done for good), `Hibernated` (between turns — all join /
+    /// active / queued conditions are independently checked beforehand), and
+    /// `Idle` (finished its task, parked only for peer reachability). `Paused`
+    /// and `AwaitingGate` block completion — the operator may redirect, or a
+    /// gate is pending; `Active` blocks it (still running).
+    ///
+    /// Read by `try_complete_workflow`.
+    pub fn permits_workflow_completion(&self) -> bool {
+        matches!(
+            self,
+            Self::Terminated(_) | Self::Hibernated | Self::Idle
+        )
+    }
+
+    /// The shared prefix of every terminal state. This is a **contract**, not a
+    /// spelling convention: readers classify terminalness by this prefix so a
+    /// `terminated:<reason>` this build has never heard of is still terminal.
+    /// Held to by `every_terminal_state_carries_the_terminated_prefix`.
+    pub const TERMINATED_PREFIX: &'static str = "terminated:";
+
+    /// SQL `LIKE` pattern matching every terminal state — the SQL spelling of
+    /// [`Self::TERMINATED_PREFIX`], cross-checked against it by
+    /// `resumable_sql_list_matches_is_resumable`.
+    pub const TERMINATED_SQL_PREFIX: &'static str = "terminated:%";
+
+    /// SQL fragment: a comma-separated, single-quoted list of every resumable
+    /// state, suitable for `lifecycle_state NOT IN (...)`. Static literals only
+    /// — no interpolation — so there is no injection surface. Cross-checked
+    /// against `is_resumable` by `resumable_sql_list_matches_is_resumable` so a
+    /// newly added resumable variant that is forgotten here fails the build.
+    pub const RESUMABLE_SQL_LIST: &'static str = "'hibernated','awaiting_gate','idle','paused'";
+
+    /// Classify a value **read back from the store**.
+    ///
+    /// [`FromStr`](std::str::FromStr) is deliberately strict: it round-trips
+    /// only the vocabulary this binary knows. Reads cannot afford to be. A row
+    /// may have been written by a newer gateway sharing the same database, or
+    /// by a [`TerminatedReason`] added after this binary was built — and while
+    /// adding a reason is a compile error in [`Self::as_str`], it is *not* one
+    /// in `FromStr`, whose `_ => Err` arm absorbs it silently.
+    ///
+    /// Terminal states share [`Self::TERMINATED_PREFIX`], and that prefix — not
+    /// the exact reason — is what readers classified on before #1057
+    /// centralized the vocabulary. Treating an unknown `terminated:<reason>` as
+    /// non-terminal would mean its children are never orphaned and its workflow
+    /// never completes: the #1056 livelock, re-entered through a strict parse.
+    ///
+    /// Genuinely unrecognised values stay conservative — see
+    /// [`StoredLifecycle::Unrecognised`].
+    pub fn classify_stored(raw: &str) -> StoredLifecycle {
+        match raw.parse::<Self>() {
+            Ok(state) => StoredLifecycle::Known(state),
+            Err(_) if raw.starts_with(Self::TERMINATED_PREFIX) => StoredLifecycle::UnknownTerminal,
+            Err(_) => StoredLifecycle::Unrecognised,
+        }
+    }
+}
+
+/// The classification of a `lifecycle_state` value read out of the store —
+/// the read-side counterpart to [`SessionLifecycleState`].
+///
+/// Writes always go through [`SessionLifecycleState::as_str`] and so are always
+/// in this build's vocabulary; reads are not. Produced by
+/// [`SessionLifecycleState::classify_stored`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredLifecycle {
+    /// A value this build knows. Classification delegates to the enum.
+    Known(SessionLifecycleState),
+    /// `terminated:<reason>` with a reason this build does not know — terminal
+    /// by the prefix contract, so a forward-written row still reaps its
+    /// children and releases its workflow.
+    UnknownTerminal,
+    /// Not in the vocabulary at all: corrupt, or a *non-terminal* state from a
+    /// newer gateway. Classified conservatively — not terminal (children stay
+    /// protected) and it blocks workflow completion. Unlike `UnknownTerminal`
+    /// there is no signal here to act on, so the safe reading is "still alive".
+    Unrecognised,
+}
+
+impl StoredLifecycle {
+    /// A truly-ended session that will never resume. See
+    /// [`SessionLifecycleState::is_terminal`].
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            Self::Known(state) => state.is_terminal(),
+            Self::UnknownTerminal => true,
+            Self::Unrecognised => false,
+        }
+    }
+
+    /// Whether a root session in this state permits its workflow to complete.
+    /// See [`SessionLifecycleState::permits_workflow_completion`].
+    pub fn permits_workflow_completion(&self) -> bool {
+        match self {
+            Self::Known(state) => state.permits_workflow_completion(),
+            Self::UnknownTerminal => true,
+            Self::Unrecognised => false,
+        }
     }
 }
 
 impl std::fmt::Display for SessionLifecycleState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Active => write!(f, "active"),
-            Self::Hibernated => write!(f, "hibernated"),
-            Self::AwaitingGate => write!(f, "awaiting_gate"),
-            Self::Terminated(reason) => match reason {
-                TerminatedReason::Completed => write!(f, "terminated:completed"),
-                TerminatedReason::Failed => write!(f, "terminated:failed"),
-                TerminatedReason::Suspended => write!(f, "terminated:suspended"),
-            },
-        }
+        f.write_str(self.as_str())
     }
 }
 
@@ -579,6 +734,8 @@ impl std::str::FromStr for SessionLifecycleState {
             "active" => Ok(Self::Active),
             "hibernated" => Ok(Self::Hibernated),
             "awaiting_gate" => Ok(Self::AwaitingGate),
+            "idle" => Ok(Self::Idle),
+            "paused" => Ok(Self::Paused),
             "terminated:completed" => Ok(Self::Terminated(TerminatedReason::Completed)),
             "terminated:failed" => Ok(Self::Terminated(TerminatedReason::Failed)),
             "terminated:suspended" => Ok(Self::Terminated(TerminatedReason::Suspended)),
@@ -959,30 +1116,207 @@ mod tests {
             (SessionLifecycleState::Active, "active"),
             (SessionLifecycleState::Hibernated, "hibernated"),
             (SessionLifecycleState::AwaitingGate, "awaiting_gate"),
+            (SessionLifecycleState::Idle, "idle"),
+            (SessionLifecycleState::Paused, "paused"),
             (SessionLifecycleState::Terminated(TerminatedReason::Completed), "terminated:completed"),
             (SessionLifecycleState::Terminated(TerminatedReason::Failed), "terminated:failed"),
             (SessionLifecycleState::Terminated(TerminatedReason::Suspended), "terminated:suspended"),
         ];
         for (state, expected) in cases {
             assert_eq!(state.to_string(), expected);
+            assert_eq!(state.as_str(), expected);
             let parsed: SessionLifecycleState = expected.parse().unwrap();
             assert_eq!(parsed, state);
         }
     }
 
     #[test]
-    fn lifecycle_state_is_terminated() {
-        assert!(!SessionLifecycleState::Active.is_terminated());
-        assert!(!SessionLifecycleState::Hibernated.is_terminated());
-        assert!(!SessionLifecycleState::AwaitingGate.is_terminated());
-        assert!(SessionLifecycleState::Terminated(TerminatedReason::Completed).is_terminated());
-        assert!(SessionLifecycleState::Terminated(TerminatedReason::Failed).is_terminated());
-        assert!(SessionLifecycleState::Terminated(TerminatedReason::Suspended).is_terminated());
+    fn lifecycle_state_classification() {
+        use SessionLifecycleState as S;
+        let term = [
+            S::Terminated(TerminatedReason::Completed),
+            S::Terminated(TerminatedReason::Failed),
+            S::Terminated(TerminatedReason::Suspended),
+        ];
+        for s in [S::Active, S::Hibernated, S::AwaitingGate, S::Idle, S::Paused] {
+            assert!(!s.is_terminal(), "{s:?} must not be terminal");
+        }
+        for s in term {
+            assert!(s.is_terminal(), "{s:?} must be terminal");
+        }
+
+        // Resumable (protected from the polite finalize path).
+        for s in [S::Hibernated, S::AwaitingGate, S::Idle, S::Paused] {
+            assert!(s.is_resumable(), "{s:?} must be resumable");
+        }
+        for s in [
+            S::Active,
+            S::Terminated(TerminatedReason::Completed),
+            S::Terminated(TerminatedReason::Failed),
+        ] {
+            assert!(!s.is_resumable(), "{s:?} must not be resumable");
+        }
+
+        // Workflow completion gate.
+        for s in [
+            S::Hibernated,
+            S::Idle,
+            S::Terminated(TerminatedReason::Completed),
+            S::Terminated(TerminatedReason::Failed),
+        ] {
+            assert!(
+                s.permits_workflow_completion(),
+                "{s:?} must permit workflow completion"
+            );
+        }
+        for s in [S::Active, S::AwaitingGate, S::Paused] {
+            assert!(
+                !s.permits_workflow_completion(),
+                "{s:?} must block workflow completion"
+            );
+        }
+    }
+
+    /// The SQL literal helpers must stay in lock-step with the classification
+    /// methods — this is the mechanical link that turns a forgotten update into
+    /// a failing test rather than a silent misclassification.
+    #[test]
+    fn resumable_sql_list_matches_is_resumable() {
+        let all = [
+            SessionLifecycleState::Active,
+            SessionLifecycleState::Hibernated,
+            SessionLifecycleState::AwaitingGate,
+            SessionLifecycleState::Idle,
+            SessionLifecycleState::Paused,
+            SessionLifecycleState::Terminated(TerminatedReason::Completed),
+            SessionLifecycleState::Terminated(TerminatedReason::Failed),
+            SessionLifecycleState::Terminated(TerminatedReason::Suspended),
+        ];
+        for s in all {
+            let quoted = format!("'{}'", s.as_str());
+            let in_list = SessionLifecycleState::RESUMABLE_SQL_LIST.contains(&quoted);
+            assert_eq!(
+                in_list,
+                s.is_resumable(),
+                "RESUMABLE_SQL_LIST membership for {s:?} ({quoted}) disagrees with is_resumable()"
+            );
+            if s.is_terminal() {
+                let pat = SessionLifecycleState::TERMINATED_SQL_PREFIX;
+                assert!(
+                    s.as_str().starts_with(pat.trim_end_matches('%')),
+                    "{s:?} is terminal but as_str() {:?} does not match the TERMINATED_SQL_PREFIX {:?}",
+                    s.as_str(),
+                    pat
+                );
+            }
+        }
     }
 
     #[test]
     fn lifecycle_state_invalid_parse_fails() {
         let result: Result<SessionLifecycleState, String> = "bogus".parse();
         assert!(result.is_err());
+    }
+
+    /// The prefix is a contract the read path depends on: `classify_stored`
+    /// calls a `terminated:*` value terminal without knowing its reason. A
+    /// terminal state spelled any other way would be silently misread as alive
+    /// by any build that doesn't know it.
+    #[test]
+    fn every_terminal_state_carries_the_terminated_prefix() {
+        for reason in [
+            TerminatedReason::Completed,
+            TerminatedReason::Failed,
+            TerminatedReason::Suspended,
+        ] {
+            let s = SessionLifecycleState::Terminated(reason);
+            assert!(
+                s.as_str()
+                    .starts_with(SessionLifecycleState::TERMINATED_PREFIX),
+                "{s:?} is terminal but as_str() {:?} does not carry TERMINATED_PREFIX {:?}",
+                s.as_str(),
+                SessionLifecycleState::TERMINATED_PREFIX
+            );
+        }
+        // The SQL pattern must be the same prefix, plus the LIKE wildcard.
+        assert_eq!(
+            SessionLifecycleState::TERMINATED_SQL_PREFIX,
+            format!("{}%", SessionLifecycleState::TERMINATED_PREFIX)
+        );
+        // No non-terminal state may borrow the prefix, or it would be read as
+        // terminal by a build that doesn't know it.
+        for s in [
+            SessionLifecycleState::Active,
+            SessionLifecycleState::Hibernated,
+            SessionLifecycleState::AwaitingGate,
+            SessionLifecycleState::Idle,
+            SessionLifecycleState::Paused,
+        ] {
+            assert!(
+                !s.as_str()
+                    .starts_with(SessionLifecycleState::TERMINATED_PREFIX),
+                "{s:?} is not terminal but carries the terminal prefix"
+            );
+        }
+    }
+
+    /// Round-trip: every known value classifies as `Known` and back to itself.
+    #[test]
+    fn classify_stored_recognises_the_whole_known_vocabulary() {
+        for s in [
+            SessionLifecycleState::Active,
+            SessionLifecycleState::Hibernated,
+            SessionLifecycleState::AwaitingGate,
+            SessionLifecycleState::Idle,
+            SessionLifecycleState::Paused,
+            SessionLifecycleState::Terminated(TerminatedReason::Completed),
+            SessionLifecycleState::Terminated(TerminatedReason::Failed),
+            SessionLifecycleState::Terminated(TerminatedReason::Suspended),
+        ] {
+            assert_eq!(
+                SessionLifecycleState::classify_stored(s.as_str()),
+                StoredLifecycle::Known(s),
+                "{s:?} must classify as Known"
+            );
+        }
+    }
+
+    /// A `terminated:<reason>` from a newer gateway (or a `TerminatedReason`
+    /// added after this build) is terminal on the prefix alone. `FromStr`'s
+    /// `_ => Err` arm absorbs such a value silently — adding a reason is a
+    /// compile error in `as_str`, but *not* there — so a bare `parse().ok()`
+    /// on the read path would read it as alive: children never orphaned, the
+    /// workflow never released. That is the #1056 livelock.
+    #[test]
+    fn classify_stored_treats_an_unknown_terminated_reason_as_terminal() {
+        let classified = SessionLifecycleState::classify_stored("terminated:cancelled");
+        assert_eq!(classified, StoredLifecycle::UnknownTerminal);
+        assert!(classified.is_terminal(), "an unknown reason is still an end");
+        assert!(
+            classified.permits_workflow_completion(),
+            "a terminated root must release its workflow whatever ended it"
+        );
+        // The strict parse this replaces is what made the guard necessary.
+        assert!("terminated:cancelled".parse::<SessionLifecycleState>().is_err());
+    }
+
+    /// A value that is neither known nor terminal-by-prefix carries no signal,
+    /// so it is read as "still alive": children stay protected and the workflow
+    /// stays open for an operator to look at.
+    #[test]
+    fn classify_stored_is_conservative_about_unrecognised_values() {
+        for raw in ["bogus", "", "TERMINATED:completed", "terminated"] {
+            let classified = SessionLifecycleState::classify_stored(raw);
+            assert_eq!(
+                classified,
+                StoredLifecycle::Unrecognised,
+                "{raw:?} must not be recognised"
+            );
+            assert!(!classified.is_terminal(), "{raw:?} must not orphan children");
+            assert!(
+                !classified.permits_workflow_completion(),
+                "{raw:?} must not release a workflow"
+            );
+        }
     }
 }

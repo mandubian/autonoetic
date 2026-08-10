@@ -195,7 +195,11 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
     let child_id =
         "root-parked-noabort/agent-factory.default-aaaa1111/specialized_builder.default-bbbb2222";
 
-    // Root alive, immediate parent's turn ended (completed), child still active.
+    // Root alive, immediate parent between turns (status `completed` from
+    // close_session, lifecycle `hibernated` from the yield checkpoint), child
+    // still active. A between-turn parent is resumable, so its children are
+    // protected from orphaning — the approval-parked exception is exercised on
+    // top of that protection.
     store
         .upsert_session_transcript(&make_transcript(
             root_id,
@@ -212,6 +216,11 @@ async fn orphan_reaper_does_not_abort_handle_for_approval_parked_child() {
             "completed",
         ))
         .unwrap();
+    // Mirrors the real flow: `close_session` writes status `completed` while
+    // `save_yield_checkpoint` writes lifecycle `hibernated`. Without this the
+    // upsert derives `terminated:completed`, making the parent terminal and the
+    // child orphanable — the opposite of what this test asserts.
+    store.set_session_lifecycle_state(parent_id, "hibernated").unwrap();
     store
         .upsert_session_transcript(&make_transcript(
             child_id,

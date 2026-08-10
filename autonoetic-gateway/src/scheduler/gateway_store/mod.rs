@@ -1446,16 +1446,20 @@ mod tests {
         Ok(())
     }
 
-    /// The polite path must keep preserving a between-turn `hibernated` yield:
-    /// `close_session` reports `completed` at the end of every turn, and the
-    /// session resumes on the next operator message.
+    /// The polite path must keep preserving a resumable lifecycle: `close_session`
+    /// reports `completed` at the end of every turn, and the session resumes on
+    /// the next operator message. Since #1057 this covers every state
+    /// `SessionLifecycleState::is_resumable` owns — `hibernated` (between-turn
+    /// yield), `awaiting_gate` (gate-suspended), `idle` (parked resident), and
+    /// `paused` (operator pause). A `completed` finalize on any of these must
+    /// leave the resumable state in place.
     #[test]
     fn finalize_completed_preserves_resumable_lifecycle() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let store = GatewayStore::open(temp_dir.path())?;
         let now = chrono::Utc::now().to_rfc3339();
 
-        for state in ["hibernated", "awaiting_gate"] {
+        for state in ["hibernated", "awaiting_gate", "idle", "paused"] {
             let sid = format!("sess-{state}");
             seed_parked_transcript(&store, &sid, state)?;
             store.finalize_session_transcript(&sid, &now, "completed")?;
@@ -1465,6 +1469,16 @@ mod tests {
                 "finalize(completed) must not terminate a {state} session"
             );
         }
+
+        // A non-resumable lifecycle (`active`) *is* overwritten to terminal —
+        // that is the path that finalizes a genuinely-ending session.
+        seed_parked_transcript(&store, "sess-active", "active")?;
+        store.finalize_session_transcript("sess-active", &now, "completed")?;
+        assert_eq!(
+            store.get_session_lifecycle_state("sess-active")?.as_deref(),
+            Some("terminated:completed"),
+            "finalize(completed) must terminate an active session"
+        );
 
         Ok(())
     }

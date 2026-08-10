@@ -1382,13 +1382,13 @@ pub async fn reap_orphaned_sessions(
         );
 
         // Force the terminal lifecycle rather than going through the polite
-        // `finalize_session_transcript`, which preserves `hibernated`/
-        // `awaiting_gate`. A child killed between turns keeps a resumable
-        // lifecycle, and the polite path cannot clear it — so the child stays
-        // selectable by `find_orphaned_sessions` and the reaper spins on it on
-        // every tick. Unreachability is already established here: the parent is
-        // `terminated:*`, and any pending gate this child held is cancelled
-        // below.
+        // `finalize_session_transcript`, which preserves every resumable state
+        // (`hibernated`/`awaiting_gate`/`idle`/`paused`). A child killed between
+        // turns keeps a resumable lifecycle, and the polite path cannot clear it
+        // — so the child stays selectable by `find_orphaned_sessions` and the
+        // reaper spins on it on every tick. Unreachability is already
+        // established here: the parent is `terminated:*`, and any pending gate
+        // this child held is cancelled below.
         let _ = store.terminate_session_transcript(&child_session_id, &now_rfc, "failed");
 
         let event = autonoetic_types::causal_chain::CausalEventRecord {
@@ -1418,14 +1418,17 @@ pub async fn reap_orphaned_sessions(
         let _ = store.create_causal_event(&event);
 
         for wf_dir in &workflow_dirs {
-            let tasks_dir = wf_dir.join("tasks");
-            if !tasks_dir.is_dir() {
-                continue;
-            }
             let wf_id = match wf_dir.file_name().and_then(|n| n.to_str()) {
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            // Task runs live in SQLite (`list_task_runs_for_workflow` is the
+            // source of truth and migrates any legacy on-disk `tasks/*.json`
+            // itself). An earlier guard skipped workflows lacking an on-disk
+            // `tasks/` subdir — but since the storage migration that subdir is
+            // rarely created, so the guard silently skipped every workflow and
+            // the reaper never cancelled tasks or aborted in-flight handles for
+            // orphaned children. Read tasks from the store unconditionally.
             let tasks = match crate::scheduler::workflow_store::list_task_runs_for_workflow(
                 &config,
                 Some(store.as_ref()),
@@ -3091,14 +3094,23 @@ pub fn append_task_board_entry(
 /// Deliberately does not resume the session to close it: the run is over, only
 /// the bookkeeping is outstanding. The Idle checkpoint is left in place so the
 /// session remains forkable/inspectable like any other completed session.
+///
+/// Since #1057 the polite `finalize_session_transcript` preserves `idle` (it is
+/// resumable), so the reaper must stamp the terminal lifecycle itself — a dead
+/// session left at `idle` would read as alive to `find_orphaned_sessions`
+/// (protecting children it can no longer coordinate) and to
+/// `try_complete_workflow`. `terminate_session_transcript` is the right tool:
+/// the reaper has established unreachability (TTL elapsed), exactly the
+/// contract that function exists for.
 fn reap_expired_residencies(
     store: &crate::scheduler::gateway_store::GatewayStore,
 ) -> anyhow::Result<()> {
     let expired = store.list_expired_session_residencies()?;
     for r in expired {
         // Order matters: write the terminal marker first, so a crash between
-        // the two leaves a session that reads as closed rather than one that is
-        // advertised as addressable but has no way to be woken.
+        // the steps leaves a session that reads as closed rather than one that
+        // is advertised as addressable but has no way to be woken.
+        let ended_at = chrono::Utc::now().to_rfc3339();
         if let Err(e) = store.upsert_session_outcome_metrics(
             &r.session_id,
             &r.root_session_id,
@@ -3116,6 +3128,19 @@ fn reap_expired_residencies(
                 "Failed to write outcome while reaping idle session; leaving residency for retry"
             );
             continue;
+        }
+        // The reaper has established the session is unreachable (TTL elapsed):
+        // stamp the terminal lifecycle over the resumable `idle` the polite
+        // finalize path deliberately left in place. Idempotent — a row already
+        // at `terminated:*` is left untouched.
+        if let Err(e) = store.terminate_session_transcript(&r.session_id, &ended_at, "completed") {
+            tracing::warn!(
+                target: "session_residency",
+                session_id = %r.session_id,
+                error = %e,
+                "Failed to terminate lifecycle while reaping idle session; \
+                 lifecycle_state may read as resumable until the next sweep"
+            );
         }
         store.clear_session_residency(&r.session_id)?;
         tracing::info!(
@@ -4680,5 +4705,102 @@ mod adjudication_sla_tests {
             .unwrap();
         assert_eq!(open.len(), 1);
         assert_ne!(open[0].invitation_id, "ainv-stale");
+    }
+}
+
+#[cfg(test)]
+mod reap_residency_tests {
+    use super::*;
+    use autonoetic_types::causal_chain::SessionTranscriptRecord;
+    use chrono::Utc;
+
+    fn seed_idle(store: &GatewayStore, session_id: &str, expires_at: &str) {
+        let now = Utc::now().to_rfc3339();
+        store
+            .upsert_session_transcript(&SessionTranscriptRecord {
+                transcript_id: format!("stx-{session_id}"),
+                session_id: session_id.to_string(),
+                root_session_id: session_id.to_string(),
+                agent_id: "resident-agent".to_string(),
+                revision_id: None,
+                user_id: None,
+                started_at: now,
+                ended_at: None,
+                status: "completed".to_string(),
+                turn_count: 1,
+                transcript_handle: None,
+                excerpt: None,
+                origin_node_id: None,
+            })
+            .unwrap();
+        // Park: lifecycle `idle` (what save_yield_checkpoint writes), plus a
+        // residency row whose TTL has elapsed.
+        store
+            .set_session_lifecycle_state(session_id, "idle")
+            .unwrap();
+        store
+            .upsert_session_residency(&SessionResidency {
+                session_id: session_id.to_string(),
+                root_session_id: session_id.to_string(),
+                agent_id: "resident-agent".to_string(),
+                turn_id: "turn-000001".to_string(),
+                since: "2020-01-01T00:00:00Z".to_string(),
+                expires_at: expires_at.to_string(),
+            })
+            .unwrap();
+    }
+
+    /// #1057: since the polite finalize path now preserves `idle`, the residency
+    /// reaper is what stamps the terminal lifecycle. A reaped session must read
+    /// as terminal — otherwise `find_orphaned_sessions` keeps protecting
+    /// children it can no longer coordinate, and `try_complete_workflow` blocks.
+    #[test]
+    fn reap_terminates_an_idle_parked_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        // TTL already elapsed relative to "now".
+        seed_idle(&store, "resident-1", "2000-01-01T00:00:00Z");
+
+        reap_expired_residencies(&store).unwrap();
+
+        assert_eq!(
+            store
+                .get_session_lifecycle_state("resident-1")
+                .unwrap()
+                .as_deref(),
+            Some("terminated:completed"),
+            "a reaped idle session must land terminal, not stay resumable"
+        );
+        assert!(
+            store.get_session_residency("resident-1").unwrap().is_none(),
+            "the residency row must be cleared"
+        );
+        assert!(
+            store.get_session_outcome("resident-1").unwrap().is_some(),
+            "the outcome row must be written"
+        );
+    }
+
+    /// A non-expired residency must be left untouched (including its lifecycle).
+    #[test]
+    fn reap_leaves_unexpired_residency_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+        seed_idle(&store, "resident-2", "9999-01-01T00:00:00Z");
+
+        reap_expired_residencies(&store).unwrap();
+
+        assert_eq!(
+            store
+                .get_session_lifecycle_state("resident-2")
+                .unwrap()
+                .as_deref(),
+            Some("idle"),
+            "an unexpired residency must keep its idle lifecycle"
+        );
+        assert!(
+            store.get_session_residency("resident-2").unwrap().is_some(),
+            "the residency row must remain"
+        );
     }
 }
