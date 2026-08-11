@@ -219,17 +219,22 @@ fn compute_code_digest(
     // byte-identical — without this, a deps-only rebuild (packager swapping a
     // layer) keeps an unchanged code_digest and a code-gate verdict could be
     // wrongly carried forward (docs/federation-carry-forward.md risk #1).
-    // ArtifactLayer.digest is already a SHA-256 of the layer content, so a
-    // layer content change moves this digest and voids the carry. Sorted by
-    // layer_id for order-independence.
-    let mut layer_ids: Vec<(&str, &str)> = layers
+    // ArtifactLayer.digest is the SHA-256 of the layer's compressed archive
+    // and layer_id is derived from that digest — neither encodes mount_path,
+    // so a packager rebuild that mounts identical content at a different path
+    // (changing the sandbox's Python/Node import paths) would otherwise go
+    // undetected. Fold (layer_id, mount_path, digest) sorted by layer_id for
+    // order-independence.
+    let mut layer_tuples: Vec<(&str, &str, &str)> = layers
         .iter()
-        .map(|l| (l.layer_id.as_str(), l.digest.as_str()))
+        .map(|l| (l.layer_id.as_str(), l.mount_path.as_str(), l.digest.as_str()))
         .collect();
-    layer_ids.sort();
-    for (layer_id, digest) in layer_ids {
+    layer_tuples.sort();
+    for (layer_id, mount_path, digest) in layer_tuples {
         hasher.update(b"layer:");
         hasher.update(layer_id.as_bytes());
+        hasher.update(b"@");
+        hasher.update(mount_path.as_bytes());
         hasher.update(b"=");
         hasher.update(digest.as_bytes());
         hasher.update(b"\0");
@@ -1487,8 +1492,17 @@ mod tests {
         }
     }
 
+    fn layer_mounted(id: &str, digest: &str, mount_path: &str) -> ArtifactLayer {
+        ArtifactLayer {
+            layer_id: id.to_string(),
+            name: "python-deps".to_string(),
+            mount_path: mount_path.to_string(),
+            digest: digest.to_string(),
+        }
+    }
+
     #[test]
-    fn code_digest_changes_when_layer_changes_even_if_files_identical() {
+    fn code_digest_changes_when_layer_content_changes_even_if_files_identical() {
         // The gap this fixes: a deps-only rebuild (packager swaps a layer) with
         // identical base files previously kept an unchanged code_digest, so a
         // code-gate verdict could be wrongly carried forward.
@@ -1497,7 +1511,25 @@ mod tests {
         let v2 = vec![layer("layer_1", "sha256:deps-v2")];
         let d1 = compute_code_digest(&files, &["main.py".to_string()], &v1).unwrap();
         let d2 = compute_code_digest(&files, &["main.py".to_string()], &v2).unwrap();
-        assert_ne!(d1, d2, "a dependency-layer change must move the code digest");
+        assert_ne!(d1, d2, "a dependency-layer content change must move the code digest");
+    }
+
+    #[test]
+    fn code_digest_changes_when_mount_path_changes_with_identical_content() {
+        // ArtifactLayer.digest covers the layer *content* but not where it's
+        // mounted. A packager rebuild that reuses identical layer content at
+        // a different mount_path changes the sandbox's import paths
+        // (python_paths/node_paths), so the execution environment a code gate
+        // reviewed has changed. The code digest must move.
+        let files = hashing_input(&[("main.py", "print('hi')")]);
+        let v1 = vec![layer_mounted("layer_1", "sha256:deps", "/deps")];
+        let v2 = vec![layer_mounted("layer_1", "sha256:deps", "/site-packages")];
+        let d1 = compute_code_digest(&files, &["main.py".to_string()], &v1).unwrap();
+        let d2 = compute_code_digest(&files, &["main.py".to_string()], &v2).unwrap();
+        assert_ne!(
+            d1, d2,
+            "a mount_path change with identical layer content must move the code digest"
+        );
     }
 
     #[test]
