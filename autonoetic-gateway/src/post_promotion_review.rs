@@ -245,6 +245,7 @@ pub fn run_post_promotion_review(
                     findings_summary: f.message.clone(),
                     evidence_ref: None,
                     recorded_at: chrono::Utc::now().to_rfc3339(),
+                    carried_from: None,
                 }
             }).collect();
 

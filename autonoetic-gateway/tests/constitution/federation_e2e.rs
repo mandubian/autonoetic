@@ -420,6 +420,10 @@ fn make_verdict(role: PromotionRole, agent_id: &str, passed: bool) -> RoleVerdic
         findings_summary: summary,
         evidence_ref: None,
         recorded_at: chrono::Utc::now().to_rfc3339(),
+        // Freshly-run verdict, not a carry-forward claim. Spelled out rather
+        // than defaulted: a carry is a security-relevant assertion, so every
+        // construction site should have to say which it is.
+        carried_from: None,
     }
 }
 

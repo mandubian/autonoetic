@@ -156,6 +156,46 @@ pub struct PromotionRecord {
     pub contract_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prose_digest: Option<String>,
+
+    /// Federation carry-forward provenance (Stage 3; see
+    /// `docs/federation-carry-forward.md`). When a role's verdict on THIS
+    /// artifact was carried forward from a prior artifact (rather than freshly
+    /// run), this map records per-role provenance: which prior artifact + role
+    /// it came from, the verified digests at carry time, and the justification.
+    ///
+    /// Kept separate from the flat per-role verdict fields so the
+    /// security-critical verdict stays hardcoded while provenance metadata
+    /// (additive, non-deciding) is keyed by role name. Empty when every
+    /// verdict on this artifact was freshly run.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub carried_roles: std::collections::BTreeMap<String, RoleCarryProvenance>,
+}
+
+/// Provenance recorded when a role's verdict was carried forward from a prior
+/// artifact rather than freshly run. Only ever attached by the gateway during
+/// `federation_escalate` after verifying the carry claim — never agent-supplied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleCarryProvenance {
+    /// The prior artifact ref (ar.*) the verdict came from.
+    pub prior_artifact_ref: String,
+    /// The prior artifact id (art_*) for join-ability.
+    pub prior_artifact_id: String,
+    /// The agent that originally recorded the verdict on the prior artifact.
+    pub original_agent_id: String,
+    /// RFC3339 timestamp the carry was verified and applied.
+    pub verified_at: String,
+    /// The code / contract digests of the prior artifact's record at carry
+    /// time — the bytes the original gate reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_code_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_contract_digest: Option<String>,
+    /// The planner's one-sentence justification (the reasoning trace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
+    /// The strictness floor in effect when the carry was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strictness: Option<String>,
 }
 
 impl PromotionRecord {

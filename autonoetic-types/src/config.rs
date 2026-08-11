@@ -899,6 +899,65 @@ pub enum FederationConstitutionMode {
     Superset,
 }
 
+/// How conservative the gateway is when accepting a gate-verdict
+/// carry-forward across a rebuild (federation carry-forward;
+/// see `docs/federation-carry-forward.md`). The planner always proposes;
+/// the gateway verifies against this floor.
+///
+/// - `off` — every rebuild re-runs every gate (today's behavior; default).
+/// - `conservative` — carry a code-reviewing gate (unit_test_runner, auditor,
+///   sealed_evaluator) only when its `code_digest` and `contract_digest` are
+///   both byte-identical to the prior artifact (i.e. only prose changed).
+///
+/// We deliberately do not ship a `per_role` level: `static_evaluator` never
+/// carries (it reviews all three digests), and the code gates share
+/// `code_digest`, so any code change re-runs both regardless. A finer level
+/// buys nothing at this digest granularity.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CarryForwardStrictness {
+    #[default]
+    Off,
+    Conservative,
+}
+
+impl CarryForwardStrictness {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CarryForwardStrictness::Off => "off",
+            CarryForwardStrictness::Conservative => "conservative",
+        }
+    }
+
+    /// Whether a code-reviewing gate (unit_test_runner / auditor /
+    /// sealed_evaluator) may be carried given the per-class change flags.
+    pub fn allows_carry(&self, code_changed: bool, contract_changed: bool, _prose_changed: bool) -> bool {
+        match self {
+            CarryForwardStrictness::Off => false,
+            // Code gates review code + contract. Carry only if both are
+            // byte-identical (only prose may differ).
+            CarryForwardStrictness::Conservative => !code_changed && !contract_changed,
+        }
+    }
+}
+
+/// Federation (multi-node) settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FederationConfig {
+    /// How conservative the gateway is when accepting a gate-verdict
+    /// carry-forward across a rebuild. Default: `off` (today's behavior).
+    #[serde(default)]
+    pub carry_forward_strictness: CarryForwardStrictness,
+}
+
+impl Default for FederationConfig {
+    fn default() -> Self {
+        Self {
+            carry_forward_strictness: CarryForwardStrictness::Off,
+        }
+    }
+}
+
 /// Federation constitution compatibility settings (P-10.9 scaffolding).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederationConstitutionConfig {
@@ -988,6 +1047,10 @@ pub struct GatewayConfig {
     /// Constitution compatibility policy for federated peers (P-10.9).
     #[serde(default)]
     pub federation_constitution: FederationConstitutionConfig,
+    /// Federation (multi-node) settings, including the carry-forward
+    /// strictness dial (Stage 3 of the carry-forward design).
+    #[serde(default)]
+    pub federation: FederationConfig,
 
     /// Maximum number of agent runtime executions allowed concurrently.
     #[serde(default = "default_max_concurrent_spawns")]
@@ -3499,6 +3562,7 @@ impl Default for GatewayConfig {
             node_name: default_node_name(),
             constitution: ConstitutionConfig::default(),
             federation_constitution: FederationConstitutionConfig::default(),
+            federation: FederationConfig::default(),
             max_concurrent_spawns: default_max_concurrent_spawns(),
             max_pending_spawns_per_agent: default_max_pending_spawns_per_agent(),
             max_spawn_depth: default_max_spawn_depth(),

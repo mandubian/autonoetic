@@ -1634,6 +1634,7 @@ mod tests {
                 findings_summary: "Code looks clean, no vulnerabilities".to_string(),
                 evidence_ref: None,
                 recorded_at: chrono::Utc::now().to_rfc3339(),
+                carried_from: None,
             },
             RoleVerdictSummary {
                 role: PromotionRole::UnitTestRunner,
@@ -1642,6 +1643,7 @@ mod tests {
                 findings_summary: "All 12 tests pass".to_string(),
                 evidence_ref: Some("art_artifact123".to_string()),
                 recorded_at: chrono::Utc::now().to_rfc3339(),
+                carried_from: None,
             },
         ];
 
