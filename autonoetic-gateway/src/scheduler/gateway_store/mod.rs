@@ -8,6 +8,8 @@ mod artifacts;
 pub mod attack_patterns;
 mod channel_bindings;
 pub mod constitutional_proposals;
+mod carry_lineage;
+pub use carry_lineage::CarryLineageRecord;
 mod credentials;
 pub mod egress_policy;
 mod workspace_taint;

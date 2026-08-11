@@ -468,6 +468,32 @@ impl NativeTool for FederationEscalateTool {
                     "carry_forward accepted: verdict carried from prior artifact",
                 );
 
+                // Lineage: record the carry edge in the gateway store's
+                // `carry_forward_lineage` ancestry table (#1067 follow-up), so
+                // "which prior artifact did this artifact carry from" is
+                // answerable from the store, not only from the planner's
+                // naming within the workflow + a cross-session digest match.
+                // Best-effort like the causal event below: the promotion
+                // record's carried_roles + digests are the enforcement
+                // surface; this table is the audit/answerability layer.
+                if let Err(e) = store.record_carry_lineage(
+                    &canonical_artifact_id,
+                    verdict.role.as_str(),
+                    &prior_resolved.artifact_id,
+                    &cf.prior_artifact_ref,
+                    strictness.as_str(),
+                    prior.code_digest.as_deref(),
+                    prior.contract_digest.as_deref(),
+                ) {
+                    tracing::warn!(
+                        target: "federation",
+                        artifact_id = %canonical_artifact_id,
+                        role = verdict.role.as_str(),
+                        error = %e,
+                        "Failed to record carry-forward ancestry row",
+                    );
+                }
+
                 // Audit: emit a `federation.carry_forward` causal event per
                 // accepted carry (same shape as `grant_revocation`). Best-effort
                 // — a failed insert is logged but does not fail the escalate

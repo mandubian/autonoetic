@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 79;
+const SCHEMA_VERSION_LATEST: i64 = 80;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -564,7 +564,56 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_egress_declassification_grants_v77(conn)?;
     apply_artifact_egress_labels_v78(conn)?;
     apply_workspace_egress_labels_v79(conn)?;
+    apply_carry_forward_lineage_v80(conn)?;
 
+    Ok(())
+}
+
+/// v80 — `carry_forward_lineage`: the source_artifact_ref ancestry table for
+/// federation carry-forward (#1067 follow-up).
+///
+/// A carried verdict reuses a prior artifact's gate result. Verification is
+/// anchored to the planner naming the prior artifact within the workflow plus
+/// the content-addressed digest match; this table makes the carry edges
+/// answerable from the store — for a given artifact, which prior artifact's
+/// verdicts it reused ("who did you carry from"), and walking the chain
+/// backwards to the root of the lineage. One row per (artifact, carried role);
+/// a row is inserted only after `verify_carry_claim` accepted the carry, so it
+/// never records claims that were rejected.
+fn apply_carry_forward_lineage_v80(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 80 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS carry_forward_lineage (
+            artifact_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            source_artifact_id TEXT NOT NULL,
+            source_artifact_ref TEXT NOT NULL,
+            strictness TEXT NOT NULL,
+            source_code_digest TEXT,
+            source_contract_digest TEXT,
+            verified_at TEXT NOT NULL,
+            PRIMARY KEY (artifact_id, role)
+        );
+        CREATE INDEX IF NOT EXISTS idx_carry_forward_lineage_source
+            ON carry_forward_lineage (source_artifact_id);",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            80_i64,
+            "carry_forward_lineage",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
     Ok(())
 }
 

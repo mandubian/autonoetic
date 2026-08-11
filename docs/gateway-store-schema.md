@@ -604,6 +604,24 @@ Spawn-tree ancestry for trust-boundary collapse (P-10.7).
 
 Index: `idx_session_spawn_lineage_root`.
 
+#### `carry_forward_lineage` — created v80, owner: `carry_lineage.rs` — `written`
+Federation carry-forward ancestry (#1067 follow-up): one row per accepted
+carry — artifact `artifact_id` reused the prior artifact's gate verdict in
+`role`. Written only after `verify_carry_claim` accepted the carry (rejected
+claims never leave a row); the promotion record's carried_roles + digests
+remain the enforcement surface, this table is the audit/answerability layer
+(`get_carry_lineage`, `list_carry_edges_from`, `walk_carry_ancestors`).
+
+| column | type | notes |
+|---|---|---|
+| `artifact_id`, `role` | TEXT NOT NULL | PK `(artifact_id, role)` — one edge per carried role |
+| `source_artifact_id`, `source_artifact_ref` | TEXT NOT NULL | prior artifact (canonical id + planner-declared ref) |
+| `strictness` | TEXT NOT NULL | strictness dial in force at accept time (`off`/`conservative`) |
+| `source_code_digest`, `source_contract_digest` | TEXT | prior record's digests at carry time — the bytes the original gate reviewed |
+| `verified_at` | TEXT NOT NULL | RFC3339 |
+
+Index: `idx_carry_forward_lineage_source` on `source_artifact_id`.
+
 #### `session_outcomes` — created v38, owner: `session_outcomes.rs` — `written`
 Per-session outcome + grader/operator rating.
 
