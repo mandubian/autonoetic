@@ -169,27 +169,40 @@ pub fn default_runtime_lock(artifact_layers: &[ArtifactLayer]) -> anyhow::Result
 
 // ─── Example rendering for diagnostics ─────────────────────────
 
+/// The **canonical** SKILL.md example handed to agents (via
+/// `agent.revision.schema` and every install validation error).
+///
+/// This must stay in the metadata-wrapped shape — the same shape
+/// `render_skill_document` emits. Agents copy this example verbatim, so a
+/// bare-root example here means the gateway teaches one notation and writes
+/// another, and every copy has to be normalized by each reader afterwards.
+/// The legacy bare-root shape is still *accepted* on input (see
+/// `install_schema_description`); it is simply no longer what we hand out.
 pub fn render_skill_metadata_example() -> String {
     r#"---
-version: "1.0"
-runtime:
-  engine: "autonoetic"
-  gateway_version: "0.1.0"
-  sdk_version: "0.1.0"
-  type: "stateful"
-  sandbox: "bubblewrap"
-  runtime_lock: "runtime.lock"
-agent:
-  id: "my.agent"
-  name: "My Agent"
-  description: "What this agent does"
-llm_preset: smart
-capabilities:
-  - type: "ReadAccess"
-    scopes: ["*"]
-  - type: "WriteAccess"
-    scopes: ["self.*"]
-execution_mode: "reasoning"
+name: "My Agent"
+description: "What this agent does"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "my.agent"
+      name: "My Agent"
+      description: "What this agent does"
+    llm_preset: smart
+    capabilities:
+      - type: "ReadAccess"
+        scopes: ["*"]
+      - type: "WriteAccess"
+        scopes: ["self.*"]
+    execution_mode: "reasoning"
 ---
 # Your agent instructions go here in markdown.
 "#
@@ -303,20 +316,26 @@ pub fn install_schema_description() -> String {
 
 ## Accepted SKILL.md Shapes
 
-Two frontmatter shapes are accepted:
-
-**Top-level Autonoetic shape:**
-- `runtime` (object, required)
-  - `engine`, `gateway_version`, `sdk_version`, `type`, `runtime_lock`
-- `agent` (object, required)
-  - `id` (required), `name`, `description`
-
-**Metadata-wrapped shape (AgentSkills-compatible):**
+**Metadata-wrapped shape (AgentSkills-compatible) — CANONICAL. Write this one.**
+It is what the gateway emits when it composes a SKILL.md, and what every
+reader treats as the canonical field location:
 - `name` (string, required)
 - `description` (string, required)
 - `metadata.autonoetic.runtime` (object, required)
   - `engine`, `gateway_version`, `sdk_version`, `type`, `runtime_lock`
 - `metadata.autonoetic.agent` (object, required)
+  - `id` (required), `name`, `description`
+- All other Autonoetic fields (`capabilities`, `io`, `execution_mode`,
+  `llm_preset`, `remote_access`, …) go under `metadata.autonoetic` too.
+
+**Top-level Autonoetic shape — LEGACY, still accepted on input.**
+Pre-existing bundles and hand-authored manifests may put the Autonoetic fields
+at the frontmatter root instead. Readers accept it, but do not write new
+manifests this way — a rebuild that re-renders such a manifest into the
+canonical shape is a pure notation change that no gate should have to re-review:
+- `runtime` (object, required)
+  - `engine`, `gateway_version`, `sdk_version`, `type`, `runtime_lock`
+- `agent` (object, required)
   - `id` (required), `name`, `description`
 
 ## runtime.lock — What You Need to Provide
@@ -1556,6 +1575,85 @@ artifacts: "not_a_sequence"
         assert!(desc.contains("Gateway-autofilled"));
         assert!(desc.contains("dependencies"));
         assert!(!desc.contains("`gateway` (object, required)"));
+        // The schema must say which of the two is canonical, and it must be the
+        // metadata-wrapped one — the shape `render_skill_document` emits.
+        assert!(
+            desc.contains("Metadata-wrapped shape (AgentSkills-compatible) — CANONICAL"),
+            "schema must name the metadata-wrapped shape as canonical"
+        );
+        assert!(
+            desc.contains("Top-level Autonoetic shape — LEGACY"),
+            "schema must mark the bare-root shape legacy while still documenting it"
+        );
+    }
+
+    /// The example handed to agents (`agent.revision.schema`, and every install
+    /// validation error) must be in the canonical shape the gateway itself
+    /// emits. It used to be bare-root, so the gateway taught one notation and
+    /// wrote another — which is how bare-root manifests kept appearing.
+    #[test]
+    fn skill_metadata_example_is_canonical_metadata_wrapped() {
+        let example = render_skill_metadata_example();
+        let frontmatter = extract_frontmatter_raw(&example)
+            .expect("the canonical example must have parseable frontmatter");
+
+        let autonoetic = frontmatter
+            .get("metadata")
+            .and_then(|m| m.get("autonoetic"))
+            .and_then(|a| a.as_mapping())
+            .expect("example must nest Autonoetic fields under metadata.autonoetic");
+        for field in ["runtime", "agent", "capabilities", "execution_mode"] {
+            assert!(
+                autonoetic.get(field).is_some(),
+                "`{field}` must live under metadata.autonoetic in the canonical example"
+            );
+            assert!(
+                frontmatter.get(field).is_none(),
+                "`{field}` must NOT also sit at the frontmatter root"
+            );
+        }
+    }
+
+    /// An example that validates is the point — a canonical-looking example that
+    /// fails the gateway's own shape check would send agents in circles.
+    #[test]
+    fn skill_metadata_example_passes_shape_validation() {
+        let example = render_skill_metadata_example();
+        let frontmatter = extract_frontmatter_raw(&example).unwrap();
+        let missing = validate_skill_frontmatter_shape(&frontmatter);
+        assert!(
+            missing.is_empty(),
+            "the canonical example must satisfy validate_skill_frontmatter_shape: {missing:?}"
+        );
+    }
+
+    /// Canonical-by-default must not become canonical-only: bundles written
+    /// before the metadata-wrapped shape existed, and hand-authored manifests,
+    /// still have to load.
+    #[test]
+    fn legacy_bare_root_shape_is_still_accepted() {
+        let bare_root: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+version: "1.0"
+runtime:
+  engine: "autonoetic"
+  gateway_version: "0.1.0"
+  sdk_version: "0.1.0"
+  type: "stateful"
+  sandbox: "bubblewrap"
+  runtime_lock: "runtime.lock"
+agent:
+  id: "legacy.agent"
+  name: "Legacy Agent"
+  description: "Bare-root manifest"
+"#,
+        )
+        .unwrap();
+        let missing = validate_skill_frontmatter_shape(&bare_root);
+        assert!(
+            missing.is_empty(),
+            "the legacy bare-root shape must keep validating: {missing:?}"
+        );
     }
 
     #[test]
