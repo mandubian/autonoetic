@@ -570,8 +570,27 @@ fn compute_file_changes(
     to: &ArtifactBundle,
     store: &ArtifactStore,
 ) -> anyhow::Result<Vec<FileChange>> {
-    let from_files = store.resolve_files(&from.artifact_id).unwrap_or_default();
-    let to_files = store.resolve_files(&to.artifact_id).unwrap_or_default();
+    // An unreadable artifact must NOT degrade to an empty file list: a caller
+    // reading `changed_files: []` would take it as mechanical evidence that
+    // nothing moved, which is exactly the unsafe carry assumption this module
+    // exists to prevent. Missing evidence is an error, not a "no changes"
+    // answer. (The digest side of the diff already fails closed — an
+    // unreadable artifact yields `None` digests, and `digest_eq` reports
+    // those as changed.)
+    let from_files = store.resolve_files(&from.artifact_id).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read files for prior artifact '{}': {e}. Refusing to report an empty \
+             file diff for an unreadable artifact.",
+            from.artifact_id
+        )
+    })?;
+    let to_files = store.resolve_files(&to.artifact_id).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read files for rebuilt artifact '{}': {e}. Refusing to report an empty \
+             file diff for an unreadable artifact.",
+            to.artifact_id
+        )
+    })?;
 
     use std::collections::BTreeMap;
     let from_map: BTreeMap<&str, &[u8]> = from_files

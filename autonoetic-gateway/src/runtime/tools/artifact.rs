@@ -91,6 +91,32 @@ pub(crate) fn resolve_artifact_ref_or_canonical(
     }
 }
 
+/// Verify that a resolved ref's recorded manifest digest still matches the
+/// artifact actually loaded from the content-addressed store.
+///
+/// A mismatch means the ref record and the manifest disagree — the ref record
+/// has been corrupted or tampered with — so the bytes behind it cannot be
+/// trusted. Every tool that resolves a ref and then reads the artifact must
+/// run this before using the result; it lives here (rather than inline in one
+/// tool) so `artifact_inspect` and `artifact_diff` cannot drift apart.
+///
+/// Returns the operator-facing message on mismatch.
+fn verify_resolved_ref_digest(
+    input_ref: &str,
+    resolved: &ResolvedArtifact,
+    bundle: &autonoetic_types::artifact::ArtifactBundle,
+) -> Result<(), String> {
+    if let Some(ref ref_digest) = resolved.manifest_digest {
+        if bundle.artifact_manifest_digest != *ref_digest {
+            return Err(format!(
+                "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
+                input_ref, ref_digest, bundle.artifact_manifest_digest,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn normalize_artifact_build_inputs(
     inputs: &[String],
     session_id: &str,
@@ -1123,6 +1149,69 @@ mod tests {
     }
 
     #[test]
+    fn artifact_diff_rejects_a_ref_whose_recorded_digest_does_not_match() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let gs = open_gs(&gateway_dir);
+        let from_ref = build_agent_bundle(&gateway_dir, "body A", "print('hi')", gs.clone());
+        let to_ref = build_agent_bundle(&gateway_dir, "body B", "print('hi')", gs.clone());
+
+        // Mint a second ref to the same artifact carrying a bogus manifest
+        // digest — the corrupted/tampered ref-record case.
+        let resolved = resolve_artifact_ref_or_canonical(
+            &from_ref,
+            "session-diff/coder.default-x",
+            &gs,
+            &gateway_dir,
+        )
+        .unwrap();
+        gs.create_artifact_ref(&ArtifactRefRecord {
+            ref_id: "ar.tampered0001".to_string(),
+            scope_type: ArtifactRefScopeType::Session,
+            scope_id: "session-diff".to_string(),
+            artifact_id: resolved.artifact_id.clone(),
+            artifact_manifest_digest: "sha256:deadbeefdeadbeef".to_string(),
+            artifact_canonical_digest: "sha256:deadbeefdeadbeef".to_string(),
+            created_by_agent_id: "coder.default".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            expires_at: None,
+            revoked_at: None,
+        })
+        .unwrap();
+
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactDiffTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({ "from": "ar.tampered0001", "to": to_ref }).to_string(),
+                Some("session-diff/coder.default-x"),
+                None,
+                None,
+                Some(gs),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed["ok"], false,
+            "a digest-mismatched ref must not produce a diff: {parsed}"
+        );
+        let message = parsed["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("digest mismatch"),
+            "message should name the tamper check: {message}"
+        );
+    }
+
+    #[test]
     fn artifact_inspect_surfaces_federation_digests_for_agent_bundle() {
         let temp = tempdir().unwrap();
         let gateway_dir = temp.path().join(".gateway");
@@ -1242,18 +1331,8 @@ impl NativeTool for ArtifactInspectTool {
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
         let bundle = store.inspect(&resolved.artifact_id)?;
 
-        if let Some(ref ref_digest) = resolved.manifest_digest {
-            if bundle.artifact_manifest_digest != *ref_digest {
-                return Ok(ToolError::fatal(
-                    format!(
-                        "artifact_ref '{}' digest mismatch — possible tampering. Ref claims '{}', manifest has '{}'.",
-                        args.artifact_ref,
-                        ref_digest,
-                        bundle.artifact_manifest_digest,
-                    ),
-                    None::<String>,
-                ).to_error_response());
-            }
+        if let Err(msg) = verify_resolved_ref_digest(&args.artifact_ref, &resolved, &bundle) {
+            return Ok(ToolError::fatal(msg, None::<String>).to_error_response());
         }
 
         let has_tests = bundle.files.iter().any(|f| {
@@ -1292,7 +1371,9 @@ impl NativeTool for ArtifactInspectTool {
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
-            // null for non-agent-bundle kinds or unparseable frontmatter.
+            // Always an object; each field is null for non-agent-bundle kinds
+            // or unparseable frontmatter (a null digest means "unverifiable",
+            // which artifact_diff treats as changed — see `digest_eq`).
             "federation_digests": serde_json::json!({
                 "code_digest": federation_digests.code_digest,
                 "contract_digest": federation_digests.contract_digest,
@@ -1410,6 +1491,18 @@ impl NativeTool for ArtifactDiffTool {
         let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
         let from_bundle = store.inspect(&from_resolved.artifact_id)?;
         let to_bundle = store.inspect(&to_resolved.artifact_id)?;
+
+        // Both sides must clear the same tamper check `artifact_inspect` runs —
+        // a corrupted ref record would otherwise silently diff the wrong
+        // artifact, and the carry-eligibility answer is only as trustworthy as
+        // the two artifacts it compared. Checked before the same-artifact
+        // short-circuit so a tampered ref cannot slip through it.
+        if let Err(msg) = verify_resolved_ref_digest(&args.from, &from_resolved, &from_bundle) {
+            return Ok(ToolError::fatal(msg, None::<String>).to_error_response());
+        }
+        if let Err(msg) = verify_resolved_ref_digest(&args.to, &to_resolved, &to_bundle) {
+            return Ok(ToolError::fatal(msg, None::<String>).to_error_response());
+        }
 
         // Same identity → trivially no diff. Still return a valid result so the
         // planner doesn't have to special-case.
