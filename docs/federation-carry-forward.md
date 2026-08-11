@@ -1,9 +1,11 @@
 # Federation Carry-Forward
 
-_Status: design (draft). Targeted at the re-federation churn observed in
-`session-964ea6d7` and addressed partially by #1066 (build-time capability
-validation + planner manifest preflight). This doc is the spec for the deeper,
-opt-in follow-up._
+_Status: implemented (Stages 1–4 merged: #1068, #1069, #1070, #1071; layered-
+artifact fix #1073). Default `off`; operators opt in via
+`federation.carry_forward_strictness: conservative`. Composes with #1066
+(build-time capability validation + planner manifest preflight), which
+targets the avoidable re-federation rounds; this design absorbs the
+legitimate-rebuild rounds that slip through._
 
 ## Problem
 
@@ -455,12 +457,14 @@ classification is sound for their agent population.
 
 ## Risks and open questions
 
-1. **Layered artifacts (packager).** A layered artifact's `code_digest` must
-   fold in layer file digests, not just the coder's base files — `runtime.lock`'s
-   `layers`/`dependencies` are already classed as contract/code inputs. Decide
-   whether the triplet covers the composed bundle or per-layer. _Lean: triplet
-   over the composed bundle (matches what the gates actually import), with
-   per-layer digests stored for diagnostic surface only._
+1. **Layered artifacts (packager)** — _resolved in #1073._ `compute_code_digest`
+   folds the sorted `(layer_id, ArtifactLayer.digest)` pairs into the code
+   digest, so a deps-only rebuild (packager swapping a layer with identical
+   base files) moves `code_digest` and voids the carry. `ArtifactLayer.digest`
+   is already a SHA-256 of the layer content — a layer change is mechanically
+   detected without reading layer bytes at digest time. Triplet covers the
+   composed bundle (matches what the gates actually import); per-layer digests
+   are not stored separately.
 2. **The field-classification table is authority.** Any misclassification is a
    security hole (too strict → wasted re-runs; too loose → silent bypass). The
    table above enumerates the real schema, but must be kept in sync as fields
