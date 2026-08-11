@@ -467,6 +467,47 @@ impl NativeTool for FederationEscalateTool {
                     strictness = strictness.as_str(),
                     "carry_forward accepted: verdict carried from prior artifact",
                 );
+
+                // Audit: emit a `federation.carry_forward` causal event per
+                // accepted carry (same shape as `grant_revocation`). Best-effort
+                // — a failed insert is logged but does not fail the escalate
+                // (the carried verdict is already durably recorded on the
+                // promotion record, which is the enforcement surface).
+                if let Err(e) = store.create_causal_event(
+                    &autonoetic_types::causal_chain::CausalEventRecord {
+                        event_id: format!("carry-fwd-{}", uuid::Uuid::new_v4()),
+                        agent_id: "gateway".to_string(),
+                        session_id: args.root_session_id.clone(),
+                        turn_id: None,
+                        event_seq: 0,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        category: "federation.carry_forward".to_string(),
+                        action: "accepted".to_string(),
+                        status: "completed".to_string(),
+                        enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
+                        target: Some(canonical_artifact_id.clone()),
+                        payload: Some(
+                            serde_json::json!({
+                                "role": verdict.role.as_str(),
+                                "prior_artifact_ref": cf.prior_artifact_ref,
+                                "new_artifact_id": canonical_artifact_id,
+                                "strictness": strictness.as_str(),
+                                "justification": cf.justification,
+                            })
+                            .to_string(),
+                        ),
+                        payload_ref: None,
+                        evidence_ref: None,
+                        reason: cf.justification.clone(),
+                    },
+                ) {
+                    tracing::warn!(
+                        target: "federation",
+                        artifact_id = %canonical_artifact_id,
+                        error = %e,
+                        "failed to emit federation.carry_forward causal event (non-blocking)"
+                    );
+                }
             }
         }
 
@@ -831,8 +872,68 @@ fn summarize_role_verdicts(verdicts: &[RoleVerdictSummary]) -> String {
                 .ok()
                 .and_then(|val| val.as_str().map(String::from))
                 .unwrap_or_else(|| "unknown_role".to_string());
-            format!("{}: {}", role, if v.passed { "pass" } else { "fail" })
+            let outcome = if v.passed { "pass" } else { "fail" };
+            // Mark carried verdicts distinctly so the operator cannot mistake
+            // them for freshly-run gates (federation carry-forward, Stage 4).
+            if let Some(cf) = &v.carried_from {
+                format!("{}: {} (carried from {})", role, outcome, cf.prior_artifact_ref)
+            } else {
+                format!("{}: {}", role, outcome)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autonoetic_types::escalation::CarriedFrom;
+    use autonoetic_types::promotion::PromotionRole;
+
+    fn verdict(role: PromotionRole, carried_from: Option<CarriedFrom>) -> RoleVerdictSummary {
+        RoleVerdictSummary {
+            role,
+            agent_id: "gate.default".to_string(),
+            passed: true,
+            findings_summary: "ok".to_string(),
+            evidence_ref: None,
+            recorded_at: "2026-01-01T00:00:00Z".to_string(),
+            carried_from,
+        }
+    }
+
+    #[test]
+    fn summary_marks_carried_verdicts_distinctly() {
+        let carried = verdict(
+            PromotionRole::Auditor,
+            Some(CarriedFrom {
+                prior_artifact_ref: "ar.prior123".to_string(),
+                role: PromotionRole::Auditor,
+                justification: Some("prose-only fix".to_string()),
+            }),
+        );
+        let fresh = verdict(PromotionRole::UnitTestRunner, None);
+        let summary = summarize_role_verdicts(&[carried, fresh]);
+        assert!(
+            summary.contains("auditor: pass (carried from ar.prior123)"),
+            "carried verdict must be marked: {summary}"
+        );
+        assert!(
+            summary.contains("unit_test_runner: pass"),
+            "fresh verdict must be unmarked: {summary}"
+        );
+        assert!(
+            !summary.contains("unit_test_runner: pass (carried"),
+            "fresh verdict must not carry the marker"
+        );
+    }
+
+    #[test]
+    fn summary_without_carried_is_plain() {
+        let a = verdict(PromotionRole::Auditor, None);
+        let b = verdict(PromotionRole::SealedEvaluator, None);
+        let summary = summarize_role_verdicts(&[a, b]);
+        assert!(!summary.contains("carried from"));
+    }
 }

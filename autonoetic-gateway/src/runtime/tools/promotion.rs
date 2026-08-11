@@ -666,6 +666,14 @@ impl NativeTool for PromotionQueryTool {
                     "code_digest": record.code_digest,
                     "contract_digest": record.contract_digest,
                     "prose_digest": record.prose_digest,
+                    // Federation carry-forward provenance (Stage 4). Empty
+                    // object when every verdict on this artifact was freshly
+                    // run. Each entry: which prior artifact + role the verdict
+                    // was carried from, the verified digests, justification,
+                    // and the strictness in effect when the carry was accepted.
+                    // The operator uses this to tell a carried verdict apart
+                    // from a freshly-run one.
+                    "carried_verdicts": record.carried_roles,
                 });
                 serde_json::to_string(&response).map_err(Into::into)
             }
