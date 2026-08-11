@@ -139,7 +139,8 @@ pub struct PromotionRecord {
     pub blessed_packages: Vec<crate::layer::ResolvedPackage>,
 
     // --- Federation carry-forward digests (Stage 1, see
-    //     docs/federation-carry-forward.md) ---
+    //     docs/federation-carry-forward.md — the design spec landing with
+    //     #1067) ---
     //
     // The three per-input digests of the artifact this verdict was recorded
     // against. `None` for records predating this feature (verdict unverifiable
