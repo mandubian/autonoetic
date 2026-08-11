@@ -444,8 +444,39 @@ Returns `{approval_request_id: "apr-esc-...", status: "pending"}` — **gates `a
 |---|---|
 | **Approve** | Spawn `agent-factory.default` with `artifact_ref`, `federation_complete: true`, `escalation_approval_id` |
 | **Request sealed eval** | Spawn `sealed_evaluator.default` (only on operator request; operator-invokable diagnostic, not mandatory), collect verdict, re-escalate |
-| **Fix** | Route findings to `coder.default`, re-run federation |
+| **Fix** | Route findings to `coder.default`, then re-federate (see carry-forward below — you may not need to re-run every gate) |
 | **Reject** | Report to user, do NOT promote |
+
+### Carry-forward after a rebuild (optional, gateway-verified)
+
+`promotion_record`s bind to the whole artifact digest, so historically any rebuild — even a one-line `SKILL.md` prose fix — voided every verdict and forced a full re-federation. The gateway can now let a **code-reviewing** gate (`unit_test_runner`, `auditor`, `sealed_evaluator`) survive a rebuild when the bytes that gate reviewed did not change. **The gateway verifies every carry; you only propose.** Whether carries are honored at all depends on the operator's `federation.carry_forward_strictness` setting (default `off`) — if the gateway rejects a carry, you get a structured `carry_forward_rejected` error and re-run just that gate.
+
+After `coder.default` rebuilds (new `artifact_ref`), before re-spawning gates:
+
+1. Call `artifact_diff({from: <prior ar.*>, to: <current ar.*>})`. Read the per-class flags: `code_changed`, `contract_changed`, `prose_changed`, and the advisory `carry_eligible_roles`.
+2. Reason out loud: which gates reviewed inputs that are byte-identical? If `code_changed` or `contract_changed` is `true`, **no** code gate can carry — re-run them. If only `prose_changed` is `true` (code + contract stable), the code gates' verdicts survive.
+3. For each **code-reviewing** gate whose prior verdict on the prior artifact was a terminal pass, you MAY carry it forward by adding `carried_from` to its role-verdict instead of re-spawning. `static_evaluator` **never** carries (it reviews prose) — always re-spawn it on any rebuild.
+
+```json
+federation_escalate({
+  "artifact_ref": "<current ar.*>", "agent_id": "<agent_id>", "revision_id": "<rev_sha256:...>",
+  "root_session_id": "<root_session_id>",
+  "role_verdicts": [
+    {"role": "auditor", "agent_id": "auditor.default", "passed": true, "findings_summary": "...",
+     "recorded_at": "...", "carried_from": {"prior_artifact_ref": "<prior ar.*>", "role": "auditor", "justification": "code+contract unchanged; only SKILL.md prose fixed"}},
+    {"role": "unit_test_runner", "agent_id": "unit_test_runner.default", "passed": true, "findings_summary": "...",
+     "recorded_at": "...", "carried_from": {"prior_artifact_ref": "<prior ar.*>", "role": "unit_test_runner", "justification": "code+contract unchanged"}},
+    {"role": "static_evaluator", "agent_id": "static_evaluator.default", "passed": true, "findings_summary": "...", "recorded_at": "..."}
+  ],
+  "planner_synthesis": "Code + contract unchanged from <prior ar.*>; only SKILL.md prose fixed. Carried auditor + unit_test_runner; re-ran static_evaluator."
+})
+```
+
+Rules:
+- **Be more conservative than the floor, never less.** If the change touched capability declarations, `remote_access`, secret handling, or egress/disclosure — even in prose — re-run `auditor` anyway; don't carry it.
+- **Absent verdict ≠ carry.** If a gate recorded nothing on the prior artifact (e.g. no tests → no `unit_test_runner` verdict), there is no pass to carry — re-attest the "no tests" state or re-run.
+- A rejected carry is not a failure of the whole escalation — read the `carry_forward_rejected` reason, re-run that one gate, and re-escalate.
+- Carried verdicts are surfaced to the operator with their `carried_from` provenance; never present a carried verdict as freshly run.
 
 ---
 
@@ -492,7 +523,7 @@ Inform user. If they want to continue, respawn (creates a new approval).
 | "not permitted" / "capability" | Delegate to an agent that has the capability |
 | `undeclared_remote_pattern` / `missing_remote_access_declaration` | NOT a code bug — route to `agent-factory`/`specialized_builder` to re-issue with covering `remote_access` declaration. Do NOT strip network access or respawn the same specialist |
 | "no such column" / SQL | Gateway bug — report, don't retry with different strings |
-| "Promotion record not found" | Artifact rebuilt (new digest) — re-run federation on current `artifact_ref` |
+| "Promotion record not found" | Artifact rebuilt (new digest) — `artifact_diff` the old vs new `artifact_ref`, then re-federate (carry forward any code gate whose reviewed bytes are unchanged; re-run the rest) |
 
 **Child task failures → routing:**
 
@@ -503,7 +534,7 @@ Inform user. If they want to continue, respawn (creates a new approval).
 | Install-state conflict (`already has active revision`, `rollback lineage mismatch`, etc.) | Inspect state (`agent_inspect`, `agent_revision_list`) — NOT a coder bug; escalate |
 | Smoke test failed (`stage: "smoke_test_failed"`) | Route to `coder.default` for fixes, re-run factory. Do NOT skip smoke test |
 | Transient infra failure (5xx, connection) | Environment failure — do NOT restart onboarding or re-spawn coder; escalate if persistent |
-| Static evaluator fails | Read the finding, route to `coder.default` for the specific fix, then **re-run Step 0 manifest preflight** on the rebuilt artifact before re-spawning gates. Do not blindly re-run all gates on a one-field manifest fix without confirming the rest of the manifest still matches the code — that is how a second latent mismatch wastes another full round. |
+| Static evaluator fails | Read the finding, route the specific fix to `coder.default`. Then, on the rebuilt artifact, in this order: (1) **re-run Step 0 manifest preflight** before spawning any gate — a one-field manifest fix must not let a second latent mismatch burn another full round; (2) `artifact_diff` prior vs current and carry forward `unit_test_runner`/`auditor` when code + contract are byte-identical (and not security-adjacent). Always re-spawn `static_evaluator` — it reviews prose. |
 | Unit test fails: `ModuleNotFoundError` **third-party** (`pytest`, `requests`…) | `packager.default` (code is correct, needs layered deps) |
 | Unit test fails: **local** module missing | `coder.default` (wrong import path / missing file) |
 | Unit test fails: other | Route test output to `coder.default` |
@@ -520,9 +551,22 @@ Do not route these to `coder.default` or `debugger.default`:
 - **`unable_to_evaluate`** — gate couldn't produce a deterministic verdict. Inspect `findings`: dependency layer missing → `packager` then re-run; live network required → don't coerce to fail, `session_escalate` describing the gap; sandbox degraded (P-7.18) → fresh gate on clean session, escalate if recurs.
 - **`clarification_needed`** — gate needs inputs from you (test criteria, scenarios). Read `clarification_request`, supply context in a fresh spawn of the same gate, or relay to operator via `user_ask`. Never invent test criteria.
 
-### Future: partial re-federation (planned, not yet available)
+### Partial re-federation on a rebuild
 
-`promotion_record`s are keyed on the full content digest of the artifact, so any rebuild — even a one-line `SKILL.md` fix that leaves the code the gate reviewed unchanged — voids **every** gate's verdict and forces a full re-federation. Step 0 above stops the common case (semantic manifest mismatches) from reaching the gates at all; a deeper future optimization would let gates whose inputs did not change (e.g. auditor + unit_test_runner when only `SKILL.md` changed) reuse their prior verdicts across a manifest-only rebuild. This is tracked as a follow-up because it cuts across the digest-keying design that gives `promotion_record` its tamper-resistance; it is not something the planner can opt into today, so always re-run the full federation on a rebuilt `artifact_ref` until then.
+`promotion_record`s bind to the artifact's full content digest, so a rebuild
+historically voided **every** gate verdict. Two mechanisms now cut that cost, and
+they compose:
+
+- **Step 0 manifest preflight** stops the common case — a semantic manifest
+  mismatch — from reaching the gates at all.
+- **Carry-forward** (§"Carry-forward after a rebuild" above) lets a
+  code-reviewing gate's verdict survive a rebuild whose reviewed bytes did not
+  change. You propose via `carried_from`; the gateway verifies every claim
+  against per-input digests and its `federation.carry_forward_strictness` floor.
+
+The floor defaults to `off`, so on a gateway that has not enabled it every
+proposed carry comes back as `carry_forward_rejected` and you re-run that gate.
+Treat a carry as an optimization you request, never as an outcome you assume.
 
 ---
 

@@ -364,6 +364,16 @@ Controls how capability broadening during `agent.revision.promote` is gated. Hig
 
 ---
 
+## Federation Carry-Forward
+
+Controls whether a federation gate verdict may survive a rebuild when the bytes that gate reviewed did not change (see `docs/federation-carry-forward.md`). The planner always proposes a carry via `federation_escalate`'s `carried_from`; the gateway verifies against this floor. Carried verdicts are recorded with provenance and surfaced to the operator.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `federation.carry_forward_strictness` | string | `"off"` | `"off"`: every rebuild re-runs every gate (today's behavior). `"conservative"`: carry a code-reviewing gate (`unit_test_runner`, `auditor`, `sealed_evaluator`) only when its `code_digest` and `contract_digest` are byte-identical to the prior artifact (only prose changed). `static_evaluator` never carries (it reviews prose). |
+
+---
+
 ## Post-Promotion Review
 
 Controls the background review of promoted agents (Phase 4 Tier 1). Reviews operational drift per agent: tool failure rates, authorization denials, suspension counts, and new sentinel findings.

@@ -453,6 +453,19 @@ code_analysis:
 # bootstrap: disable capability-delta gating (development only).
 # capability_delta_gate_mode: strict
 
+# ── Federation carry-forward ───────────────────────────────────────────
+# Controls whether a federation gate verdict may survive a rebuild when the
+# bytes that gate reviewed did not change (see docs/federation-carry-forward.md).
+# The planner always proposes a carry; the gateway verifies against this floor.
+#   off (default)          — every rebuild re-runs every gate (today's behavior).
+#   conservative           — carry a code-reviewing gate (unit_test_runner,
+#                            auditor, sealed_evaluator) only when its code_digest
+#                            and contract_digest are byte-identical to the prior
+#                            artifact (i.e. only prose changed). static_evaluator
+#                            never carries (it reviews prose).
+# federation:
+#   carry_forward_strictness: off
+
 # Promotion-completeness cursors (see docs/design/promotion-completeness-invariant.md).
 # Completeness (auditor/evaluator pass, distinct identities, reviewable artifact)
 # is ALWAYS fail-closed; these only tune the relief valves.

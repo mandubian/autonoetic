@@ -13,6 +13,26 @@ pub struct RoleVerdictSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_ref: Option<String>,
     pub recorded_at: String,
+    /// Federation carry-forward (Stage 3): present when this verdict is a
+    /// carry-forward claim from a prior artifact rather than a freshly-run
+    /// gate. The gateway verifies it before accepting. See
+    /// `docs/federation-carry-forward.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_from: Option<CarriedFrom>,
+}
+
+/// Provenance for a carried-forward gate verdict: which prior artifact's
+/// verdict (and which role) this claim derives from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CarriedFrom {
+    /// The prior artifact ref (ar.*) the verdict came from, as supplied by the
+    /// planner. Kept for operator readability.
+    pub prior_artifact_ref: String,
+    /// The role that originally recorded the verdict on the prior artifact.
+    pub role: PromotionRole,
+    /// One-sentence justification from the planner (the reasoning trace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
 }
 
 /// Category of escalation for channel routing and filtering.

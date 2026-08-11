@@ -348,6 +348,128 @@ impl NativeTool for FederationEscalateTool {
                 }
             };
 
+        // ------------------------------------------------------------------
+        // Federation carry-forward (Stage 3): verify any `carried_from` claims
+        // in the role verdicts and materialize them onto the current artifact's
+        // promotion record. The gateway verifies every claim — the agent only
+        // proposes. A rejected claim fails the whole escalate call with a
+        // structured `carry_forward_rejected` error naming the offending role,
+        // so the planner re-runs just that gate. Runs under
+        // `federation.carry_forward_strictness` (default `off`).
+        // ------------------------------------------------------------------
+        let strictness = _config
+            .map(|c| c.federation.carry_forward_strictness)
+            .unwrap_or_default();
+        if args
+            .role_verdicts
+            .iter()
+            .any(|v| v.carried_from.is_some())
+        {
+            let Some(gw_dir) = gateway_dir else {
+                return Ok(autonoetic_types::tool_error::ToolError::resource(
+                    "carry-forward verification requires a gateway directory",
+                    None::<String>,
+                )
+                .to_error_response());
+            };
+            let promo_store =
+                crate::runtime::promotion_store::PromotionStore::new(gw_dir)?;
+            let artifact_store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+            let current_bundle = artifact_store.inspect(&canonical_artifact_id)?;
+            let current_digests =
+                crate::runtime::federation_carry_forward::compute_federation_digests(
+                    &current_bundle,
+                    &artifact_store,
+                );
+
+            for verdict in &args.role_verdicts {
+                let Some(cf) = &verdict.carried_from else {
+                    continue;
+                };
+                // Resolve the prior artifact ref to its internal id, then to
+                // the promotion record that (maybe) holds the prior verdict.
+                let prior_resolved = super::artifact::resolve_artifact_ref_or_canonical(
+                    &cf.prior_artifact_ref,
+                    _session_id.unwrap_or_default(),
+                    &store,
+                    gw_dir,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "carry_forward_rejected: role={} reason=prior_artifact_unresolvable \
+                         strictness={}: {}",
+                        verdict.role.as_str(),
+                        strictness.as_str(),
+                        e
+                    )
+                })?;
+                let prior_record = promo_store.get_promotion(&prior_resolved.artifact_id);
+
+                crate::runtime::federation_carry_forward::verify_carry_claim(
+                    &verdict.role,
+                    prior_record.as_ref(),
+                    &current_digests,
+                    strictness,
+                )
+                .map_err(|rejection| {
+                    anyhow::anyhow!(
+                        "carry_forward_rejected: role={} reason={} strictness={} — {}. \
+                         Re-run that gate on the current artifact and re-escalate.",
+                        verdict.role.as_str(),
+                        rejection.reason_code(),
+                        strictness.as_str(),
+                        rejection.message(&verdict.role),
+                    )
+                })?;
+
+                // Accepted: materialize the carried verdict onto the current
+                // artifact's record with provenance. Fail the escalate if the
+                // write fails (a silently-dropped carried verdict would let the
+                // FullJury gate see a missing record later).
+                let prior = prior_record.as_ref().expect("verified above");
+                let provenance = autonoetic_types::promotion::RoleCarryProvenance {
+                    prior_artifact_ref: cf.prior_artifact_ref.clone(),
+                    prior_artifact_id: prior_resolved.artifact_id.clone(),
+                    original_agent_id: verdict.agent_id.clone(),
+                    verified_at: chrono::Utc::now().to_rfc3339(),
+                    prior_code_digest: prior.code_digest.clone(),
+                    prior_contract_digest: prior.contract_digest.clone(),
+                    justification: cf.justification.clone(),
+                    strictness: Some(strictness.as_str().to_string()),
+                };
+                promo_store
+                    .record_carried_verdict(
+                        &canonical_artifact_id,
+                        verdict.role.clone(),
+                        prior,
+                        provenance,
+                        (
+                            current_digests.code_digest.clone(),
+                            current_digests.contract_digest.clone(),
+                            current_digests.prose_digest.clone(),
+                        ),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "carry_forward_rejected: role={} reason=record_write_failed \
+                             strictness={}: {}",
+                            verdict.role.as_str(),
+                            strictness.as_str(),
+                            e
+                        )
+                    })?;
+
+                tracing::info!(
+                    target: "federation",
+                    artifact_id = %canonical_artifact_id,
+                    prior_artifact_ref = %cf.prior_artifact_ref,
+                    role = verdict.role.as_str(),
+                    strictness = strictness.as_str(),
+                    "carry_forward accepted: verdict carried from prior artifact",
+                );
+            }
+        }
+
         let escalation_id = args
             .escalation_id
             .unwrap_or_else(|| format!("esc_{:x}", uuid::Uuid::new_v4().as_u128()));

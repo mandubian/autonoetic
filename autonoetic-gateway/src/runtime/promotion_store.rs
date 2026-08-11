@@ -120,6 +120,7 @@ impl PromotionStore {
                 code_digest: None,
                 contract_digest: None,
                 prose_digest: None,
+                carried_roles: std::collections::BTreeMap::new(),
             });
 
         if let Some(artifact_digest) = artifact_digest {
@@ -372,6 +373,74 @@ impl PromotionStore {
             self.save()?;
         }
         Ok(())
+    }
+
+    /// Record a **carried-forward** verdict on `new_artifact_id`, copying the
+    /// pass/findings from `prior` (which already recorded a pass in `role`)
+    /// and attaching carry provenance. Called by `federation_escalate` only
+    /// after `verify_carry_claim` has accepted the carry — never agent-supplied.
+    ///
+    /// The new artifact's record gets the role's verdict (same pass/findings
+    /// as the prior), the current digests (copied so future carries can chain),
+    /// and an entry in `carried_roles` so the operator and the FullJury gate
+    /// can tell the verdict was carried rather than freshly run.
+    pub fn record_carried_verdict(
+        &self,
+        new_artifact_id: &str,
+        role: PromotionRole,
+        prior: &PromotionRecord,
+        provenance: autonoetic_types::promotion::RoleCarryProvenance,
+        new_digests: (Option<String>, Option<String>, Option<String>),
+    ) -> anyhow::Result<PromotionRecord> {
+        // A carry is only sound if the prior artifact actually recorded a
+        // verdict in this role — `get_role_result` returns a default for any
+        // role name, so gate on `has_role_verdict` first.
+        anyhow::ensure!(
+            prior.has_role_verdict(role.as_str()),
+            "prior record has no verdict in role '{}'",
+            role.as_str()
+        );
+        let (prior_pass, prior_findings) = prior
+            .get_role_result(role.as_str())
+            .ok_or_else(|| anyhow::anyhow!(
+                "prior record has no verdict in role '{}'", role.as_str()
+            ))?;
+        let original_agent_id = match role {
+            PromotionRole::Evaluator => prior.evaluator_id.clone(),
+            PromotionRole::Auditor => prior.auditor_id.clone(),
+            PromotionRole::StaticEvaluator => prior.static_evaluator_id.clone(),
+            PromotionRole::UnitTestRunner => prior.unit_test_runner_id.clone(),
+            PromotionRole::SealedEvaluator => prior.sealed_evaluator_id.clone(),
+        }
+        .unwrap_or_else(|| role.as_str().to_string());
+        let role_name = role.as_str().to_string();
+
+        // Reuse record_promotion's field-writing for the role verdict, then
+        // attach carry provenance + digests.
+        let mut record = self.record_promotion(
+            new_artifact_id.to_string(),
+            prior.artifact_digest.clone(),
+            prior.content_digest.clone(),
+            role,
+            &original_agent_id,
+            prior_pass,
+            prior_findings.to_vec(),
+            None,
+            None,
+        )?;
+
+        let mut records = self.records.lock().unwrap();
+        if let Some(rec) = records.get_mut(new_artifact_id) {
+            rec.carried_roles.insert(role_name, provenance);
+            let (code, contract, prose) = new_digests;
+            rec.code_digest = code.or_else(|| rec.code_digest.clone());
+            rec.contract_digest = contract.or_else(|| rec.contract_digest.clone());
+            rec.prose_digest = prose.or_else(|| rec.prose_digest.clone());
+            record = rec.clone();
+        }
+        drop(records);
+        self.save()?;
+        Ok(record)
     }
 
     /// Saves the promotion registry to disk.
@@ -827,5 +896,114 @@ mod tests {
         assert!(record.contract_digest.is_none());
         assert!(record.prose_digest.is_none());
         assert!(record.evaluator_pass, "legacy verdict itself survives");
+    }
+
+    #[test]
+    fn record_carried_verdict_copies_pass_and_attaches_provenance() {
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+
+        // Prior artifact records a passing auditor verdict + digests.
+        store
+            .record_promotion(
+                "art_prior".to_string(),
+                Some("sha256:art-digest".to_string()),
+                Some("sha256:content".to_string()),
+                PromotionRole::Auditor,
+                "auditor.default",
+                true,
+                vec![test_finding()],
+                Some("all clean".to_string()),
+                None,
+            )
+            .unwrap();
+        store
+            .set_federation_digests(
+                "art_prior",
+                Some("sha256:code-x".to_string()),
+                Some("sha256:contract-y".to_string()),
+                Some("sha256:prose-prior".to_string()),
+            )
+            .unwrap();
+        let prior = store.get_promotion("art_prior").unwrap();
+
+        // Carry the auditor verdict onto the new artifact.
+        let provenance = autonoetic_types::promotion::RoleCarryProvenance {
+            prior_artifact_ref: "ar.prior123".to_string(),
+            prior_artifact_id: "art_prior".to_string(),
+            original_agent_id: "auditor.default".to_string(),
+            verified_at: "2026-01-02T00:00:00Z".to_string(),
+            prior_code_digest: Some("sha256:code-x".to_string()),
+            prior_contract_digest: Some("sha256:contract-y".to_string()),
+            justification: Some("prose-only fix".to_string()),
+            strictness: Some("conservative".to_string()),
+        };
+        store
+            .record_carried_verdict(
+                "art_new",
+                PromotionRole::Auditor,
+                &prior,
+                provenance,
+                (
+                    Some("sha256:code-x".to_string()),
+                    Some("sha256:contract-y".to_string()),
+                    Some("sha256:prose-new".to_string()),
+                ),
+            )
+            .unwrap();
+
+        let new_rec = store.get_promotion("art_new").unwrap();
+        // The carried verdict: auditor pass copied, with the original agent id.
+        assert!(new_rec.auditor_pass);
+        assert_eq!(new_rec.auditor_id.as_deref(), Some("auditor.default"));
+        // Digests are the current artifact's (so future carries can chain).
+        assert_eq!(new_rec.code_digest.as_deref(), Some("sha256:code-x"));
+        assert_eq!(new_rec.contract_digest.as_deref(), Some("sha256:contract-y"));
+        assert_eq!(new_rec.prose_digest.as_deref(), Some("sha256:prose-new"));
+        // Provenance: the carried_roles map names the prior artifact + role.
+        let carry = new_rec.carried_roles.get("auditor").expect("provenance");
+        assert_eq!(carry.prior_artifact_ref, "ar.prior123");
+        assert_eq!(carry.prior_artifact_id, "art_prior");
+        assert_eq!(carry.justification.as_deref(), Some("prose-only fix"));
+        assert_eq!(carry.strictness.as_deref(), Some("conservative"));
+    }
+
+    #[test]
+    fn record_carried_verdict_errors_when_prior_role_absent() {
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+        // Prior artifact has an auditor verdict, but we try to carry unit_test_runner.
+        store
+            .record_promotion(
+                "art_prior".to_string(),
+                None,
+                None,
+                PromotionRole::Auditor,
+                "auditor.default",
+                true,
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        let prior = store.get_promotion("art_prior").unwrap();
+        let provenance = autonoetic_types::promotion::RoleCarryProvenance {
+            prior_artifact_ref: "ar.prior".to_string(),
+            prior_artifact_id: "art_prior".to_string(),
+            original_agent_id: "unit_test_runner.default".to_string(),
+            verified_at: "2026-01-02T00:00:00Z".to_string(),
+            prior_code_digest: None,
+            prior_contract_digest: None,
+            justification: None,
+            strictness: None,
+        };
+        let result = store.record_carried_verdict(
+            "art_new",
+            PromotionRole::UnitTestRunner,
+            &prior,
+            provenance,
+            (None, None, None),
+        );
+        assert!(result.is_err(), "carrying an absent role must fail");
     }
 }

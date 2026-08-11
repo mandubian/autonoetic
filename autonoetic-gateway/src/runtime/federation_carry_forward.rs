@@ -625,6 +625,157 @@ fn compute_file_changes(
     Ok(changes)
 }
 
+// ---------------------------------------------------------------------------
+// Stage 3: carry-eligibility verification.
+// ---------------------------------------------------------------------------
+
+use autonoetic_types::config::CarryForwardStrictness;
+use autonoetic_types::promotion::{PromotionRecord, PromotionRole};
+
+/// Why a carry-forward claim was rejected. Mapped to a structured
+/// `carry_forward_rejected` error by `federation_escalate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CarryRejection {
+    /// No promotion record exists for the prior artifact, or it has no
+    /// verdict recorded in the claimed role.
+    PriorRecordMissing,
+    /// The prior artifact has a record but the claimed role did not pass
+    /// (or never ran) on it.
+    PriorVerdictNotPassed,
+    /// A reviewed digest differs between the prior record and the current
+    /// artifact — the gate did not actually review the current bytes.
+    DigestMismatch { field: &'static str },
+    /// The claimed role is not eligible for carry at all (only code-reviewing
+    /// gates carry; `static_evaluator` reviews prose and never carries).
+    RoleNotCarryEligible,
+    /// The configured strictness floor disallows this carry.
+    StrictnessDisallowed,
+}
+
+impl CarryRejection {
+    pub fn reason_code(&self) -> &'static str {
+        match self {
+            CarryRejection::PriorRecordMissing => "prior_record_missing",
+            CarryRejection::PriorVerdictNotPassed => "prior_verdict_not_passed",
+            CarryRejection::DigestMismatch { .. } => "digest_mismatch",
+            CarryRejection::RoleNotCarryEligible => "role_not_carry_eligible",
+            CarryRejection::StrictnessDisallowed => "strictness_disallowed",
+        }
+    }
+
+    pub fn message(&self, role: &PromotionRole) -> String {
+        match self {
+            CarryRejection::PriorRecordMissing => format!(
+                "no promotion record / verdict exists for the prior artifact in role '{}'",
+                role.as_str()
+            ),
+            CarryRejection::PriorVerdictNotPassed => format!(
+                "the prior artifact's role '{}' did not record a terminal pass",
+                role.as_str()
+            ),
+            CarryRejection::DigestMismatch { field } => format!(
+                "{field} differs between the prior artifact's record and the current artifact — \
+                 role '{}' did not review the current bytes",
+                role.as_str()
+            ),
+            CarryRejection::RoleNotCarryEligible => format!(
+                "role '{}' is not eligible for carry-forward (only code-reviewing gates carry; \
+                 static_evaluator reviews prose and always re-runs)",
+                role.as_str()
+            ),
+            CarryRejection::StrictnessDisallowed => {
+                "the configured carry_forward_strictness floor disallows this carry".to_string()
+            }
+        }
+    }
+}
+
+/// Which digests a role reviews. Only code-reviewing gates may carry;
+/// `static_evaluator` reviews all three digests so it never carries.
+fn role_is_carry_eligible(role: &PromotionRole) -> bool {
+    matches!(
+        role,
+        PromotionRole::UnitTestRunner | PromotionRole::Auditor | PromotionRole::SealedEvaluator
+    )
+}
+
+/// Verify a single carry-forward claim.
+///
+/// The gateway calls this for each role-verdict in a `federation_escalate`
+/// that carries `carried_from`. Returns `Ok(())` if the carry is sound;
+/// `Err(CarryRejection)` otherwise (mapped to a structured rejection so the
+/// planner re-runs just that gate).
+///
+/// Checks, in order:
+/// 1. The role is carry-eligible (code-reviewing gates only).
+/// 2. The prior artifact's record exists and the role recorded a pass on it.
+/// 3. The digests the role reviews match between the prior record and the
+///    current artifact (code + contract for code gates).
+/// 4. The strictness floor allows the carry.
+///
+/// **Lineage:** we anchor lineage to the planner explicitly naming the prior
+/// artifact ref within the same workflow, plus the content-addressed digest
+/// match. Cross-lineage collisions would require identical per-class digests,
+/// which content-addressing makes negligible. A dedicated
+/// `source_artifact_ref` ancestry table is a tracked follow-up.
+pub fn verify_carry_claim(
+    role: &PromotionRole,
+    prior_record: Option<&PromotionRecord>,
+    current_digests: &FederationDigests,
+    strictness: CarryForwardStrictness,
+) -> Result<(), CarryRejection> {
+    if !role_is_carry_eligible(role) {
+        return Err(CarryRejection::RoleNotCarryEligible);
+    }
+
+    let prior = prior_record.ok_or(CarryRejection::PriorRecordMissing)?;
+
+    // The claimed role must have recorded a terminal pass on the prior
+    // artifact. `get_role_result` returns (pass, findings).
+    let (prior_passed, _) = prior
+        .get_role_result(role.as_str())
+        .filter(|_| prior.has_role_verdict(role.as_str()))
+        .ok_or(CarryRejection::PriorRecordMissing)?;
+    if !prior_passed {
+        return Err(CarryRejection::PriorVerdictNotPassed);
+    }
+
+    // The prior record must carry digests (recorded under this feature).
+    // None digests = unverifiable = cannot carry.
+    let prior_code = prior.code_digest.as_ref();
+    let prior_contract = prior.contract_digest.as_ref();
+    if prior_code.is_none() || prior_contract.is_none() {
+        return Err(CarryRejection::PriorRecordMissing);
+    }
+
+    let cur_code = current_digests.code_digest.as_ref();
+    let cur_contract = current_digests.contract_digest.as_ref();
+
+    let code_changed = match (prior_code, cur_code) {
+        (Some(a), Some(b)) => a != b,
+        _ => true, // unverifiable → treat as changed (fail closed)
+    };
+    let contract_changed = match (prior_contract, cur_contract) {
+        (Some(a), Some(b)) => a != b,
+        _ => true,
+    };
+
+    if code_changed {
+        return Err(CarryRejection::DigestMismatch { field: "code_digest" });
+    }
+    if contract_changed {
+        return Err(CarryRejection::DigestMismatch {
+            field: "contract_digest",
+        });
+    }
+
+    if !strictness.allows_carry(code_changed, contract_changed, false) {
+        return Err(CarryRejection::StrictnessDisallowed);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,5 +1264,190 @@ mod tests {
         // contract digest must be identical across shapes.
         assert!(!diff.contract_changed, "shape-only change must not void contract");
         assert!(!diff.code_changed);
+    }
+
+    // --- Stage 3: verify_carry_claim tests ---
+
+    use autonoetic_types::config::CarryForwardStrictness;
+    use autonoetic_types::promotion::{Finding, FindingSeverity, PromotionRecord};
+
+    fn finding() -> Finding {
+        Finding {
+            severity: FindingSeverity::Info,
+            description: "ok".to_string(),
+            evidence: None,
+        }
+    }
+
+    /// A PromotionRecord with a passing auditor verdict and the given digests.
+    fn prior_record_with_auditor_pass(code: &str, contract: &str) -> PromotionRecord {
+        PromotionRecord {
+            artifact_id: "art_prior".to_string(),
+            artifact_digest: None,
+            content_digest: None,
+            evaluator_id: None,
+            evaluator_pass: false,
+            evaluator_findings: vec![],
+            evaluator_timestamp: None,
+            evaluator_execution_trace_id: None,
+            auditor_id: Some("auditor.default".to_string()),
+            auditor_pass: true,
+            auditor_findings: vec![finding()],
+            auditor_timestamp: Some("2026-01-01T00:00:00Z".to_string()),
+            static_evaluator_id: None,
+            static_evaluator_pass: false,
+            static_evaluator_findings: vec![],
+            static_evaluator_timestamp: None,
+            static_evaluator_execution_trace_id: None,
+            unit_test_runner_id: None,
+            unit_test_runner_pass: false,
+            unit_test_runner_findings: vec![],
+            unit_test_runner_timestamp: None,
+            unit_test_runner_execution_trace_id: None,
+            sealed_evaluator_id: None,
+            sealed_evaluator_pass: false,
+            sealed_evaluator_findings: vec![],
+            sealed_evaluator_timestamp: None,
+            sealed_evaluator_execution_trace_id: None,
+            promotion_gate_version: "2.2".to_string(),
+            blessed_packages: vec![],
+            code_digest: Some(code.to_string()),
+            contract_digest: Some(contract.to_string()),
+            prose_digest: Some("sha256:prose-prior".to_string()),
+            carried_roles: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn current_digests(code: &str, contract: &str) -> FederationDigests {
+        FederationDigests {
+            code_digest: Some(code.to_string()),
+            contract_digest: Some(contract.to_string()),
+            prose_digest: Some("sha256:prose-current".to_string()),
+        }
+    }
+
+    #[test]
+    fn carry_accepted_when_digests_match_and_strictness_conservative() {
+        let prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        let cur = current_digests("sha256:code-x", "sha256:contract-y");
+        assert!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Conservative,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_strictness_off() {
+        // Even with matching digests, `off` disallows any carry.
+        let prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        let cur = current_digests("sha256:code-x", "sha256:contract-y");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Off,
+            ),
+            Err(CarryRejection::StrictnessDisallowed)
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_code_digest_differs() {
+        let prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        let cur = current_digests("sha256:code-DIFFERENT", "sha256:contract-y");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Conservative,
+            ),
+            Err(CarryRejection::DigestMismatch { field: "code_digest" })
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_contract_digest_differs() {
+        let prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        let cur = current_digests("sha256:code-x", "sha256:contract-DIFFERENT");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Conservative,
+            ),
+            Err(CarryRejection::DigestMismatch { field: "contract_digest" })
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_no_prior_record() {
+        let cur = current_digests("sha256:code-x", "sha256:contract-y");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                None,
+                &cur,
+                CarryForwardStrictness::Conservative,
+            ),
+            Err(CarryRejection::PriorRecordMissing)
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_prior_role_did_not_pass() {
+        let mut prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        prior.auditor_pass = false;
+        let cur = current_digests("sha256:code-x", "sha256:contract-y");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Conservative,
+            ),
+            Err(CarryRejection::PriorVerdictNotPassed)
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_role_is_static_evaluator() {
+        // static_evaluator reviews prose → never carry-eligible.
+        let prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        let cur = current_digests("sha256:code-x", "sha256:contract-y");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::StaticEvaluator,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Conservative,
+            ),
+            Err(CarryRejection::RoleNotCarryEligible)
+        );
+    }
+
+    #[test]
+    fn carry_rejected_when_prior_record_lacks_digests() {
+        // A legacy record (pre-feature, None digests) is unverifiable.
+        let mut prior = prior_record_with_auditor_pass("sha256:code-x", "sha256:contract-y");
+        prior.code_digest = None;
+        prior.contract_digest = None;
+        let cur = current_digests("sha256:code-x", "sha256:contract-y");
+        assert_eq!(
+            verify_carry_claim(
+                &PromotionRole::Auditor,
+                Some(&prior),
+                &cur,
+                CarryForwardStrictness::Conservative,
+            ),
+            Err(CarryRejection::PriorRecordMissing)
+        );
     }
 }
