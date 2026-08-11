@@ -196,7 +196,7 @@ pub fn compute_federation_digests(
         }
     };
 
-    let code_digest = compute_code_digest(&files, &bundle.entrypoints);
+    let code_digest = compute_code_digest(&files, &bundle.entrypoints, &bundle.layers);
     let (contract_digest, prose_digest) =
         compute_contract_and_prose_digests(&files, &bundle.entrypoints);
 
@@ -210,18 +210,46 @@ pub fn compute_federation_digests(
 fn compute_code_digest(
     files: &[(String, Vec<u8>)],
     entrypoints: &[String],
+    layers: &[autonoetic_types::layer::ArtifactLayer],
 ) -> Option<String> {
     let mut hasher = Sha256::new();
+
+    // Fold dependency layers into the code digest. A layer change alters what
+    // unit_test_runner can import/run even when the bundle's base files are
+    // byte-identical — without this, a deps-only rebuild (packager swapping a
+    // layer) keeps an unchanged code_digest and a code-gate verdict could be
+    // wrongly carried forward (docs/federation-carry-forward.md risk #1).
+    // ArtifactLayer.digest is the SHA-256 of the layer's compressed archive
+    // and layer_id is derived from that digest — neither encodes mount_path,
+    // so a packager rebuild that mounts identical content at a different path
+    // (changing the sandbox's Python/Node import paths) would otherwise go
+    // undetected. Fold (layer_id, mount_path, digest) sorted by layer_id for
+    // order-independence.
+    let mut layer_tuples: Vec<(&str, &str, &str)> = layers
+        .iter()
+        .map(|l| (l.layer_id.as_str(), l.mount_path.as_str(), l.digest.as_str()))
+        .collect();
+    layer_tuples.sort();
+    for (layer_id, mount_path, digest) in layer_tuples {
+        hasher.update(b"layer:");
+        hasher.update(layer_id.as_bytes());
+        hasher.update(b"@");
+        hasher.update(mount_path.as_bytes());
+        hasher.update(b"=");
+        hasher.update(digest.as_bytes());
+        hasher.update(b"\0");
+    }
+
     let mut entries: Vec<(&str, &[u8])> = files
         .iter()
         .filter(|(name, _)| is_code_file(name, entrypoints))
         .map(|(n, c)| (n.as_str(), c.as_slice()))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
-    if entries.is_empty() {
-        // No code files: still produce a stable digest so a code-less agent
-        // (pure-reasoning) has a constant code_digest across rebuilds that
-        // don't touch code. Hash the empty-marker.
+    if entries.is_empty() && layers.is_empty() {
+        // No code files and no layers: still produce a stable digest so a
+        // code-less agent (pure-reasoning) has a constant code_digest across
+        // rebuilds that don't touch code. Hash the empty-marker.
         hasher.update(b"<no-code-files>");
     } else {
         for (name, content) in entries {
@@ -817,8 +845,8 @@ mod tests {
             ("test_main.py", "assert True"),
             ("SKILL.md", "---\n---\nbody"),
         ]);
-        let d1 = compute_code_digest(&files, &["main.py".to_string()]).unwrap();
-        let d2 = compute_code_digest(&files, &["main.py".to_string()]).unwrap();
+        let d1 = compute_code_digest(&files, &["main.py".to_string()], &[]).unwrap();
+        let d2 = compute_code_digest(&files, &["main.py".to_string()], &[]).unwrap();
         assert_eq!(d1, d2);
         assert!(d1.starts_with("sha256:"));
     }
@@ -827,8 +855,8 @@ mod tests {
     fn code_digest_changes_when_code_changes() {
         let files_a = hashing_input(&[("main.py", "print('a')"), ("SKILL.md", "---\n---\nx")]);
         let files_b = hashing_input(&[("main.py", "print('b')"), ("SKILL.md", "---\n---\nx")]);
-        let da = compute_code_digest(&files_a, &["main.py".to_string()]).unwrap();
-        let db = compute_code_digest(&files_b, &["main.py".to_string()]).unwrap();
+        let da = compute_code_digest(&files_a, &["main.py".to_string()], &[]).unwrap();
+        let db = compute_code_digest(&files_b, &["main.py".to_string()], &[]).unwrap();
         assert_ne!(da, db);
     }
 
@@ -838,8 +866,8 @@ mod tests {
         // the code digest, so unit_test_runner / auditor verdicts survive it.
         let files_a = hashing_input(&[("main.py", "print('a')"), ("SKILL.md", "---\n---\nA")]);
         let files_b = hashing_input(&[("main.py", "print('a')"), ("SKILL.md", "---\n---\nB")]);
-        let da = compute_code_digest(&files_a, &["main.py".to_string()]).unwrap();
-        let db = compute_code_digest(&files_b, &["main.py".to_string()]).unwrap();
+        let da = compute_code_digest(&files_a, &["main.py".to_string()], &[]).unwrap();
+        let db = compute_code_digest(&files_b, &["main.py".to_string()], &[]).unwrap();
         assert_eq!(da, db, "code digest must not move on a prose-only edit");
     }
 
@@ -847,8 +875,8 @@ mod tests {
     fn code_digest_ignores_file_order() {
         let ordered = hashing_input(&[("a.py", "x"), ("b.py", "y")]);
         let reversed = hashing_input(&[("b.py", "y"), ("a.py", "x")]);
-        let d1 = compute_code_digest(&ordered, &[]).unwrap();
-        let d2 = compute_code_digest(&reversed, &[]).unwrap();
+        let d1 = compute_code_digest(&ordered, &[], &[]).unwrap();
+        let d2 = compute_code_digest(&reversed, &[], &[]).unwrap();
         assert_eq!(d1, d2);
     }
 
@@ -991,8 +1019,8 @@ mod tests {
             "an entrypoint edit must not move the prose digest"
         );
 
-        let code_a = compute_code_digest(&files_a, &entrypoints).unwrap();
-        let code_b = compute_code_digest(&files_b, &entrypoints).unwrap();
+        let code_a = compute_code_digest(&files_a, &entrypoints, &[]).unwrap();
+        let code_b = compute_code_digest(&files_b, &entrypoints, &[]).unwrap();
         assert_ne!(code_a, code_b, "an entrypoint edit must move the code digest");
     }
 
@@ -1449,5 +1477,96 @@ mod tests {
             ),
             Err(CarryRejection::PriorRecordMissing)
         );
+    }
+
+    // --- Layered-artifact code digest (risk #1 fix) ---
+
+    use autonoetic_types::layer::ArtifactLayer;
+
+    fn layer(id: &str, digest: &str) -> ArtifactLayer {
+        ArtifactLayer {
+            layer_id: id.to_string(),
+            name: "python-deps".to_string(),
+            mount_path: "/deps".to_string(),
+            digest: digest.to_string(),
+        }
+    }
+
+    fn layer_mounted(id: &str, digest: &str, mount_path: &str) -> ArtifactLayer {
+        ArtifactLayer {
+            layer_id: id.to_string(),
+            name: "python-deps".to_string(),
+            mount_path: mount_path.to_string(),
+            digest: digest.to_string(),
+        }
+    }
+
+    #[test]
+    fn code_digest_changes_when_layer_content_changes_even_if_files_identical() {
+        // The gap this fixes: a deps-only rebuild (packager swaps a layer) with
+        // identical base files previously kept an unchanged code_digest, so a
+        // code-gate verdict could be wrongly carried forward.
+        let files = hashing_input(&[("main.py", "print('hi')")]);
+        let v1 = vec![layer("layer_1", "sha256:deps-v1")];
+        let v2 = vec![layer("layer_1", "sha256:deps-v2")];
+        let d1 = compute_code_digest(&files, &["main.py".to_string()], &v1).unwrap();
+        let d2 = compute_code_digest(&files, &["main.py".to_string()], &v2).unwrap();
+        assert_ne!(d1, d2, "a dependency-layer content change must move the code digest");
+    }
+
+    #[test]
+    fn code_digest_changes_when_mount_path_changes_with_identical_content() {
+        // ArtifactLayer.digest covers the layer *content* but not where it's
+        // mounted. A packager rebuild that reuses identical layer content at
+        // a different mount_path changes the sandbox's import paths
+        // (python_paths/node_paths), so the execution environment a code gate
+        // reviewed has changed. The code digest must move.
+        let files = hashing_input(&[("main.py", "print('hi')")]);
+        let v1 = vec![layer_mounted("layer_1", "sha256:deps", "/deps")];
+        let v2 = vec![layer_mounted("layer_1", "sha256:deps", "/site-packages")];
+        let d1 = compute_code_digest(&files, &["main.py".to_string()], &v1).unwrap();
+        let d2 = compute_code_digest(&files, &["main.py".to_string()], &v2).unwrap();
+        assert_ne!(
+            d1, d2,
+            "a mount_path change with identical layer content must move the code digest"
+        );
+    }
+
+    #[test]
+    fn code_digest_stable_when_layers_and_files_identical() {
+        let files = hashing_input(&[("main.py", "print('hi')")]);
+        let layers = vec![layer("layer_1", "sha256:deps-v1")];
+        let d1 = compute_code_digest(&files, &["main.py".to_string()], &layers).unwrap();
+        let d2 = compute_code_digest(&files, &["main.py".to_string()], &layers).unwrap();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn code_digest_layer_order_invariant() {
+        let files = hashing_input(&[("main.py", "x")]);
+        let d1 = compute_code_digest(
+            &files,
+            &["main.py".to_string()],
+            &[layer("layer_a", "sha256:a"), layer("layer_b", "sha256:b")],
+        )
+        .unwrap();
+        let d2 = compute_code_digest(
+            &files,
+            &["main.py".to_string()],
+            &[layer("layer_b", "sha256:b"), layer("layer_a", "sha256:a")],
+        )
+        .unwrap();
+        assert_eq!(d1, d2, "layer order must not affect the digest");
+    }
+
+    #[test]
+    fn code_digest_layers_only_still_produces_stable_digest() {
+        // An artifact with layers but no code files still gets a real digest
+        // (not the empty-marker), so two such artifacts with different layers
+        // differ.
+        let files = hashing_input(&[("SKILL.md", "---\n---\nx")]);
+        let d1 = compute_code_digest(&files, &[], &[layer("layer_1", "sha256:v1")]).unwrap();
+        let d2 = compute_code_digest(&files, &[], &[layer("layer_1", "sha256:v2")]).unwrap();
+        assert_ne!(d1, d2);
     }
 }
