@@ -461,6 +461,151 @@ fn is_code_file(name: &str, entrypoints: &[String]) -> bool {
     false
 }
 
+// ---------------------------------------------------------------------------
+// Stage 2: structured change-diff between two artifacts.
+// ---------------------------------------------------------------------------
+
+/// How a single file changed between two artifact revisions.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileChangeKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileChange {
+    pub file: String,
+    pub change: FileChangeKind,
+}
+
+/// Per-class digest-equality summary across two artifacts, plus the file-level
+/// diff and a purely-mechanical carry-eligibility hint.
+///
+/// The carry-eligibility list is advisory: it reports which roles' reviewed
+/// inputs are byte-identical, ignoring the strictness floor (Stage 3). A role
+/// appears here iff `compute_artifact_diff` could find no digest difference
+/// in the inputs that role reviews. The gateway still re-verifies at escalate
+/// time and applies the configured strictness floor.
+//
+// This is a tool-output type only — never deserialized from agent input — so
+// it derives Serialize but not Deserialize (the `Vec<&'static str>` role list
+// would otherwise force an unwanted lifetime bound).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ArtifactDiff {
+    pub from_artifact_id: String,
+    pub to_artifact_id: String,
+    pub code_changed: bool,
+    pub contract_changed: bool,
+    pub prose_changed: bool,
+    pub changed_files: Vec<FileChange>,
+    /// Roles whose reviewed inputs are byte-identical between the two
+    /// artifacts. Advisory only — the strictness floor (Stage 3) and the
+    /// escalate-time verify are the real gate. Empty if anything changed that
+    /// a code-reviewing gate cares about.
+    pub carry_eligible_roles: Vec<&'static str>,
+}
+
+/// Compute the structured change-diff between two artifacts.
+///
+/// `from` is the prior artifact (the one whose verdicts might be carried);
+/// `to` is the current rebuild. Both must be resolvable via the store.
+pub fn compute_artifact_diff(
+    from: &ArtifactBundle,
+    to: &ArtifactBundle,
+    store: &ArtifactStore,
+) -> anyhow::Result<ArtifactDiff> {
+    let from_digests = compute_federation_digests(from, store);
+    let to_digests = compute_federation_digests(to, store);
+
+    let code_changed = !digest_eq(&from_digests.code_digest, &to_digests.code_digest);
+    let contract_changed =
+        !digest_eq(&from_digests.contract_digest, &to_digests.contract_digest);
+    let prose_changed = !digest_eq(&from_digests.prose_digest, &to_digests.prose_digest);
+
+    let changed_files = compute_file_changes(from, to, store)?;
+
+    // Code-reviewing gates (unit_test_runner, auditor, sealed_evaluator) all
+    // review code_digest + contract_digest. static_evaluator reviews all
+    // three, so it is only eligible when nothing changed — i.e. the same
+    // artifact, which is not a real rebuild. We still include it for
+    // completeness; Stage 3's verify path will reject it in practice when
+    // strictness > off.
+    let code_review_inputs_unchanged = !code_changed && !contract_changed;
+    let mut carry_eligible_roles: Vec<&'static str> = Vec::new();
+    if code_review_inputs_unchanged {
+        carry_eligible_roles.push("unit_test_runner");
+        carry_eligible_roles.push("auditor");
+        carry_eligible_roles.push("sealed_evaluator");
+    }
+    if code_review_inputs_unchanged && !prose_changed {
+        carry_eligible_roles.push("static_evaluator");
+    }
+
+    Ok(ArtifactDiff {
+        from_artifact_id: from.artifact_id.clone(),
+        to_artifact_id: to.artifact_id.clone(),
+        code_changed,
+        contract_changed,
+        prose_changed,
+        changed_files,
+        carry_eligible_roles,
+    })
+}
+
+fn digest_eq(a: &Option<String>, b: &Option<String>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x == y,
+        // If either digest is None (unverifiable — pre-feature record, or a
+        // non-agent-bundle), treat them as NOT equal so the diff reports
+        // "changed" and the planner re-runs the gate rather than assuming
+        // carry is safe. Fail-closed.
+        _ => false,
+    }
+}
+
+fn compute_file_changes(
+    from: &ArtifactBundle,
+    to: &ArtifactBundle,
+    store: &ArtifactStore,
+) -> anyhow::Result<Vec<FileChange>> {
+    let from_files = store.resolve_files(&from.artifact_id).unwrap_or_default();
+    let to_files = store.resolve_files(&to.artifact_id).unwrap_or_default();
+
+    use std::collections::BTreeMap;
+    let from_map: BTreeMap<&str, &[u8]> = from_files
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_slice()))
+        .collect();
+    let to_map: BTreeMap<&str, &[u8]> = to_files
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_slice()))
+        .collect();
+
+    let mut changes = Vec::new();
+    let mut all_names: std::collections::BTreeSet<&str> = from_map.keys().copied().collect();
+    all_names.extend(to_map.keys().copied());
+    for name in all_names {
+        match (from_map.get(name), to_map.get(name)) {
+            (None, Some(_)) => changes.push(FileChange {
+                file: name.to_string(),
+                change: FileChangeKind::Added,
+            }),
+            (Some(_), None) => changes.push(FileChange {
+                file: name.to_string(),
+                change: FileChangeKind::Removed,
+            }),
+            (Some(a), Some(b)) if a != b => changes.push(FileChange {
+                file: name.to_string(),
+                change: FileChangeKind::Modified,
+            }),
+            _ => {}
+        }
+    }
+    Ok(changes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,5 +887,212 @@ mod tests {
             canonical_contract_digest(&b),
             "a gateway version bump must not void carried verdicts"
         );
+    }
+
+    // --- Stage 2: artifact diff computation tests ---
+    //
+    // These build two real agent-bundle artifacts via ArtifactStore and diff
+    // them, exercising the full compute_artifact_diff path.
+
+    use crate::runtime::content_store::ContentStore;
+    use autonoetic_types::artifact::ArtifactKind;
+    use tempfile::tempdir;
+
+    /// Build an agent-bundle artifact from the given (name, content) file set.
+    fn build_bundle(
+        gateway_dir: &std::path::Path,
+        session_id: &str,
+        files: &[(&str, &str)],
+        entrypoints: &[&str],
+    ) -> autonoetic_types::artifact::ArtifactBundle {
+        let content_store = ContentStore::new(gateway_dir).unwrap();
+        let mut input_names = Vec::new();
+        for (name, content) in files {
+            let handle = content_store.write(content.as_bytes()).unwrap();
+            content_store
+                .register_name(session_id, name, &handle)
+                .unwrap();
+            input_names.push(name.to_string());
+        }
+        let artifact_store = crate::artifact_store::ArtifactStore::new(gateway_dir).unwrap();
+        artifact_store
+            .build_with_kind(
+                &input_names,
+                Some(
+                    &entrypoints
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>(),
+                ),
+                None,
+                ArtifactKind::AgentBundle,
+                session_id,
+            )
+            .unwrap()
+    }
+
+    fn skill_md(body: &str, capabilities_yaml: &str) -> String {
+        format!(
+            "---\nmetadata:\n  autonoetic:\n    agent_id: test-agent\n    capabilities:\n{}\n---\n{}",
+            capabilities_yaml, body
+        )
+    }
+
+    #[test]
+    fn diff_prose_only_change_keeps_code_gates_eligible() {
+        // The whole point: a SKILL.md body edit doesn't move the code or
+        // contract digest, so unit_test_runner / auditor / sealed_evaluator
+        // are carry-eligible. static_evaluator is NOT (it reviews prose).
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let caps = "      - type: CodeExecution\n        patterns:\n          - python*\n";
+        let v1 = build_bundle(
+            &gw,
+            "s1",
+            &[
+                ("main.py", "print('hi')"),
+                ("SKILL.md", &skill_md("body A", caps)),
+            ],
+            &["main.py"],
+        );
+        let v2 = build_bundle(
+            &gw,
+            "s1",
+            &[
+                ("main.py", "print('hi')"),
+                ("SKILL.md", &skill_md("body B", caps)),
+            ],
+            &["main.py"],
+        );
+
+        let store = crate::artifact_store::ArtifactStore::new(&gw).unwrap();
+        let diff = compute_artifact_diff(&v1, &v2, &store).unwrap();
+
+        assert!(!diff.code_changed, "code digest must be stable");
+        assert!(!diff.contract_changed, "contract digest must be stable");
+        assert!(diff.prose_changed, "prose digest must move on body edit");
+        assert!(
+            diff.carry_eligible_roles.contains(&"unit_test_runner"),
+            "unit_test_runner should be carry-eligible on a prose-only change"
+        );
+        assert!(
+            diff.carry_eligible_roles.contains(&"auditor"),
+            "auditor should be carry-eligible on a prose-only change"
+        );
+        assert!(
+            !diff.carry_eligible_roles.contains(&"static_evaluator"),
+            "static_evaluator must NOT be carry-eligible when prose changed"
+        );
+        // File-level diff should show SKILL.md modified.
+        assert_eq!(diff.changed_files.len(), 1);
+        assert_eq!(diff.changed_files[0].file, "SKILL.md");
+    }
+
+    #[test]
+    fn diff_code_change_voids_all_code_gates() {
+        // A code edit trips code_digest → no code-gate carry, including
+        // static_evaluator.
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let caps = "      - type: CodeExecution\n        patterns:\n          - python*\n";
+        let v1 = build_bundle(
+            &gw,
+            "s1",
+            &[
+                ("main.py", "print('a')"),
+                ("SKILL.md", &skill_md("body", caps)),
+            ],
+            &["main.py"],
+        );
+        let v2 = build_bundle(
+            &gw,
+            "s1",
+            &[
+                ("main.py", "print('b')"),
+                ("SKILL.md", &skill_md("body", caps)),
+            ],
+            &["main.py"],
+        );
+
+        let store = crate::artifact_store::ArtifactStore::new(&gw).unwrap();
+        let diff = compute_artifact_diff(&v1, &v2, &store).unwrap();
+
+        assert!(diff.code_changed);
+        assert!(diff.carry_eligible_roles.is_empty());
+    }
+
+    #[test]
+    fn diff_contract_change_voids_all_gates() {
+        // A capabilities change is a contract change → nothing carries.
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let caps_before = "      - type: CodeExecution\n        patterns:\n          - python*\n";
+        let caps_after =
+            "      - type: CodeExecution\n        patterns:\n          - python*\n      - type: SandboxFunctions\n        allowed:\n          - content.\n";
+        let v1 = build_bundle(
+            &gw,
+            "s1",
+            &[
+                ("main.py", "print('hi')"),
+                ("SKILL.md", &skill_md("body", caps_before)),
+            ],
+            &["main.py"],
+        );
+        let v2 = build_bundle(
+            &gw,
+            "s1",
+            &[
+                ("main.py", "print('hi')"),
+                ("SKILL.md", &skill_md("body", caps_after)),
+            ],
+            &["main.py"],
+        );
+
+        let store = crate::artifact_store::ArtifactStore::new(&gw).unwrap();
+        let diff = compute_artifact_diff(&v1, &v2, &store).unwrap();
+
+        assert!(!diff.code_changed);
+        assert!(diff.contract_changed, "capabilities change is a contract change");
+        assert!(diff.carry_eligible_roles.is_empty());
+    }
+
+    #[test]
+    fn diff_frontmatter_shape_change_does_not_void_verdicts() {
+        // Switching between the two accepted frontmatter shapes (top-level
+        // autonoetic: vs metadata.autonoetic:) with no semantic change must
+        // NOT trip the contract digest — that's the canonicalization guarantee.
+        let temp = tempdir().unwrap();
+        let gw = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gw).unwrap();
+
+        let skill_top = "---\nautonoetic:\n  agent_id: test-agent\n  capabilities:\n    - type: CodeExecution\n      patterns:\n        - python*\n---\nbody\n";
+        let skill_meta = "---\nmetadata:\n  autonoetic:\n    agent_id: test-agent\n    capabilities:\n      - type: CodeExecution\n        patterns:\n          - python*\n---\nbody\n";
+        let v1 = build_bundle(
+            &gw,
+            "s1",
+            &[("main.py", "print('hi')"), ("SKILL.md", skill_top)],
+            &["main.py"],
+        );
+        let v2 = build_bundle(
+            &gw,
+            "s1",
+            &[("main.py", "print('hi')"), ("SKILL.md", skill_meta)],
+            &["main.py"],
+        );
+
+        let store = crate::artifact_store::ArtifactStore::new(&gw).unwrap();
+        let diff = compute_artifact_diff(&v1, &v2, &store).unwrap();
+
+        // Same bytes everywhere (the SKILL.md content differs in shape only),
+        // so prose_changed will be true (the file content differs), but the
+        // contract digest must be identical across shapes.
+        assert!(!diff.contract_changed, "shape-only change must not void contract");
+        assert!(!diff.code_changed);
     }
 }

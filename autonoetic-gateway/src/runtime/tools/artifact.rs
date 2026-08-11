@@ -11,6 +11,7 @@ use std::path::Path;
 pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(ArtifactBuildTool));
     registry.register(Box::new(ArtifactInspectTool));
+    registry.register(Box::new(ArtifactDiffTool));
 }
 
 fn mint_artifact_ref_id() -> String {
@@ -980,6 +981,190 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(parsed["ok"], true, "expected success: {parsed}");
     }
+
+    // --- Stage 2: artifact_diff + artifact_inspect digest surfacing ---
+
+    /// Build an agent_bundle and return its artifact_ref. Uses a shared
+    /// session_id so multiple builds in one test produce refs that are all
+    /// visible to a single artifact_diff call (artifact_refs are
+    /// session-scoped; artifacts themselves are immutable + content-addressed,
+    /// so the first ref stays valid even after a later build remaps names).
+    fn build_agent_bundle(
+        gateway_dir: &std::path::Path,
+        skill_body: &str,
+        main_content: &str,
+        gs: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+    ) -> String {
+        let session_id = "session-diff/coder.default-x";
+        let content_store = ContentStore::new(gateway_dir).unwrap();
+        let skill = format!(
+            "---\nmetadata:\n  autonoetic:\n    agent_id: diff-agent\n    capabilities:\n      - type: CodeExecution\n        patterns:\n          - python*\n---\n{skill_body}"
+        );
+        for (name, content) in [("main.py", main_content), ("SKILL.md", &skill)] {
+            let handle = content_store.write(content.as_bytes()).unwrap();
+            content_store.register_name(session_id, name, &handle).unwrap();
+        }
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactBuildTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(gateway_dir),
+                &serde_json::json!({
+                    "inputs": ["main.py", "SKILL.md"],
+                    "entrypoints": ["main.py"],
+                    "kind": "agent_bundle"
+                })
+                .to_string(),
+                Some(session_id),
+                None,
+                None,
+                Some(gs),
+                None,
+            )
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], true, "build failed: {parsed}");
+        parsed["artifact_ref"].as_str().unwrap().to_string()
+    }
+
+    fn open_gs(gateway_dir: &std::path::Path) -> std::sync::Arc<crate::scheduler::gateway_store::GatewayStore> {
+        std::sync::Arc::new(GatewayStore::open(gateway_dir).unwrap())
+    }
+
+    #[test]
+    fn artifact_diff_reports_prose_only_change_as_carry_eligible() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let gs = open_gs(&gateway_dir);
+        // v1 and v2 share identical code + contract; only the SKILL.md body
+        // (prose) differs — the session-964ea6d7 class.
+        let from_ref = build_agent_bundle(&gateway_dir, "body A", "print('hi')", gs.clone());
+        let to_ref = build_agent_bundle(&gateway_dir, "body B", "print('hi')", gs.clone());
+
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactDiffTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({ "from": from_ref, "to": to_ref })
+                    .to_string(),
+                Some("session-diff/coder.default-x"),
+                None,
+                None,
+                Some(gs),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], true, "diff failed: {parsed}");
+        assert_eq!(parsed["same_artifact"], false);
+        assert_eq!(parsed["code_changed"], false, "code must be stable: {parsed}");
+        assert_eq!(parsed["contract_changed"], false, "contract must be stable: {parsed}");
+        assert_eq!(parsed["prose_changed"], true, "prose must move on body edit: {parsed}");
+        let eligible: Vec<String> = parsed["carry_eligible_roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(eligible.contains(&"unit_test_runner".to_string()));
+        assert!(eligible.contains(&"auditor".to_string()));
+        assert!(
+            !eligible.contains(&"static_evaluator".to_string()),
+            "static_evaluator reviews prose — must NOT be eligible when prose changed"
+        );
+    }
+
+    #[test]
+    fn artifact_diff_same_artifact_is_trivial_no_diff() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let gs = open_gs(&gateway_dir);
+        let art_ref = build_agent_bundle(&gateway_dir, "body", "print('hi')", gs.clone());
+
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactDiffTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({ "from": art_ref, "to": art_ref })
+                    .to_string(),
+                Some("session-diff/coder.default-x"),
+                None,
+                None,
+                Some(gs),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["same_artifact"], true);
+        assert_eq!(parsed["code_changed"], false);
+        assert_eq!(parsed["contract_changed"], false);
+        assert_eq!(parsed["prose_changed"], false);
+    }
+
+    #[test]
+    fn artifact_inspect_surfaces_federation_digests_for_agent_bundle() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+
+        let gs = open_gs(&gateway_dir);
+        let art_ref = build_agent_bundle(&gateway_dir, "body", "print('hi')", gs.clone());
+
+        let manifest = coder_manifest();
+        let policy = PolicyEngine::new(manifest.clone());
+        let tool = ArtifactInspectTool;
+        let response = tool
+            .execute(
+                &manifest,
+                &policy,
+                gateway_dir.parent().unwrap(),
+                Some(&gateway_dir),
+                &serde_json::json!({ "artifact_ref": art_ref }).to_string(),
+                Some("session-diff/coder.default-x"),
+                None,
+                None,
+                Some(gs),
+                None,
+            )
+            .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["ok"], true, "inspect failed: {parsed}");
+        let digests = &parsed["federation_digests"];
+        assert!(
+            digests["code_digest"].is_string(),
+            "agent bundle must have a code digest: {parsed}"
+        );
+        assert!(
+            digests["contract_digest"].is_string(),
+            "agent bundle must have a contract digest: {parsed}"
+        );
+        assert!(
+            digests["prose_digest"].is_string(),
+            "agent bundle must have a prose digest: {parsed}"
+        );
+    }
 }
 
 pub struct ArtifactInspectTool;
@@ -1075,6 +1260,15 @@ impl NativeTool for ArtifactInspectTool {
             crate::runtime::is_test_file(&f.name)
         });
 
+        // Federation carry-forward digests (Stage 2): surface the per-input
+        // classification so the planner can compare two artifacts via
+        // artifact_diff, or read a single artifact's coverage directly here.
+        // Recomputed from bytes — artifacts are immutable, so this is stable.
+        let federation_digests =
+            crate::runtime::federation_carry_forward::compute_federation_digests(
+                &bundle, &store,
+            );
+
         serde_json::to_string(&serde_json::json!({
             "ok": true,
             "artifact_ref": args.artifact_ref,
@@ -1098,6 +1292,164 @@ impl NativeTool for ArtifactInspectTool {
             })).collect::<Vec<_>>(),
             "entrypoints": bundle.entrypoints,
             "created_at": bundle.created_at,
+            // null for non-agent-bundle kinds or unparseable frontmatter.
+            "federation_digests": serde_json::json!({
+                "code_digest": federation_digests.code_digest,
+                "contract_digest": federation_digests.contract_digest,
+                "prose_digest": federation_digests.prose_digest,
+            }),
+        }))
+        .map_err(Into::into)
+    }
+}
+
+/// `artifact_diff(from, to)` — the federation carry-forward reasoning input.
+///
+/// Returns the per-class (code / contract / prose) digest-equality summary
+/// between two artifacts, the file-level diff, and an advisory list of roles
+/// whose reviewed inputs are byte-identical (and so *could* be carried forward
+/// under Stage 3's strictness floor). Distinct from `agent_revision_diff`,
+/// which gives a raw file-level diff between two revisions; this tool gives
+/// the **digest-classified** answer the planner reasons over ("did the
+/// contract change? did code change?") plus the carry-eligibility mapping.
+///
+/// Strictness is still `off` in Stage 2 — this is read-only analysis, no
+/// carry is honored yet.
+pub struct ArtifactDiffTool;
+
+impl NativeTool for ArtifactDiffTool {
+    fn name(&self) -> &'static str {
+        "artifact_diff"
+    }
+
+    fn is_available(&self, manifest: &AgentManifest) -> bool {
+        // Same gating as artifact_inspect: any ReadAccess scope suffices.
+        manifest
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::ReadAccess { .. }))
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: "Compare two artifacts by scoped ref and return the per-class (code / \
+                contract / prose) change summary plus the carry-eligibility mapping. Use after a \
+                coder rebuild to decide which federation gates can be carried forward vs re-run. \
+                `from` is the prior artifact (whose verdicts might carry); `to` is the current \
+                rebuild. The carry_eligible_roles list is advisory — the gateway re-verifies at \
+                federation_escalate time.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "from": {
+                        "type": "string",
+                        "description": "The prior artifact ref (e.g., 'ar.aabb1234ef56') or canonical id (art_*)."
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "The current/rebuilt artifact ref or canonical id."
+                    }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn execute(
+        &self,
+        _manifest: &AgentManifest,
+        _policy: &PolicyEngine,
+        _agent_dir: &Path,
+        gateway_dir: Option<&Path>,
+        arguments_json: &str,
+        session_id: Option<&str>,
+        _turn_id: Option<&str>,
+        _config: Option<&autonoetic_types::config::GatewayConfig>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        _run_context: Option<&NativeToolRunContext>,
+    ) -> anyhow::Result<String> {
+        #[derive(Deserialize)]
+        struct Args {
+            from: String,
+            to: String,
+        }
+        let args: Args = serde_json::from_str(arguments_json)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON arguments for '{}': {}", self.name(), e))?;
+
+        let Some(gw_dir) = gateway_dir else {
+            return Ok(ToolError::resource(
+                "artifact_diff requires gateway directory to be configured",
+                None::<String>,
+            )
+            .to_error_response());
+        };
+        let Some(gs) = gateway_store else {
+            return Ok(ToolError::resource(
+                "artifact_diff requires GatewayStore to be configured",
+                None::<String>,
+            )
+            .to_error_response());
+        };
+        let sid = session_id.unwrap_or_default();
+
+        let from_resolved = match resolve_artifact_ref_or_canonical(&args.from, sid, &gs, gw_dir) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(ToolError::resource(e.to_string(), None::<String>).to_error_response());
+            }
+        };
+        let to_resolved = match resolve_artifact_ref_or_canonical(&args.to, sid, &gs, gw_dir) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(ToolError::resource(e.to_string(), None::<String>).to_error_response());
+            }
+        };
+
+        let store = crate::artifact_store::ArtifactStore::new(gw_dir)?;
+        let from_bundle = store.inspect(&from_resolved.artifact_id)?;
+        let to_bundle = store.inspect(&to_resolved.artifact_id)?;
+
+        // Same identity → trivially no diff. Still return a valid result so the
+        // planner doesn't have to special-case.
+        if from_bundle.artifact_id == to_bundle.artifact_id {
+            return serde_json::to_string(&serde_json::json!({
+                "ok": true,
+                "from": args.from,
+                "to": args.to,
+                "same_artifact": true,
+                "code_changed": false,
+                "contract_changed": false,
+                "prose_changed": false,
+                "changed_files": [],
+                "carry_eligible_roles": ["unit_test_runner", "auditor", "sealed_evaluator", "static_evaluator"],
+                "note": "from and to resolve to the same artifact; no rebuild occurred.",
+            }))
+            .map_err(Into::into);
+        }
+
+        let diff = crate::runtime::federation_carry_forward::compute_artifact_diff(
+            &from_bundle,
+            &to_bundle,
+            &store,
+        )?;
+
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "from": args.from,
+            "to": args.to,
+            "same_artifact": false,
+            "code_changed": diff.code_changed,
+            "contract_changed": diff.contract_changed,
+            "prose_changed": diff.prose_changed,
+            "changed_files": diff.changed_files,
+            "carry_eligible_roles": diff.carry_eligible_roles,
+            // Advisory: strictness is still `off` in Stage 2; Stage 3 will
+            // honor these at federation_escalate. The planner reads the diff
+            // now but still re-runs every gate.
+            "note": "Strictness is off — no carry honored yet. carry_eligible_roles is \
+                     advisory and lists roles whose reviewed inputs are byte-identical.",
         }))
         .map_err(Into::into)
     }
