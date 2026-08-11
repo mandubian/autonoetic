@@ -117,6 +117,9 @@ impl PromotionStore {
                 sealed_evaluator_execution_trace_id: None,
                 promotion_gate_version: "2.2".to_string(),
                 blessed_packages: vec![],
+                code_digest: None,
+                contract_digest: None,
+                prose_digest: None,
             });
 
         if let Some(artifact_digest) = artifact_digest {
@@ -342,6 +345,33 @@ impl PromotionStore {
         } else {
             false
         }
+    }
+
+    /// Annotate an artifact's promotion record with the three federation
+    /// carry-forward digests (Stage 1; see `docs/federation-carry-forward.md`,
+    /// the design spec landing with #1067).
+    ///
+    /// Called by `promotion.record` after the verdict is written, copying the
+    /// artifact's current digests onto the record so the verdict binds to the
+    /// exact bytes the gate reviewed. No-op (returns `Ok(())`) if no record
+    /// exists for the artifact yet — the digests will be attached on the next
+    /// verdict recorded for it.
+    pub fn set_federation_digests(
+        &self,
+        artifact_id: &str,
+        code_digest: Option<String>,
+        contract_digest: Option<String>,
+        prose_digest: Option<String>,
+    ) -> anyhow::Result<()> {
+        let mut records = self.records.lock().unwrap();
+        if let Some(record) = records.get_mut(artifact_id) {
+            record.code_digest = code_digest;
+            record.contract_digest = contract_digest;
+            record.prose_digest = prose_digest;
+            drop(records);
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Saves the promotion registry to disk.
@@ -686,5 +716,116 @@ mod tests {
         assert!(record.auditor_id.is_none());
         assert!(record.evaluator_findings.is_empty());
         assert!(record.auditor_findings.is_empty());
+    }
+
+    #[test]
+    fn federation_digests_round_trip_via_setter_and_persist() {
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+        let artifact_id = "art_digest1".to_string();
+
+        // Record a verdict first — digests start None.
+        store
+            .record_promotion(
+                artifact_id.clone(),
+                Some("sha256:abc".to_string()),
+                Some("sha256:content".to_string()),
+                PromotionRole::Auditor,
+                "auditor.default",
+                true,
+                vec![test_finding()],
+                None,
+                None,
+            )
+            .unwrap();
+        let before = store.get_promotion(&artifact_id).unwrap();
+        assert!(before.code_digest.is_none());
+        assert!(before.contract_digest.is_none());
+        assert!(before.prose_digest.is_none());
+
+        // Attach digests (as promotion.record does after recording).
+        store
+            .set_federation_digests(
+                &artifact_id,
+                Some("sha256:code-1".to_string()),
+                Some("sha256:contract-1".to_string()),
+                Some("sha256:prose-1".to_string()),
+            )
+            .unwrap();
+
+        // Re-open the store to verify persistence (the JSON file round-trips
+        // the new fields).
+        let reopened = PromotionStore::new(temp.path()).unwrap();
+        let after = reopened.get_promotion(&artifact_id).unwrap();
+        assert_eq!(after.code_digest.as_deref(), Some("sha256:code-1"));
+        assert_eq!(after.contract_digest.as_deref(), Some("sha256:contract-1"));
+        assert_eq!(after.prose_digest.as_deref(), Some("sha256:prose-1"));
+        // And the verdict itself is untouched.
+        assert!(after.auditor_pass);
+    }
+
+    #[test]
+    fn set_federation_digests_no_op_when_record_absent() {
+        // If no verdict has been recorded for the artifact yet, the setter
+        // must not panic and must not create an empty record.
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+        store
+            .set_federation_digests(
+                "art_never_seen",
+                Some("sha256:x".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(store.get_promotion("art_never_seen").is_none());
+    }
+
+    #[test]
+    fn legacy_record_without_digest_fields_deserializes_as_none() {
+        // A promotion_registry.json written before this feature has no
+        // code_digest/contract_digest/prose_digest keys. It must deserialize
+        // with None (not error), so existing deployments upgrade cleanly.
+        // None digests = unverifiable under carry-forward = must re-run,
+        // which is the intended fail-closed posture.
+        let temp = tempdir().unwrap();
+        let legacy_path = temp.path().join("promotion_registry.json");
+        let legacy_json = r#"{
+            "art_legacy1": {
+                "artifact_id": "art_legacy1",
+                "artifact_digest": "sha256:old",
+                "content_digest": "sha256:old-content",
+                "evaluator_id": "evaluator.default",
+                "evaluator_pass": true,
+                "evaluator_findings": [],
+                "evaluator_timestamp": "2026-01-01T00:00:00Z",
+                "auditor_id": null,
+                "auditor_pass": false,
+                "auditor_findings": [],
+                "auditor_timestamp": null,
+                "static_evaluator_id": null,
+                "static_evaluator_pass": false,
+                "static_evaluator_findings": [],
+                "static_evaluator_timestamp": null,
+                "unit_test_runner_id": null,
+                "unit_test_runner_pass": false,
+                "unit_test_runner_findings": [],
+                "unit_test_runner_timestamp": null,
+                "sealed_evaluator_id": null,
+                "sealed_evaluator_pass": false,
+                "sealed_evaluator_findings": [],
+                "sealed_evaluator_timestamp": null,
+                "promotion_gate_version": "2.2",
+                "blessed_packages": []
+            }
+        }"#;
+        std::fs::write(&legacy_path, legacy_json).unwrap();
+
+        let store = PromotionStore::new(temp.path()).unwrap();
+        let record = store.get_promotion("art_legacy1").unwrap();
+        assert!(record.code_digest.is_none());
+        assert!(record.contract_digest.is_none());
+        assert!(record.prose_digest.is_none());
+        assert!(record.evaluator_pass, "legacy verdict itself survives");
     }
 }

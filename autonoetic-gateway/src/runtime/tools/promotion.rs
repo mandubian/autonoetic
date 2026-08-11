@@ -386,6 +386,39 @@ call this — e.g. no tests found; follow that role-specific guidance.)"
             execution_trace_id,
         )?;
 
+        // Federation carry-forward (Stage 1): bind this verdict to the exact
+        // bytes the gate reviewed by copying the artifact's current per-input
+        // digests onto the record. Non-blocking — a failure here leaves the
+        // digests as None (= unverifiable = must re-run under carry-forward),
+        // which is the fail-closed posture, never a promotion failure.
+        // Strictness is still `off` in Stage 1, so this is pure provenance.
+        if let Some(artifact_store) = crate::artifact_store::ArtifactStore::new(gw_dir).ok() {
+            if let Ok(bundle) = artifact_store.inspect(&artifact_id) {
+                let digests = crate::runtime::federation_carry_forward::compute_federation_digests(
+                    &bundle, &artifact_store,
+                );
+                if let Err(e) = store.set_federation_digests(
+                    &artifact_id,
+                    digests.code_digest,
+                    digests.contract_digest,
+                    digests.prose_digest,
+                ) {
+                    tracing::warn!(
+                        target: "promotion",
+                        artifact_id = %artifact_id,
+                        error = %e,
+                        "failed to attach federation carry-forward digests (non-blocking)"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    target: "promotion",
+                    artifact_id = %artifact_id,
+                    "artifact not resolvable for federation digest attachment (non-agent-bundle or missing); skipping"
+                );
+            }
+        }
+
         // Bless-on-promotion (determinism inc 3): on a passing verdict, freeze
         // the resolved dependency closure the validated run used. Best-effort
         // provenance recorded *after* the gate decision — it never alters the
@@ -626,6 +659,13 @@ impl NativeTool for PromotionQueryTool {
                     "sealed_evaluator_findings": record.sealed_evaluator_findings,
                     "sealed_evaluator_timestamp": record.sealed_evaluator_timestamp,
                     "promotion_gate_version": record.promotion_gate_version,
+                    // Federation carry-forward digests (Stage 1). `null` for
+                    // records predating this feature (= unverifiable under
+                    // carry-forward) or non-agent-bundle artifacts. Strictness
+                    // is still `off` in Stage 1, so these are pure provenance.
+                    "code_digest": record.code_digest,
+                    "contract_digest": record.contract_digest,
+                    "prose_digest": record.prose_digest,
                 });
                 serde_json::to_string(&response).map_err(Into::into)
             }

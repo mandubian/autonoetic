@@ -137,6 +137,25 @@ pub struct PromotionRecord {
     /// See `docs/design/packager-dependency-determinism.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blessed_packages: Vec<crate::layer::ResolvedPackage>,
+
+    // --- Federation carry-forward digests (Stage 1, see
+    //     docs/federation-carry-forward.md — the design spec landing with
+    //     #1067) ---
+    //
+    // The three per-input digests of the artifact this verdict was recorded
+    // against. `None` for records predating this feature (verdict unverifiable
+    // → must re-run) and for non-agent-bundle artifacts. Copied from the
+    // artifact at `promotion.record` time so the verdict binds to the exact
+    // bytes the gate reviewed.
+    //
+    // Stage 3 will add `carried_from` provenance when a verdict is carried
+    // forward from a prior artifact rather than freshly run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose_digest: Option<String>,
 }
 
 impl PromotionRecord {

@@ -30,6 +30,7 @@ pub mod egress_stored;
 pub mod error_fingerprint;
 pub mod eval_stats;
 pub mod failure_classification;
+pub mod federation_carry_forward;
 pub mod fuzzy_match;
 pub mod guard;
 pub mod guidance;
