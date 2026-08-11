@@ -458,13 +458,16 @@ classification is sound for their agent population.
 ## Risks and open questions
 
 1. **Layered artifacts (packager)** — _resolved in #1073._ `compute_code_digest`
-   folds the sorted `(layer_id, ArtifactLayer.digest)` pairs into the code
-   digest, so a deps-only rebuild (packager swapping a layer with identical
-   base files) moves `code_digest` and voids the carry. `ArtifactLayer.digest`
-   is already a SHA-256 of the layer content — a layer change is mechanically
-   detected without reading layer bytes at digest time. Triplet covers the
-   composed bundle (matches what the gates actually import); per-layer digests
-   are not stored separately.
+   folds the sorted `(layer_id, mount_path, ArtifactLayer.digest)` triples into
+   the code digest, so a deps-only rebuild (packager swapping a layer with
+   identical base files) moves `code_digest` and voids the carry.
+   `ArtifactLayer.digest` is a SHA-256 of the layer content — a layer change
+   is mechanically detected without reading layer bytes at digest time.
+   `mount_path` is folded too (a caller-supplied parameter, so not covered by
+   the content digest): mounting identical content at a different path changes
+   the sandbox's Python/Node import paths, which is a reviewable-environment
+   change, not a no-op. Triplet covers the composed bundle (matches what the
+   gates actually import); per-layer digests are not stored separately.
 2. **The field-classification table is authority.** Any misclassification is a
    security hole (too strict → wasted re-runs; too loose → silent bypass). The
    table above enumerates the real schema, but must be kept in sync as fields
