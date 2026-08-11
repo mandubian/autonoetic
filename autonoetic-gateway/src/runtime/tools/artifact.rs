@@ -372,15 +372,13 @@ impl NativeTool for ArtifactBuildTool {
                                     // "validation: Promotion gate: <details>". Both prefixes are
                                     // misleading at build time, so strip them and surface just the
                                     // parse details.
-                                    let cap_err_msg = cap_err.to_string();
-                                    let cap_err_msg = cap_err_msg
+                                    let cap_err_full = cap_err.to_string();
+                                    let cap_err_msg = cap_err_full
                                         .strip_prefix("validation: ")
-                                        .unwrap_or(&cap_err_msg)
+                                        .unwrap_or(&cap_err_full);
+                                    let cap_err_msg = cap_err_msg
                                         .strip_prefix("Promotion gate: ")
-                                        .unwrap_or_else(|| {
-                                            cap_err_msg.strip_prefix("validation: ").unwrap_or(&cap_err_msg)
-                                        })
-                                        .to_string();
+                                        .unwrap_or(cap_err_msg);
                                     return Ok(ToolError::validation(
                                         format!(
                                             "agent_bundle artifact has malformed capabilities in \
