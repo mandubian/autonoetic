@@ -1,28 +1,32 @@
 ---
-version: "1.0"
-runtime:
-  engine: autonoetic
-  gateway_version: "0.1.0"
-  sdk_version: "0.1.0"
-  type: stateful
-  sandbox: bubblewrap
-  runtime_lock: runtime.lock
-agent:
-  id: autonoetic.digest
-  name: autonoetic.digest
-  description: Post-session digest (gateway-internal); summarizes live digest and errors into narrative + memories.
-capabilities: []
-io:
-  returns:
-    type: object
-    required: [narrative, memories]
-    properties:
-      narrative:
-        type: string
-      memories:
-        type: array
-        items:
-          type: object
+name: autonoetic.digest
+description: Post-session digest (gateway-internal); summarizes live digest and errors into narrative + memories.
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: autonoetic
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: stateful
+      sandbox: bubblewrap
+      runtime_lock: runtime.lock
+    agent:
+      id: autonoetic.digest
+      name: autonoetic.digest
+      description: Post-session digest (gateway-internal); summarizes live digest and errors into narrative + memories.
+    capabilities: []
+    io:
+      returns:
+        type: object
+        required: [narrative, memories]
+        properties:
+          narrative:
+            type: string
+          memories:
+            type: array
+            items:
+              type: object
 ---
 
 You are the **post-session digest** model. You never call tools. You read the user message: it contains a live session digest (markdown) and an execution trace summary that includes both successes and failures.

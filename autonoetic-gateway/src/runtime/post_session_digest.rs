@@ -657,6 +657,35 @@ mod tests {
         assert_eq!(strip_markdown_frontmatter(raw), "Hello **body**");
     }
 
+    /// This bundle was the last bare-root manifest in the repo and is now
+    /// metadata-wrapped like every other agent. Its frontmatter is stripped for
+    /// the digest prompt, so a shape mistake here would not surface at runtime —
+    /// only when the bundle is installed or listed as an agent. Parse it.
+    #[test]
+    fn embedded_digest_skill_parses_in_the_canonical_shape() {
+        let raw = EMBEDDED_DIGEST_SKILL;
+        let frontmatter = crate::runtime::install_contract::extract_frontmatter_raw(raw).unwrap();
+        assert!(
+            frontmatter
+                .get("metadata")
+                .and_then(|m| m.get("autonoetic"))
+                .is_some(),
+            "the digest bundle must use the canonical metadata-wrapped shape"
+        );
+
+        let (manifest, body) = crate::runtime::parser::SkillParser::parse(raw)
+            .expect("digest SKILL.md must parse as an agent manifest");
+        assert_eq!(manifest.agent.id, DIGEST_AGENT_ID);
+        assert!(
+            manifest.io.as_ref().and_then(|io| io.returns.as_ref()).is_some(),
+            "the digest output contract (io.returns) must survive the shape conversion"
+        );
+        assert!(
+            body.contains("post-session digest"),
+            "the prompt body must be preserved"
+        );
+    }
+
     #[test]
     fn load_digest_skill_body_falls_back_to_embedded_prompt() {
         let body = load_digest_skill_body(Path::new("/nonexistent/agents")).unwrap();
