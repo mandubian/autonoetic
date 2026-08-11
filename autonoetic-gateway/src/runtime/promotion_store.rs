@@ -1006,4 +1006,62 @@ mod tests {
         );
         assert!(result.is_err(), "carrying an absent role must fail");
     }
+
+    #[test]
+    fn carried_verdict_provenance_survives_json_round_trip() {
+        // promotion_query surfaces record.carried_roles directly. Pin that the
+        // provenance map serializes + deserializes through the JSON store, so
+        // the query output is correct after a store re-open.
+        let temp = tempdir().unwrap();
+        let store = PromotionStore::new(temp.path()).unwrap();
+        store
+            .record_promotion(
+                "art_prior".to_string(),
+                None,
+                None,
+                PromotionRole::Auditor,
+                "auditor.default",
+                true,
+                vec![test_finding()],
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .set_federation_digests(
+                "art_prior",
+                Some("sha256:code-x".to_string()),
+                Some("sha256:contract-y".to_string()),
+                None,
+            )
+            .unwrap();
+        let prior = store.get_promotion("art_prior").unwrap();
+        store
+            .record_carried_verdict(
+                "art_new",
+                PromotionRole::Auditor,
+                &prior,
+                autonoetic_types::promotion::RoleCarryProvenance {
+                    prior_artifact_ref: "ar.prior123".to_string(),
+                    prior_artifact_id: "art_prior".to_string(),
+                    original_agent_id: "auditor.default".to_string(),
+                    verified_at: "2026-01-02T00:00:00Z".to_string(),
+                    prior_code_digest: Some("sha256:code-x".to_string()),
+                    prior_contract_digest: Some("sha256:contract-y".to_string()),
+                    justification: Some("prose-only fix".to_string()),
+                    strictness: Some("conservative".to_string()),
+                },
+                (None, None, None),
+            )
+            .unwrap();
+
+        let reopened = PromotionStore::new(temp.path()).unwrap();
+        let rec = reopened.get_promotion("art_new").unwrap();
+        let carry = rec.carried_roles.get("auditor").expect("carried_roles must round-trip");
+        assert_eq!(carry.prior_artifact_ref, "ar.prior123");
+        assert_eq!(carry.prior_artifact_id, "art_prior");
+        assert_eq!(carry.strictness.as_deref(), Some("conservative"));
+        assert_eq!(carry.prior_code_digest.as_deref(), Some("sha256:code-x"));
+        assert_eq!(carry.justification.as_deref(), Some("prose-only fix"));
+    }
 }
