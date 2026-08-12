@@ -254,7 +254,8 @@ pub fn transport_error_source_chain(err: &reqwest::Error) -> String {
 /// Log a transient transport retry with the structured discriminants
 /// (#1042): the classified kind, the source chain, and the elapsed time of
 /// the failed attempt — so a 120s timeout reads as a timeout in the log,
-/// not a "connection error".
+/// not a "connection error". The message names the kind: triage should not
+/// have to cross-reference the `transport_kind` field to learn what failed.
 pub fn log_transport_retry(
     kind: LlmTransportErrorKind,
     attempt: u32,
@@ -274,7 +275,7 @@ pub fn log_transport_retry(
             error_source_chain = %source_chain,
             "LLM request timed out, retrying"
         ),
-        _ => tracing::warn!(
+        LlmTransportErrorKind::Connect => tracing::warn!(
             attempt,
             wait_ms,
             elapsed_ms,
@@ -282,6 +283,33 @@ pub fn log_transport_retry(
             error = %err,
             error_source_chain = %source_chain,
             "LLM connection error, retrying"
+        ),
+        LlmTransportErrorKind::Request => tracing::warn!(
+            attempt,
+            wait_ms,
+            elapsed_ms,
+            transport_kind = kind.as_str(),
+            error = %err,
+            error_source_chain = %source_chain,
+            "LLM request build error, retrying"
+        ),
+        LlmTransportErrorKind::Body => tracing::warn!(
+            attempt,
+            wait_ms,
+            elapsed_ms,
+            transport_kind = kind.as_str(),
+            error = %err,
+            error_source_chain = %source_chain,
+            "LLM response body read failed, retrying"
+        ),
+        LlmTransportErrorKind::Other => tracing::warn!(
+            attempt,
+            wait_ms,
+            elapsed_ms,
+            transport_kind = kind.as_str(),
+            error = %err,
+            error_source_chain = %source_chain,
+            "LLM transport error, retrying"
         ),
     }
 }
