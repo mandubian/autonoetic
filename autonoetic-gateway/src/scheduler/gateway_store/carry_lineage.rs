@@ -105,13 +105,15 @@ impl GatewayStore {
     }
 
     /// All edges pointing AT `artifact_id` (artifacts that carried from it),
-    /// oldest first (ties broken by `role`, as in `get_carry_lineage`).
+    /// oldest first (ties broken by `artifact_id` then `role` — the
+    /// tie-breaker must span children, so `role` alone is insufficient here,
+    /// unlike `get_carry_lineage` where the artifact is fixed).
     pub fn list_carry_edges_from(&self, source_artifact_id: &str) -> Result<Vec<CarryLineageRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {CARRY_LINEAGE_COLUMNS} FROM carry_forward_lineage
              WHERE source_artifact_id = ?1
-             ORDER BY verified_at ASC, role ASC"
+             ORDER BY verified_at ASC, artifact_id ASC, role ASC"
         ))?;
         let rows = stmt.query_map(params![source_artifact_id], carry_lineage_record_from_row)?;
         let mut out = Vec::new();
