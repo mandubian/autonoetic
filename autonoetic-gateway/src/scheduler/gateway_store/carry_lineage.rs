@@ -86,13 +86,15 @@ impl GatewayStore {
     }
 
     /// All carry edges for `artifact_id` (the artifacts it carried verdicts
-    /// from), oldest first.
+    /// from), oldest first. Ties on `verified_at` (second-precision RFC3339 —
+    /// same-tick inserts of multiple roles in one escalate) are broken by
+    /// `role`, making the order total since (artifact_id, role) is the PK.
     pub fn get_carry_lineage(&self, artifact_id: &str) -> Result<Vec<CarryLineageRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {CARRY_LINEAGE_COLUMNS} FROM carry_forward_lineage
              WHERE artifact_id = ?1
-             ORDER BY verified_at ASC"
+             ORDER BY verified_at ASC, role ASC"
         ))?;
         let rows = stmt.query_map(params![artifact_id], carry_lineage_record_from_row)?;
         let mut out = Vec::new();
@@ -103,13 +105,13 @@ impl GatewayStore {
     }
 
     /// All edges pointing AT `artifact_id` (artifacts that carried from it),
-    /// oldest first.
+    /// oldest first (ties broken by `role`, as in `get_carry_lineage`).
     pub fn list_carry_edges_from(&self, source_artifact_id: &str) -> Result<Vec<CarryLineageRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {CARRY_LINEAGE_COLUMNS} FROM carry_forward_lineage
              WHERE source_artifact_id = ?1
-             ORDER BY verified_at ASC"
+             ORDER BY verified_at ASC, role ASC"
         ))?;
         let rows = stmt.query_map(params![source_artifact_id], carry_lineage_record_from_row)?;
         let mut out = Vec::new();
@@ -133,7 +135,7 @@ impl GatewayStore {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {CARRY_LINEAGE_COLUMNS} FROM carry_forward_lineage
                  WHERE artifact_id = ?1
-                 ORDER BY verified_at ASC"
+                 ORDER BY verified_at ASC, role ASC"
             ))?;
             let rows = stmt
                 .query_map(params![&cursor], carry_lineage_record_from_row)?
@@ -192,6 +194,8 @@ mod tests {
     }
 
     /// Roundtrip: a carry edge is recorded and read back with provenance.
+    /// Ordering is total — (verified_at, role) — and (artifact_id, role) is
+    /// the PK, so positional assertions are stable.
     #[test]
     fn record_and_get_carry_lineage() {
         let (_temp, store) = open_store();
@@ -200,7 +204,7 @@ mod tests {
 
         let rows = store.get_carry_lineage("art_child").unwrap();
         assert_eq!(rows.len(), 2, "one row per carried role");
-        assert_eq!(rows[0].role, "unit_test_runner");
+        assert_eq!(rows[0].role, "unit_test_runner", "inserted first, earlier ts");
         assert_eq!(rows[1].role, "auditor");
         for row in &rows {
             assert_eq!(row.artifact_id, "art_child");
@@ -266,5 +270,38 @@ mod tests {
     fn walk_carry_ancestors_empty_for_fresh_artifact() {
         let (_temp, store) = open_store();
         assert!(store.walk_carry_ancestors("art_fresh").unwrap().is_empty());
+    }
+
+    /// Genuine same-timestamp ties (e.g. a row written with an identical
+    /// RFC3339 `verified_at`) break deterministically by `role` — the
+    /// ORDER BY tie-breaker Copilot review asked for.
+    #[test]
+    fn same_timestamp_ties_break_by_role() {
+        let (_temp, store) = open_store();
+        {
+            let conn = store.conn.lock().unwrap();
+            for role in ["unit_test_runner", "auditor"] {
+                conn.execute(
+                    "INSERT INTO carry_forward_lineage
+                        (artifact_id, role, source_artifact_id, source_artifact_ref,
+                         strictness, verified_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        "art_child",
+                        role,
+                        "art_prior",
+                        "ar.prior1",
+                        "conservative",
+                        "2026-01-01T00:00:00Z",
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let rows = store.get_carry_lineage("art_child").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].role, "auditor", "identical timestamps break by role");
+        assert_eq!(rows[1].role, "unit_test_runner");
     }
 }
