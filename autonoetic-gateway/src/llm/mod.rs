@@ -5,6 +5,7 @@
 
 use autonoetic_types::agent::LlmConfig;
 use serde::{Deserialize, Serialize};
+use std::error::Error as _;
 use std::sync::Arc;
 
 const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
@@ -134,7 +135,32 @@ pub(crate) fn resolve_request_timeout_secs(env: Option<&str>, configured: Option
 }
 
 pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
-    (attempt as u64) * 1000
+    // (attempt + 1) so the FIRST retry already waits (#1043): `attempt * 1000`
+    // made the only retry a timeout ever gets fire instantly, re-sending the
+    // same heavy request the moment the previous one gave up — the worst
+    // possible behaviour toward a queueing provider. Same shape as the 429
+    // (`(attempt + 1) * 2000`) and 5xx (`(attempt + 1) * 1500`) backoffs.
+    (attempt as u64 + 1) * 1000
+}
+
+/// Total backoff budget the retry deadline must leave room for: the sum of
+/// the connection backoffs across [`MAX_CONNECTION_RETRIES`].
+pub(crate) fn retry_backoff_budget() -> std::time::Duration {
+    let total_ms: u64 = (0..MAX_CONNECTION_RETRIES)
+        .map(connection_retry_backoff_ms)
+        .sum();
+    std::time::Duration::from_millis(total_ms)
+}
+
+/// The wall-clock deadline bounding a `complete()` retry loop: two full
+/// per-request attempts plus the backoffs between retries (#1043). The old
+/// `timeout * 2` was denominated in the same unit the attempts consume —
+/// mathematically exhausted by one timed-out attempt, so the backoff could
+/// never fit and the retry degenerated to an instant duplicate.
+pub(crate) fn retry_deadline(complete_timeout: std::time::Duration) -> std::time::Duration {
+    complete_timeout
+        .saturating_mul(2)
+        .saturating_add(retry_backoff_budget())
 }
 
 /// Backoff for transient server-error (HTTP 5xx) retries.
@@ -157,6 +183,130 @@ pub fn server_error_retry_backoff_ms(attempt: u32) -> u64 {
 /// send()-phase and body-read-phase errors.
 pub(crate) fn error_is_timeout(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.to_string().to_lowercase().contains("timed out")
+}
+
+/// Stable classification of a reqwest transport error, computed from
+/// reqwest's structured flags (#1041, #1042). The LLM layer computes this
+/// once and stamps it on the terminal error as a `llm_transport:<kind>`
+/// token; the workflow failure classifier matches the token, so the two
+/// layers stop disagreeing about the same error (the #1021 lesson: a
+/// hand-maintained substring list per layer can never keep up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmTransportErrorKind {
+    /// Our per-request timeout fired (the connection was established; the
+    /// endpoint never answered in time).
+    Timeout,
+    /// Connection refused / reset / aborted / DNS — never connected.
+    Connect,
+    /// Malformed request construction (rare; still transport-phase).
+    Request,
+    /// HTTP status received but the body transfer broke.
+    Body,
+    /// Anything else reqwest can emit.
+    Other,
+}
+
+impl LlmTransportErrorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LlmTransportErrorKind::Timeout => "timeout",
+            LlmTransportErrorKind::Connect => "connect",
+            LlmTransportErrorKind::Request => "request",
+            LlmTransportErrorKind::Body => "body",
+            LlmTransportErrorKind::Other => "other",
+        }
+    }
+}
+
+/// Classify a reqwest error from its structured flags. Timeout first:
+/// `error_is_timeout` also matches the message text, which reqwest sets
+/// inconsistently across send/read phases.
+pub fn classify_transport_error(err: &reqwest::Error) -> LlmTransportErrorKind {
+    if error_is_timeout(err) {
+        LlmTransportErrorKind::Timeout
+    } else if err.is_connect() {
+        LlmTransportErrorKind::Connect
+    } else if err.is_request() {
+        LlmTransportErrorKind::Request
+    } else if err.is_body() {
+        LlmTransportErrorKind::Body
+    } else {
+        LlmTransportErrorKind::Other
+    }
+}
+
+/// The full `source()` chain of a reqwest error, joined with `" <- "`.
+///
+/// reqwest's `Display` is the generic `error sending request for url (...)`;
+/// the discriminating text (`operation timed out`, `Connection refused`)
+/// lives in `source()` (#1042). An empty string means no chain beyond the
+/// top-level error.
+pub fn transport_error_source_chain(err: &reqwest::Error) -> String {
+    let mut parts = Vec::new();
+    let mut cur = err.source();
+    while let Some(source) = cur {
+        parts.push(source.to_string());
+        cur = source.source();
+    }
+    parts.join(" <- ")
+}
+
+/// Log a transient transport retry with the structured discriminants
+/// (#1042): the classified kind, the source chain, and the elapsed time of
+/// the failed attempt — so a 120s timeout reads as a timeout in the log,
+/// not a "connection error".
+pub fn log_transport_retry(
+    kind: LlmTransportErrorKind,
+    attempt: u32,
+    wait_ms: u64,
+    elapsed: std::time::Duration,
+    err: &reqwest::Error,
+) {
+    let elapsed_ms = elapsed.as_millis() as u64;
+    let source_chain = transport_error_source_chain(err);
+    match kind {
+        LlmTransportErrorKind::Timeout => tracing::warn!(
+            attempt,
+            wait_ms,
+            elapsed_ms,
+            transport_kind = kind.as_str(),
+            error = %err,
+            error_source_chain = %source_chain,
+            "LLM request timed out, retrying"
+        ),
+        _ => tracing::warn!(
+            attempt,
+            wait_ms,
+            elapsed_ms,
+            transport_kind = kind.as_str(),
+            error = %err,
+            error_source_chain = %source_chain,
+            "LLM connection error, retrying"
+        ),
+    }
+}
+
+/// The terminal error returned when a transport retry loop gives up.
+///
+/// Carries the stable `llm_transport:<kind>` token that the workflow failure
+/// classifier (`classify_task_status`) matches — the structured hand-off
+/// between the LLM layer (which computed the kind) and the workflow layer
+/// (which decides retryability). Timeout → `FailureClass::Timeout`, all
+/// other kinds → `FailureClass::TransientInfra`; both retryable.
+pub fn transport_terminal_error(
+    kind: LlmTransportErrorKind,
+    attempts: u32,
+    elapsed: std::time::Duration,
+    err: &reqwest::Error,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "llm_transport:{} attempts={} elapsed_ms={} source_chain=[{}]: {}",
+        kind.as_str(),
+        attempts,
+        elapsed.as_millis(),
+        transport_error_source_chain(err),
+        err,
+    )
 }
 
 ///   [`MAX_CONNECTION_RETRIES`].

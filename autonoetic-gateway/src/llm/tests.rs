@@ -814,7 +814,7 @@ mod tests {
         #[test]
         fn backoff_that_would_cross_deadline_stops_now() {
             // attempt 2 still has connection budget (cap 3) and elapsed (239.5s)
-            // is under the 240s deadline — but the attempt-2 backoff (2000ms)
+            // is under the 240s deadline — but the attempt-2 backoff (3000ms)
             // would push us past it, so we must NOT sleep-then-retry late.
             assert_eq!(
                 retry_wait_decision(true, false, 2, Duration::from_millis(239_500), DEADLINE),
@@ -824,6 +824,39 @@ mod tests {
             assert!(
                 retry_wait_decision(true, false, 1, Duration::from_secs(10), DEADLINE).is_some()
             );
+        }
+
+        /// #1043: the first connection/timeout backoff must be non-zero —
+        /// `attempt * 1000` made the only retry a timeout ever gets fire
+        /// instantly, re-sending the same heavy request the moment the
+        /// previous attempt gave up. The shape mirrors the 429 backoff.
+        #[test]
+        fn first_connection_backoff_is_non_zero() {
+            use crate::llm::connection_retry_backoff_ms;
+            assert_eq!(connection_retry_backoff_ms(0), 1000);
+            assert_eq!(connection_retry_backoff_ms(1), 2000);
+            assert_eq!(connection_retry_backoff_ms(2), 3000);
+        }
+
+        /// #1043: the retry deadline is two full attempts PLUS the backoff
+        /// budget between retries — the old `2 × timeout` was denominated in
+        /// the same unit the attempts consume, so the backoff could never
+        /// fit and the retry degenerated to an instant duplicate.
+        #[test]
+        fn retry_deadline_leaves_room_for_backoffs() {
+            use crate::llm::{retry_backoff_budget, retry_deadline};
+            let timeout = Duration::from_secs(120);
+            let deadline = retry_deadline(timeout);
+            assert_eq!(
+                deadline,
+                timeout * 2 + retry_backoff_budget(),
+                "deadline = 2 attempts + backoff budget"
+            );
+            // The incident shape: attempt 0 timed out (elapsed = timeout).
+            // With the backoff budget in the deadline, the retry decision
+            // admits the backoff and the second attempt genuinely runs.
+            let decision = retry_wait_decision(true, true, 0, timeout, deadline);
+            assert_eq!(decision, Some(1000), "first timeout retry waits 1s");
         }
     }
 

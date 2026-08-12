@@ -659,12 +659,19 @@ turn for many minutes.
 |---|---|---|
 | per-request timeout | `120s` default | Set `llm_request_timeout_secs` (below), or env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` for a one-off run. Floor 5s. |
 | connect timeout | `15s` | Fail fast on unreachable endpoints (vs ~2min OS TCP timeout). |
-| retries — fast connection errors (refused/reset) | up to `3` | Quick backoff; these fail in well under the timeout. |
-| retries — request **timeout** | at most `1` | A timeout already consumed a full attempt; retrying it is how a degraded endpoint compounds. |
-| overall retry deadline | `2 × per-request timeout` | Stops retrying once cumulative wall-clock (incl. the next backoff) would reach this — caps the *request-timeout* worst case at ~one timeout + one retry. |
+| retries — fast connection errors (refused/reset) | up to `3` | Backoff 1s/2s/3s — non-zero from the first retry (#1043); these fail in well under the timeout. |
+| retries — request **timeout** | at most `1` | A timeout already consumed a full attempt; retrying it is how a degraded endpoint compounds. The retry waits 1s first — never an instant duplicate (#1043). |
+| overall retry deadline | `2 × per-request timeout + backoff budget` | Two full attempts plus the backoffs between them (#1043). Stops retrying once cumulative wall-clock (incl. the next backoff) would reach this. |
 
-Worst case for a hung endpoint is therefore ~`2 × timeout` (≈4 min at the
-default), not the previous ~`4 × 300s` (≈20 min).
+Worst case for a hung endpoint is therefore ~`2 × timeout + ~6s` (≈4 min at
+the default), not the previous ~`4 × 300s` (≈20 min).
+
+Transport errors that exhaust the retry budget are returned with a stable
+`llm_transport:<kind>` token (`timeout` / `connect` / `request` / `body`) plus
+the full reqwest `source()` chain, so the log line names a timeout as a
+timeout (#1042) and the workflow layer classifies the failure from the token
+(`llm_transport:timeout` → retryable `timeout`; the other kinds → retryable
+`transient_infra`) rather than re-deriving it from provider phrasings (#1041).
 
 > The deadline bounds *request timeouts*. The `connect timeout` (15s, fixed) is
 > separate: at very low `request_timeout` settings (near the 5s floor) a single
@@ -690,10 +697,11 @@ falls through to the configured value rather than erasing it.
 
 Raise it when the upstream **queues** requests under load. Because a
 timed-out attempt consumes its full budget and the retry deadline is
-`2 × timeout`, a single stalled attempt eats the whole retry allowance: at the
-default, one stall costs 4 minutes and ends the turn. A larger value trades
-slower failure detection for surviving upstream latency spikes — it does not
-help if the endpoint never answers at all.
+`2 × timeout` plus the backoff budget, a single stalled attempt still eats
+most of the retry allowance: at the default, one stall costs ~4 minutes and
+ends the turn. A larger value trades slower failure detection for surviving
+upstream latency spikes — it does not help if the endpoint never answers at
+all.
 
 Note this is *not* a per-preset setting: a long-generating `coding` preset and a
 short `haiku` one share the same budget.
