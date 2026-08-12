@@ -741,11 +741,14 @@ fn role_is_carry_eligible(role: &PromotionRole) -> bool {
 ///    current artifact (code + contract for code gates).
 /// 4. The strictness floor allows the carry.
 ///
-/// **Lineage:** we anchor lineage to the planner explicitly naming the prior
-/// artifact ref within the same workflow, plus the content-addressed digest
-/// match. Cross-lineage collisions would require identical per-class digests,
-/// which content-addressing makes negligible. A dedicated
-/// `source_artifact_ref` ancestry table is a tracked follow-up.
+/// **Lineage:** the gateway records each accepted carry as an edge in the
+/// `carry_forward_lineage` ancestry table (gateway store, v80), so "which
+/// prior artifact did this artifact carry from" is answerable from the store
+/// and the chain is walkable back to the artifact whose gates ran fresh.
+/// Verification itself remains anchored to the planner explicitly naming the
+/// prior artifact ref within the same workflow, plus the content-addressed
+/// digest match — cross-lineage collisions would require identical per-class
+/// digests, which content-addressing makes negligible.
 pub fn verify_carry_claim(
     role: &PromotionRole,
     prior_record: Option<&PromotionRecord>,

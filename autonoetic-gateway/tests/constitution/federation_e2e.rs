@@ -2215,3 +2215,175 @@ fn escalate_orphaned_short_id_is_refused() {
         "error must explain the short_id_index is stale: {msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// carry-forward lineage ancestry table (#1067 follow-up)
+// ---------------------------------------------------------------------------
+
+/// #1067 follow-up: an accepted carry records a `carry_forward_lineage` edge
+/// (source artifact, role, strictness, prior digests) in the gateway store,
+/// and the ancestry walk answers the chain back to the artifact whose gates
+/// ran fresh. A rejected claim leaves no row.
+#[test]
+fn escalated_carry_records_ancestry_edge_and_rejected_leaves_none() {
+    let agent_id = "carry-lineage-agent";
+    let (mut s, current_artifact_id, store) = setup_test_unseeded(&high_risk_skill_md(agent_id));
+    // Carries are opt-in: default strictness `off` rejects every claim, so
+    // flip the dial like an operator would.
+    s.config.federation.carry_forward_strictness =
+        autonoetic_types::config::CarryForwardStrictness::Conservative;
+
+    // Two PRIOR artifacts with distinct bytes (distinct ids). Their promotion
+    // records get the CURRENT bundle's code/contract digests — the verified
+    // match that makes a carry sound — or a deliberately different code
+    // digest to force rejection.
+    let (prior_ok_id, _) = build_agent_bundle(
+        s._temp.path(),
+        "---\nname: prior-ok\n---\n# prior ok, different bytes\n",
+        "#!/usr/bin/env python3\nprint('prior ok')\n",
+    );
+    let (prior_bad_id, _) = build_agent_bundle(
+        s._temp.path(),
+        "---\nname: prior-bad\n---\n# prior bad, different bytes\n",
+        "#!/usr/bin/env python3\nprint('prior bad')\n",
+    );
+
+    let artifact_store =
+        autonoetic_gateway::artifact_store::ArtifactStore::new(&s.gateway_dir).unwrap();
+    let current_bundle = artifact_store.inspect(&current_artifact_id).unwrap();
+    let digests = autonoetic_gateway::runtime::federation_carry_forward::compute_federation_digests(
+        &current_bundle,
+        &artifact_store,
+    );
+    let cur_code = digests
+        .code_digest
+        .clone()
+        .expect("main.py is code — code_digest must be present");
+    let cur_contract = digests
+        .contract_digest
+        .clone()
+        .expect("frontmatter contract fields — contract_digest must be present");
+
+    let promo = PromotionStore::new(&s.gateway_dir).unwrap();
+    for (id, code) in [
+        (&prior_ok_id, cur_code.clone()),
+        (&prior_bad_id, "sha256:different-code".to_string()),
+    ] {
+        promo
+            .record_promotion(
+                id.clone(),
+                Some("sha256:art".to_string()),
+                Some("sha256:content".to_string()),
+                PromotionRole::UnitTestRunner,
+                "unit_test_runner.default",
+                true,
+                vec![],
+                Some("all clean".to_string()),
+                None,
+            )
+            .unwrap();
+        promo
+            .set_federation_digests(
+                id,
+                Some(code),
+                Some(cur_contract.clone()),
+                Some("sha256:prose".to_string()),
+            )
+            .unwrap();
+    }
+
+    let carried_verdict = |prior_ref: &str| {
+        serde_json::json!([{
+            "role": "unit_test_runner",
+            "agent_id": "unit_test_runner.default",
+            "passed": true,
+            "findings_summary": "no findings",
+            "recorded_at": chrono::Utc::now().to_rfc3339(),
+            "carried_from": {
+                "prior_artifact_ref": prior_ref,
+                "role": "unit_test_runner",
+                "justification": "prose-only fix; code and contract unchanged",
+            },
+        }])
+    };
+
+    // Rejected claim first: mismatched code digest must fail the escalate
+    // with a structured rejection and record NO lineage row.
+    let raw = s
+        .registry
+        .execute(
+            "federation_escalate",
+            &s.b_manifest,
+            &s.b_policy,
+            &s.builder_dir,
+            Some(&s.gateway_dir),
+            &serde_json::to_string(&serde_json::json!({
+                "agent_id": agent_id,
+                "artifact_id": current_artifact_id,
+                "role_verdicts": carried_verdict(&prior_bad_id),
+                "planner_synthesis": "Propose carry.",
+                "root_session_id": "root-lineage",
+            }))
+            .unwrap(),
+            Some("session-escalate"),
+            None,
+            Some(&s.config),
+            Some(store.clone()),
+            None,
+        );
+    assert!(
+        raw.is_err(),
+        "a mismatched carry claim must be rejected: {raw:?}"
+    );
+    assert!(
+        format!("{}", raw.unwrap_err()).contains("carry_forward_rejected"),
+        "rejection must carry the structured carry_forward_rejected reason"
+    );
+    assert!(
+        store.get_carry_lineage(&current_artifact_id).unwrap().is_empty(),
+        "a rejected claim must not leave a lineage row"
+    );
+
+    // Accepted claim: escalate succeeds, and the ancestry edge is recorded.
+    let parsed = escalate(
+        &s,
+        &store,
+        serde_json::json!({
+            "agent_id": agent_id,
+            "artifact_id": current_artifact_id,
+            "role_verdicts": carried_verdict(&prior_ok_id),
+            "planner_synthesis": "Propose carry.",
+            "root_session_id": "root-lineage",
+        }),
+    );
+    assert_eq!(
+        parsed.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "a verified carry must be accepted: {parsed}"
+    );
+
+    let rows = store.get_carry_lineage(&current_artifact_id).unwrap();
+    assert_eq!(rows.len(), 1, "one accepted carry, one edge");
+    assert_eq!(rows[0].role, "unit_test_runner");
+    assert_eq!(rows[0].source_artifact_id, prior_ok_id);
+    assert_eq!(rows[0].source_artifact_ref, prior_ok_id);
+    assert_eq!(rows[0].strictness, "conservative");
+    assert_eq!(
+        rows[0].source_code_digest.as_deref(),
+        Some(cur_code.as_str())
+    );
+    assert_eq!(
+        rows[0].source_contract_digest.as_deref(),
+        Some(cur_contract.as_str())
+    );
+
+    // The ancestry walk answers the chain: current -> prior_ok (which ran
+    // fresh — no edge on it).
+    let chain = store.walk_carry_ancestors(&current_artifact_id).unwrap();
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].source_artifact_id, prior_ok_id);
+    assert!(
+        store.walk_carry_ancestors(&prior_ok_id).unwrap().is_empty(),
+        "the original gate run is the root of the chain"
+    );
+}
