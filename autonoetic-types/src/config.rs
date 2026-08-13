@@ -62,6 +62,14 @@ pub struct LlmPreset {
     /// server is a real deployment shape). Maps to a [`Sink`] at request time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_class: Option<crate::egress::EgressClass>,
+
+    /// Optional per-preset per-request timeout (seconds). Overrides the global
+    /// `llm_request_timeout_secs` for this preset — a `coding` preset
+    /// generating whole files can outlast a `haiku` digest preset (#1045).
+    /// The retry deadline is derived from the per-attempt timeout, so this
+    /// also makes the retry budget per-preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Schema enforcement mode for agent.spawn payloads.
@@ -3859,6 +3867,7 @@ mod tests {
             latency: None,
             routing: None,
             egress_class: None,
+            request_timeout_secs: None,
         }
     }
 
@@ -4071,6 +4080,7 @@ mod tests {
                 latency: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         config.llm_presets.insert(
@@ -4098,6 +4108,7 @@ mod tests {
                     hybrid: HybridRoutingConfig::default(),
                 }),
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         config
@@ -4136,6 +4147,7 @@ mod tests {
                     hybrid: HybridRoutingConfig::default(),
                 }),
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
 
@@ -4164,6 +4176,7 @@ mod tests {
                 latency: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
 
@@ -4201,6 +4214,7 @@ mod tests {
                     hybrid: HybridRoutingConfig::default(),
                 }),
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
 
@@ -4242,6 +4256,7 @@ mod tests {
                 latency: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         config.llm_presets.insert(
@@ -4269,6 +4284,7 @@ mod tests {
                     hybrid: HybridRoutingConfig::default(),
                 }),
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         config

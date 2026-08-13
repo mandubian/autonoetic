@@ -256,6 +256,7 @@ pub fn init_agent_scaffold(
                 thinking: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         autonoetic_gateway::config::save_config(config_path, &config)?;
@@ -2004,6 +2005,7 @@ pub fn handle_agent_import_skill(
             routing_preset: None,
             thinking: None,
             egress_class: None,
+            request_timeout_secs: None,
         })
     } else {
         let resolved = resolve_llm_config(&config, None, None, provider, model);
@@ -2020,6 +2022,7 @@ pub fn handle_agent_import_skill(
             routing_preset: resolved.routing_preset,
             thinking: None,
             egress_class: None,
+            request_timeout_secs: None,
         })
     };
 
@@ -2768,6 +2771,7 @@ Use tools when needed.
                 thinking: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         config
@@ -2801,6 +2805,7 @@ Use tools when needed.
                 thinking: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         config

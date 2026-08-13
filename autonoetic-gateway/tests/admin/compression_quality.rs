@@ -39,6 +39,7 @@ fn get_test_llm_config() -> Option<(LlmPreset, reqwest::Client)> {
         latency: None,
         routing: None,
         egress_class: None,
+        request_timeout_secs: None,
     };
     Some((preset, reqwest::Client::new()))
 }

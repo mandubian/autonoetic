@@ -30,10 +30,10 @@ pub mod xml_tool_calls;
 /// - `tcp_keepalive`: 30 s — detect dead TCP connections proactively.
 /// - **No global request timeout** — LLM streams can run for minutes; a blanket
 ///   `timeout()` would kill legitimate long-running responses. Instead, each
-///   non-streaming `complete()` call applies a per-request timeout
-///   ([`request_timeout`], default 120s, env `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS`)
-///   with a fail-fast, wall-clock-bounded retry policy
-///   ([`next_connection_retry_wait`]).
+///   non-streaming `complete()` call applies a per-request timeout resolved at
+///   driver-build time (env override → preset `request_timeout_secs` →
+///   `llm_request_timeout_secs` → default 120s, #1045) with a fail-fast,
+///   wall-clock-bounded retry policy ([`next_connection_retry_wait`]).
 pub fn build_llm_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
@@ -94,12 +94,12 @@ const MIN_REQUEST_TIMEOUT_SECS: u64 = 5;
 /// The configured per-request timeout, published once at gateway startup from
 /// [`autonoetic_types::config::GatewayConfig::llm_request_timeout_secs`].
 ///
-/// A process-wide cell rather than a threaded parameter because
-/// [`request_timeout`] is called deep inside the drivers, which resolve their
-/// endpoint from a `ResolvedProvider` and have no view of gateway config. Moving
-/// the value onto `ResolvedProvider` — which would also allow a per-preset
-/// timeout, so a `coding` preset could outlast a `haiku` one — is the follow-up
-/// tracked separately.
+/// A process-wide cell rather than a threaded parameter because some
+/// `LlmConfig`-producing auxiliary paths (context compression, capsule delta
+/// extraction, routing classifier) resolve from presets without a
+/// `GatewayConfig` in scope. It is read exactly once per driver build, in
+/// [`build_driver`]'s precedence merge — drivers themselves only ever see the
+/// resolved value on `ResolvedProvider::request_timeout` (#1045).
 static CONFIGURED_REQUEST_TIMEOUT_SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 /// Publish the configured per-request timeout. Called once during gateway
@@ -111,25 +111,19 @@ pub(crate) fn set_configured_request_timeout_secs(secs: Option<u64>) {
     }
 }
 
-/// The per-request completion timeout.
-///
-/// Precedence: `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (ad-hoc override) →
-/// configured `llm_request_timeout_secs` → [`DEFAULT_REQUEST_TIMEOUT_SECS`].
-pub fn request_timeout() -> std::time::Duration {
-    let secs = resolve_request_timeout_secs(
-        std::env::var("AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS")
-            .ok()
-            .as_deref(),
-        CONFIGURED_REQUEST_TIMEOUT_SECS.get().copied(),
-    );
-    std::time::Duration::from_secs(secs)
-}
-
-/// Pure resolution core of [`request_timeout`], split out so precedence and
-/// clamping are testable without mutating process env or the `OnceLock`.
-pub(crate) fn resolve_request_timeout_secs(env: Option<&str>, configured: Option<u64>) -> u64 {
+/// Pure resolution of the per-request timeout, in precedence order (#1045):
+/// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (ad-hoc override) → preset-level
+/// `request_timeout_secs` (carried on the resolved `LlmConfig`) → gateway
+/// `llm_request_timeout_secs` → [`DEFAULT_REQUEST_TIMEOUT_SECS`]. Values below
+/// [`MIN_REQUEST_TIMEOUT_SECS`] are treated as unset and fall through.
+pub(crate) fn resolve_request_timeout_secs(
+    env: Option<&str>,
+    preset: Option<u64>,
+    configured: Option<u64>,
+) -> u64 {
     env.and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS)
+        .or_else(|| preset.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
         .or_else(|| configured.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
 }
@@ -1013,6 +1007,17 @@ pub fn build_driver(
             .as_ref()
             .and_then(|env_name| std::env::var(env_name).ok())
     };
+    // Resolve the per-request timeout at the factory (#1045): env override →
+    // preset field (carried on the merged LlmConfig) → gateway default
+    // (published at config load) → built-in default. Drivers read the value
+    // off `ResolvedProvider`; they never read the global themselves.
+    let request_timeout = std::time::Duration::from_secs(resolve_request_timeout_secs(
+        std::env::var("AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+        config.request_timeout_secs,
+        CONFIGURED_REQUEST_TIMEOUT_SECS.get().copied(),
+    ));
     let resolved = provider::resolve(
         &config.provider,
         &config.model,
@@ -1026,6 +1031,7 @@ pub fn build_driver(
         api_key_override.as_deref(),
         config.chat_only,
         config.egress_class,
+        request_timeout,
     )?;
 
     // Capture the egress sink before `resolved` is moved into the inner driver.

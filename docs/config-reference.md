@@ -691,9 +691,10 @@ as well as the gateway.
 
 Applies process-wide, published at config load, so every entry point
 (`gateway start`, `run`, `chat`) uses one budget. Precedence:
-`AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` → `llm_request_timeout_secs` → `120s` —
-the env var stays an ad-hoc override, and a malformed or sub-floor env value
-falls through to the configured value rather than erasing it.
+`AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` → preset `request_timeout_secs` →
+`llm_request_timeout_secs` → `120s` — the env var stays an ad-hoc override,
+and a malformed or sub-floor value falls through to the next level rather
+than erasing it.
 
 Raise it when the upstream **queues** requests under load. Because a
 timed-out attempt consumes its full budget and the retry deadline is
@@ -703,8 +704,20 @@ ends the turn. A larger value trades slower failure detection for surviving
 upstream latency spikes — it does not help if the endpoint never answers at
 all.
 
-Note this is *not* a per-preset setting: a long-generating `coding` preset and a
-short `haiku` one share the same budget.
+Per-preset override (#1045): a fixed preset may set `request_timeout_secs`
+to outlast (or tighten) the global budget — e.g. a long-generating `coding`
+preset at 300s while `haiku` digests stay at 120s:
+
+```yaml
+llm_presets:
+  coding:
+    provider: anthropic
+    model: claude-sonnet-4
+    request_timeout_secs: 300
+```
+
+Because `retry_deadline` derives from the per-attempt timeout, this also
+makes the retry budget per-preset.
 
 ## LLM Presets
 
@@ -730,6 +743,7 @@ Unified registry for all LLM configurations. Each preset is either **fixed** (co
 | `latency.ttft_ms` | u64 | `null` | Expected time-to-first-token (ms). |
 | `latency.tokens_per_second` | u64 | `null` | Expected output throughput. |
 | `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](rfc/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
+| `request_timeout_secs` | integer | `null` | Per-preset per-request timeout (seconds). Overrides the global `llm_request_timeout_secs` for this preset (#1045) — a long-generating `coding` preset can outlast a `haiku` digest preset. The retry deadline derives from it, so the retry budget is per-preset too. Floor 5s; sub-floor values fall through to the global default. |
 
 ### Routing Preset Fields
 

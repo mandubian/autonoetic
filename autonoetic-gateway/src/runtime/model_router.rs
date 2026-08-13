@@ -607,6 +607,7 @@ pub fn create_router_from_preset(
                 routing_preset: None,
                 thinking: None,
                 egress_class: None,
+                request_timeout_secs: None,
             });
             (
                 Box::new(LlmClassifierRouter::new(
@@ -631,6 +632,7 @@ pub fn create_router_from_preset(
                 routing_preset: None,
                 thinking: None,
                 egress_class: None,
+                request_timeout_secs: None,
             });
             (
                 Box::new(HybridRouter::new(
@@ -675,6 +677,11 @@ pub fn decision_to_llm_config(
         egress_class: model_entry
             .and_then(|e| e.config.egress_class)
             .or(base_config.egress_class),
+        // Same precedence for the per-preset request timeout (#1045): the
+        // routed-to preset's timeout wins over the base config's.
+        request_timeout_secs: model_entry
+            .and_then(|e| e.config.request_timeout_secs)
+            .or(base_config.request_timeout_secs),
     }
 }
 
@@ -703,6 +710,7 @@ mod tests {
                     routing_preset: None,
                     thinking: None,
                     egress_class: None,
+                    request_timeout_secs: None,
                 },
                 tier: CapabilityTier::Premium,
             },
@@ -721,6 +729,7 @@ mod tests {
                     routing_preset: None,
                     thinking: None,
                     egress_class: None,
+                    request_timeout_secs: None,
                 },
                 tier: CapabilityTier::Standard,
             },
@@ -739,6 +748,7 @@ mod tests {
                     routing_preset: None,
                     thinking: None,
                     egress_class: None,
+                    request_timeout_secs: None,
                 },
                 tier: CapabilityTier::Economy,
             },
@@ -759,6 +769,7 @@ mod tests {
             routing_preset: None,
             thinking: None,
             egress_class: None,
+            request_timeout_secs: None,
         }
     }
 

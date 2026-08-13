@@ -41,6 +41,7 @@ fn reader_manifest(agent_id: &str) -> AgentManifest {
             routing_preset: None,
             thinking: None,
             egress_class: None,
+            request_timeout_secs: None,
         }),
         ..TestManifest::new().build()
     }
@@ -135,6 +136,7 @@ async fn post_session_digest_writes_narrative_and_memories() -> anyhow::Result<(
         routing_preset: None,
         thinking: None,
         egress_class: None,
+        request_timeout_secs: None,
     };
     let driver = FixedJsonDigestDriver;
     run_post_session_digest_with_driver(

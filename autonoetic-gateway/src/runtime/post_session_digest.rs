@@ -167,6 +167,7 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         routing_preset: None,
         thinking: None,
         egress_class: None,
+        request_timeout_secs: None,
     })
 }
 
@@ -232,6 +233,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         routing_preset: None,
         thinking: p.thinking.clone(),
         egress_class: p.egress_class,
+        request_timeout_secs: None,
     }
 }
 
