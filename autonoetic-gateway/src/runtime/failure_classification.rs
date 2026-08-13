@@ -428,6 +428,20 @@ pub(crate) fn classify_task_status(
                 || summary.contains("archived revision exists")
             {
                 Some(WorkflowFailureMetadata::install_conflict())
+            } else if summary.contains("llm_transport:timeout") {
+                // Structured token stamped by the LLM layer when its transport
+                // retry loop gave up (#1041): the layer that computed the
+                // classification (reqwest's is_timeout/is_connect/…) names it,
+                // instead of this list re-deriving it from provider phrasings.
+                // A bare "error sending request for url (...)" string matches
+                // none of the substrings below and used to fall through to
+                // unknown (never retried) even though the LLM layer itself
+                // considered the same error transient.
+                Some(WorkflowFailureMetadata::timeout())
+            } else if summary.contains("llm_transport:") {
+                // connect/request/body/other — transient transport failures
+                // classified upstream; all worth a mechanical retry.
+                Some(WorkflowFailureMetadata::transient_infra())
             } else if summary.contains("connection refused")
                 || summary.contains("transport reset")
                 || summary.contains("502")
@@ -538,6 +552,55 @@ mod tests {
         assert_eq!(err.failure_class, Some(FailureClass::InstallConflict));
         assert_eq!(err.retry_advice, Some(RetryAdvice::DoNotRetry));
         assert_eq!(err.retryable, Some(false));
+    }
+
+    /// #1041: an LLM transport error carries the structured
+    /// `llm_transport:<kind>` token stamped by the driver — the layer that
+    /// computed the classification (reqwest's is_timeout/is_connect/…)
+    /// names it, and this list trusts the token instead of re-deriving the
+    /// class from provider phrasings. Before the token, the bare reqwest
+    /// Display ("error sending request for url (...)") matched nothing and
+    /// fell through to unknown — never mechanically retried, even though
+    /// the LLM layer itself considered the same error transient.
+    #[test]
+    fn llm_transport_timeout_token_classifies_as_retryable_timeout() {
+        let summary = "llm_transport:timeout attempts=2 elapsed_ms=240133 \
+                       source_chain=[operation timed out]: \
+                       error sending request for url (https://example/v1/chat/completions)";
+        let metadata = classify_task_status(TaskRunStatus::Failed, Some(summary))
+            .expect("timeout metadata");
+        assert_eq!(metadata.failure_class, Some(FailureClass::Timeout));
+        assert_eq!(metadata.retryable, Some(true));
+    }
+
+    #[test]
+    fn llm_transport_non_timeout_tokens_classify_as_retryable_transient() {
+        for kind in ["connect", "request", "body", "other"] {
+            let summary = format!(
+                "llm_transport:{kind} attempts=1 elapsed_ms=12 source_chain=[connection refused]: \
+                 error sending request for url (https://example/)"
+            );
+            let metadata = classify_task_status(TaskRunStatus::Failed, Some(&summary))
+                .expect("transient metadata");
+            assert_eq!(
+                metadata.failure_class,
+                Some(FailureClass::TransientInfra),
+                "{kind}"
+            );
+            assert_eq!(metadata.retryable, Some(true), "{kind}");
+        }
+    }
+
+    /// The token survives wrapping (e.g. a failover chain prepending
+    /// context): classification is substring-based on a stable token.
+    #[test]
+    fn llm_transport_token_survives_wrapping() {
+        let summary = "all fallback models failed; last error: llm_transport:timeout \
+                       attempts=2 elapsed_ms=240000 source_chain=[]: error sending request";
+        let metadata = classify_task_status(TaskRunStatus::Failed, Some(summary))
+            .expect("timeout metadata");
+        assert_eq!(metadata.failure_class, Some(FailureClass::Timeout));
+        assert_eq!(metadata.retryable, Some(true));
     }
 
     // A missing sandbox driver must be terminal & unable-to-evaluate, not the

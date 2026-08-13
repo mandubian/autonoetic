@@ -484,7 +484,7 @@ impl LlmDriver for OpenAiDriver {
         let complete_timeout = crate::llm::request_timeout();
         // Bound total wall-clock so a slow endpoint can't multiply the
         // per-request timeout across retries.
-        let retry_deadline = complete_timeout.saturating_mul(2);
+        let retry_deadline = crate::llm::retry_deadline(complete_timeout);
         let loop_start = std::time::Instant::now();
         for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
@@ -504,16 +504,22 @@ impl LlmDriver for OpenAiDriver {
                         loop_start.elapsed(),
                         retry_deadline,
                     ) {
-                        tracing::warn!(
+                        crate::llm::log_transport_retry(
+                            crate::llm::classify_transport_error(&e),
                             attempt,
                             wait_ms,
-                            error = %e,
-                            "LLM connection error, retrying"
+                            loop_start.elapsed(),
+                            &e,
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
-                    return Err(e.into());
+                    return Err(crate::llm::transport_terminal_error(
+                        crate::llm::classify_transport_error(&e),
+                        attempt + 1,
+                        loop_start.elapsed(),
+                        &e,
+                    ));
                 }
             };
             let status = response.status();
@@ -577,13 +583,21 @@ impl LlmDriver for OpenAiDriver {
                         tracing::warn!(
                             attempt,
                             wait_ms,
+                            elapsed_ms = loop_start.elapsed().as_millis() as u64,
+                            transport_kind = "body",
                             error = %e,
+                            error_source_chain = %crate::llm::transport_error_source_chain(&e),
                             "LLM response body read failed, retrying"
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
-                    return Err(anyhow::anyhow!("error reading LLM response body: {}", e));
+                    return Err(crate::llm::transport_terminal_error(
+                        crate::llm::classify_transport_error(&e),
+                        attempt + 1,
+                        loop_start.elapsed(),
+                        &e,
+                    ));
                 }
             };
             let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
@@ -629,7 +643,7 @@ impl LlmDriver for OpenAiDriver {
         let body = self.build_body(req, true);
 
         let complete_timeout = crate::llm::request_timeout();
-        let retry_deadline = complete_timeout.saturating_mul(2);
+        let retry_deadline = crate::llm::retry_deadline(complete_timeout);
         let loop_start = std::time::Instant::now();
         'retry: for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
@@ -644,14 +658,23 @@ impl LlmDriver for OpenAiDriver {
                 Ok(r) => r,
                 Err(e) if crate::llm::is_transient_connection_error(&e) && attempt < crate::llm::MAX_CONNECTION_RETRIES => {
                     let wait_ms = crate::llm::connection_retry_backoff_ms(attempt);
-                    tracing::warn!(
+                    crate::llm::log_transport_retry(
+                        crate::llm::classify_transport_error(&e),
                         attempt,
                         wait_ms,
-                        error = %e,
-                        "LLM stream connection error, retrying"
+                        loop_start.elapsed(),
+                        &e,
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                     continue;
+                }
+                Err(e) if crate::llm::is_transient_connection_error(&e) => {
+                    return Err(crate::llm::transport_terminal_error(
+                        crate::llm::classify_transport_error(&e),
+                        attempt + 1,
+                        loop_start.elapsed(),
+                        &e,
+                    ));
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -714,7 +737,10 @@ impl LlmDriver for OpenAiDriver {
                                 tracing::warn!(
                                     attempt,
                                     wait_ms,
+                                    elapsed_ms = loop_start.elapsed().as_millis() as u64,
+                                    transport_kind = "body",
                                     error = %e,
+                                    error_source_chain = %crate::llm::transport_error_source_chain(&e),
                                     "LLM stream body read failed before any delta, retrying"
                                 );
                                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms))
@@ -722,7 +748,12 @@ impl LlmDriver for OpenAiDriver {
                                 continue 'retry;
                             }
                         }
-                        return Err(e.into());
+                        return Err(crate::llm::transport_terminal_error(
+                            crate::llm::classify_transport_error(&e),
+                            attempt + 1,
+                            loop_start.elapsed(),
+                            &e,
+                        ));
                     }
                 };
                 buffer.push_str(&String::from_utf8_lossy(&chunk));

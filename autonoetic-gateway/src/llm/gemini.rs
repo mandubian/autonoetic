@@ -173,7 +173,7 @@ impl LlmDriver for GeminiDriver {
         let complete_timeout = crate::llm::request_timeout();
         // Bound total wall-clock so a slow endpoint can't multiply the
         // per-request timeout across retries.
-        let retry_deadline = complete_timeout.saturating_mul(2);
+        let retry_deadline = crate::llm::retry_deadline(complete_timeout);
         let loop_start = std::time::Instant::now();
         for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
             let builder = self.apply_auth(
@@ -192,16 +192,22 @@ impl LlmDriver for GeminiDriver {
                         loop_start.elapsed(),
                         retry_deadline,
                     ) {
-                        tracing::warn!(
+                        crate::llm::log_transport_retry(
+                            crate::llm::classify_transport_error(&e),
                             attempt,
                             wait_ms,
-                            error = %e,
-                            "Gemini connection error, retrying"
+                            loop_start.elapsed(),
+                            &e,
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
-                    return Err(e.into());
+                    return Err(crate::llm::transport_terminal_error(
+                        crate::llm::classify_transport_error(&e),
+                        attempt + 1,
+                        loop_start.elapsed(),
+                        &e,
+                    ));
                 }
             };
             let status = response.status().as_u16();
@@ -264,13 +270,21 @@ impl LlmDriver for GeminiDriver {
                         tracing::warn!(
                             attempt,
                             wait_ms,
+                            elapsed_ms = loop_start.elapsed().as_millis() as u64,
+                            transport_kind = "body",
                             error = %e,
+                            error_source_chain = %crate::llm::transport_error_source_chain(&e),
                             "LLM response body read failed, retrying"
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                         continue;
                     }
-                    return Err(anyhow::anyhow!("error reading LLM response body: {}", e));
+                    return Err(crate::llm::transport_terminal_error(
+                        crate::llm::classify_transport_error(&e),
+                        attempt + 1,
+                        loop_start.elapsed(),
+                        &e,
+                    ));
                 }
             };
             let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
