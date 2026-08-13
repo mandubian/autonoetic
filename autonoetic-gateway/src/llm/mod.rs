@@ -955,6 +955,130 @@ pub trait LlmDriver: Send + Sync {
             .await;
         Ok(response)
     }
+
+    /// The resolved per-request timeout for this driver (#1045). On the
+    /// streaming turn path (#1044) the value doubles as the **idle-gap**
+    /// budget: the maximum silence between streamed chunks before the turn
+    /// declares the upstream stalled.
+    fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
+    }
+}
+
+/// Run a turn's completion through the streaming path with stall detection
+/// (#1044).
+///
+/// A blocking `complete()` cannot distinguish "the upstream accepted and
+/// stalled without emitting anything" from "generation was underway and the
+/// wall-clock ceiling cut it off" — both surface as a bare timeout after zero
+/// observable output, and they need opposite fixes (fail fast vs. raise the
+/// budget). Streaming makes time-to-first-byte a first-class signal and
+/// replaces the whole-response wall-clock cap with an **idle-gap** timeout:
+/// silence longer than `driver.request_timeout()` between chunks declares a
+/// stall. A legitimately long generation that keeps emitting is no longer
+/// punished for its length.
+///
+/// Providers without real streaming fall back to the trait's default
+/// `stream()` (a single chunk around `complete()`), where the idle gap
+/// degenerates to the same whole-request cap as before — no regression.
+///
+/// A stall aborts the in-flight attempt and returns an error carrying the
+/// `llm_transport:timeout` token (#1041), so the workflow classifier marks it
+/// retryable and the failover chain can try the next preset. Nothing is
+/// salvaged from a stalled stream: partial tool-call JSON is unsafe to
+/// append to history, and the turn-level retry starts clean.
+pub async fn complete_with_stall_detection(
+    driver: &Arc<dyn LlmDriver>,
+    req: &CompletionRequest,
+) -> anyhow::Result<CompletionResponse> {
+    let idle = driver.request_timeout();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(256);
+    let task_driver = driver.clone();
+    let task_req = req.clone();
+    let mut task = tokio::spawn(async move { task_driver.stream(&task_req, tx).await });
+
+    let start = std::time::Instant::now();
+    let mut ttfb: Option<std::time::Duration> = None;
+    let mut chunks: u64 = 0;
+    let mut text_chars: u64 = 0;
+    loop {
+        match tokio::time::timeout(idle, rx.recv()).await {
+            Ok(Some(event)) => {
+                if ttfb.is_none() {
+                    ttfb = Some(start.elapsed());
+                }
+                chunks += 1;
+                if let StreamEvent::TextDelta(t) = &event {
+                    text_chars += t.len() as u64;
+                }
+            }
+            Ok(None) => {
+                // Channel closed: the stream task finished. Join for the result.
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                match task.await {
+                    Ok(result) => {
+                        match &result {
+                            Ok(_) => tracing::debug!(
+                                target: "llm",
+                                ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                                chunks,
+                                text_chars,
+                                elapsed_ms,
+                                "LLM stream completed"
+                            ),
+                            Err(_) => tracing::debug!(
+                                target: "llm",
+                                ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                                chunks,
+                                elapsed_ms,
+                                "LLM stream failed"
+                            ),
+                        }
+                        return result;
+                    }
+                    Err(join_err) => {
+                        return Err(anyhow::anyhow!(
+                            "llm_transport:other attempts=1 elapsed_ms={} source_chain=[]: \
+                             stream task join failed: {}",
+                            elapsed_ms,
+                            join_err
+                        ));
+                    }
+                }
+            }
+            Err(_elapsed) => {
+                // Idle gap exceeded: the upstream stalled. Abort the attempt;
+                // the turn-level failover/retry starts clean.
+                task.abort();
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let phase = if ttfb.is_none() {
+                    "stalled before first byte"
+                } else {
+                    "stalled mid-stream"
+                };
+                tracing::warn!(
+                    target: "llm",
+                    phase,
+                    idle_ms = idle.as_millis() as u64,
+                    ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                    chunks,
+                    text_chars,
+                    elapsed_ms,
+                    "LLM stream stalled"
+                );
+                return Err(anyhow::anyhow!(
+                    "llm_transport:timeout attempts=1 elapsed_ms={} source_chain=[]: \
+                     stream {} — no chunk for {}ms (chunks={}, text_chars={}, ttfb_ms={:?})",
+                    elapsed_ms,
+                    phase,
+                    idle.as_millis(),
+                    chunks,
+                    text_chars,
+                    ttfb.map(|d| d.as_millis()),
+                ));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

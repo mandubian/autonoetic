@@ -3695,9 +3695,13 @@ impl AgentExecutor {
                 // the batch forced a reroute; otherwise the session's primary
                 // (`self.llm`). Both are already wrapped by the egress
                 // chokepoint at build time (RFC §5.2), so filtering applies
-                // either way.
+                // either way. The call goes through the streaming stall
+                // detector (#1044): TTFB distinguishes a stalled upstream from
+                // slow generation, and the budget is an idle gap between
+                // chunks, not a wall-clock cap on the whole response.
                 let primary_driver = primary_egress_driver.as_ref().unwrap_or(&self.llm);
-                let response = primary_driver.complete(&req).await;
+                let response =
+                    crate::llm::complete_with_stall_detection(primary_driver, &req).await;
                 // Egress chokepoint audit (RFC §9.1): emit the causal events
                 // for what the wrapper withheld. Only fires when labels are
                 // attached to this request (unconfigured deployments skip
@@ -3879,7 +3883,7 @@ impl AgentExecutor {
                                     ));
                                 }
                             }
-                            match fb_driver.complete(&req).await {
+                            match crate::llm::complete_with_stall_detection(&fb_driver, &req).await {
                                 Ok(resp) => {
                                     tracing::info!(
                                         target: "autonoetic::model_routing",

@@ -1157,3 +1157,162 @@ mod tests {
         assert!(!crate::llm::is_failover_eligible_error(&err));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stall-detecting streaming turn path (#1044)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod stall_detection {
+    use crate::llm::{
+        complete_with_stall_detection, CompletionRequest, CompletionResponse, LlmDriver,
+        StopReason, StreamEvent, TokenUsage,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A driver that emits scripted chunks with scripted delays, for timing
+    /// tests without a network. `request_timeout` doubles as the idle-gap
+    /// budget the stall detector enforces.
+    struct ScriptedDriver {
+        script: Vec<(Duration, Option<StreamEvent>)>,
+        idle: Duration,
+    }
+
+    impl ScriptedDriver {
+        fn ok_response() -> CompletionResponse {
+            CompletionResponse {
+                text: "hello".to_string(),
+                tool_calls: vec![],
+                reasoning_content: None,
+                reasoning_details: None,
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmDriver for ScriptedDriver {
+        async fn complete(
+            &self,
+            _req: &CompletionRequest,
+        ) -> anyhow::Result<CompletionResponse> {
+            Ok(Self::ok_response())
+        }
+
+        async fn stream(
+            &self,
+            _req: &CompletionRequest,
+            tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        ) -> anyhow::Result<CompletionResponse> {
+            for (delay, event) in &self.script {
+                tokio::time::sleep(*delay).await;
+                if let Some(ev) = event {
+                    let _ = tx.send(ev.clone()).await;
+                }
+            }
+            Ok(Self::ok_response())
+        }
+
+        fn request_timeout(&self) -> Duration {
+            self.idle
+        }
+    }
+
+    fn req() -> CompletionRequest {
+        CompletionRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: None,
+            temperature: None,
+            metadata: None,
+            thinking: None,
+            prompt_cache_key: None,
+            system_cache_prefix_bytes: None,
+        }
+    }
+
+    /// The incident shape: zero bytes in the whole budget. The error must
+    /// name the stall phase and carry the retryable `llm_transport:timeout`
+    /// token so the workflow layer retries mechanically (#1041).
+    #[tokio::test]
+    async fn stall_before_first_byte_is_a_retryable_timeout() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: vec![(Duration::from_millis(500), None)], // silence past the gap
+            idle: Duration::from_millis(50),
+        });
+        let err = complete_with_stall_detection(&driver, &req())
+            .await
+            .expect_err("stall must error");
+        let msg = err.to_string();
+        assert!(msg.contains("llm_transport:timeout"), "{msg}");
+        assert!(msg.contains("stalled before first byte"), "{msg}");
+    }
+
+    /// A stall after partial output is mid-stream; the phase distinguishes
+    /// "upstream stalled" from "slow generation" in the log.
+    #[tokio::test]
+    async fn stall_mid_stream_reports_phase() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: vec![
+                (Duration::from_millis(10), Some(StreamEvent::TextDelta("hi".into()))),
+                (Duration::from_millis(500), None), // then silence
+            ],
+            idle: Duration::from_millis(50),
+        });
+        let err = complete_with_stall_detection(&driver, &req())
+            .await
+            .expect_err("stall must error");
+        let msg = err.to_string();
+        assert!(msg.contains("llm_transport:timeout"), "{msg}");
+        assert!(msg.contains("stalled mid-stream"), "{msg}");
+    }
+
+    /// A stream that keeps emitting within the gap budget completes even when
+    /// its total duration far exceeds the old wall-clock cap — the whole point
+    /// of gap-based budgeting.
+    #[tokio::test]
+    async fn long_generation_under_gap_budget_completes() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: (0..10)
+                .map(|i| {
+                    (
+                        Duration::from_millis(30), // each gap under the 50ms budget
+                        Some(StreamEvent::TextDelta(format!("chunk{i}"))),
+                    )
+                })
+                .collect(), // total ~300ms, 6× the 50ms idle budget
+            idle: Duration::from_millis(50),
+        });
+        let resp = complete_with_stall_detection(&driver, &req())
+            .await
+            .expect("long but chatty stream must complete");
+        assert_eq!(resp.text, "hello");
+    }
+
+    /// A driver error propagates through the detector unchanged (it already
+    /// carries its own llm_transport token from the driver layer).
+    #[tokio::test]
+    async fn driver_error_propagates() {
+        struct FailDriver;
+        #[async_trait::async_trait]
+        impl LlmDriver for FailDriver {
+            async fn complete(
+                &self,
+                _req: &CompletionRequest,
+            ) -> anyhow::Result<CompletionResponse> {
+                anyhow::bail!("llm_transport:connect attempts=1 elapsed_ms=3 source_chain=[]: refused")
+            }
+            fn request_timeout(&self) -> Duration {
+                Duration::from_millis(50)
+            }
+        }
+        let driver: Arc<dyn LlmDriver> = Arc::new(FailDriver);
+        let err = complete_with_stall_detection(&driver, &req())
+            .await
+            .expect_err("driver error must propagate");
+        assert!(err.to_string().contains("llm_transport:connect"));
+    }
+}

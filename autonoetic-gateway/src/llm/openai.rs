@@ -470,6 +470,12 @@ impl OpenAiDriver {
 
 #[async_trait::async_trait]
 impl LlmDriver for OpenAiDriver {
+    /// #1045: the resolved per-request timeout, doubling as the
+    /// idle-gap budget on the streaming turn path (#1044).
+    fn request_timeout(&self) -> std::time::Duration {
+        self.provider.request_timeout
+    }
+
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let body = self.build_body(req, false);
 

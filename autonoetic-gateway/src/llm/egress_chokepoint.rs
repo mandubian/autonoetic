@@ -427,6 +427,45 @@ impl LlmDriver for EgressChokepointDriver {
         }
         self.inner.complete(&filtered).await
     }
+
+    /// #1044: stream through the same filter-then-delegate path as
+    /// `complete()`. Without this override the trait default would collapse
+    /// every turn behind the chokepoint back to a blocking `complete()`,
+    /// defeating the stall detector.
+    async fn stream(
+        &self,
+        request: &CompletionRequest,
+        tx: tokio::sync::mpsc::Sender<crate::llm::StreamEvent>,
+    ) -> anyhow::Result<CompletionResponse> {
+        let labels = match Self::read_label_map(request)? {
+            None => {
+                return self.inner.stream(request, tx).await;
+            }
+            Some(map) if map.is_empty() => {
+                return self.inner.stream(request, tx).await;
+            }
+            Some(map) => map,
+        };
+        Self::read_declassified_sinks(request)?;
+        let (filtered, report) = self.filter_request(request, &labels);
+        if report.has_violations() {
+            tracing::error!(
+                target: "egress_chokepoint",
+                sink = %report.sink,
+                violation_count = report.violations.len(),
+                "egress assertion violation — aborting stream (fail-closed)"
+            );
+            return Err(anyhow::anyhow!(
+                "egress assertion violation: withheld payload appeared verbatim in a \
+                 non-withheld message — completion aborted (fail-closed, RFC §5.2.3)"
+            ));
+        }
+        self.inner.stream(&filtered, tx).await
+    }
+
+    fn request_timeout(&self) -> std::time::Duration {
+        self.inner.request_timeout()
+    }
 }
 
 /// Compute a [`FilterReport`] for a request without forwarding it — used by
