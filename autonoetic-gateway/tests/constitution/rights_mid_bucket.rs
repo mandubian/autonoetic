@@ -5,8 +5,11 @@
 //! emits a causal event.
 //!
 //! Ri-0.12: Closed list of termination/suspension reasons. YieldReason is the
-//! authoritative closed set. Tests verify mechanical completeness — if a new
-//! variant is added, the roundtrip test catches it.
+//! authoritative closed set. Mechanical completeness rests on the exhaustive
+//! match in `ri_0_12_category`, which fails to *compile* when a variant is
+//! added — not on the sample lists, whose length assertions only ever compare a
+//! vec to itself. (That distinction is not academic: `Idle` (#902) entered the
+//! enum and stayed unclassified and untested while every assertion here passed.)
 
 
 use autonoetic_gateway::execution::GatewayExecutionService;
@@ -153,10 +156,59 @@ fn ri_0_6_capability_narrowing_only_via_declared_paths() {
 // Ri-0.12: Closed list of termination/suspension reasons
 // ---------------------------------------------------------------------------
 
+/// Ri-0.12 category of a yield reason: does it *end* the session or not?
+///
+/// The match in [`ri_0_12_category`] is **exhaustive on purpose**. Adding a
+/// `YieldReason` variant breaks the build here until it is deliberately
+/// classified, and that compile error *is* the closed-list guarantee Ri-0.12
+/// claims. A hand-written sample list checked against a literal count cannot
+/// provide it: such an assertion only ever compares a vec to its own length, so
+/// `Idle` (#902) entered the enum unclassified and untested while both Ri-0.12
+/// tests kept passing. Mirrors the pattern `SessionLifecycleState` already uses.
+///
+/// This axis is orthogonal to crash-recovery auto-resume
+/// (`should_auto_resume_checkpoint_yield_reason`): `BudgetExhausted` and `Error`
+/// are terminal here yet auto-resume once the condition clears.
+#[derive(Debug, PartialEq, Eq)]
+enum Ri012Category {
+    /// The session closes.
+    Terminal,
+    /// The session suspends and continues.
+    Resumable,
+}
+
+fn ri_0_12_category(reason: &YieldReason) -> Ri012Category {
+    match reason {
+        YieldReason::MaxTurnsReached
+        | YieldReason::BudgetExhausted
+        | YieldReason::EmergencyStop { .. }
+        | YieldReason::Error(_)
+        | YieldReason::ParentTerminated { .. } => Ri012Category::Terminal,
+
+        YieldReason::Hibernation
+        // A parked resident session (#902) exists precisely to be resumed by an
+        // inbound message.
+        | YieldReason::Idle { .. }
+        | YieldReason::WaitingForChild { .. }
+        // Cooperative operator pause (#1026/#1051): `root_session.pause` is the
+        // only producer of `ManualStop`, and it parks the session as
+        // `SessionLifecycleState::Paused` to resume in-place on the next
+        // message. It does not close the session.
+        | YieldReason::ManualStop
+        | YieldReason::ApprovalRequired { .. }
+        | YieldReason::UserInputRequired { .. }
+        | YieldReason::HumanEscalation { .. } => Ri012Category::Resumable,
+    }
+}
+
 #[test]
 fn ri_0_12_all_yield_reasons_roundtrip() {
     let reasons = vec![
         YieldReason::Hibernation,
+        YieldReason::Idle {
+            since: "2026-08-13T00:00:00Z".to_string(),
+            ttl_secs: 900,
+        },
         YieldReason::BudgetExhausted,
         YieldReason::ApprovalRequired {
             approval_request_id: "apr-test".to_string(),
@@ -194,10 +246,17 @@ fn ri_0_12_all_yield_reasons_roundtrip() {
             reason
         );
     }
+    // Every sample must be classifiable; the exhaustive match in
+    // `ri_0_12_category` is what actually forces a new variant to be handled.
+    for reason in &reasons {
+        let _ = ri_0_12_category(reason);
+    }
     assert_eq!(
         reasons.len(),
-        11,
-        "YieldReason must have exactly 11 variants — update this test if adding one"
+        12,
+        "every YieldReason variant needs a roundtrip sample here — \
+         add one when you add a variant (the exhaustive match in \
+         `ri_0_12_category` is the guard that will not let you forget)"
     );
 }
 
@@ -219,7 +278,6 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
         YieldReason::EmergencyStop {
             stop_id: "t".to_string(),
         },
-        YieldReason::ManualStop,
         YieldReason::Error("fatal".to_string()),
         YieldReason::ParentTerminated {
             parent_session_id: "p".to_string(),
@@ -228,6 +286,12 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
     ];
     let resumable = vec![
         YieldReason::Hibernation,
+        YieldReason::Idle {
+            since: "2026-08-13T00:00:00Z".to_string(),
+            ttl_secs: 900,
+        },
+        // Cooperative operator pause parks as `Paused` and resumes in-place.
+        YieldReason::ManualStop,
         YieldReason::ApprovalRequired {
             approval_request_id: "a".to_string(),
         },
@@ -245,9 +309,27 @@ fn ri_0_12_terminal_vs_resumable_categorized() {
 
     assert_eq!(
         terminal.len() + resumable.len(),
-        11,
-        "terminal + resumable must cover all 11 YieldReason variants"
+        12,
+        "terminal + resumable must cover all 12 YieldReason variants"
     );
+
+    // The categories asserted above must be the ones the exhaustive
+    // classification actually yields — otherwise this test drifts from the
+    // vocabulary it claims to pin.
+    for r in &terminal {
+        assert_eq!(
+            ri_0_12_category(r),
+            Ri012Category::Terminal,
+            "{r:?} must classify as terminal"
+        );
+    }
+    for r in &resumable {
+        assert_eq!(
+            ri_0_12_category(r),
+            Ri012Category::Resumable,
+            "{r:?} must classify as resumable"
+        );
+    }
 
     for r in &terminal {
         let json = serde_json::to_string(r).unwrap();
@@ -268,7 +350,6 @@ fn ri_0_12_each_terminal_reason_has_correct_tag() {
     let cases = vec![
         (YieldReason::MaxTurnsReached, "max_turns_reached"),
         (YieldReason::BudgetExhausted, "budget_exhausted"),
-        (YieldReason::ManualStop, "manual_stop"),
         (
             YieldReason::EmergencyStop {
                 stop_id: "t".to_string(),
@@ -298,6 +379,16 @@ fn ri_0_12_each_terminal_reason_has_correct_tag() {
 fn ri_0_12_each_resumable_reason_has_correct_tag() {
     let cases = vec![
         (YieldReason::Hibernation, "hibernation"),
+        (
+            YieldReason::Idle {
+                since: "2026-08-13T00:00:00Z".to_string(),
+                ttl_secs: 900,
+            },
+            "idle",
+        ),
+        // Cooperative operator pause (#1026/#1051): parks as `Paused`, resumes
+        // on the next message — resumable, not a close.
+        (YieldReason::ManualStop, "manual_stop"),
         (
             YieldReason::ApprovalRequired {
                 approval_request_id: "a".to_string(),

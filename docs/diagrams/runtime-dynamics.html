@@ -159,6 +159,22 @@
   .cap .c-h { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .cap .c-b { font-size: 0.78rem; color: var(--ink-soft); margin-top: 3px; }
 
+  table.reg { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
+  table.reg th {
+    text-align: left; font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--muted); padding: 6px 10px; border-bottom: 1px solid var(--line-strong);
+  }
+  table.reg td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink-soft); }
+  table.reg tr:last-child td { border-bottom: none; }
+  table.reg code, table.reg .mono { font-family: var(--font-mono); font-size: 0.9em; }
+  table.reg td:first-child { color: var(--ink); white-space: nowrap; }
+
+  kbd {
+    font-family: var(--font-mono); font-size: 0.82em; line-height: 1;
+    padding: 2px 5px; border: 1px solid var(--line-strong); border-bottom-width: 2px;
+    border-radius: 3px; background: var(--paper-raised); color: var(--ink);
+  }
+
   footer.colophon { margin-top: 40px; padding-top: 24px; border-top: 3px double var(--line-strong); font-size: 0.85rem; color: var(--muted); }
   footer.colophon code { font-family: var(--font-mono); font-size: 0.85em; }
   footer.colophon ul { padding-left: 18px; margin: 10px 0; columns: 2; column-gap: 32px; }
@@ -187,15 +203,17 @@
       <div class="eyebrow">§ A — State Machine</div>
       <h2>The session lifecycle</h2>
       <p class="dek">A session is always in the turn loop or parked at a yield point. There are exactly
-        <strong>eleven</strong> ways it can yield (the <span class="mono">YieldReason</span> enum), and
-        every one writes a checkpoint. The constitution's <span class="mono">Ri-0.12</span> sorts them
-        into <strong>five resumable</strong> (the session suspends and continues) and <strong>six
-        terminal</strong> (it closes) — a closed list, so any exit outside it is a bug.</p>
+        <strong>twelve</strong> ways it can yield (the <span class="mono">YieldReason</span> enum), and
+        every one writes a checkpoint. As enforced, they sort into <strong>seven resumable</strong>
+        (the session suspends and continues) and <strong>five terminal</strong> (it closes). What the
+        constitution's <span class="mono">Ri-0.12</span> contributes is that the list is
+        <em>closed</em> — any exit outside it is a gateway bug, not an accepted behaviour. Its clause
+        text still enumerates an earlier 11-variant split; see the note below.</p>
     </div>
 
     <div class="gwrap">
       <svg class="diagram" viewBox="0 0 1180 366" role="img"
-           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of eleven checkpointed states. Ri-0.12 groups them: five resumable (Hibernation and WaitingForChild auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and six terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, ManualStop, Error, ParentTerminated).">
+           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of twelve checkpointed states. As enforced they group into seven resumable (Hibernation, Idle, WaitingForChild and ManualStop auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and five terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, Error, ParentTerminated). Ri-0.12 makes this list closed rather than supplying these counts; its clause text still enumerates an earlier 11-variant split.">
         <defs>
           <marker id="rd-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
@@ -221,23 +239,24 @@
 
         <!-- zone RESUMABLE -->
         <rect class="zone zone-res" x="440" y="18" width="720" height="152" rx="8"/>
-        <text class="zlabel zlabel-res" x="456" y="40">RESUMABLE · suspends &amp; continues (5) · Ri-0.12</text>
+        <text class="zlabel zlabel-res" x="456" y="40">RESUMABLE · suspends &amp; continues (7) · Ri-0.12</text>
         <text class="znote" x="456" y="58">teal ▸ auto-resume        blue ▸ resumes on an external decision</text>
         <rect class="pill pill-auto" x="470" y="70" width="150" height="38" rx="6"/><text class="pill-t" x="545" y="94">Hibernation</text>
-        <rect class="pill pill-auto" x="636" y="70" width="186" height="38" rx="6"/><text class="pill-t" x="729" y="94">WaitingForChild</text>
+        <rect class="pill pill-auto" x="636" y="70" width="110" height="38" rx="6"/><text class="pill-t" x="691" y="94">Idle</text>
+        <rect class="pill pill-auto" x="762" y="70" width="186" height="38" rx="6"/><text class="pill-t" x="855" y="94">WaitingForChild</text>
+        <rect class="pill pill-auto" x="964" y="70" width="150" height="38" rx="6"/><text class="pill-t" x="1039" y="94">ManualStop</text>
         <rect class="pill pill-gated" x="470" y="120" width="170" height="38" rx="6"/><text class="pill-t" x="555" y="144">ApprovalRequired</text>
         <rect class="pill pill-gated" x="656" y="120" width="188" height="38" rx="6"/><text class="pill-t" x="750" y="144">UserInputRequired</text>
         <rect class="pill pill-gated" x="860" y="120" width="178" height="38" rx="6"/><text class="pill-t" x="949" y="144">HumanEscalation</text>
 
         <!-- zone TERMINAL -->
         <rect class="zone zone-term" x="440" y="196" width="560" height="150" rx="8"/>
-        <text class="zlabel zlabel-term" x="456" y="218">TERMINAL · session closes (6) · Ri-0.12 closed list</text>
+        <text class="zlabel zlabel-term" x="456" y="218">TERMINAL · session closes (5) · Ri-0.12 closed list</text>
         <rect class="pill pill-term" x="456" y="232" width="178" height="38" rx="6"/><text class="pill-t" x="545" y="256">MaxTurnsReached</text>
         <rect class="pill pill-term" x="650" y="232" width="176" height="38" rx="6"/><text class="pill-t" x="738" y="256">BudgetExhausted</text>
         <rect class="pill pill-term" x="842" y="232" width="146" height="38" rx="6"/><text class="pill-t" x="915" y="256">EmergencyStop</text>
-        <rect class="pill pill-term" x="456" y="282" width="140" height="38" rx="6"/><text class="pill-t" x="526" y="306">ManualStop</text>
-        <rect class="pill pill-term" x="612" y="282" width="104" height="38" rx="6"/><text class="pill-t" x="664" y="306">Error</text>
-        <rect class="pill pill-term" x="732" y="282" width="180" height="38" rx="6"/><text class="pill-t" x="822" y="306">ParentTerminated</text>
+        <rect class="pill pill-term" x="456" y="282" width="104" height="38" rx="6"/><text class="pill-t" x="508" y="306">Error</text>
+        <rect class="pill pill-term" x="576" y="282" width="180" height="38" rx="6"/><text class="pill-t" x="666" y="306">ParentTerminated</text>
 
         <!-- closed -->
         <rect class="endnode" x="1022" y="240" width="138" height="92" rx="8"/>
@@ -256,28 +275,50 @@
 
     <div class="grid3" style="margin-top:16px;">
       <div class="box tone-accent">
-        <span class="kicker-chip">resumable · 5</span>
+        <span class="kicker-chip">resumable · 7</span>
         <h3>Suspends, then continues</h3>
-        <p>Two auto-resume on re-entry — <code>Hibernation</code>, <code>WaitingForChild</code>
-          (<span class="badge">Ri-0.14</span> wake-not-poll). Three wait for an external decision — an
-          approval, a user answer, or operator guidance (§ B); their checkpoint is HMAC-signed.</p>
+        <p>Four auto-resume on re-entry — <code>Hibernation</code>, <code>WaitingForChild</code>
+          (<span class="badge">Ri-0.14</span> wake-not-poll), <code>Idle</code> (a <em>resident</em>
+          session parked only so peers can still reach it — nothing is being waited on), and
+          <code>ManualStop</code> (the operator's cooperative pause). Three wait for an external
+          decision — an approval, a user answer, or operator guidance (§ B); their checkpoint is
+          HMAC-signed.</p>
       </div>
       <div class="box tone-served">
-        <span class="kicker-chip">terminal · 6</span>
+        <span class="kicker-chip">terminal · 5</span>
         <h3>The session closes</h3>
         <p>Budget exhaustion, the LoopGuard halt (<code>MaxTurnsReached</code>), the operator circuit
-          breaker (<code>EmergencyStop</code> — never resumes), a manual stop, an unrecoverable
+          breaker (<code>EmergencyStop</code> — never resumes), an unrecoverable
           <code>Error</code>, or an orphaned child (<code>ParentTerminated</code>).</p>
       </div>
       <div class="box tone-right">
         <span class="kicker-chip">footnote · distinct axis</span>
         <h3>Crash recovery ≠ continuation</h3>
         <p>A separate function, <code>should_auto_resume_checkpoint_yield_reason</code>, restarts
-          <code>Hibernation</code>, <code>BudgetExhausted</code>, <code>WaitingForChild</code>,
-          <code>ManualStop</code> and <code>Error</code> on gateway re-entry with no external input —
-          so a terminal <code>BudgetExhausted</code>/<code>Error</code> close is recoverable once the
-          condition clears. That is a different axis from the terminal/resumable split above.</p>
+          <code>Hibernation</code>, <code>Idle</code>, <code>BudgetExhausted</code>,
+          <code>WaitingForChild</code>, <code>ManualStop</code> and <code>Error</code> on gateway
+          re-entry with no external input — so a terminal <code>BudgetExhausted</code>/<code>Error</code>
+          close is recoverable once the condition clears. That is a different axis from the
+          terminal/resumable split above.</p>
       </div>
+    </div>
+
+    <div class="box tone-rule" style="margin-top:16px;">
+      <span class="kicker-chip">pause ≠ stop</span>
+      <h3><code>ManualStop</code> is the cooperative pause, not a kill</h3>
+      <p>Its only producer is <span class="mono">root_session.pause</span> (the room TUI's
+        <kbd>p</kbd>). It yields at the <em>pre-LLM</em> checkpoint, so the in-flight tool batch
+        finishes and only the next model call is prevented — then the session parks as
+        <span class="mono">Paused</span> and continues in place on the operator's next message, no fork.
+        That is the whole distinction from <code>EmergencyStop</code>, which hard-aborts and never
+        resumes; <kbd>Esc</kbd> deliberately does not arm the circuit breaker.</p>
+      <p class="fine">Known discrepancy: <span class="mono">Ri-0.12</span>'s clause text still reads
+        "all 11 session yield causes (6 terminal + 5 resumable)" and omits <code>Idle</code> from its
+        auto-resume list — it predates <code>Idle</code> (#902) and the cooperative pause
+        (#1026/#1051). The counts above are the enforced code. Realigning the clause needs a
+        constitutional amendment, not a doc edit; the exhaustive classification in
+        <span class="mono">autonoetic-gateway/tests/constitution/rights_mid_bucket.rs</span> now makes
+        any future variant a compile error rather than a silent omission.</p>
     </div>
 
     <p class="para" style="margin-top:16px;">Two guarantees make this a closed system, not a maze.
@@ -286,6 +327,53 @@
       point writes a checkpoint, so any past state is a runnable snapshot: a fork
       (<span class="mono">session.fork</span>) branches a fresh session from any checkpoint into its own
       lineage.</p>
+
+    <div class="subhead">Two vocabularies — why a yield reason is not a lifecycle state</div>
+    <p class="para"><span class="mono">YieldReason</span> answers <em>why did this turn stop</em>. It is
+      a per-yield fact written into the checkpoint. What an observer — the room TUI, a workflow join, the
+      orphan reaper — actually reads is a different, coarser vocabulary persisted on the session row:
+      <span class="mono">SessionLifecycleState</span>. Several yield reasons collapse into one state, so
+      the two lists are deliberately not the same length.</p>
+
+    <div class="gwrap">
+      <table class="reg">
+        <thead>
+          <tr><th>lifecycle_state</th><th>reached from</th><th>resumable?</th><th>lets a workflow complete?</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="mono">active</span></td><td>a turn is executing</td><td>no — it <em>is</em> running</td><td>no</td></tr>
+          <tr><td><span class="mono">hibernated</span></td><td><code>Hibernation</code>, <code>WaitingForChild</code>, <code>Error</code>, <code>BudgetExhausted</code>, …</td><td>yes</td><td>yes</td></tr>
+          <tr><td><span class="mono">awaiting_gate</span></td><td><code>ApprovalRequired</code>, <code>UserInputRequired</code>, <code>HumanEscalation</code></td><td>yes</td><td><strong>no</strong> — a gate is pending</td></tr>
+          <tr><td><span class="mono">idle</span></td><td><code>Idle</code> — resident, task done, parked for reachability</td><td>yes</td><td>yes</td></tr>
+          <tr><td><span class="mono">paused</span></td><td><code>ManualStop</code> — operator pressed <kbd>p</kbd></td><td>yes</td><td><strong>no</strong> — the operator may redirect</td></tr>
+          <tr><td><span class="mono">terminated:{completed,failed,suspended}</span></td><td>any terminal yield</td><td>no</td><td>yes</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2" style="margin-top:16px;">
+      <div class="box tone-accent">
+        <h3>Why <span class="mono">paused</span> is not <span class="mono">hibernated</span></h3>
+        <p>Both park and both resume on the next message, so collapsing them looks harmless. It isn't:
+          <span class="mono">hibernated</span> means <em>the agent</em> finished its turn,
+          <span class="mono">paused</span> means <em>the operator</em> stopped it mid-task. The room needs
+          the difference to know whether <kbd>p</kbd> pauses or resumes, and a paused session must block
+          its workflow from completing where a hibernated one need not.</p>
+      </div>
+      <div class="box tone-right">
+        <h3>One vocabulary, mechanically</h3>
+        <p>The states were string literals scattered across ad-hoc SQL and Rust until they were
+          centralised in one enum. Classification now happens through exhaustive methods
+          (<span class="mono">is_terminal</span>, <span class="mono">is_resumable</span>,
+          <span class="mono">permits_workflow_completion</span>), so adding a state is a compile error at
+          every site rather than a silent misread in some other file.</p>
+        <p class="fine">One asymmetry is deliberate: writers parse strictly (a writer must never invent a
+          value), but readers classify via <span class="mono">classify_stored</span>, which honours the
+          <span class="mono">terminated:</span> prefix — so a row written by a <em>newer</em> gateway is
+          still correctly read as terminal. Strictness on the read path would re-introduce the exact
+          failure the enum exists to prevent, one version boundary out.</p>
+      </div>
+    </div>
   </section>
 
   <!-- ============ B. APPROVAL & ESCALATION ============ -->
@@ -396,6 +484,11 @@
           <div class="keys"><span class="k">constitution_version</span><span class="k">constitution_digest</span></div>
           <p class="fine" style="margin-top:8px;color:var(--muted);font-size:.8rem">The agent knows <em>which</em> law binds it as a verified fact (Ri-0.10).</p>
         </div>
+        <div class="field">
+          <h4>The substrate it thinks on</h4>
+          <div class="keys"><span class="k">model_id</span></div>
+          <p class="fine" style="margin-top:8px;color:var(--muted);font-size:.8rem">Preset-resolved and session-override-aware, so the agent can self-calibrate — context budget, known-weakness workarounds, honest escalation — instead of guessing which model it is. Only the id: provider config, endpoints and pricing are deliberately excluded.</p>
+        </div>
       </div>
       <div class="att-foot">Taught to the agent as <strong>ground truth over its own recollection</strong> — the antidote to confabulated budgets, invented capabilities, and lost gate state.</div>
     </div>
@@ -437,6 +530,20 @@
           <span class="mono">egress.boundary_refused</span> when it must withhold.</p>
       </div>
     </div>
+    <div class="box tone-rule" style="margin-top:14px;">
+      <h3>The one exit from monotonic narrowing — and it is the operator's, not the agent's</h3>
+      <p>Steps 1–3 only ever narrow, which by itself would make a mislabelled input an unrecoverable dead
+        end. The release valve is a <strong>declassification grant</strong> (<span class="badge">P-15.3</span>):
+        the operator explicitly widens a label, content- or host-scoped, optionally expiring and revocable
+        at any time. A refusal <em>offers</em> the grant that would unblock it, so the turn presents a
+        decision rather than a wall — and expiry/revocation are re-checked when the grant is
+        <em>used</em>, not merely when it was issued. Never inferred from content, never agent-set, never
+        LLM judgment; recorded as <span class="mono">egress.declassified</span>.</p>
+      <p class="fine">Taint also crosses session boundaries, not just requests: it propagates into spawned
+        children, rides <span class="mono">agent_message</span> between peers, and is fail-closed on
+        inbound OFP messages — so widening has to be granted at the boundary it actually applies to
+        rather than side-stepped by delegating the work to a child.</p>
+    </div>
 
     <div class="subhead">Why this is the whole point — the five capacities it delivers</div>
     <div class="att-map">
@@ -455,11 +562,13 @@
     <p>Compiled from the repository's source:</p>
     <ul>
       <li><code>autonoetic-gateway/src/runtime/checkpoint.rs</code> (YieldReason)</li>
+      <li><code>autonoetic-types/src/agent.rs</code> (<code>SessionLifecycleState</code>)</li>
       <li><code>autonoetic-gateway/src/runtime/session_resume.rs</code> (auto-resume set)</li>
-      <li><code>autonoetic-gateway/tests/constitution_rights_mid_bucket.rs</code> (terminal/resumable split)</li>
+      <li><code>autonoetic-gateway/src/runtime/lifecycle.rs</code> (yield → lifecycle_state mapping, cooperative pause)</li>
+      <li><code>autonoetic-gateway/tests/constitution/rights_mid_bucket.rs</code> (terminal/resumable split)</li>
       <li><code>autonoetic-gateway/src/runtime/state_attestation.rs</code> (P-6.23 payload)</li>
       <li><code>docs/ARCHITECTURE.md</code> (checkpoints, approvals, escalation, operator.pending)</li>
-      <li>constitution 2026.07.19 — Ri-0.5, Ri-0.10, Ri-0.12, Ri-0.14, Ri-0.15, O-1, O-2, P-6.23</li>
+      <li>constitution 2026.07.30 — Ri-0.5, Ri-0.10, Ri-0.12, Ri-0.14, Ri-0.15, O-1, O-2, P-6.23, P-15.1–P-15.3</li>
     </ul>
   </footer>
 

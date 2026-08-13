@@ -145,22 +145,23 @@
         <span class="file">technical-map.html</span>
         <h2>Technical infrastructure</h2>
         <p>The tool-call lifecycle, the four sandbox drivers, the three storage classes, the credential
-          vault, the egress label plane (lattice · chokepoint · routing · labels at rest), the
-          agent-birth pipeline, and the full native tool surface.</p>
+          vault, the egress label plane (lattice · chokepoint · routing · labels at rest ·
+          declassification grants), the agent-birth pipeline, and the native tool surface.</p>
       </a>
       <a class="card m3" href="diagrams/runtime-dynamics.html">
         <span class="file">runtime-dynamics.html</span>
         <h2>Runtime dynamics</h2>
-        <p>The temporal dimension: the session-lifecycle state machine, the approval &amp; escalation
-          swimlane (suspend-to-checkpoint, resume-with-real-result), the per-turn signed self-model, and
-          the per-turn egress label flow.</p>
+        <p>The temporal dimension: the session-lifecycle state machine and the persisted lifecycle-state
+          vocabulary it maps onto, the approval &amp; escalation swimlane (suspend-to-checkpoint,
+          resume-with-real-result), the per-turn signed self-model, and the per-turn egress label flow.</p>
       </a>
       <a class="card m4" href="diagrams/federation-data-model.html">
         <span class="file">federation-data-model.html</span>
         <h2>Federation &amp; data model</h2>
         <p>OFP node-to-node federation (topology, the HMAC + constitution-digest handshake, compatibility
-          modes, wire protocol) and the <code>gateway.db</code> entity-relationship model — the spine
-          columns, the core ER diagram, and the full table inventory incl. the egress label plane.</p>
+          modes, wire protocol), the <code>gateway.db</code> entity-relationship model — the spine
+          columns, the core ER diagram, the load-bearing tables incl. the egress label plane — and
+          federation carry-forward: the three-digest model behind reusing a gate verdict across a rebuild.</p>
       </a>
     </div>
 
