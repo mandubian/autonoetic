@@ -338,11 +338,24 @@ pub(crate) async fn execute_script_in_sandbox(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::error!(stderr = %stderr, stdout = %stdout, status = ?output.status.code(), "Script execution failed");
+        let has_network_cap = capabilities.iter().any(|c| {
+            matches!(
+                c,
+                autonoetic_types::capability::Capability::NetworkAccess { .. }
+            )
+        });
+        let diag = crate::runtime::tools::sandbox::classify_script_network_failure(
+            &stdout,
+            &stderr,
+            has_network_cap,
+            has_evaluation_cap,
+        );
         anyhow::bail!(
-            "Script execution failed with code {:?}: stdout={}, stderr={}",
+            "Script execution failed with code {:?}: stdout={}, stderr={}{}",
             output.status.code(),
             stdout,
-            stderr
+            stderr,
+            diag.map(|d| format!("\n{}", d)).unwrap_or_default()
         );
     }
 
