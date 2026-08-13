@@ -254,10 +254,10 @@ Autonoetic now accepts AgentSkills-compliant top-level `SKILL.md` frontmatter (`
 
 Four self-contained HTML maps render the system at different altitudes. **View them live in your browser at the [visual maps hub](https://mandubian.github.io/autonoetic/)** (GitHub Pages). Each is also a standalone file under `docs/diagrams/` — no build step, light/dark theme–aware:
 
-- **[Governance architecture](https://mandubian.github.io/autonoetic/diagrams/architecture-map.html)** ([source](docs/diagrams/architecture-map.html)) — functional autonoesis and the community-of-equals framing, the bind-direction constitution (rules/rights/obligations/served), the data-locality boundary (egress enforcement landing ahead of the served-party right), enforcement & contract health, the standing governance offices, the amendment lifecycle, and a full node-and-edge system graph rendering the whole as one correction loop.
-- **[Technical infrastructure](https://mandubian.github.io/autonoetic/diagrams/technical-map.html)** ([source](docs/diagrams/technical-map.html)) — the tool-call lifecycle, the four sandbox drivers, the three storage classes, the credential vault, the **egress label plane** (lattice · chokepoint · taint-following routing · labels at rest), the immutability guarantees, the agent-birth pipeline and error/repair loop, the full native tool surface, and the default agent roster.
-- **[Runtime dynamics](https://mandubian.github.io/autonoetic/diagrams/runtime-dynamics.html)** ([source](docs/diagrams/runtime-dynamics.html)) — the temporal dimension: the session-lifecycle state machine (the 11 `YieldReason` variants grouped by Ri-0.12 into resumable vs terminal), the approval & escalation multi-actor swimlane (suspend-to-signed-checkpoint, resume-with-real-result), the per-turn signed self-model (the P-6.23 attestation), and the **per-turn egress label flow**.
-- **[Federation & data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html)** ([source](docs/diagrams/federation-data-model.html)) — OFP node-to-node federation (the topology, the HMAC + constitution-digest handshake, the three P-10.9 compatibility modes, the wire protocol and message kinds), and the `gateway.db` entity-relationship model at **schema v76** (the four spine columns, a core-spine ER diagram, and the full table inventory by cluster including the egress label plane).
+- **[Governance architecture](https://mandubian.github.io/autonoetic/diagrams/architecture-map.html)** ([source](docs/diagrams/architecture-map.html)) — functional autonoesis and the community-of-equals framing, the bind-direction constitution (rules/rights/obligations/served), the data-locality boundary (§15 enacts the agent's egress duty; the served-party right is still unratified), enforcement & contract health, the standing governance offices, the amendment lifecycle, and a full node-and-edge system graph rendering the whole as one correction loop.
+- **[Technical infrastructure](https://mandubian.github.io/autonoetic/diagrams/technical-map.html)** ([source](docs/diagrams/technical-map.html)) — the tool-call lifecycle, the four sandbox drivers (network is a per-exec grant, never capability-inherited), the three storage classes, the credential vault, the **egress label plane** (lattice · chokepoint · taint-following routing · labels at rest · operator declassification grants), the immutability guarantees, the agent-birth pipeline and error/repair loop, the native tool surface, and the default agent roster.
+- **[Runtime dynamics](https://mandubian.github.io/autonoetic/diagrams/runtime-dynamics.html)** ([source](docs/diagrams/runtime-dynamics.html)) — the temporal dimension: the session-lifecycle state machine (the 12 `YieldReason` variants grouped by Ri-0.12 into resumable vs terminal, and the separate persisted `SessionLifecycleState` vocabulary they map onto), the approval & escalation multi-actor swimlane (suspend-to-signed-checkpoint, resume-with-real-result), the per-turn signed self-model (the P-6.23 attestation), and the **per-turn egress label flow**.
+- **[Federation & data model](https://mandubian.github.io/autonoetic/diagrams/federation-data-model.html)** ([source](docs/diagrams/federation-data-model.html)) — OFP node-to-node federation (the topology, the HMAC + constitution-digest handshake, the three P-10.9 compatibility modes, the wire protocol and message kinds), the `gateway.db` entity-relationship model at **schema v80** (the four spine columns, a core-spine ER diagram, and the load-bearing tables by cluster including the egress label plane), and **federation carry-forward** (the three-digest model and the strictness dial that let a gate verdict survive a rebuild).
 
 ### Specialized Docs
 
@@ -373,12 +373,12 @@ code-level comparison with a representative direct-loop harness:
 
 The runtime core is implemented and self-hosting: gateway daemon (JSON-RPC +
 HTTP REST), `SKILL.md` + `runtime.lock` parsing, multi-driver sandboxing
-(bubblewrap / docker / microvm), content-addressed artifacts, hash-chain
+(bubblewrap / docker / microvm / wasm), content-addressed artifacts, hash-chain
 causal logging, durable workflows, OFP federation with HMAC + constitution
 digest handshake, and MCP client/server plumbing.
 
 Governance is built alongside the runtime: the current constitution
-(`2026.07.19`) has 18 enforced rights and 179 enforced rules — see
+(`2026.07.30`) has 18 enforced rights and 182 rules, 179 of them enforced — see
 [`docs/constitution/enforcement-register.md`](docs/constitution/enforcement-register.md)
 for what is `ENFORCED` vs `PARTIAL` / `MISSING` / `DESIGN DEBT`. Active and
 archived design plans are tracked under [`docs/design/`](docs/design/README.md)

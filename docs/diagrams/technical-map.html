@@ -241,10 +241,13 @@
       <div class="box tone-accent">
         <span class="kicker-chip">Gate</span>
         <h3>Tool dispatch &amp; policy</h3>
-        <p>Three checks in order: <strong>tier filter</strong> (Core / Workflow / Specialized surface),
-          <strong>capability gate</strong> (<span class="mono">policy.can_invoke_tool</span>), and an
-          <strong>approval gate</strong> if the action is privileged — which suspends the turn to a
-          signed checkpoint and resumes with the real result.</p>
+        <p>Four checks in order: <strong>exclusions</strong> (the registry-level
+          <span class="mono">DEFAULT_EXCLUDED_TOOLS</span> list plus the manifest's own
+          <span class="mono">excluded_tools</span> — applied before anything else and, for the default
+          list, with no per-agent override), <strong>tier filter</strong> (Core / Workflow / Specialized
+          surface), <strong>capability gate</strong> (<span class="mono">policy.can_invoke_tool</span>),
+          and an <strong>approval gate</strong> if the action is privileged — which suspends the turn to
+          a signed checkpoint and resumes with the real result.</p>
       </div>
       <div class="connector vert"><span class="glyph">↓</span><span>validated</span></div>
       <div class="box tone-accent">
@@ -269,7 +272,10 @@
         <span class="kicker-chip">default</span>
         <h3>bubblewrap</h3>
         <p><span class="mono">--unshare-all</span>, read-only root, workspace bind-mount. Network is
-          <strong>off unless</strong> the agent declares non-empty <span class="mono">NetworkAccess.hosts</span>.</p>
+          <strong>granted per exec, never inherited</strong>: <span class="mono">NetworkAccess</span> is
+          only a <em>ceiling</em> ("may this agent ever reach the network"), and holding it grants
+          nothing. <span class="mono">share_net</span> turns on for one exec only when an approval was
+          validated for it.</p>
       </div>
       <div class="box tone-right">
         <span class="kicker-chip">containerized</span>
@@ -319,8 +325,9 @@
         <span class="kicker-chip">Lattice</span>
         <h3>The egress label</h3>
         <p>Content carries an <span class="mono">EgressLabel</span> — the set of sinks it may reach (local
-          model, remote model, another agent, a federated peer, network, persistence, the user). Labels only
-          ever <strong>narrow</strong> (a meet-lattice; taint is monotonic). Named shorthands:
+          model, remote model, another agent, a federated peer, network, persistence, the user). Labels
+          narrow <strong>monotonically</strong> as content flows (a meet-lattice); the one path that
+          <em>widens</em> a label is an operator declassification grant (below), never inference. Named shorthands:
           <span class="mono">unrestricted</span>, <span class="mono">no_remote_model</span>,
           <span class="mono">local_only</span>. Labels are gateway-assigned metadata, never LLM-inferred.</p>
       </div>
@@ -346,7 +353,23 @@
         <p>Memories, execution traces, and digests store an <span class="mono">egress_label_json</span>; recall,
           search, and the post-session digest filter by target sink, so <span class="mono">local_only</span>
           content can't re-enter a remote turn across sessions. Legacy-unlabeled rows resolve via a configured
-          default (fail-closed option: <span class="mono">no_remote_model</span>).</p>
+          default (fail-closed option: <span class="mono">no_remote_model</span>). Two more object classes are
+          labelled as durable objects in their own tables: <strong>artifacts</strong>
+          (<span class="mono">artifact_egress_labels</span>, v78) and the <strong>agent workspace</strong>
+          (<span class="mono">agent_workspace_egress_labels</span>, v79) — the latter closing the
+          content-movement laundering path, where tainted bytes were written to the workspace and re-read as clean.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">Widening · P-15.3</span>
+        <h3>Declassification is a grant, not a judgment</h3>
+        <p>A label widens <em>only</em> via an explicit, operator-approved <strong>declassification
+          grant</strong> — content- or host-scoped, optionally expiring, revocable at any time, and
+          causal-logged (<span class="mono">egress.declassified</span> on grant,
+          <span class="mono">grant_revocation</span> on revoke). Expiry and revocation are re-checked at
+          <em>use</em> time, not just at grant time. Never inferred from content, never agent-set, never
+          granted by LLM judgment. Refusals offer the grant that would unblock them, so a boundary refusal
+          is actionable rather than a dead end (<span class="mono">grants.list</span> / <span class="mono">revoke</span>,
+          the room's <kbd>G</kbd> panel).</p>
       </div>
     </div>
 
@@ -478,7 +501,8 @@
         <div class="trow"><code>content_patch</code><span class="desc">structured edit of existing content</span><span class="tmeta"><span class="gate">WriteAccess</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>resolve</code><span class="desc">single front door to fetch any handle</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
         <div class="trow"><code>artifact_build</code><span class="desc">bundle handles into an immutable artifact</span><span class="tmeta"><span class="gate">WriteAccess</span><span class="tdot core"></span></span></div>
-        <div class="trow"><code>artifact_inspect</code><span class="desc">read an artifact's metadata/contents</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>artifact_inspect</code><span class="desc">read an artifact's metadata/contents + per-input digests</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
+        <div class="trow"><code>artifact_diff</code><span class="desc">what changed between two artifacts, per input bucket</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot core"></span></span></div>
       </div>
 
       <div class="catcard">
@@ -508,6 +532,7 @@
         <div class="trow"><code>workflow_wait</code><span class="desc">block until a task reaches a state</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
         <div class="trow"><code>workflow_state</code><span class="desc">read workflow/task state</span><span class="tmeta"><span class="gate">ReadAccess</span><span class="tdot wf"></span></span></div>
         <div class="trow"><code>workflow_cancel_task</code><span class="desc">cancel an in-flight task</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
+        <div class="trow"><code>workflow_force_complete</code><span class="desc">resolve a task stuck in Running — verifies the child actually finished first</span><span class="tmeta"><span class="gate">AgentSpawn</span><span class="tdot wf"></span></span></div>
         <div class="trow"><code>approval_status / _list / _withdraw</code><span class="desc">inspect / withdraw approval requests</span><span class="tmeta"><span class="gate free">—</span><span class="tdot wf"></span></span></div>
       </div>
 
@@ -566,10 +591,8 @@
       </div>
 
       <div class="catcard">
-        <h3>Plan, workbench &amp; validation <span class="count">Workflow</span></h3>
+        <h3>Plan &amp; validation <span class="count">Workflow</span></h3>
         <div class="trow"><code>planframe_propose / get / list / approve / amend / history</code><span class="desc">structured plan lifecycle</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
-        <div class="trow"><code>workbench_status / diff / checkpoint / checkout / reconcile / discard</code><span class="desc">dev workbench ops</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
-        <div class="trow"><code>artifact_project</code><span class="desc">project-scoped artifact workspace</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
         <div class="trow"><code>validation_waive / _waivers</code><span class="desc">waive / list validation gates</span><span class="tmeta"><span class="gate">PlanFrameAccess</span><span class="tdot wf"></span></span></div>
       </div>
 
@@ -587,7 +610,15 @@
 
     <div class="box tone-served" style="margin-top:16px;">
       <h3>Not part of the tool surface</h3>
-      <p><span class="mono">agent_install</span> was removed (P-9.2): agents are seeded only through
+      <p><strong>Excluded from every agent by default.</strong>
+        <span class="mono">DEFAULT_EXCLUDED_TOOLS</span> hides <span class="mono">workbench_*</span> and
+        <span class="mono">artifact_project</span> registry-wide — including from future/custom manifests
+        and from <span class="mono">tool_discover</span>'s catalog. These back the <em>operator</em>
+        workbench console, so they carry universal inert prompt weight and zero legitimate agent callers.
+        There is deliberately no per-agent override (<span class="mono">tool_discover</span> cannot
+        re-enable an excluded tool), which is why the default list may only ever contain tools with no
+        real users; per-agent <span class="mono">excluded_tools</span> composes on top of it.</p>
+      <p style="margin-top:8px;"><span class="mono">agent_install</span> was removed (P-9.2): agents are seeded only through
         revision-create + promote, never a one-shot install. <span class="mono">emergency_stop</span> is
         a capability and runtime trigger, not a callable LLM tool. There are no
         <span class="mono">constitution_resolve_proposal</span>, <span class="mono">anomaly_resolve</span>,
@@ -640,8 +671,7 @@
       <div class="agent spec"><h4>executor.default</h4><p class="role">Small deterministic shell/script tasks, no durable artifact.</p><div class="caps"><span class="badge">CodeExecution</span><span class="badge">ArtifactExecution</span></div></div>
       <div class="agent spec"><h4>coder.default</h4><p class="role">Produces durable, tested, auditable code/artifacts.</p><div class="caps"><span class="badge">ArtifactExecution</span><span class="badge">AgentMessage</span></div></div>
       <div class="agent spec"><h4>debugger.default</h4><p class="role">Isolates root causes, proposes fixes.</p><div class="caps"><span class="badge">CodeExecution</span></div></div>
-      <div class="agent spec"><h4>registration.default</h4><p class="role">Registrar: multi-step human-in-loop credential ceremonies.</p><div class="caps"><span class="badge">CredentialAccess</span><span class="badge">NetworkAccess</span></div></div>
-      <div class="agent spec"><h4>credential_onboarding.default</h4><p class="role">Non-singleton variant of the registrar flow.</p><div class="caps"><span class="badge">CredentialAccess</span></div></div>
+      <div class="agent spec"><h4>credential_onboarding.default</h4><p class="role">Registrar: multi-step human-in-loop credential ceremonies (OAuth, identity verification, manual token entry). Sole registrar — <span class="mono">registration.default</span> was folded into it.</p><div class="caps"><span class="badge">singleton</span><span class="badge">CredentialAccess</span><span class="badge">NetworkAccess</span></div></div>
       <div class="agent spec"><h4>discovery.default</h4><p class="role">Semantic agent discovery → ranked candidates + recommendation.</p><div class="caps"><span class="badge">agent_ / knowledge_</span></div></div>
       <div class="agent spec"><h4>watchdog.default</h4><p class="role">Observer of trajectory divergence; read-only, no execution.</p><div class="caps"><span class="badge">ReadAccess</span><span class="badge">AgentMessage</span></div></div>
       <div class="agent spec"><h4>watchdog-fast.default</h4><p class="role">Tool-free single-completion divergence judge (validation).</p><div class="caps"><span class="badge">no tools</span></div></div>
@@ -667,6 +697,7 @@
       <div class="agent evo"><h4>specialized_builder.default</h4><p class="role">Installs durable agents (revision create + promote).</p><div class="caps"><span class="badge">AgentRevision</span><span class="badge">AgentSpawn ×5</span></div></div>
       <div class="agent evo"><h4>agent-adapter.default</h4><p class="role">Generates wrapper agents to bridge I/O gaps.</p><div class="caps"><span class="badge">CodeExecution</span></div></div>
       <div class="agent evo"><h4>code-issue-proposer.default</h4><p class="role">Files scoped GitHub issues for gateway-code root causes; never edits code.</p><div class="caps"><span class="badge">GithubIssueCreate</span></div></div>
+      <div class="agent evo"><h4>skill-crystallizer.default</h4><p class="role">Operator-triggered (<span class="mono">/crystallize</span>): reads a session's evidence and routes a proven tactic to its cheapest durable home — <em>graduate</em> (instruction), <em>adapt</em> (wrapper), <em>crystallize</em> (new skill), or <em>none</em>. Proposes and delegates; never installs.</p><div class="caps"><span class="badge">singleton</span><span class="badge">AgentSpawn ×2</span><span class="badge">read *</span></div></div>
     </div>
 
     <div class="subhead">Governance &amp; system offices</div>
@@ -694,10 +725,12 @@
     <p>Compiled from the repository's source and documentation:</p>
     <ul>
       <li><code>docs/ARCHITECTURE.md</code> (storage, sandbox, error taxonomy)</li>
-      <li><code>autonoetic-gateway/src/sandbox.rs</code></li>
+      <li><code>autonoetic-gateway/src/sandbox.rs</code>, <code>runtime/network_grant.rs</code></li>
+      <li><code>docs/sandbox-network-grant.md</code> (network is a per-exec grant, not a ceiling)</li>
       <li><code>autonoetic-gateway/src/vault.rs</code>, <code>runtime/tools/credential.rs</code></li>
       <li><code>config/tools.yaml</code> (tool tiers)</li>
-      <li><code>autonoetic-gateway/src/runtime/tools/</code></li>
+      <li><code>autonoetic-gateway/src/runtime/tools/</code> (incl. <code>DEFAULT_EXCLUDED_TOOLS</code>)</li>
+      <li><code>docs/rfc/data-envelopes-egress-localization.md</code> · constitution §15 (P-15.1–P-15.3)</li>
       <li><code>docs/AGENTS.md</code> (roles, routing, tools)</li>
       <li><code>docs/agent-prompt-guidance.md</code></li>
       <li><code>docs/iteration-repair-validation-runbook.md</code></li>

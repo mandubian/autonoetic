@@ -174,12 +174,13 @@
   <header class="titleblock">
     <div class="kicker">Companion · cross-node trust &amp; the data backbone</div>
     <h1>Autonoetic — Federation &amp; Data Model</h1>
-    <p class="dek">Two structural pictures the other maps don't reach: how independent gateways decide
-      to trust each other across the wire, and how the single database that records everything is
-      actually wired together.</p>
+    <p class="dek">Three structural pictures the other maps don't reach: how independent gateways decide
+      to trust each other across the wire, how the single database that records everything is
+      actually wired together, and when a promotion gate is allowed to trust its own prior verdict.</p>
     <p class="companion">Fourth companion to the governance, technical, and runtime-dynamics maps.
       §A is the one dimension none of them touch — trust <em>between</em> nodes. §B is the schema
-      behind all the audit and activation the others describe.</p>
+      behind all the audit and activation the others describe. §C is trust across <em>time</em>: reusing a
+      verdict for bytes that provably did not change.</p>
   </header>
 
   <!-- ============ A. FEDERATION ============ -->
@@ -284,11 +285,104 @@
     </div>
 
     <div class="box tone-served" style="margin-top:16px;">
-      <h3>Three things called "federation" — keep them apart</h3>
-      <p><strong>OFP node federation</strong> (this sheet) is cross-machine TCP between gateways.
+      <h3>Four things called "federation" — keep them apart</h3>
+      <p><strong>OFP node federation</strong> (§ A, this sheet) is cross-machine TCP between gateways.
         It is <em>not</em> <span class="mono">federation_escalate</span> — a local in-process tool that
-        escalates promotion verdicts to the operator — and <em>not</em> the <strong>promotion jury</strong>
-        (auditor + evaluators) that gates a revision. Same word, three architecturally distinct mechanisms.</p>
+        escalates promotion verdicts to the operator — <em>not</em> the <strong>promotion jury</strong>
+        (auditor + evaluators) that gates a revision — and <em>not</em> <strong>federation
+        carry-forward</strong> (§ C), which reuses a prior jury verdict across a rebuild and never touches
+        the wire at all. Same word, four architecturally distinct mechanisms.</p>
+    </div>
+  </section>
+
+  <!-- ============ C. CARRY-FORWARD ============ -->
+  <section class="sheet" id="carry-forward">
+    <div class="sheet-head">
+      <div class="eyebrow">§ C — Verdict Reuse</div>
+      <h2>Carry-forward — when a gate need not look twice</h2>
+      <p class="dek">A jury verdict is recorded against the <strong>whole-artifact</strong> digest, so any
+        rebuild voids all three verdicts — even a one-line <span class="mono">SKILL.md</span> prose fix that
+        leaves code and contract byte-identical. One real promotion re-ran a 42-test
+        <span class="mono">unit_test_runner</span> and an <span class="mono">auditor</span> LLM review three
+        times over, neither of which reviewed anything that had changed. Carry-forward narrows the binding
+        from <em>this gate reviewed the whole artifact</em> to <em>this gate reviewed a specific subset of
+        it</em> — where the subset is fixed and gateway-owned, never agent-named.</p>
+    </div>
+
+    <div class="subhead">Three digests, not one — each gate carries only if what <em>it</em> read is unchanged</div>
+    <div class="gwrap">
+      <table class="reg">
+        <thead>
+          <tr><th>digest</th><th>covers</th><th>gates that read it</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>code_digest</code></td><td>every file classified <b>code</b>: <span class="mono">script_entry</span>, sources, tests, dependency manifests, and <span class="mono">runtime.lock</span>'s dependency/artifact/layer set — deps change what the tests can import</td><td><span class="mono">unit_test_runner</span> · <span class="mono">auditor</span> · <span class="mono">sealed_evaluator</span> · <span class="mono">static_evaluator</span></td></tr>
+          <tr><td><code>contract_digest</code></td><td>canonical JSON of the <b>semantic</b> frontmatter fields — what the gates verify <em>against</em> — normalized from either accepted SKILL shape</td><td>all four</td></tr>
+          <tr><td><code>prose_digest</code></td><td>everything else: the SKILL.md prose body, names and descriptions, README, examples, comments</td><td><span class="mono">static_evaluator</span> only</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid3" style="margin-top:16px;">
+      <div class="box tone-accent">
+        <span class="kicker-chip">classification</span>
+        <h3>Gateway-owned, never agent-supplied</h3>
+        <p>Which bucket a file or field lands in is mechanical. A frontmatter field in neither the contract
+          table nor the known-prose list defaults to <strong>prose</strong> and is logged, so an
+          unclassified field is visible during rollout rather than silently downgrading a gate. If the
+          agent could name its own classification, it could rename code as prose and carry a verdict over
+          a rewrite.</p>
+      </div>
+      <div class="box tone-rule">
+        <span class="kicker-chip">the asymmetry</span>
+        <h3>The planner reasons; the gateway verifies</h3>
+        <p>The planner <em>proposes</em> a carry by naming the prior artifact; the gateway accepts only on
+          a content-addressed digest match against its own recomputation, and rejects anything below the
+          configured floor. The planner never reads the strictness value — it simply receives rejections.
+          Proposing is cheap and unprivileged; accepting is neither.</p>
+      </div>
+      <div class="box tone-served">
+        <span class="kicker-chip">audit</span>
+        <h3>A carried verdict can never pass as fresh</h3>
+        <p>Each role verdict reports its <span class="mono">input_coverage</span> and either
+          <span class="mono">fresh: true</span> or <span class="mono">carried_from</span> with the prior
+          ref, role, timestamp and justification. The approvals surface marks it
+          <span class="mono">↻ carried</span>; a <span class="mono">federation.carry_forward</span> causal
+          event is emitted per accepted carry; <span class="mono">carry_forward_lineage</span> makes the
+          chain walkable back to its root.</p>
+      </div>
+    </div>
+
+    <div class="subhead">The strictness dial — an operator floor, defaulting to today's behaviour</div>
+    <div class="gwrap">
+      <table class="reg">
+        <thead>
+          <tr><th>level</th><th>carries when…</th><th>never carries when…</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="mono">off</span> <span class="badge">default</span></td><td>never — every rebuild re-runs every gate</td><td>always</td></tr>
+          <tr><td><span class="mono">conservative</span></td><td>a code-reviewing gate's <code>code_digest</code> <em>and</em> <code>contract_digest</code> are both byte-identical — i.e. only prose moved</td><td>code or contract changed at all</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid2" style="margin-top:16px;">
+      <div class="box tone-served">
+        <h3><span class="mono">static_evaluator</span> never carries</h3>
+        <p>It reads all three digests, so its verdict is reusable only when nothing changed — which means
+          no rebuild happened. Carry-forward therefore only ever helps the three code-reviewing gates.
+          That is correct rather than unfortunate: <span class="mono">static_evaluator</span> is the
+          manifest gate, and the manifest is exactly what a prose-only rebuild touches.</p>
+      </div>
+      <div class="box tone-right">
+        <h3>Off by default, and fail-closed when on</h3>
+        <p>An upgrade changes no behaviour until an operator opts in per environment. Every failure mode —
+          a missing digest, an unresolvable prior ref, a recorded digest that doesn't match the
+          recomputation — refuses the carry and re-runs the gate. A row lands in
+          <span class="mono">carry_forward_lineage</span> only <em>after</em> verification accepted, so
+          rejected claims leave no trace suggesting they were honoured. The floor is a ceiling on
+          permissiveness, not a mandate: the planner may always be more conservative than it allows.</p>
+      </div>
     </div>
   </section>
 
@@ -297,11 +391,16 @@
     <div class="sheet-head">
       <div class="eyebrow">§ B — Entity-Relationship</div>
       <h2>The gateway database</h2>
-      <p class="dek">One SQLite file (<span class="mono">gateway.db</span>, schema v76) holds all
-        transactional state — thirty-odd tables. Most relationships are logical joins on shared
-        columns, not declared foreign keys. Four <strong>spine columns</strong> carry the whole model.
-        A newer <strong>egress label plane</strong> (v73–v76, data-envelopes track) threads an
-        <span class="mono">egress_label_json</span> through the durable stores and keys taint by session.</p>
+      <p class="dek">One SQLite file (<span class="mono">gateway.db</span>, schema <strong>v80</strong>)
+        holds all transactional state — some seventy tables. Most relationships are logical joins on
+        shared columns, not declared foreign keys. Four <strong>spine columns</strong> carry the whole
+        model. A newer <strong>egress label plane</strong> (v73–v79, data-envelopes track) threads an
+        <span class="mono">egress_label_json</span> through the durable stores and keys taint by session;
+        v80 adds <strong>carry-forward lineage</strong> (§ C).</p>
+      <p class="fine">The clusters below map the <strong>load-bearing</strong> tables — the ones with
+        independent identity and cross-cluster relationships. They are not the complete list: pure
+        child/index tables, per-feature state tables, and search mirrors are omitted deliberately.
+        <span class="mono">migrate.rs</span> is the authority on the full set.</p>
     </div>
 
     <div class="subhead">The spine — four columns thread every cluster</div>
@@ -436,6 +535,14 @@
         <div class="erow"><code>session_egress_taint</code> <span class="pk">PK session_id</span><span class="rel">the session's accumulated (intersected) egress label (v74)</span></div>
         <div class="erow"><code>agent_messages</code> <span class="rel">+ <b>egress_label_json</b> — carries taint across agents (v75)</span></div>
         <div class="erow"><code>memories</code> · <code>execution_traces</code> <span class="rel">+ <b>egress_label_json</b> — where stored content may flow (v76)</span></div>
+        <div class="erow"><code>egress_declassification_grants</code> <span class="pk">PK id</span><span class="rel">the only widening path — keyed by <code>root_session_id</code>/<code>session_id</code>/<code>agent_id</code> + <code>target_kind</code>/<code>target_value</code>/<code>allowed_sink</code>; <code>expires_at</code>/<code>revoked_at</code> re-checked at <em>use</em> time (v77 · P-15.3)</span></div>
+        <div class="erow"><code>artifact_egress_labels</code> <span class="pk">PK artifact_id</span><span class="rel">an artifact's label at birth; absence ⇒ unrestricted (v78)</span></div>
+        <div class="erow"><code>agent_workspace_egress_labels</code> <span class="pk">PK agent_id</span><span class="rel">the workspace as a durable labelled object, per <em>agent</em> not per session — closes the write-then-re-read laundering path across sessions (v79)</span></div>
+      </div>
+      <div class="ercard lin">
+        <h3>Carry-forward</h3>
+        <div class="erow"><code>carry_forward_lineage</code> <span class="pk">PK artifact_id · role</span><span class="rel">→ source_artifact_id/_ref; strictness, source_code_digest, source_contract_digest (v80)</span></div>
+        <div class="erow"><span class="rel">One row per (artifact, carried gate role), written <em>only</em> after <span class="mono">verify_carry_claim</span> accepted — so rejected claims never appear. Answers "who did you carry from", and walks back to the root of the lineage.</span></div>
       </div>
     </div>
 
@@ -455,9 +562,12 @@
       <li><code>autonoetic-gateway/src/server/ofp.rs</code> (handshake, compatibility)</li>
       <li><code>autonoetic-gateway/src/server/router.rs</code> (client handshake)</li>
       <li><code>autonoetic-gateway/src/server/registry.rs</code> (PeerRegistry)</li>
-      <li>constitution 2026.07.19 §10 · P-10.6 · P-10.9</li>
-      <li><code>autonoetic-gateway/src/scheduler/gateway_store/migrate.rs</code> (schema v76)</li>
-      <li><code>docs/rfc/data-envelopes-egress-localization.md</code> (egress label plane, v73–v76)</li>
+      <li>constitution 2026.07.30 §10 · P-10.6 · P-10.9 · §15 P-15.3</li>
+      <li><code>autonoetic-gateway/src/scheduler/gateway_store/migrate.rs</code> (schema v80 — the authority on the full table set)</li>
+      <li><code>docs/rfc/data-envelopes-egress-localization.md</code> (egress label plane, v73–v79)</li>
+      <li><code>docs/federation-carry-forward.md</code> (§ C design spec)</li>
+      <li><code>autonoetic-gateway/src/runtime/federation_carry_forward.rs</code> (digests, diff, verify)</li>
+      <li><code>autonoetic-types/src/config.rs</code> (<code>CarryForwardStrictness</code>)</li>
       <li>the <code>gateway_store/*.rs</code> per-table modules</li>
       <li><code>docs/ARCHITECTURE.md</code> § Unified Gateway Database</li>
     </ul>

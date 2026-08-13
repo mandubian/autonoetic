@@ -498,9 +498,9 @@
     <p class="dek">How a constitution binds three parties instead of one, and the standing institutions —
       ombudsman, steward, curator, sentinels — that keep it correctable while nobody is watching.</p>
     <div class="meta-row">
-      <span><strong>Constitution</strong> 2026.07.19</span>
-      <span><strong>Rights</strong> 18 enforced</span>
-      <span><strong>Rules</strong> 179 enforced</span>
+      <span><strong>Constitution</strong> 2026.07.30</span>
+      <span><strong>Rights</strong> 18 · all enforced</span>
+      <span><strong>Rules</strong> 182 · 179 enforced, 2 partial, 1 design debt</span>
       <span><strong>Entrenched core</strong> 6 clauses</span>
       <span><strong>Storage</strong> SQLite + content-addressed (SHA-256)</span>
     </div>
@@ -688,13 +688,14 @@
     <div class="grid4">
       <div class="box tone-rule">
         <span class="kicker-chip">Binds the Agent</span>
-        <h3>§1–§11 Rules · P-*</h3>
+        <h3>§1–§11 · §15 Rules · P-*</h3>
         <p>A finite, named list of forbidden actions. Everything not forbidden is permitted.</p>
         <div class="badge-row">
           <span class="badge">P-1.1 capability match</span>
           <span class="badge">P-7.19 no polling</span>
           <span class="badge">P-8.1 chain integrity</span>
           <span class="badge">P-9.15 one door</span>
+          <span class="badge">P-15.1 egress locality</span>
         </div>
       </div>
       <div class="box tone-right">
@@ -738,7 +739,7 @@
       <div class="rr-ratio">
         <div class="rr-bar rights" style="width:9%"></div><div class="rr-bar rules" style="width:91%"></div>
       </div>
-      <p class="rr-label">18 rights against 179 rules. A constitution heavy on rules and light on
+      <p class="rr-label">18 rights against 182 rules. A constitution heavy on rules and light on
         rights is one to watch — amendments that widen this gap deserve scrutiny by design.
         When a rule appears to conflict with a right, <strong>the right wins</strong>: never a silent
         override, always an operator escalation.</p>
@@ -757,18 +758,23 @@
         fails loudly if an entrenched clause silently drops out of the register.</p>
     </div>
 
-    <div class="subhead">Data-locality — the mechanism landed ahead of the right</div>
+    <div class="subhead">Data-locality — the duty landed ahead of the right</div>
     <div class="box tone-served">
       <p>The <strong>egress label plane</strong> (data-envelopes track) lets the gateway enforce
         <em>where content may flow</em> — local model, remote model, another agent, a federated peer —
-        as deterministic, gateway-assigned metadata, never LLM judgment. It is live today: labels, the
-        model-boundary chokepoint, taint-following provider routing, and labels persisted with stored
-        content. The matching <strong>served-party right</strong> — the end-user's claim over their
-        data's locality — is the sequenced amendment (<span class="badge">§12 · U-*</span>), not yet
-        ratified.</p>
-      <p class="fine">A deliberate ordering: build the enforcement, measure it, then entrench the right —
-        correctability over a right that can't yet be honoured. Enforcement surfaces on the chain as
-        <code>egress.provider_selected</code> · <code>egress.boundary_refused</code> ·
+        as deterministic, gateway-assigned metadata, never LLM judgment. As of
+        <strong>v2026.07.30</strong> it is no longer only code: <span class="badge">§15 Data Egress
+        Localization</span> enacts it as law binding the agent — <code>P-15.1</code> (the chokepoint and
+        taint-following provider selection), <code>P-15.2</code> (every off-machine surface gates on
+        session taint), <code>P-15.3</code> (a label widens only via an operator declassification
+        grant). All three are <strong>ENFORCED</strong>, each naming its enforcing code and pinning test.</p>
+      <p>What is still outstanding is the other bind-direction. The <strong>served-party right</strong> —
+        the end-user's own claim over their data's locality — remains the sequenced amendment
+        (<span class="badge">§12 · U-*</span>), not yet ratified. So the agent now owes the duty before
+        the user holds the matching right.</p>
+      <p class="fine">A deliberate ordering: build the enforcement, measure it, entrench the duty, then
+        entrench the right — correctability over a right that can't yet be honoured. Enforcement surfaces
+        on the chain as <code>egress.provider_selected</code> · <code>egress.boundary_refused</code> ·
         <code>egress.declassified</code> · <code>egress.relabel</code>, which the contract-health tally reads like any other clause.
         Phase 4 (#909) surfaces: <code>sandbox</code> · <code>web</code> · <code>hooks</code> ·
         <code>mcp</code> · <code>ofp</code> · <code>compression</code>.</p>
@@ -1256,7 +1262,7 @@
       <li><code>docs/philosophy.md</code></li>
       <li><code>docs/ARCHITECTURE.md</code></li>
       <li><code>docs/separation-of-powers.md</code></li>
-      <li><code>docs/constitution/versions/2026.07.19/constitution.md</code></li>
+      <li><code>docs/constitution/versions/2026.07.30/constitution.md</code></li>
       <li><code>docs/constitution/enforcement-register.md</code></li>
       <li><code>docs/design/citizenship-as-a-runtime-service.md</code> (Parts B, D, F)</li>
       <li><code>agents/governance/ombudsman.default/SKILL.md</code></li>
