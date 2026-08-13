@@ -470,6 +470,12 @@ impl OpenAiDriver {
 
 #[async_trait::async_trait]
 impl LlmDriver for OpenAiDriver {
+    /// #1045: the resolved per-request timeout, doubling as the
+    /// idle-gap budget on the streaming turn path (#1044).
+    fn request_timeout(&self) -> std::time::Duration {
+        self.provider.request_timeout
+    }
+
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let body = self.build_body(req, false);
 
@@ -709,6 +715,47 @@ impl LlmDriver for OpenAiDriver {
                     "OpenAI stream error"
                 );
                 anyhow::bail!("OpenAI stream error {}: {}", status, text);
+            }
+
+            // Some OpenAI-compatible endpoints (and proxies) answer a
+            // `stream: true` request with a plain JSON completion instead of
+            // SSE. Degrade gracefully: parse it as a normal response and emit
+            // it as a single chunk, rather than hanging or failing on a body
+            // that is not event-stream framed.
+            let is_event_stream = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|ct| ct.starts_with("text/event-stream"))
+                .unwrap_or(false);
+            if !is_event_stream {
+                let body_text = response.text().await.map_err(|e| {
+                    crate::llm::transport_terminal_error(
+                        crate::llm::classify_transport_error(&e),
+                        attempt + 1,
+                        loop_start.elapsed(),
+                        &e,
+                    )
+                })?;
+                let j: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+                    anyhow::anyhow!(
+                        "error decoding LLM response body as JSON: {} (body_len={}, preview={:?})",
+                        e,
+                        body_text.len(),
+                        &body_text[..body_text.len().min(256)]
+                    )
+                })?;
+                let response = parse_response(&j);
+                if !response.text.is_empty() {
+                    let _ = tx.send(StreamEvent::TextDelta(response.text.clone())).await;
+                }
+                let _ = tx
+                    .send(StreamEvent::Complete {
+                        stop_reason: response.stop_reason.clone(),
+                        usage: response.usage.clone(),
+                    })
+                    .await;
+                return Ok(response);
             }
 
             let mut text_accum = String::new();

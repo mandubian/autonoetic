@@ -17,6 +17,7 @@ mod fork;
 mod grant_close_preservation;
 mod inference;
 mod pause_cooperative;
+mod stream_fallback;
 mod report;
 mod residency;
 mod trace;

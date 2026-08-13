@@ -651,9 +651,20 @@ rules:
 
 ## LLM request timeout & retries
 
-Each non-streaming `complete()` call applies a **per-request timeout** and a
-bounded, fail-fast retry policy so a slow or overloaded endpoint cannot stall a
-turn for many minutes.
+Agent turns run on the **streaming** path where the provider supports it
+(#1044). The per-request timeout is an **idle-gap budget** — the maximum
+silence between streamed chunks — not a wall-clock cap on the whole
+response, so a legitimately long generation is not punished for its length.
+A stall (no chunk within the budget) aborts the attempt, logs whether the
+stream stalled *before first byte* or *mid-stream* (time-to-first-byte is
+the discriminator between a stalled upstream and slow generation), and
+returns a retryable `llm_transport:timeout` error. Providers without
+streaming fall back to blocking `complete()` with the same value as a
+whole-request cap — the pre-#1044 behavior.
+
+Non-streaming `complete()` calls (auxiliary paths) apply the per-request
+timeout as a wall-clock cap plus a bounded, fail-fast retry policy so a slow
+or overloaded endpoint cannot stall a turn for many minutes.
 
 | Setting | Value | Notes |
 |---|---|---|
