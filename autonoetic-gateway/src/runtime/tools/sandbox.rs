@@ -607,6 +607,83 @@ pub fn apply_network_isolation_failure_to_result(
     Some(network_errors)
 }
 
+/// Connectivity-only fingerprint table for script-mode failure classification.
+///
+/// Unlike [`detect_network_errors_in_output`] — which also flags broad
+/// HTTP-level library exceptions like `requests.exceptions.HTTPError: 404`
+/// (right for the `sandbox_exec` path, which knows the run was isolated) — this
+/// list matches only errors that prove the outbound *connection* itself failed
+/// (no route, refused, timed out, DNS). A script-mode run may have had the
+/// network namespace shared, so an HTTP-level error is evidence of nothing and
+/// must not be annotated as `network_isolated`.
+fn detect_connectivity_errors_in_output(output: &str) -> Vec<String> {
+    const PATTERNS: &[(&str, &str)] = &[
+        ("Network is unreachable", "Network unreachable"),
+        ("OSError: [Errno 101]", "Network unreachable (errno 101)"),
+        ("Connection refused", "Connection refused"),
+        ("OSError: [Errno 111]", "Connection refused (errno 111)"),
+        ("ConnectionRefusedError:", "ConnectionRefusedError"),
+        ("socket.gaierror", "socket.gaierror"),
+        ("Name or service not known", "DNS resolution failed"),
+        ("Could not resolve host", "DNS resolution failed (curl)"),
+        ("ConnectionError:", "ConnectionError"),
+        ("ConnectTimeoutError", "ConnectTimeoutError"),
+        ("NewConnectionError", "NewConnectionError"),
+        ("MaxRetryError", "MaxRetryError"),
+        ("httpx.ConnectError", "httpx connection error"),
+        ("httpx.ConnectTimeout", "httpx timeout"),
+        ("aiohttp.ClientConnectorError", "aiohttp connector error"),
+    ];
+
+    let mut found = Vec::new();
+    for (pattern, label) in PATTERNS {
+        if output.contains(pattern) {
+            found.push(label.to_string());
+        }
+    }
+    found
+}
+
+/// § 3.6 sibling of [`apply_network_isolation_failure_to_result`] for
+/// script-mode spawns (`execute_script_in_sandbox`): a script run returns a
+/// plain error string instead of a tool-result JSON body, so the network
+/// diagnosis is folded into the error text. Returns `None` when the output
+/// carries no connectivity-failure fingerprint.
+pub(crate) fn classify_script_network_failure(
+    stdout: &str,
+    stderr: &str,
+    has_network_cap: bool,
+    evaluation_blocked: bool,
+) -> Option<String> {
+    let network_errors = detect_connectivity_errors_in_output(&format!("{stdout}\n{stderr}"));
+    if network_errors.is_empty() {
+        return None;
+    }
+    let reason = if evaluation_blocked {
+        "promotion/evaluation runs are network-isolated (constitution rule R+16): the sandbox ran \
+         with the network namespace unshared on purpose. Mock all external services so the script \
+         runs offline."
+    } else if has_network_cap {
+        "this agent declares NetworkAccess, so the sandbox shared the host network namespace and \
+         the script's outbound call failed at the connection layer. With the namespace shared this \
+         is most often an environmental egress problem — no route to the target (e.g. proxy-only \
+         egress or a firewall) — not a code bug, though 'connection refused' can also mean the \
+         target is reachable and the service or port is unavailable. Operator approval cannot create \
+         connectivity; grant real egress (route/tunnel/firewall), or run the script from a host \
+         with outbound access, then retry."
+    } else {
+        "this agent does not declare NetworkAccess, so the sandbox ran with outbound network \
+         blocked. Add a scoped NetworkAccess capability to the manifest (with the target listed in \
+         metadata.autonoetic.remote_access.targets), or change the script to reach the target \
+         through an allowed path, then retry."
+    };
+    Some(format!(
+        "network_isolated: the script failed on an outbound network call ({}). {}",
+        network_errors.join(", "),
+        reason
+    ))
+}
+
 pub fn effective_root_session_id(session_id: &str, explicit_root: Option<&str>) -> String {
     explicit_root
         .map(str::trim)
@@ -2848,6 +2925,65 @@ mod network_error_detection_tests {
             msg.contains("Mock all external services"),
             "evaluation-blocked message should advise mocking: {msg}"
         );
+    }
+
+    #[test]
+    fn script_classification_returns_none_on_clean_output() {
+        let diag = super::classify_script_network_failure("some output", "", true, false);
+        assert!(diag.is_none());
+        let diag = super::classify_script_network_failure("", "log: connection reset by policy", false, false);
+        assert!(diag.is_none());
+    }
+
+    #[test]
+    fn script_classification_ignores_http_level_library_errors() {
+        let stderr = "Traceback...\nrequests.exceptions.HTTPError: 404 Client Error: Not Found\n";
+        let diag = super::classify_script_network_failure("", stderr, true, false);
+        assert!(
+            diag.is_none(),
+            "HTTP-level errors are not connectivity failures and must not be \
+             classified as network_isolated: {diag:?}"
+        );
+        let stderr = "urllib.error.HTTPError: HTTP Error 403: Forbidden\n";
+        let diag = super::classify_script_network_failure("", stderr, true, false);
+        assert!(diag.is_none(), "{diag:?}");
+    }
+
+    #[test]
+    fn script_classification_flags_errno_101_network_unreachable() {
+        let stderr = "error: cannot connect to imap.gmail.com:993: [Errno 101] Network is unreachable\n";
+        let diag = super::classify_script_network_failure("", stderr, true, false).unwrap();
+        assert!(diag.starts_with("network_isolated:"), "{diag}");
+        assert!(diag.contains("Network unreachable"), "{diag}");
+    }
+
+    #[test]
+    fn script_classification_network_cap_case_names_connection_layer_and_egress() {
+        let stderr = "error: cannot connect to imap.gmail.com:993: [Errno 101] Network is unreachable\n";
+        let diag = super::classify_script_network_failure("", stderr, true, false).unwrap();
+        assert!(diag.contains("failed at the connection layer"), "{diag}");
+        assert!(
+            diag.contains("environmental egress problem"),
+            "{diag}"
+        );
+        assert!(diag.contains("approval cannot create connectivity"), "{diag}");
+        assert!(!diag.contains("R+16"), "{diag}");
+    }
+
+    #[test]
+    fn script_classification_no_cap_case_names_missing_capability() {
+        let stderr = "URLError: <urlopen error [Errno 111] Connection refused>\n";
+        let diag = super::classify_script_network_failure("", stderr, false, false).unwrap();
+        assert!(diag.contains("does not declare NetworkAccess"), "{diag}");
+        assert!(diag.contains("metadata.autonoetic.remote_access.targets"), "{diag}");
+    }
+
+    #[test]
+    fn script_classification_evaluation_blocked_case_names_r16() {
+        let stderr = "requests.exceptions.ConnectionError: boom\n";
+        let diag = super::classify_script_network_failure("", stderr, true, true).unwrap();
+        assert!(diag.contains("R+16"), "{diag}");
+        assert!(diag.contains("Mock all external services"), "{diag}");
     }
 }
 
