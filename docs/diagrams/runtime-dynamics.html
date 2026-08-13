@@ -204,14 +204,16 @@
       <h2>The session lifecycle</h2>
       <p class="dek">A session is always in the turn loop or parked at a yield point. There are exactly
         <strong>twelve</strong> ways it can yield (the <span class="mono">YieldReason</span> enum), and
-        every one writes a checkpoint. The constitution's <span class="mono">Ri-0.12</span> sorts them
-        into <strong>seven resumable</strong> (the session suspends and continues) and <strong>five
-        terminal</strong> (it closes) — a closed list, so any exit outside it is a bug.</p>
+        every one writes a checkpoint. As enforced, they sort into <strong>seven resumable</strong>
+        (the session suspends and continues) and <strong>five terminal</strong> (it closes). What the
+        constitution's <span class="mono">Ri-0.12</span> contributes is that the list is
+        <em>closed</em> — any exit outside it is a gateway bug, not an accepted behaviour. Its clause
+        text still enumerates an earlier 11-variant split; see the note below.</p>
     </div>
 
     <div class="gwrap">
       <svg class="diagram" viewBox="0 0 1180 366" role="img"
-           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of twelve checkpointed states. Ri-0.12 groups them: seven resumable (Hibernation, Idle, WaitingForChild and ManualStop auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and five terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, Error, ParentTerminated).">
+           aria-label="State machine of a session: from spawn into the Executing turn loop, which yields into one of twelve checkpointed states. As enforced they group into seven resumable (Hibernation, Idle, WaitingForChild and ManualStop auto-resume; ApprovalRequired, UserInputRequired and HumanEscalation resume on an external decision) and five terminal that close the session (MaxTurnsReached, BudgetExhausted, EmergencyStop, Error, ParentTerminated). Ri-0.12 makes this list closed rather than supplying these counts; its clause text still enumerates an earlier 11-variant split.">
         <defs>
           <marker id="rd-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
@@ -315,8 +317,8 @@
         auto-resume list — it predates <code>Idle</code> (#902) and the cooperative pause
         (#1026/#1051). The counts above are the enforced code. Realigning the clause needs a
         constitutional amendment, not a doc edit; the exhaustive classification in
-        <span class="mono">tests/constitution/rights_mid_bucket.rs</span> now makes any future variant a
-        compile error rather than a silent omission.</p>
+        <span class="mono">autonoetic-gateway/tests/constitution/rights_mid_bucket.rs</span> now makes
+        any future variant a compile error rather than a silent omission.</p>
     </div>
 
     <p class="para" style="margin-top:16px;">Two guarantees make this a closed system, not a maze.
