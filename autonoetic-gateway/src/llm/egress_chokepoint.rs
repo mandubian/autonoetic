@@ -457,7 +457,7 @@ impl LlmDriver for EgressChokepointDriver {
             );
             return Err(anyhow::anyhow!(
                 "egress assertion violation: withheld payload appeared verbatim in a \
-                 non-withheld message — completion aborted (fail-closed, RFC §5.2.3)"
+                 non-withheld message — stream aborted (fail-closed, RFC §5.2.3)"
             ));
         }
         self.inner.stream(&filtered, tx).await

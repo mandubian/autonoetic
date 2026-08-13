@@ -1008,44 +1008,25 @@ pub async fn complete_with_stall_detection(
                     ttfb = Some(start.elapsed());
                 }
                 chunks += 1;
-                if let StreamEvent::TextDelta(t) = &event {
-                    text_chars += t.len() as u64;
+                let done = match &event {
+                    StreamEvent::TextDelta(t) => {
+                        text_chars += t.len() as u64;
+                        false
+                    }
+                    // Completion is signalled by the event, not by the sender
+                    // dropping: a driver that keeps `tx` alive past `Complete`
+                    // (cloned sender, trailing cleanup) must not trip a false
+                    // stall after a finished turn.
+                    StreamEvent::Complete { .. } => true,
+                    _ => false,
+                };
+                if done {
+                    break;
                 }
             }
-            Ok(None) => {
-                // Channel closed: the stream task finished. Join for the result.
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                match task.await {
-                    Ok(result) => {
-                        match &result {
-                            Ok(_) => tracing::debug!(
-                                target: "llm",
-                                ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
-                                chunks,
-                                text_chars,
-                                elapsed_ms,
-                                "LLM stream completed"
-                            ),
-                            Err(_) => tracing::debug!(
-                                target: "llm",
-                                ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
-                                chunks,
-                                elapsed_ms,
-                                "LLM stream failed"
-                            ),
-                        }
-                        return result;
-                    }
-                    Err(join_err) => {
-                        return Err(anyhow::anyhow!(
-                            "llm_transport:other attempts=1 elapsed_ms={} source_chain=[]: \
-                             stream task join failed: {}",
-                            elapsed_ms,
-                            join_err
-                        ));
-                    }
-                }
-            }
+            // Sender dropped without a Complete event: the task finished
+            // (or died); join for the result.
+            Ok(None) => break,
             Err(_elapsed) => {
                 // Idle gap exceeded: the upstream stalled. Abort the attempt;
                 // the turn-level failover/retry starts clean.
@@ -1077,6 +1058,49 @@ pub async fn complete_with_stall_detection(
                     ttfb.map(|d| d.as_millis()),
                 ));
             }
+        }
+    }
+
+    // Join the stream task for its response. The idle budget is the grace
+    // window: a task that signalled (or dropped) completion but then hangs in
+    // cleanup is as stuck as a silent stream.
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    match tokio::time::timeout(idle, &mut task).await {
+        Ok(Ok(result)) => {
+            match &result {
+                Ok(_) => tracing::debug!(
+                    target: "llm",
+                    ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                    chunks,
+                    text_chars,
+                    elapsed_ms,
+                    "LLM stream completed"
+                ),
+                Err(_) => tracing::debug!(
+                    target: "llm",
+                    ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                    chunks,
+                    elapsed_ms,
+                    "LLM stream failed"
+                ),
+            }
+            result
+        }
+        Ok(Err(join_err)) => Err(anyhow::anyhow!(
+            "llm_transport:other attempts=1 elapsed_ms={} source_chain=[]: \
+             stream task join failed: {}",
+            elapsed_ms,
+            join_err
+        )),
+        Err(_) => {
+            task.abort();
+            Err(anyhow::anyhow!(
+                "llm_transport:timeout attempts=1 elapsed_ms={} source_chain=[]: \
+                 stream signalled completion but the driver task did not finish \
+                 within {}ms",
+                start.elapsed().as_millis(),
+                idle.as_millis(),
+            ))
         }
     }
 }

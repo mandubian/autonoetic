@@ -1315,4 +1315,52 @@ mod stall_detection {
             .expect_err("driver error must propagate");
         assert!(err.to_string().contains("llm_transport:connect"));
     }
+
+    /// Review (#1080): a driver that sends `Complete` but keeps the sender
+    /// alive (a cloned tx held by trailing cleanup) must not trip a false
+    /// stall after a finished turn — detection ends on the Complete event,
+    /// not on sender drop.
+    #[tokio::test]
+    async fn complete_event_ends_detection_even_if_sender_stays_alive() {
+        struct LingeringSenderDriver;
+        #[async_trait::async_trait]
+        impl LlmDriver for LingeringSenderDriver {
+            async fn complete(
+                &self,
+                _req: &CompletionRequest,
+            ) -> anyhow::Result<CompletionResponse> {
+                Ok(ScriptedDriver::ok_response())
+            }
+            async fn stream(
+                &self,
+                _req: &CompletionRequest,
+                tx: tokio::sync::mpsc::Sender<StreamEvent>,
+            ) -> anyhow::Result<CompletionResponse> {
+                let lingering = tx.clone();
+                let _ = tx.send(StreamEvent::TextDelta("hi".into())).await;
+                let _ = tx
+                    .send(StreamEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+                // A cleanup task holds a sender clone well past the idle
+                // budget — with drop-based detection this would be a false
+                // stall; with Complete-based detection it completes.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    drop(lingering);
+                });
+                Ok(ScriptedDriver::ok_response())
+            }
+            fn request_timeout(&self) -> Duration {
+                Duration::from_millis(50)
+            }
+        }
+        let driver: Arc<dyn LlmDriver> = Arc::new(LingeringSenderDriver);
+        let resp = complete_with_stall_detection(&driver, &req())
+            .await
+            .expect("a finished turn must not false-stall on a lingering sender");
+        assert_eq!(resp.text, "hello");
+    }
 }
