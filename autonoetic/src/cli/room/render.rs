@@ -1410,6 +1410,291 @@ fn exec_headline(preview: Option<&str>) -> String {
     }
 }
 
+/// Parsed `result` object from a `tool.completed` payload (`result` may be a
+/// JSON object or a JSON-encoded string).
+fn tool_completed_result_object(p: &serde_json::Value) -> Option<serde_json::Value> {
+    p.get("result").and_then(|r| match r {
+        serde_json::Value::String(raw) => serde_json::from_str(raw).ok(),
+        serde_json::Value::Object(_) => Some(r.clone()),
+        _ => None,
+    })
+}
+
+/// View model for a `promotion_record` tool result — gateway response shape from
+/// `PromotionRecordTool` (plus legacy test payloads with flat `role`/`findings`).
+struct PromotionRecordView {
+    tool_ok: bool,
+    pass: bool,
+    role: String,
+    artifact_hint: Option<String>,
+    execution_trace_id: Option<String>,
+    findings: Vec<serde_json::Value>,
+    roles_recorded: Vec<(String, bool)>,
+    error: Option<String>,
+}
+
+fn is_promotion_record_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "promotion_record" | "promotion.record")
+}
+
+fn promotion_role_label(entry: &SessionTimelineEntry, rec: Option<&serde_json::Value>) -> String {
+    if let SessionRole::Specialist { kind } = &entry.role {
+        return kind.clone();
+    }
+    if let SessionRole::Auditor = &entry.role {
+        return "auditor".to_string();
+    }
+    if let Some(rec) = rec {
+        let slots: [(&str, &str, &str); 5] = [
+            ("evaluator", "evaluator_id", "evaluator_timestamp"),
+            ("auditor", "auditor_id", "auditor_timestamp"),
+            ("static_evaluator", "static_evaluator_id", "static_evaluator_timestamp"),
+            ("unit_test_runner", "unit_test_runner_id", "unit_test_runner_timestamp"),
+            ("sealed_evaluator", "sealed_evaluator_id", "sealed_evaluator_timestamp"),
+        ];
+        let mut latest: Option<(String, String)> = None;
+        for (role, id_key, ts_key) in slots {
+            if rec.get(id_key).and_then(|v| v.as_str()).is_some() {
+                let ts = rec
+                    .get(ts_key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if latest.as_ref().map(|(_, t)| ts > t.as_str()).unwrap_or(true) {
+                    latest = Some((role.to_string(), ts.to_string()));
+                }
+            }
+        }
+        if let Some((role, _)) = latest {
+            return role;
+        }
+    }
+    role_label(&entry.role)
+}
+
+fn promotion_findings_from_value(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    v.get("findings")
+        .and_then(|f| f.as_array())
+        .map(|a| a.clone())
+        .unwrap_or_default()
+}
+
+fn promotion_roles_recorded(rec: &serde_json::Value) -> Vec<(String, bool)> {
+    let slots: [(&str, &str, &str); 5] = [
+        ("evaluator", "evaluator_id", "evaluator_pass"),
+        ("auditor", "auditor_id", "auditor_pass"),
+        ("static_evaluator", "static_evaluator_id", "static_evaluator_pass"),
+        ("unit_test_runner", "unit_test_runner_id", "unit_test_runner_pass"),
+        ("sealed_evaluator", "sealed_evaluator_id", "sealed_evaluator_pass"),
+    ];
+    let mut out = Vec::new();
+    for (role, id_key, pass_key) in slots {
+        if rec.get(id_key).and_then(|v| v.as_str()).is_some() {
+            let pass = rec.get(pass_key).and_then(|v| v.as_bool()).unwrap_or(false);
+            out.push((role.to_string(), pass));
+        }
+    }
+    out
+}
+
+fn promotion_record_view(entry: &SessionTimelineEntry, p: &serde_json::Value) -> Option<PromotionRecordView> {
+    let result = tool_completed_result_object(p)?;
+    let rec = result.get("promotion_record").filter(|v| v.is_object());
+    let tool_ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+    let pass = result
+        .get("pass")
+        .and_then(|v| v.as_bool())
+        .or_else(|| rec.and_then(|r| r.get("pass").and_then(|v| v.as_bool())))
+        .unwrap_or(false);
+    let role = result
+        .get("role")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| promotion_role_label(entry, rec));
+    let artifact_hint = entry
+        .refs
+        .artifact_id
+        .clone()
+        .or_else(|| {
+            rec.and_then(|r| r.get("artifact_ref").and_then(|v| v.as_str()).map(str::to_string))
+        })
+        .or_else(|| {
+            result
+                .get("artifact_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    let execution_trace_id = result
+        .get("execution_trace_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let findings = {
+        let mut findings = promotion_findings_from_value(&result);
+        if let Some(rec) = rec {
+            let role_key = format!("{role}_findings");
+            if let Some(arr) = rec.get(&role_key).and_then(|f| f.as_array()) {
+                findings.extend(arr.clone());
+            }
+        }
+        findings
+    };
+    let roles_recorded = rec.map(promotion_roles_recorded).unwrap_or_default();
+    let error = result
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    Some(PromotionRecordView {
+        tool_ok,
+        pass,
+        role,
+        artifact_hint,
+        execution_trace_id,
+        findings,
+        roles_recorded,
+        error,
+    })
+}
+
+fn short_promotion_artifact(id: &str) -> String {
+    let trimmed = id.trim();
+    if trimmed.len() <= 20 {
+        return trimmed.to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("art_") {
+        let short: String = rest.chars().take(12).collect();
+        return format!("art_{short}…");
+    }
+    format!("{}…", trimmed.chars().take(16).collect::<String>())
+}
+
+fn short_trace_id(id: &str) -> String {
+    let trimmed = id.trim();
+    if trimmed.len() <= 12 {
+        return trimmed.to_string();
+    }
+    format!("{}…", trimmed.chars().take(8).collect::<String>())
+}
+
+fn promotion_finding_counts(findings: &[serde_json::Value]) -> String {
+    let mut critical = 0usize;
+    let mut error = 0usize;
+    let mut warning = 0usize;
+    let mut info = 0usize;
+    for f in findings {
+        match f.get("severity").and_then(|v| v.as_str()) {
+            Some("critical") => critical += 1,
+            Some("error") => error += 1,
+            Some("warning") => warning += 1,
+            Some("info") | None => info += 1,
+            _ => info += 1,
+        }
+    }
+    let mut parts = Vec::new();
+    if critical > 0 {
+        parts.push(format!("{critical} critical"));
+    }
+    if error > 0 {
+        parts.push(format!("{error} error"));
+    }
+    if warning > 0 {
+        parts.push(format!("{warning} warning"));
+    }
+    if info > 0 {
+        parts.push(format!("{info} info"));
+    }
+    if parts.is_empty() {
+        "no findings".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn promotion_record_headline(view: &PromotionRecordView) -> String {
+    if !view.tool_ok {
+        return "✗ promotion record rejected".to_string();
+    }
+    let verdict = if view.pass { "PASS" } else { "FAIL" };
+    let glyph = if view.pass { "✓" } else { "✗" };
+    format!("{glyph} promotion {verdict} · {role}", role = view.role)
+}
+
+fn promotion_record_detail(view: &PromotionRecordView) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(err) = &view.error {
+        lines.push(format!("error: {}", one_line(err, 160)));
+    }
+    if let Some(art) = &view.artifact_hint {
+        lines.push(format!("artifact: {}", short_promotion_artifact(art)));
+    }
+    if let Some(trace) = &view.execution_trace_id {
+        lines.push(format!("execution trace: {}", short_trace_id(trace)));
+    }
+    if !view.findings.is_empty() {
+        lines.push(format!("findings: {}", promotion_finding_counts(&view.findings)));
+        for f in view
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.get("severity").and_then(|v| v.as_str()),
+                    Some("critical") | Some("error") | Some("warning")
+                )
+            })
+            .take(3)
+        {
+            let sev = f
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("finding");
+            let desc = f
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no description)");
+            lines.push(format!("  [{sev}] {}", one_line(desc, 120)));
+        }
+    }
+    if !view.roles_recorded.is_empty() {
+        let slots: Vec<String> = view
+            .roles_recorded
+            .iter()
+            .map(|(role, pass)| {
+                let mark = if *pass { "✓" } else { "✗" };
+                format!("{role} {mark}")
+            })
+            .collect();
+        lines.push(format!("registry: {}", slots.join(" · ")));
+    }
+    if lines.is_empty() {
+        if view.pass {
+            "verdict recorded — no additional detail".to_string()
+        } else {
+            "verdict recorded — promotion blocked".to_string()
+        }
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn promotion_record_tone(entry: &SessionTimelineEntry) -> Option<RowTone> {
+    if entry.event_type != "tool.completed" {
+        return None;
+    }
+    let p = parse_entry_payload(entry)?;
+    let tool = p
+        .get("tool_name")
+        .or_else(|| p.get("tool"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !is_promotion_record_tool(tool) {
+        return None;
+    }
+    let view = promotion_record_view(entry, &p)?;
+    if view.tool_ok && view.pass {
+        Some(RowTone::VerdictPass)
+    } else {
+        Some(RowTone::VerdictFail)
+    }
+}
+
 /// Headline for `content_write` / `content_patch` rows: `✎ wrote <path>` so a
 /// file creation reads as an action with its target, not a buried `(name)` suffix.
 fn write_headline(verb: &str, path: Option<&str>) -> String {
@@ -1580,6 +1865,13 @@ pub fn summarize(entry: &SessionTimelineEntry) -> String {
                 }
                 "content_write" => return write_headline("wrote", key_param.as_deref()),
                 "content_patch" => return write_headline("patched", key_param.as_deref()),
+                "promotion_record" | "promotion.record" => {
+                    if let Some(ref pv) = p {
+                        if let Some(view) = promotion_record_view(entry, pv) {
+                            return promotion_record_headline(&view);
+                        }
+                    }
+                }
                 _ => {}
             }
             let summary = extract_tool_summary(p.as_ref());
@@ -2068,6 +2360,10 @@ fn detail_preview(entry: &SessionTimelineEntry) -> Option<String> {
                 Some("artifact_inspect") => s("args_preview")
                     .or_else(|| s("artifact_ref"))
                     .map(|p| cap_preview(&p, 80)),
+                Some("promotion_record") | Some("promotion.record") => p
+                    .as_ref()
+                    .and_then(|payload| promotion_record_view(entry, payload))
+                    .map(|view| promotion_record_detail(&view)),
                 // `result` is normally a JSON-encoded *string* (see
                 // `log_tool_completed_with_approval`), not a nested object —
                 // parse it before reading stdout/stderr/exit_code. Without
@@ -2462,6 +2758,10 @@ pub enum RowTone {
     Reasoning,
     /// Operator gates — plans, approvals, clarifications (high visibility).
     OperatorGate,
+    /// Promotion verdict recorded (`promotion_record` pass).
+    VerdictPass,
+    /// Promotion verdict recorded (`promotion_record` fail/reject).
+    VerdictFail,
     /// LLM errors and everything else.
     Default,
 }
@@ -2478,6 +2778,9 @@ pub fn row_tone(event_type: &str) -> RowTone {
 
 /// Tone for a full timeline entry — includes embedded plan proposals in messages.
 pub fn tone_for_entry(entry: &SessionTimelineEntry) -> RowTone {
+    if let Some(tone) = promotion_record_tone(entry) {
+        return tone;
+    }
     match entry.event_type.as_str() {
         "plan.pending" | "approval.pending" | "user.ask.pending" | "escalation.pending"
         | "wiki.proposed" | "wiki.promoted" | "wiki.rejected" | "wiki.withdrawn" => {
@@ -5483,6 +5786,99 @@ mod tests {
         assert!(spec.headline.contains("coder.default"), "headline: {}", spec.headline);
         assert!(!spec.headline.contains("tool agent_spawn"), "headline: {}", spec.headline);
         assert_eq!(spec.detail.as_deref(), Some("implement the retry backoff"));
+    }
+
+    #[test]
+    fn render_spec_promotion_record_pass_is_green_verdict_with_detail() {
+        let raw_result = serde_json::json!({
+            "ok": true,
+            "pass": true,
+            "execution_trace_id": "51204daf-4efb-4c19-9cf8-d8b337c13289",
+            "promotion_record": {
+                "artifact_ref": "ar.386f5b222421",
+                "unit_test_runner_pass": true,
+                "unit_test_runner_id": "unit_test_runner.default",
+                "unit_test_runner_findings": [
+                    {"severity": "info", "description": "47 tests passed"},
+                ],
+                "unit_test_runner_timestamp": "2026-08-04T12:00:00Z",
+                "evaluator_pass": false,
+                "auditor_pass": false,
+            }
+        });
+        let e = entry(
+            SessionRole::Specialist {
+                kind: "unit_test_runner".into(),
+            },
+            Principal::agent("unit_test_runner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "promotion_record",
+                "result": raw_result.to_string(),
+            }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.tone, RowTone::VerdictPass);
+        assert!(
+            spec.headline.contains("✓ promotion PASS"),
+            "headline: {}",
+            spec.headline
+        );
+        assert!(
+            spec.headline.contains("unit_test_runner"),
+            "headline: {}",
+            spec.headline
+        );
+        let detail = spec.detail.expect("promotion detail");
+        assert!(detail.contains("execution trace"), "{detail}");
+        assert!(detail.contains("findings"), "{detail}");
+        assert!(detail.contains("unit_test_runner ✓"), "{detail}");
+        assert!(
+            !detail.contains("promotion_record"),
+            "must not dump raw JSON: {detail}"
+        );
+    }
+
+    #[test]
+    fn render_spec_promotion_record_fail_is_red_verdict_with_blocking_findings() {
+        let raw_result = serde_json::json!({
+            "ok": true,
+            "pass": false,
+            "execution_trace_id": "aabbccdd-1111-2222-3333-444455556666",
+            "promotion_record": {
+                "artifact_ref": "ar.deadbeef",
+                "unit_test_runner_pass": false,
+                "unit_test_runner_id": "unit_test_runner.default",
+                "unit_test_runner_findings": [
+                    {"severity": "critical", "description": "test_auth_login FAILED"},
+                    {"severity": "warning", "description": "coverage below target"},
+                ],
+                "unit_test_runner_timestamp": "2026-08-04T12:01:00Z",
+            }
+        });
+        let e = entry(
+            SessionRole::Specialist {
+                kind: "unit_test_runner".into(),
+            },
+            Principal::agent("unit_test_runner.default"),
+            "tool.completed",
+            Altitude::Normal,
+            serde_json::json!({
+                "tool_name": "promotion_record",
+                "result": raw_result.to_string(),
+            }),
+        );
+        let spec = render_spec(&e);
+        assert_eq!(spec.tone, RowTone::VerdictFail);
+        assert!(
+            spec.headline.contains("✗ promotion FAIL"),
+            "headline: {}",
+            spec.headline
+        );
+        let detail = spec.detail.expect("promotion detail");
+        assert!(detail.contains("[critical]"), "{detail}");
+        assert!(detail.contains("test_auth_login"), "{detail}");
     }
 
     #[test]

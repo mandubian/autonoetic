@@ -9092,6 +9092,8 @@ fn row_rail_color(spec: &RowSpec) -> Color {
     }
     match spec.tone {
         RowTone::OperatorGate => Color::Yellow,
+        RowTone::VerdictPass => Color::Green,
+        RowTone::VerdictFail => Color::Red,
         RowTone::ToolCall => Color::Blue,
         RowTone::Reasoning => Color::DarkGray,
         RowTone::AgentNarrative | RowTone::Default => actor_color(spec.actor),
@@ -9106,6 +9108,12 @@ fn row_headline_style(spec: &RowSpec) -> Style {
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
+        RowTone::VerdictPass => alt
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        RowTone::VerdictFail => alt
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD),
         RowTone::AgentNarrative => alt
             .fg(actor_color(spec.actor))
             .add_modifier(Modifier::BOLD),
@@ -9118,6 +9126,8 @@ fn row_headline_style(spec: &RowSpec) -> Style {
 fn row_label_style(spec: &RowSpec) -> Style {
     match spec.tone {
         RowTone::OperatorGate => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        RowTone::VerdictPass => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        RowTone::VerdictFail => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         RowTone::ToolCall => Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
         RowTone::Reasoning => Style::default().fg(Color::DarkGray),
         RowTone::AgentNarrative | RowTone::Default => {
@@ -9129,6 +9139,8 @@ fn row_label_style(spec: &RowSpec) -> Style {
 fn row_detail_style(spec: &RowSpec) -> Style {
     match spec.tone {
         RowTone::OperatorGate => Style::default().fg(Color::LightYellow),
+        RowTone::VerdictPass => Style::default().fg(Color::Indexed(77)),
+        RowTone::VerdictFail => Style::default().fg(Color::LightRed),
         RowTone::ToolCall => Style::default().fg(Color::Indexed(67)),
         RowTone::AgentNarrative => Style::default().fg(Color::Gray),
         _ => Style::default().fg(Color::DarkGray),
