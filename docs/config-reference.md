@@ -689,8 +689,9 @@ Set it **once**. `GatewayConfig` rejects a duplicated key outright
 every CLI command, a leftover second line stops `chat`, `room` and `agent list`
 as well as the gateway.
 
-Applies process-wide, published at config load, so every entry point
-(`gateway start`, `run`, `chat`) uses one budget. Precedence:
+The top-level key is the **global default**, published at config load; the
+effective budget can vary by selected preset (see the per-preset override
+below) — only the env var override is truly process-wide. Precedence:
 `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` → preset `request_timeout_secs` →
 `llm_request_timeout_secs` → `120s` — the env var stays an ad-hoc override,
 and a malformed or sub-floor value falls through to the next level rather

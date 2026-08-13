@@ -233,7 +233,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         routing_preset: None,
         thinking: p.thinking.clone(),
         egress_class: p.egress_class,
-        request_timeout_secs: None,
+        request_timeout_secs: p.request_timeout_secs,
     }
 }
 

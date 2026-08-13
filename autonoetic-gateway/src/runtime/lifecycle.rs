@@ -1246,7 +1246,7 @@ impl AgentExecutor {
             routing_preset: Some(preset_name.to_string()),
             thinking: preset.thinking.clone(),
             egress_class: preset.egress_class,
-            request_timeout_secs: None,
+            request_timeout_secs: preset.request_timeout_secs,
         };
         crate::llm::build_driver(llm_config, self.http_client.clone()).ok()
     }
@@ -3821,7 +3821,7 @@ impl AgentExecutor {
                                             routing_preset: Some(fb_preset.clone()),
                                             thinking: preset.thinking.clone(),
                                             egress_class: preset.egress_class,
-                                            request_timeout_secs: None,
+                                            request_timeout_secs: preset.request_timeout_secs,
                                         });
                                     match fb_config {
                                         Some(config) => {
