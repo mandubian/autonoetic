@@ -52,6 +52,7 @@ pub fn resolve_fixed_preset(preset: &LlmPreset) -> Option<LlmConfig> {
         routing_preset: None,
         thinking: preset.thinking.clone(),
         egress_class: preset.egress_class,
+        request_timeout_secs: preset.request_timeout_secs,
     })
 }
 
@@ -132,6 +133,7 @@ mod tests {
             latency: None,
             routing: None,
             egress_class: None,
+            request_timeout_secs: None,
         }
     }
 
@@ -159,6 +161,7 @@ mod tests {
                 hybrid: HybridRoutingConfig::default(),
             }),
             egress_class: None,
+            request_timeout_secs: None,
         }
     }
 
@@ -183,6 +186,19 @@ mod tests {
         assert_eq!(cfg.provider, "anthropic");
         assert_eq!(cfg.model, "claude-sonnet");
         assert_eq!(cfg.temperature, 0.2);
+    }
+
+    /// #1045: the preset-level request timeout carries onto the resolved
+    /// LlmConfig so build_driver can give the preset its own budget.
+    #[test]
+    fn test_resolve_fixed_preset_carries_request_timeout() {
+        let mut p = fixed_preset("anthropic", "claude-sonnet", CapabilityTier::Standard);
+        assert_eq!(resolve_fixed_preset(&p).unwrap().request_timeout_secs, None);
+        p.request_timeout_secs = Some(300);
+        assert_eq!(
+            resolve_fixed_preset(&p).unwrap().request_timeout_secs,
+            Some(300)
+        );
     }
 
     #[test]

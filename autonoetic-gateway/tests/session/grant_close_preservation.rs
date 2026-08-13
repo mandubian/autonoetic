@@ -62,6 +62,7 @@ fn manifest_with(agent_id: &str) -> AgentManifest {
             routing_preset: None,
             thinking: None,
             egress_class: None,
+            request_timeout_secs: None,
         }),
         ..TestManifest::new().build()
     }

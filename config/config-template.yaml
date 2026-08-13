@@ -875,6 +875,8 @@ llm_presets:
 # value, one stall ends the turn — so raising it also raises the worst case per
 # turn to twice whatever you set. Env AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS
 # overrides it for one-off runs. Values below 5 are ignored.
+# A fixed preset may override this per preset via `request_timeout_secs` (#1045) —
+# e.g. a long-generating `coding` preset at 300 while digest presets stay lean.
 # llm_request_timeout_secs: 120
 
 # Role → preset for agent init and agents without manifest llm_preset.

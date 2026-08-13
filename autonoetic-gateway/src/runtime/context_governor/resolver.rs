@@ -152,6 +152,7 @@ mod tests {
             latency: None,
             routing: None,
             egress_class: None,
+            request_timeout_secs: None,
         }
     }
 
@@ -189,6 +190,7 @@ mod tests {
                 routing_preset: None,
                 thinking: None,
                 egress_class: None,
+                request_timeout_secs: None,
             }),
             limits: None,
             background: None,

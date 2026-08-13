@@ -544,6 +544,7 @@ mod tests {
                 latency: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         GatewayConfig {

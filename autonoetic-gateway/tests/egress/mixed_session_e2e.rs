@@ -76,6 +76,7 @@ fn remote_preset() -> LlmPreset {
         latency: None,
         routing: None,
         egress_class: Some(EgressClass::Remote),
+        request_timeout_secs: None,
     }
 }
 

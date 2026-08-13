@@ -683,10 +683,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Per-request timeout resolution — config vs env vs default
+    // Per-request timeout resolution — env vs preset vs config vs default
     // -----------------------------------------------------------------------
     //
-    // Exercises the pure core rather than `request_timeout()`, which reads
+    // Exercises the pure core rather than `build_driver`, which reads
     // process env and a `OnceLock`: both are global, so a test touching them
     // would order-depend on every other test in the binary.
     mod request_timeout_resolution {
@@ -695,26 +695,54 @@ mod tests {
         #[test]
         fn unset_everywhere_is_the_default() {
             assert_eq!(
-                resolve_request_timeout_secs(None, None),
+                resolve_request_timeout_secs(None, None, None),
                 DEFAULT_REQUEST_TIMEOUT_SECS
             );
         }
 
         #[test]
-        fn configured_value_applies_when_env_is_absent() {
-            assert_eq!(resolve_request_timeout_secs(None, Some(600)), 600);
+        fn configured_value_applies_when_env_and_preset_are_absent() {
+            assert_eq!(resolve_request_timeout_secs(None, None, Some(600)), 600);
         }
 
         /// The env var stays an ad-hoc escape hatch, so it must win over a
         /// committed config value rather than the other way round.
         #[test]
         fn env_overrides_configured_value() {
-            assert_eq!(resolve_request_timeout_secs(Some("300"), Some(600)), 300);
+            assert_eq!(resolve_request_timeout_secs(Some("300"), None, Some(600)), 300);
+        }
+
+        /// #1045: the preset-level value sits between env and the gateway
+        /// default — a `coding` preset can outlast the global budget without
+        /// an env tweak.
+        #[test]
+        fn preset_applies_when_env_is_absent() {
+            assert_eq!(resolve_request_timeout_secs(None, Some(300), None), 300);
+        }
+
+        #[test]
+        fn preset_beats_gateway_default() {
+            assert_eq!(resolve_request_timeout_secs(None, Some(300), Some(600)), 300);
+        }
+
+        #[test]
+        fn env_beats_preset() {
+            assert_eq!(
+                resolve_request_timeout_secs(Some("900"), Some(300), Some(600)),
+                900
+            );
+        }
+
+        /// A sub-floor preset value is a misconfiguration, not an intent —
+        /// fall through to the gateway default rather than clamping to it.
+        #[test]
+        fn sub_floor_preset_falls_through_to_configured() {
+            assert_eq!(resolve_request_timeout_secs(None, Some(4), Some(600)), 600);
         }
 
         #[test]
         fn surrounding_whitespace_in_env_is_tolerated() {
-            assert_eq!(resolve_request_timeout_secs(Some("  300 "), None), 300);
+            assert_eq!(resolve_request_timeout_secs(Some("  300 "), None, None), 300);
         }
 
         /// A malformed or sub-floor env value must fall through to config, not
@@ -724,7 +752,7 @@ mod tests {
         fn unusable_env_falls_through_to_configured_value() {
             for env in ["not-a-number", "0", "4", ""] {
                 assert_eq!(
-                    resolve_request_timeout_secs(Some(env), Some(600)),
+                    resolve_request_timeout_secs(Some(env), None, Some(600)),
                     600,
                     "env {env:?} should fall through to config"
                 );
@@ -734,15 +762,15 @@ mod tests {
         #[test]
         fn sub_floor_configured_value_falls_back_to_default() {
             assert_eq!(
-                resolve_request_timeout_secs(None, Some(4)),
+                resolve_request_timeout_secs(None, None, Some(4)),
                 DEFAULT_REQUEST_TIMEOUT_SECS
             );
         }
 
         #[test]
         fn floor_value_is_accepted() {
-            assert_eq!(resolve_request_timeout_secs(None, Some(5)), 5);
-            assert_eq!(resolve_request_timeout_secs(Some("5"), None), 5);
+            assert_eq!(resolve_request_timeout_secs(None, None, Some(5)), 5);
+            assert_eq!(resolve_request_timeout_secs(Some("5"), None, None), 5);
         }
     }
 

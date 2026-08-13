@@ -481,7 +481,7 @@ impl LlmDriver for OpenAiDriver {
             }
         }
 
-        let complete_timeout = crate::llm::request_timeout();
+        let complete_timeout = self.provider.request_timeout;
         // Bound total wall-clock so a slow endpoint can't multiply the
         // per-request timeout across retries.
         let retry_deadline = crate::llm::retry_deadline(complete_timeout);
@@ -642,7 +642,7 @@ impl LlmDriver for OpenAiDriver {
 
         let body = self.build_body(req, true);
 
-        let complete_timeout = crate::llm::request_timeout();
+        let complete_timeout = self.provider.request_timeout;
         let retry_deadline = crate::llm::retry_deadline(complete_timeout);
         let loop_start = std::time::Instant::now();
         'retry: for attempt in 0..=crate::llm::MAX_CONNECTION_RETRIES {
@@ -1155,6 +1155,7 @@ mod tests {
                 temperature: None,
                 max_tokens: None,
                 egress_class: autonoetic_types::egress::EgressClass::Remote,
+                request_timeout: std::time::Duration::from_secs(120),
             },
         )
     }

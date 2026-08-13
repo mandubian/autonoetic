@@ -74,6 +74,7 @@ pub fn resolve_compression_llm_config(
                 // compressing local_only history on a remote preset is a leak
                 // even with per-envelope filtering (RFC §5.7).
                 egress_class: preset.egress_class,
+                request_timeout_secs: preset.request_timeout_secs,
             });
         }
         return None;
@@ -93,6 +94,7 @@ pub fn resolve_compression_llm_config(
             routing_preset: None,
             thinking: None,
             egress_class: None,
+            request_timeout_secs: None,
         });
     }
 
@@ -814,6 +816,7 @@ mod tests {
                 latency: None,
                 routing: None,
                 egress_class: None,
+                request_timeout_secs: None,
             },
         );
         let gateway = ContextCompressionConfig {

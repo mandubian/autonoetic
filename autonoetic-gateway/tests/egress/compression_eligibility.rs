@@ -40,6 +40,7 @@ fn remote_preset() -> LlmPreset {
         // Explicitly remote (the default, but stated for clarity — this preset
         // is the sink the gate must refuse the local_only band for).
         egress_class: Some(EgressClass::Remote),
+        request_timeout_secs: None,
     }
 }
 

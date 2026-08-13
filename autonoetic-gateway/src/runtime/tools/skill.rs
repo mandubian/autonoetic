@@ -268,6 +268,7 @@ impl NativeTool for SkillInstallTool {
                     routing_preset: None,
                     thinking: preset.thinking.clone(),
                     egress_class: preset.egress_class,
+                    request_timeout_secs: preset.request_timeout_secs,
                 })
         });
 

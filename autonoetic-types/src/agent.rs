@@ -99,6 +99,14 @@ pub struct LlmConfig {
     /// (phase 1b #905) knows which sink a completion targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_class: Option<crate::egress::EgressClass>,
+
+    /// Per-request timeout (seconds) carried from the preset at resolve time
+    /// (#1045). `None` means "use the gateway default
+    /// (`llm_request_timeout_secs`) or the built-in 120s". Lets a long-running
+    /// `coding` preset outlast a `haiku` one instead of sharing one
+    /// process-wide budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Extended thinking / reasoning configuration for models that support it.

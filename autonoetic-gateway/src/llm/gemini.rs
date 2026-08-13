@@ -170,7 +170,7 @@ impl LlmDriver for GeminiDriver {
         let body = self.build_body(req);
         let url = self.url();
 
-        let complete_timeout = crate::llm::request_timeout();
+        let complete_timeout = self.provider.request_timeout;
         // Bound total wall-clock so a slow endpoint can't multiply the
         // per-request timeout across retries.
         let retry_deadline = crate::llm::retry_deadline(complete_timeout);
