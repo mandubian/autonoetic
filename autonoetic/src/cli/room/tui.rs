@@ -48,6 +48,10 @@ const IDLE_TIMELINE_POLL_MS: u64 = 2000;
 const TIMELINE_POLL_MS: u64 = 400;
 /// How often to poll `session.status` for async ingest still `processing`.
 const SESSION_STATUS_POLL_MS: u64 = 2000;
+/// How often to poll `llm.activity` — the live LLM stream registry. 1s keeps
+/// the elapsed/since-last-chunk clocks in the activity strip ticking without
+/// hammering the gateway (the read is an in-process counter clone).
+const LLM_ACTIVITY_POLL_MS: u64 = 1000;
 
 /// Hard cap on plumbing/tool rows — keeps the list scannable.
 const MAX_ROW_LINES: usize = 8;
@@ -790,6 +794,99 @@ fn pending_chip(pending: &[String], age_turns: Option<u64>) -> Option<String> {
         _ => String::new(),
     };
     Some(format!("⋯{n} {}{}{}", distinct[..shown].join(","), more, age))
+}
+
+/// One live LLM stream as reported by the gateway's `llm.activity` registry —
+/// the stuck-vs-slow surface (#1081 follow-up). Mirrors the fields the strip
+/// renders; unknown fields are ignored so the gateway can extend the payload.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+struct LlmActivityRow {
+    session_id: String,
+    agent_id: String,
+    #[serde(default)]
+    model: String,
+    /// `awaiting_first_byte` | `streaming`
+    phase: String,
+    #[serde(default)]
+    elapsed_ms: u64,
+    #[serde(default)]
+    since_last_chunk_ms: u64,
+    #[serde(default)]
+    chunks: u64,
+    #[serde(default)]
+    text_chars: u64,
+    #[serde(default)]
+    idle_budget_ms: u64,
+}
+
+/// True when the stream's silence is eating into the idle-gap budget — within
+/// a quarter of the stall declaration, the strip flags it so "slow" and
+/// "about to fail" stay distinguishable.
+fn llm_activity_near_stall(row: &LlmActivityRow) -> bool {
+    row.idle_budget_ms > 0 && row.since_last_chunk_ms * 4 >= row.idle_budget_ms * 3
+}
+
+fn fmt_secs(ms: u64) -> String {
+    if ms >= 60_000 {
+        format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
+    } else {
+        format!("{}s", ms / 1000)
+    }
+}
+
+/// One compact segment for the activity strip: `⏳ agent waiting 42s` for a
+/// stream the provider has not answered yet (the overloaded-upstream shape),
+/// `⟳ agent streaming 8.1k ch · 61s` while data flows. Near-stall streams
+/// carry `⚠` and the since-last-chunk age — the discriminator the operator
+/// needs: a stream that keeps beating is slow-but-alive, one whose last-chunk
+/// age climbs toward the budget is stuck.
+fn llm_activity_segment(row: &LlmActivityRow) -> String {
+    let agent = render::agent_id_short(&row.agent_id);
+    match row.phase.as_str() {
+        "awaiting_first_byte" => {
+            let warn = if llm_activity_near_stall(row) { " ⚠" } else { "" };
+            format!("⏳ {agent} waiting {} for model{warn}", fmt_secs(row.elapsed_ms))
+        }
+        _ => {
+            let chars = if row.text_chars >= 1000 {
+                format!("{:.1}k ch", row.text_chars as f64 / 1000.0)
+            } else {
+                format!("{} ch", row.text_chars)
+            };
+            let stall = if llm_activity_near_stall(row) {
+                format!(" ⚠ last chunk {} ago", fmt_secs(row.since_last_chunk_ms))
+            } else {
+                String::new()
+            };
+            format!("⟳ {agent} streaming {chars} · {}{stall}", fmt_secs(row.elapsed_ms))
+        }
+    }
+}
+
+/// The full strip line: up to three streams inline, `+N` for the rest.
+/// Empty when nothing is in flight (the strip row is not reserved then).
+fn build_llm_activity_strip(rows: &[LlmActivityRow], width: u16) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    const MAX_INLINE: usize = 3;
+    let mut parts: Vec<String> = rows.iter().take(MAX_INLINE).map(llm_activity_segment).collect();
+    let extra = rows.len().saturating_sub(MAX_INLINE);
+    if extra > 0 {
+        parts.push(format!("+{extra} more"));
+    }
+    let mut line = format!(" {} ", parts.join("  ·  "));
+    // Truncate at a glyph boundary from the left side of the strip; the
+    // leading streams are the most stuck-looking (registry sorts them first).
+    if line.width() > width as usize {
+        let mut cut = width as usize;
+        while cut > 1 && !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut.saturating_sub(1));
+        line.push('…');
+    }
+    line
 }
 
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
@@ -3883,6 +3980,12 @@ pub fn run(
         autonoetic_gateway::runtime::egress_proposal::EgressProposal,
     > = None;
     let mut last_session_status_poll = Instant::now();
+    // Live LLM stream registry (#1081): refreshed every LLM_ACTIVITY_POLL_MS;
+    // drives the activity strip under the header. Cleared on poll error — a
+    // stale "streaming" line while the gateway is down would be actively
+    // misleading.
+    let mut llm_activity: Vec<LlmActivityRow> = Vec::new();
+    let mut last_llm_activity_poll = Instant::now();
     let mut last_timeline_poll = Instant::now();
     let mut force_timeline_refresh = true;
     let mut session_async_processing = false;
@@ -7186,6 +7289,7 @@ pub fn run(
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
                     current_pinned,
+                    &llm_activity,
                 )
             })?;
         }
@@ -7236,6 +7340,7 @@ pub fn run(
                     labels_panel.as_ref(),
                     current_taint.as_deref(),
                     current_pinned,
+                    &llm_activity,
                 )
             })?;
         }
@@ -7363,6 +7468,35 @@ pub fn run(
             if new_async != session_async_processing {
                 session_async_processing = new_async;
                 session_async_processing_changed = true;
+                needs_redraw = true;
+            }
+        }
+
+        // Live LLM activity poll — the stuck-vs-slow discriminator. Runs even
+        // when rendering is skipped so the strip data stays fresh; a non-empty
+        // registry also forces the spinner/animation path below.
+        if last_llm_activity_poll.elapsed() >= Duration::from_millis(LLM_ACTIVITY_POLL_MS) {
+            last_llm_activity_poll = Instant::now();
+            let new_activity = match rpc(
+                client,
+                "llm.activity",
+                serde_json::json!({ "root_session_id": &*root_session_id }),
+            ) {
+                Ok(value) => serde_json::from_value::<Vec<LlmActivityRow>>(
+                    value
+                        .get("streams")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::Array(vec![])),
+                )
+                .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            let changed = new_activity != llm_activity;
+            if changed {
+                llm_activity = new_activity;
+                needs_redraw = true;
+            } else if !llm_activity.is_empty() {
+                // Same shape but the clocks (elapsed / since-last-chunk) tick.
                 needs_redraw = true;
             }
         }
@@ -7519,8 +7653,10 @@ pub fn run(
 
         // Only animate the spinner when something is actually in flight. Idle
         // sessions therefore freeze the spinner and skip redraws entirely.
+        // A live LLM stream counts as in flight — the strip's clocks tick.
         let has_in_flight_visual = !cached_open_turns.is_empty()
             || session_async_processing
+            || !llm_activity.is_empty()
             || pending_gate.is_some();
         if has_in_flight_visual {
             spinner_frame = (spinner_frame + 1) % SPINNER_FRAMES.len();
@@ -7884,6 +8020,7 @@ pub fn run(
                 labels_panel.as_ref(),
                 current_taint.as_deref(),
                 current_pinned,
+                &llm_activity,
             )
         })?;
 
@@ -10201,32 +10338,49 @@ fn draw(
     labels_panel: Option<&LabelsPanel>,
     taint: Option<&str>,
     pinned: bool,
+    llm_activity: &[LlmActivityRow],
 ) {
     let compose_open = compose.is_some() && detail.is_none();
-    let chunks = if compose_open {
-        Layout::vertical([
+    // Live LLM activity strip (#1081): one line under the header while any
+    // stream is in flight; not reserved when idle so the layout is unchanged
+    // for quiet sessions.
+    let activity_line = build_llm_activity_strip(llm_activity, f.area().width);
+    let has_activity_strip = !activity_line.is_empty();
+    let base_constraints = if has_activity_strip {
+        vec![
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(COMPOSE_PANEL_HEIGHT),
-            Constraint::Length(FOOTER_HEIGHT),
-        ])
-        .split(f.area())
+        ]
     } else {
-        Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(FOOTER_HEIGHT),
-        ])
-        .split(f.area())
+        vec![Constraint::Length(1), Constraint::Min(1)]
     };
-    let footer_idx = if compose_open { 3 } else { 2 };
-    let list_idx = 1usize;
+    let mut constraints = base_constraints;
+    if compose_open {
+        constraints.push(Constraint::Length(COMPOSE_PANEL_HEIGHT));
+    }
+    constraints.push(Constraint::Length(FOOTER_HEIGHT));
+    let chunks = Layout::vertical(constraints).split(f.area());
+    let footer_idx = chunks.len() - 1;
+    let list_idx = if has_activity_strip { 2 } else { 1 };
 
     let header = build_header(root, TuiChannel.kind(), stats, gate_count, follow, floor, squash, taint, pinned, chunks[0].width);
     f.render_widget(
         Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
         chunks[0],
     );
+
+    // Activity strip: streams still queueing (⏳) or flowing (⟳), with a ⚠
+    // once the since-last-chunk gap eats into the stall budget — the
+    // stuck-vs-slow call the bare spinner cannot make.
+    if has_activity_strip {
+        let style = if llm_activity.iter().any(llm_activity_near_stall) {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        f.render_widget(Paragraph::new(activity_line).style(style), chunks[1]);
+    }
 
     // Gate-input mode owns the screen — never let the detail pane hide the
     // motivation/answer prompt (otherwise Enter appears to do nothing).
@@ -11804,6 +11958,70 @@ fn wrap_spans(spans: &[Span], max_width: usize) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- LLM activity strip (#1081): stuck vs slow ----
+
+    fn activity_row(phase: &str, since_last_chunk_ms: u64, idle_budget_ms: u64) -> LlmActivityRow {
+        LlmActivityRow {
+            session_id: "root/child".to_string(),
+            agent_id: "coder.default".to_string(),
+            model: "test/model".to_string(),
+            phase: phase.to_string(),
+            elapsed_ms: 61_000,
+            since_last_chunk_ms,
+            chunks: 42,
+            text_chars: 8100,
+            idle_budget_ms,
+        }
+    }
+
+    #[test]
+    fn activity_strip_empty_when_idle() {
+        assert_eq!(build_llm_activity_strip(&[], 80), "");
+    }
+
+    #[test]
+    fn activity_segment_discriminates_waiting_from_streaming() {
+        let waiting = llm_activity_segment(&activity_row("awaiting_first_byte", 0, 120_000));
+        assert!(waiting.contains("⏳ coder"), "{waiting}");
+        assert!(waiting.contains("waiting 1m1s for model"), "{waiting}");
+        let streaming = llm_activity_segment(&activity_row("streaming", 1_000, 120_000));
+        assert!(streaming.contains("⟳ coder"), "{streaming}");
+        assert!(streaming.contains("streaming 8.1k ch"), "{streaming}");
+        // 61s elapsed also renders as m+s
+        assert!(streaming.contains("1m1s"), "{streaming}");
+    }
+
+    #[test]
+    fn activity_segment_flags_near_stall_silence() {
+        // 100s silent against a 120s budget = 83% consumed -> flagged.
+        let near = llm_activity_segment(&activity_row("streaming", 100_000, 120_000));
+        assert!(near.contains("⚠ last chunk"), "{near}");
+        assert!(llm_activity_near_stall(&activity_row("streaming", 100_000, 120_000)));
+        // A chatty stream (2s since last chunk) is slow, not stuck.
+        let calm = llm_activity_segment(&activity_row("streaming", 2_000, 120_000));
+        assert!(!calm.contains("⚠"), "{calm}");
+        // The awaiting phase flags on total elapsed vs budget too.
+        assert!(llm_activity_near_stall(&activity_row(
+            "awaiting_first_byte",
+            110_000,
+            120_000
+        )));
+    }
+
+    #[test]
+    fn activity_strip_caps_inline_streams_and_truncates() {
+        let rows: Vec<LlmActivityRow> = (0..5)
+            .map(|_| activity_row("streaming", 1_000, 120_000))
+            .collect();
+        let strip = build_llm_activity_strip(&rows, 200);
+        assert!(strip.contains("+2 more"), "{strip}");
+        // Narrow terminal: truncated at a char boundary, ends with an ellipsis,
+        // and never exceeds the width.
+        let narrow = build_llm_activity_strip(&rows, 30);
+        assert!(narrow.ends_with('…'), "{narrow}");
+        assert!(narrow.width() <= 30, "{} > 30", narrow.width());
+    }
 
     #[test]
     fn system_sessions_are_hidden_from_session_list() {

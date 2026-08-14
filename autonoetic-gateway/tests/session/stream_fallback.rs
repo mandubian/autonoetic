@@ -30,7 +30,8 @@ async fn stream_falls_back_to_json_when_endpoint_does_not_serve_sse() -> anyhow:
     let driver: Arc<dyn llm::LlmDriver> =
         Arc::new(llm::openai::OpenAiDriver::new(reqwest::Client::new(), resolved));
     let req = CompletionRequest::simple("gpt-4o", vec![Message::user("hi")]);
-    let resp = llm::complete_with_stall_detection(&driver, &req).await?;
+    let ctx = llm::activity::LlmTurnCtx::detached();
+    let resp = llm::complete_with_stall_detection(&driver, &req, ctx).await?;
     assert_eq!(resp.text, "hello");
     Ok(())
 }

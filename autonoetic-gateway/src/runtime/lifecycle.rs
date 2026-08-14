@@ -3700,8 +3700,13 @@ impl AgentExecutor {
                 // slow generation, and the budget is an idle gap between
                 // chunks, not a wall-clock cap on the whole response.
                 let primary_driver = primary_egress_driver.as_ref().unwrap_or(&self.llm);
+                let llm_turn_ctx = crate::llm::activity::LlmTurnCtx {
+                    session_id: session_id.clone(),
+                    agent_id: self.manifest.agent.id.clone(),
+                };
                 let response =
-                    crate::llm::complete_with_stall_detection(primary_driver, &req).await;
+                    crate::llm::complete_with_stall_detection(primary_driver, &req, llm_turn_ctx)
+                        .await;
                 // Egress chokepoint audit (RFC §9.1): emit the causal events
                 // for what the wrapper withheld. Only fires when labels are
                 // attached to this request (unconfigured deployments skip
@@ -3883,7 +3888,17 @@ impl AgentExecutor {
                                     ));
                                 }
                             }
-                            match crate::llm::complete_with_stall_detection(&fb_driver, &req).await {
+                            let llm_turn_ctx = crate::llm::activity::LlmTurnCtx {
+                                session_id: session_id.clone(),
+                                agent_id: self.manifest.agent.id.clone(),
+                            };
+                            match crate::llm::complete_with_stall_detection(
+                                &fb_driver,
+                                &req,
+                                llm_turn_ctx,
+                            )
+                            .await
+                            {
                                 Ok(resp) => {
                                     tracing::info!(
                                         target: "autonoetic::model_routing",

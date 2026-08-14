@@ -139,9 +139,11 @@ log "starting gateway (port $PORT)"
 "$BIN" --config "$CFG" gateway start --daemon >"$RUN_DIR/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 RESOLVER_PID=""
+MIRROR_PID=""
 
 cleanup() {
   [ -n "$RESOLVER_PID" ] && kill "$RESOLVER_PID" 2>/dev/null || true
+  [ -n "$MIRROR_PID" ] && kill "$MIRROR_PID" 2>/dev/null || true
   if kill -0 "$GATEWAY_PID" 2>/dev/null; then
     log "stopping gateway (pid $GATEWAY_PID)"
     kill "$GATEWAY_PID" 2>/dev/null || true
@@ -160,6 +162,20 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 [ "$GATEWAY_UP" = "1" ] || die "gateway did not start listening on port $PORT (see $RUN_DIR/gateway.log)"
+
+# -------------------------------------------------------- console mirror
+# The gateway logs to $RUN_DIR/gateway.log; surface the operationally
+# interesting lines on the demo console as they happen: errors/warnings,
+# LLM liveness (first byte, per-stream heartbeats, stalls), per-turn
+# token usage. Without this, a long silent LLM turn (overloaded provider)
+# is indistinguishable from a dead run.
+console_mirror() {
+  tail -n +1 -F "$RUN_DIR/gateway.log" 2>/dev/null \
+    | grep --line-buffered -E 'ERROR|WARN|autonoetic\.llm:|LLM stream|LLM first byte|llm exchange|LoopGuard|budget_exhausted' \
+    | while IFS= read -r line; do printf '[gateway] %s\n' "$line"; done
+}
+console_mirror &
+MIRROR_PID=$!
 
 # --------------------------------------------------- operator auto-resolver
 # One unified poll of `gateway pending` (#722): approvals, interactions,
@@ -203,10 +219,27 @@ auto_resolve &
 RESOLVER_PID=$!
 
 # ------------------------------------------------------------------ the run
-log "sending factory prompt to planner.default (root session: $SID)"
+# `chat --test-mode` treats each stdin line as ONE event.ingest message, so a
+# raw multi-line prompt file would arrive as ~55 fragmented turns. Collapse
+# the whole factory spec onto a single line (blank lines dropped, structure
+# kept inline) so the planner receives the entire spec as ONE block.
+PROMPT_ONEBLOCK="$RUN_DIR/factory_prompt.oneblock.txt"
+python3 - "$DEMO_DIR/factory_prompt.txt" "$PROMPT_ONEBLOCK" <<'PY'
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding="utf-8") as fh:
+    text = fh.read()
+one = " ".join(part.strip() for part in text.split("\n\n") if part.strip())
+one = " ".join(one.split())
+with open(dst, "w", encoding="utf-8") as fh:
+    fh.write(one + "\n")
+PY
+
+log "sending factory prompt to planner.default as one block (root session: $SID)"
 log "constraints: tokens=$MAX_LLM_TOKENS rounds=$MAX_LLM_ROUNDS tools=$MAX_TOOLS wall=${MAX_WALL}s"
 "$BIN" --config "$CFG" chat --test-mode --session-id "$SID" planner.default \
-  < "$DEMO_DIR/factory_prompt.txt" > "$RUN_DIR/$SID.reply.txt" 2>&1 || true
+  < "$PROMPT_ONEBLOCK" > "$RUN_DIR/$SID.reply.txt" 2>&1 || true
 log "chat returned; waiting for the session tree to go quiet"
 python3 "$DEMO_DIR/verdict.py" wait-done --db "$DB" --sid "$SID" --timeout "$MAX_WALL" || true
 

@@ -1165,10 +1165,10 @@ mod tests {
 #[cfg(test)]
 mod stall_detection {
     use crate::llm::{
-        complete_with_stall_detection, CompletionRequest, CompletionResponse, LlmDriver,
-        StopReason, StreamEvent, TokenUsage,
+        complete_with_stall_detection, stream_heartbeat_interval, CompletionRequest,
+        CompletionResponse, LlmDriver, StopReason, StreamEvent, TokenUsage,
     };
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     /// A driver that emits scripted chunks with scripted delays, for timing
@@ -1234,6 +1234,12 @@ mod stall_detection {
         }
     }
 
+    /// A detached turn context — these tests exercise stream timing, not
+    /// activity attribution.
+    fn ctx() -> crate::llm::activity::LlmTurnCtx {
+        crate::llm::activity::LlmTurnCtx::detached()
+    }
+
     /// The incident shape: zero bytes in the whole budget. The error must
     /// name the stall phase and carry the retryable `llm_transport:timeout`
     /// token so the workflow layer retries mechanically (#1041).
@@ -1243,7 +1249,7 @@ mod stall_detection {
             script: vec![(Duration::from_millis(500), None)], // silence past the gap
             idle: Duration::from_millis(50),
         });
-        let err = complete_with_stall_detection(&driver, &req())
+        let err = complete_with_stall_detection(&driver, &req(), ctx())
             .await
             .expect_err("stall must error");
         let msg = err.to_string();
@@ -1262,7 +1268,7 @@ mod stall_detection {
             ],
             idle: Duration::from_millis(50),
         });
-        let err = complete_with_stall_detection(&driver, &req())
+        let err = complete_with_stall_detection(&driver, &req(), ctx())
             .await
             .expect_err("stall must error");
         let msg = err.to_string();
@@ -1286,7 +1292,7 @@ mod stall_detection {
                 .collect(), // total ~300ms, 6× the 50ms idle budget
             idle: Duration::from_millis(50),
         });
-        let resp = complete_with_stall_detection(&driver, &req())
+        let resp = complete_with_stall_detection(&driver, &req(), ctx())
             .await
             .expect("long but chatty stream must complete");
         assert_eq!(resp.text, "hello");
@@ -1310,7 +1316,7 @@ mod stall_detection {
             }
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(FailDriver);
-        let err = complete_with_stall_detection(&driver, &req())
+        let err = complete_with_stall_detection(&driver, &req(), ctx())
             .await
             .expect_err("driver error must propagate");
         assert!(err.to_string().contains("llm_transport:connect"));
@@ -1358,9 +1364,187 @@ mod stall_detection {
             }
         }
         let driver: Arc<dyn LlmDriver> = Arc::new(LingeringSenderDriver);
-        let resp = complete_with_stall_detection(&driver, &req())
+        let resp = complete_with_stall_detection(&driver, &req(), ctx())
             .await
             .expect("a finished turn must not false-stall on a lingering sender");
         assert_eq!(resp.text, "hello");
+    }
+
+    // ------------------------------------------------------------------
+    // Heartbeat (#1081 follow-up): liveness lines while a stream is open
+    // ------------------------------------------------------------------
+
+    /// The cadence is a quarter of the idle budget clamped to [1s, 15s]:
+    /// short budgets never beat (the stall fires first — timing of the
+    /// existing short-budget tests above is untouched), long budgets cap at
+    /// 15s so a slow provider stays watchable without flooding the log.
+    #[test]
+    fn heartbeat_interval_is_a_clamped_quarter_of_the_idle_budget() {
+        assert_eq!(
+            stream_heartbeat_interval(Duration::from_millis(50)),
+            Duration::from_secs(1),
+            "sub-second budgets clamp up; beats can never precede the stall"
+        );
+        assert_eq!(
+            stream_heartbeat_interval(Duration::from_secs(4)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            stream_heartbeat_interval(Duration::from_secs(8)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            stream_heartbeat_interval(Duration::from_secs(120)),
+            Duration::from_secs(15),
+            "the default 120s budget beats at the 15s cap, not 30s"
+        );
+        assert_eq!(
+            stream_heartbeat_interval(Duration::from_secs(600)),
+            Duration::from_secs(15)
+        );
+    }
+
+    /// Captures `tracing` output into a shared buffer so heartbeat/first-byte
+    /// lines can be asserted. `set_default` is thread-local and the current-
+    /// thread test runtime keeps the future (and the spawned stream task) on
+    /// this thread, so parallel tests don't cross-contaminate.
+    #[derive(Clone)]
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_logs() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(SharedWriter(buf.clone()))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (buf, guard)
+    }
+
+    fn captured(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap_or_default()
+    }
+
+    /// The overloaded-provider shape: a long queue before the first byte.
+    /// Heartbeats must say `awaiting first byte` while nothing has arrived,
+    /// and the first event must be announced as `LLM first byte`.
+    #[tokio::test]
+    async fn heartbeat_reports_awaiting_first_byte() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: vec![
+                (Duration::from_millis(2600), None), // queueing: >1 beat, <idle
+                (
+                    Duration::from_millis(0),
+                    Some(StreamEvent::TextDelta("hi".into())),
+                ),
+                (
+                    Duration::from_millis(0),
+                    Some(StreamEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    }),
+                ),
+            ],
+            idle: Duration::from_secs(8), // beat every 2s
+        });
+        let (buf, _guard) = capture_logs();
+        let resp = complete_with_stall_detection(&driver, &req(), ctx()).await;
+        let logs = captured(&buf);
+        assert!(resp.is_ok(), "a beat is not a stall — must complete");
+        assert!(
+            logs.contains("LLM stream heartbeat") && logs.contains("awaiting first byte"),
+            "expected an awaiting-first-byte heartbeat, log was:\n{logs}"
+        );
+        assert!(
+            logs.contains("LLM first byte"),
+            "the first event must be announced, log was:\n{logs}"
+        );
+    }
+
+    /// A long generation that keeps emitting: heartbeats fire while data
+    /// flows (proving the model is still sending), tagged `streaming` with a
+    /// nonzero chunk count — and the stream still completes.
+    #[tokio::test]
+    async fn heartbeat_reports_liveness_while_streaming() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: (0..12)
+                .map(|i| {
+                    (
+                        Duration::from_millis(300), // 12 × 300ms = 3.6s, gaps ≪ 8s budget
+                        Some(StreamEvent::TextDelta(format!("chunk{i}"))),
+                    )
+                })
+                .chain(std::iter::once((
+                    Duration::from_millis(0),
+                    Some(StreamEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    }),
+                )))
+                .collect(),
+            idle: Duration::from_secs(8), // beat every 2s
+        });
+        let (buf, _guard) = capture_logs();
+        let resp = complete_with_stall_detection(&driver, &req(), ctx()).await;
+        let logs = captured(&buf);
+        assert!(resp.is_ok(), "chatty stream must complete");
+        assert!(
+            logs.contains("LLM stream heartbeat") && logs.contains("streaming"),
+            "expected streaming-phase heartbeats, log was:\n{logs}"
+        );
+        assert!(
+            !logs.contains("awaiting first byte"),
+            "data flowed from the start, log was:\n{logs}"
+        );
+    }
+
+    /// A stream that finishes within one beat interval emits no heartbeat —
+    /// the liveness lines are for silence, not noise on every healthy turn.
+    #[tokio::test]
+    async fn fast_stream_emits_no_heartbeat() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: (0..10)
+                .map(|i| {
+                    (
+                        Duration::from_millis(50),
+                        Some(StreamEvent::TextDelta(format!("chunk{i}"))),
+                    )
+                })
+                .chain(std::iter::once((
+                    Duration::from_millis(0),
+                    Some(StreamEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    }),
+                )))
+                .collect(),
+            idle: Duration::from_secs(8), // beat every 2s; total run ~0.5s
+        });
+        let (buf, _guard) = capture_logs();
+        let resp = complete_with_stall_detection(&driver, &req(), ctx()).await;
+        let logs = captured(&buf);
+        assert!(resp.is_ok());
+        assert!(
+            !logs.contains("LLM stream heartbeat"),
+            "a sub-beat stream must stay silent, log was:\n{logs}"
+        );
     }
 }
