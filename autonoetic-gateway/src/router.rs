@@ -2019,6 +2019,39 @@ impl JsonRpcRouter {
                 }
             }
 
+            "llm.activity" => {
+                // Live LLM stream registry (#1081 follow-up): which turns are
+                // waiting on a model right now, and whether each stream is
+                // still moving — the stuck-vs-slow discriminator for the
+                // Session Room activity strip. Ephemeral by design: nothing
+                // is persisted, entries vanish when the stream ends.
+                #[derive(Deserialize)]
+                struct LlmActivityParams {
+                    root_session_id: Option<String>,
+                }
+                let params: LlmActivityParams = match serde_json::from_value(req.params) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            format!("Invalid params for llm.activity: {}", e),
+                        );
+                    }
+                };
+                let streams = match params.root_session_id.as_deref() {
+                    Some(root) if !root.trim().is_empty() => {
+                        crate::llm::activity::snapshot_for_root(root)
+                    }
+                    _ => crate::llm::activity::snapshot(),
+                };
+                let count = streams.len();
+                JsonRpcResponse::success(
+                    req.id,
+                    serde_json::json!({ "streams": streams, "count": count }),
+                )
+            }
+
             "operator.activity.list" => {
                 let params: autonoetic_types::operator_activity::OperatorActivityListParams =
                     match serde_json::from_value(req.params) {

@@ -662,6 +662,20 @@ returns a retryable `llm_transport:timeout` error. Providers without
 streaming fall back to blocking `complete()` with the same value as a
 whole-request cap — the pre-#1044 behavior.
 
+While a stream is open, an info-level **heartbeat** line (`LLM stream
+heartbeat`, target `autonoetic.llm`) is emitted every quarter of the idle
+budget (clamped to 1–15 s; 15 s at the default 120 s). It reports
+`phase=awaiting first byte` (the provider is still queueing the request —
+the overloaded-upstream shape) or `phase=streaming` with live chunk/char
+counts, so a long silent turn is distinguishable from a dead one on a
+tailing console. The first received event is announced as `LLM first byte`
+with the measured TTFB; a stream that completes within one beat interval
+stays silent. The same live state is published over JSON-RPC (`llm.activity`,
+root-session-scoped) and rendered by the Session Room TUI as an activity
+strip under the header: `⏳ agent waiting …s for model` while the provider
+queues, `⟳ agent streaming …` while data flows, with a `⚠` once the
+since-last-chunk gap eats into the stall budget — the stuck-vs-slow call.
+
 Non-streaming `complete()` calls (auxiliary paths) apply the per-request
 timeout as a wall-clock cap plus a bounded, fail-fast retry policy so a slow
 or overloaded endpoint cannot stall a turn for many minutes.

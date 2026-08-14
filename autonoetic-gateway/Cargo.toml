@@ -58,3 +58,4 @@ path = "src/bin/mock_moltbook.rs"
 [dev-dependencies]
 serial_test = "3.0"
 proptest = "1.11.0"
+tracing-subscriber.workspace = true

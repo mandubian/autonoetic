@@ -12,6 +12,7 @@ const LLM_BASE_URL_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_BASE_URL";
 const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
 const ALLOW_LLM_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES";
 
+pub mod activity;
 pub mod anthropic;
 pub mod egress_chokepoint;
 pub mod gemini;
@@ -965,8 +966,25 @@ pub trait LlmDriver: Send + Sync {
     }
 }
 
+/// Shortest interval between stream heartbeats. Budgets below 4× this never
+/// emit a heartbeat — the idle deadline fires first, so short-budget tests
+/// and tight configs keep their exact stall timing.
+const STREAM_HEARTBEAT_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Longest interval between stream heartbeats: with the default 120s idle
+/// budget, a beat every 15s — enough to watch a slow provider, not enough to
+/// drown the log.
+const STREAM_HEARTBEAT_MAX: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Heartbeat cadence for an idle-gap budget: a quarter of the budget, clamped
+/// to [`STREAM_HEARTBEAT_MIN`]..=[`STREAM_HEARTBEAT_MAX`]. Pure so tests can
+/// pin the bounds without timing runs.
+pub(crate) fn stream_heartbeat_interval(idle: std::time::Duration) -> std::time::Duration {
+    (idle / 4).clamp(STREAM_HEARTBEAT_MIN, STREAM_HEARTBEAT_MAX)
+}
+
 /// Run a turn's completion through the streaming path with stall detection
-/// (#1044).
+/// (#1044), a periodic heartbeat, and live activity publication.
 ///
 /// A blocking `complete()` cannot distinguish "the upstream accepted and
 /// stalled without emitting anything" from "generation was underway and the
@@ -978,6 +996,18 @@ pub trait LlmDriver: Send + Sync {
 /// stall. A legitimately long generation that keeps emitting is no longer
 /// punished for its length.
 ///
+/// **Heartbeat** — an overloaded provider can queue a request for a long time
+/// before the first byte (and a long generation can stream for minutes), so
+/// silence on the console is ambiguous: still waiting, or dead? While the
+/// stream is open, an info-level `LLM stream heartbeat` line is emitted every
+/// [`stream_heartbeat_interval`] reporting whether the model is still sending
+/// data: `phase=awaiting first byte` (nothing received yet — the
+/// queueing-provider shape) or `phase=streaming` with live chunk/char counts
+/// and time since the last chunk. The first received event is announced as
+/// `LLM first byte` with the measured TTFB. Both land in the gateway log at
+/// INFO under target `autonoetic.llm`, next to the terminal `llm exchange`
+/// line, so a tailing console can follow the conversation's health live.
+///
 /// Providers without real streaming fall back to the trait's default
 /// `stream()` (a single chunk around `complete()`), where the idle gap
 /// degenerates to the same whole-request cap as before — no regression.
@@ -987,11 +1017,20 @@ pub trait LlmDriver: Send + Sync {
 /// retryable and the failover chain can try the next preset. Nothing is
 /// salvaged from a stalled stream: partial tool-call JSON is unsafe to
 /// append to history, and the turn-level retry starts clean.
+///
+/// The live stream is also registered in the process-wide activity registry
+/// ([`activity`]) for the duration of the call, keyed by `ctx` — the Session
+/// Room's activity strip answers "stuck or just slow?" from there.
 pub async fn complete_with_stall_detection(
     driver: &Arc<dyn LlmDriver>,
     req: &CompletionRequest,
+    ctx: activity::LlmTurnCtx,
 ) -> anyhow::Result<CompletionResponse> {
     let idle = driver.request_timeout();
+    let beat = stream_heartbeat_interval(idle);
+    // Publish the live stream to operator surfaces (Session Room activity
+    // strip). The guard removes the entry on every exit path below.
+    let _activity = activity::begin_activity(&ctx, &req.model, idle);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(256);
     let task_driver = driver.clone();
     let task_req = req.clone();
@@ -1001,11 +1040,39 @@ pub async fn complete_with_stall_detection(
     let mut ttfb: Option<std::time::Duration> = None;
     let mut chunks: u64 = 0;
     let mut text_chars: u64 = 0;
+    // Heartbeat scheduling: `last_event_at` drives the idle-gap deadline,
+    // `next_beat_at` is an absolute beat schedule that ticks regardless of
+    // event flow — that is the point, liveness is only interesting when
+    // nothing else is printing.
+    let mut last_event_at = std::time::Instant::now();
+    let mut next_beat_at = start + beat;
     loop {
-        match tokio::time::timeout(idle, rx.recv()).await {
+        let idle_deadline = last_event_at + idle;
+        let wait = next_beat_at
+            .min(idle_deadline)
+            .saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(wait, rx.recv()).await {
             Ok(Some(event)) => {
+                last_event_at = std::time::Instant::now();
                 if ttfb.is_none() {
                     ttfb = Some(start.elapsed());
+                    // Count the first event's payload in the registry too —
+                    // a TextDelta-first stream starts streaming with content.
+                    _activity.mark_first_byte(match &event {
+                        StreamEvent::TextDelta(t) => t.len() as u64,
+                        _ => 0,
+                    });
+                    tracing::info!(
+                        target: "autonoetic.llm",
+                        model = %req.model,
+                        ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                        "LLM first byte"
+                    );
+                } else {
+                    _activity.mark_event(match &event {
+                        StreamEvent::TextDelta(t) => t.len() as u64,
+                        _ => 0,
+                    });
                 }
                 chunks += 1;
                 let done = match &event {
@@ -1028,35 +1095,61 @@ pub async fn complete_with_stall_detection(
             // (or died); join for the result.
             Ok(None) => break,
             Err(_elapsed) => {
-                // Idle gap exceeded: the upstream stalled. Abort the attempt;
-                // the turn-level failover/retry starts clean.
-                task.abort();
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                let phase = if ttfb.is_none() {
-                    "stalled before first byte"
-                } else {
-                    "stalled mid-stream"
-                };
-                tracing::warn!(
-                    target: "llm",
-                    phase,
-                    idle_ms = idle.as_millis() as u64,
-                    ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
-                    chunks,
-                    text_chars,
-                    elapsed_ms,
-                    "LLM stream stalled"
-                );
-                return Err(anyhow::anyhow!(
-                    "llm_transport:timeout attempts=1 elapsed_ms={} source_chain=[]: \
-                     stream {} — no chunk for {}ms (chunks={}, text_chars={}, ttfb_ms={:?})",
-                    elapsed_ms,
-                    phase,
-                    idle.as_millis(),
-                    chunks,
-                    text_chars,
-                    ttfb.map(|d| d.as_millis()),
-                ));
+                let now = std::time::Instant::now();
+                if now >= idle_deadline {
+                    // Idle gap exceeded: the upstream stalled. Abort the
+                    // attempt; the turn-level failover/retry starts clean.
+                    task.abort();
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    let phase = if ttfb.is_none() {
+                        "stalled before first byte"
+                    } else {
+                        "stalled mid-stream"
+                    };
+                    tracing::warn!(
+                        target: "llm",
+                        phase,
+                        idle_ms = idle.as_millis() as u64,
+                        ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
+                        chunks,
+                        text_chars,
+                        elapsed_ms,
+                        "LLM stream stalled"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "llm_transport:timeout attempts=1 elapsed_ms={} source_chain=[]: \
+                         stream {} — no chunk for {}ms (chunks={}, text_chars={}, ttfb_ms={:?})",
+                        elapsed_ms,
+                        phase,
+                        idle.as_millis(),
+                        chunks,
+                        text_chars,
+                        ttfb.map(|d| d.as_millis()),
+                    ));
+                }
+                if now >= next_beat_at {
+                    // Heartbeat tick: the stream is still open and the model
+                    // may (or may not) still be sending data — say which.
+                    let phase = if ttfb.is_none() {
+                        "awaiting first byte"
+                    } else {
+                        "streaming"
+                    };
+                    tracing::info!(
+                        target: "autonoetic.llm",
+                        model = %req.model,
+                        phase,
+                        since_last_chunk_ms = last_event_at.elapsed().as_millis() as u64,
+                        chunks,
+                        text_chars,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
+                        idle_ms = idle.as_millis() as u64,
+                        "LLM stream heartbeat"
+                    );
+                    next_beat_at = now + beat;
+                }
+                // A wake before both deadlines (clock skew between the tokio
+                // timer and std::time) just re-arms; nothing to report.
             }
         }
     }
