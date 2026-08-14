@@ -1405,9 +1405,11 @@ mod stall_detection {
     }
 
     /// Captures `tracing` output into a shared buffer so heartbeat/first-byte
-    /// lines can be asserted. `set_default` is thread-local and the current-
-    /// thread test runtime keeps the future (and the spawned stream task) on
-    /// this thread, so parallel tests don't cross-contaminate.
+    /// lines can be asserted. `set_default` is thread-local, so every test
+    /// using this helper MUST pin `flavor = "current_thread"` — that keeps
+    /// the future *and* the spawned stream task polling on this thread where
+    /// the dispatcher is installed (a multi-thread runtime would let the
+    /// stream task log on another worker and escape capture).
     #[derive(Clone)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -1446,7 +1448,7 @@ mod stall_detection {
     /// The overloaded-provider shape: a long queue before the first byte.
     /// Heartbeats must say `awaiting first byte` while nothing has arrived,
     /// and the first event must be announced as `LLM first byte`.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn heartbeat_reports_awaiting_first_byte() {
         let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
             script: vec![
@@ -1482,7 +1484,7 @@ mod stall_detection {
     /// A long generation that keeps emitting: heartbeats fire while data
     /// flows (proving the model is still sending), tagged `streaming` with a
     /// nonzero chunk count — and the stream still completes.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn heartbeat_reports_liveness_while_streaming() {
         let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
             script: (0..12)
@@ -1518,7 +1520,7 @@ mod stall_detection {
 
     /// A stream that finishes within one beat interval emits no heartbeat —
     /// the liveness lines are for silence, not noise on every healthy turn.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn fast_stream_emits_no_heartbeat() {
         let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
             script: (0..10)

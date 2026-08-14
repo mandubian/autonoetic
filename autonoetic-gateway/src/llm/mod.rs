@@ -1056,7 +1056,12 @@ pub async fn complete_with_stall_detection(
                 last_event_at = std::time::Instant::now();
                 if ttfb.is_none() {
                     ttfb = Some(start.elapsed());
-                    _activity.mark_first_byte();
+                    // Count the first event's payload in the registry too —
+                    // a TextDelta-first stream starts streaming with content.
+                    _activity.mark_first_byte(match &event {
+                        StreamEvent::TextDelta(t) => t.len() as u64,
+                        _ => 0,
+                    });
                     tracing::info!(
                         target: "autonoetic.llm",
                         model = %req.model,

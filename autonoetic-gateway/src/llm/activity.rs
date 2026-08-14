@@ -135,14 +135,18 @@ pub struct LlmActivityGuard {
 }
 
 impl LlmActivityGuard {
-    /// Record the first received event (the TTFB discriminator).
-    pub fn mark_first_byte(&self) {
+    /// Record the first received event (the TTFB discriminator). `text_chars`
+    /// is the payload size of that event — a stream whose first event is a
+    /// `TextDelta` (the common shape) must count those chars too, or the
+    /// snapshot underreports.
+    pub fn mark_first_byte(&self, text_chars: u64) {
         let mut map = lock();
         if let Some(e) = map.get_mut(&self.id) {
             e.phase = LlmStreamPhase::Streaming;
             e.ttfb = Some(e.started_at.elapsed());
             e.last_event_at = Instant::now();
             e.chunks += 1;
+            e.text_chars += text_chars;
         }
     }
 
@@ -238,13 +242,14 @@ mod tests {
     #[test]
     fn marks_advance_phase_and_counters() {
         let g = begin_activity(&ctx("s2"), "m", Duration::from_secs(10));
-        g.mark_first_byte();
+        // First event is a TextDelta (common shape): its chars must count.
+        g.mark_first_byte(50);
         g.mark_event(120);
         g.mark_event(80);
         let s = snapshot().into_iter().find(|s| s.session_id == "s2").unwrap();
         assert_eq!(s.phase, LlmStreamPhase::Streaming);
         assert_eq!(s.chunks, 3);
-        assert_eq!(s.text_chars, 200);
+        assert_eq!(s.text_chars, 250);
         assert!(s.ttfb_ms.is_some());
         drop(g);
     }
@@ -269,7 +274,7 @@ mod tests {
     #[test]
     fn awaiting_sorts_above_streaming() {
         let g1 = begin_activity(&ctx("s-flow"), "m", Duration::from_secs(10));
-        g1.mark_first_byte();
+        g1.mark_first_byte(0);
         let g2 = begin_activity(&ctx("s-wait"), "m", Duration::from_secs(10));
         let snaps = snapshot();
         let wait_first = snaps

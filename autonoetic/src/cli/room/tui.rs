@@ -27,7 +27,7 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -863,6 +863,28 @@ fn llm_activity_segment(row: &LlmActivityRow) -> String {
     }
 }
 
+/// Truncate to a display-width budget on a char boundary, ending with an
+/// ellipsis. Accumulates per-char display width (never a byte index derived
+/// from a width) so multi-byte glyphs — this strip's own `⏳`, `⟳`, `⚠`, `·`
+/// — can neither overshoot the budget nor panic `String::truncate` on a
+/// mid-char cut.
+fn truncate_strip_to_width(line: &str, width: usize) -> String {
+    const ELLIPSIS_WIDTH: usize = 1;
+    let budget = width.saturating_sub(ELLIPSIS_WIDTH);
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in line.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if w + cw > budget {
+            break;
+        }
+        w += cw;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 /// The full strip line: up to three streams inline, `+N` for the rest.
 /// Empty when nothing is in flight (the strip row is not reserved then).
 fn build_llm_activity_strip(rows: &[LlmActivityRow], width: u16) -> String {
@@ -875,18 +897,18 @@ fn build_llm_activity_strip(rows: &[LlmActivityRow], width: u16) -> String {
     if extra > 0 {
         parts.push(format!("+{extra} more"));
     }
-    let mut line = format!(" {} ", parts.join("  ·  "));
-    // Truncate at a glyph boundary from the left side of the strip; the
-    // leading streams are the most stuck-looking (registry sorts them first).
-    if line.width() > width as usize {
-        let mut cut = width as usize;
-        while cut > 1 && !line.is_char_boundary(cut) {
-            cut -= 1;
+    let line = format!(" {} ", parts.join("  ·  "));
+    // Keep the leading streams (the registry sorts the most stuck-looking
+    // first) within the strip's display-width budget.
+    let width = width as usize;
+    if line.width() > width {
+        if width <= 1 {
+            return String::new();
         }
-        line.truncate(cut.saturating_sub(1));
-        line.push('…');
+        truncate_strip_to_width(&line, width)
+    } else {
+        line
     }
-    line
 }
 
 /// Count pending gates from the rendered rows: approval, plan, interaction, escalation.
@@ -12021,6 +12043,32 @@ mod tests {
         let narrow = build_llm_activity_strip(&rows, 30);
         assert!(narrow.ends_with('…'), "{narrow}");
         assert!(narrow.width() <= 30, "{} > 30", narrow.width());
+    }
+
+    #[test]
+    fn activity_strip_truncation_survives_multibyte_at_every_width() {
+        // Regression (PR review): the strip is full of multi-byte glyphs
+        // (⏳ ⟳ ⚠ ·). The old byte-index truncation derived a byte cut from a
+        // display width and then truncated at cut-1 — the last byte of the
+        // previous char whenever that char is multi-byte — which panics
+        // `String::truncate`. Sweep every terminal width; each result must
+        // fit the budget and, when truncation happened, end with `…`.
+        let waiting = activity_row("awaiting_first_byte", 100_000, 120_000);
+        let streaming = activity_row("streaming", 1_000, 120_000);
+        let near_stall = activity_row("streaming", 100_000, 120_000);
+        let rows = vec![waiting, streaming, near_stall];
+        for w in 2u16..80 {
+            let strip = build_llm_activity_strip(&rows, w);
+            assert!(
+                strip.width() <= w as usize,
+                "width {w}: strip display width {} — {strip:?}",
+                strip.width()
+            );
+            let full = build_llm_activity_strip(&rows, 200);
+            if strip != full {
+                assert!(strip.ends_with('…'), "width {w}: {strip:?}");
+            }
+        }
     }
 
     #[test]
