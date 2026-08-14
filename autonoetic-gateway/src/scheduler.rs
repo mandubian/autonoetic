@@ -4241,6 +4241,7 @@ mod stuck_task_tests {
             loop_guard_state: crate::runtime::guard::LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::default(),
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: std::collections::HashSet::new(),
             blocked_state_event_emitted: false,
             extended_loaded: false,

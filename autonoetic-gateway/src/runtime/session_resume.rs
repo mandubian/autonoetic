@@ -270,6 +270,7 @@ mod session_resume_tests {
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,

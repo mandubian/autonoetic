@@ -280,6 +280,13 @@ pub struct AgentExecutor {
     /// the rest of the session (including across approval suspension/resume).
     pub tool_tier_escalated: bool,
 
+    /// How far this session has progressed, derived mechanically from observed
+    /// tool results (RFC `prompt-burden-phase-gated-guidance`). Drives
+    /// `GuidanceCondition::Phase`, so procedural prose enters the system prompt
+    /// at the turn the work actually reaches it instead of at turn 1. Monotonic
+    /// and checkpointed, so a resumed session keeps the guidance it had earned.
+    pub session_phase: crate::runtime::guidance::SessionPhase,
+
     /// Tool names explicitly discovered via `tool_discover`. These tools are
     /// included in subsequent turns even if they would be filtered by tier.
     pub discovered_tools: std::collections::HashSet<String>,
@@ -537,6 +544,7 @@ impl AgentExecutor {
             last_context_utilization: None,
             suppress_until_turn: Arc::new(AtomicU64::new(0)),
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: std::collections::HashSet::new(),
             discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pressure_high_warned: false,
@@ -1777,6 +1785,7 @@ impl AgentExecutor {
             loop_guard_state: self.guard.snapshot(),
             session_state: self.session_state,
             tool_tier_escalated: self.tool_tier_escalated,
+            session_phase: self.session_phase.clone(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: self.blocked_state_event_emitted,
             extended_loaded: self.extended_loaded,
@@ -2049,6 +2058,7 @@ impl AgentExecutor {
             active_tool_names,
             model_family,
             role: crate::runtime::context::role_from_manifest(&self.manifest),
+            phase: Some(&self.session_phase),
         };
         crate::runtime::guidance::compose_guidance(&blocks, &ctx)
     }
@@ -4866,6 +4876,22 @@ impl AgentExecutor {
                         );
                         break;
                     }
+                }
+            }
+
+            // Session-phase observation (RFC `prompt-burden-phase-gated-guidance`).
+            // Purely mechanical: derived from the gateway's own record of what
+            // each tool returned, never from agent prose. Facts are monotonic,
+            // so a block that has entered the prompt stays in it — the prompt
+            // prefix grows once and remains cacheable.
+            for (_id, tool_name, result_json) in &results {
+                for fact in self.session_phase.observe(tool_name, result_json) {
+                    tracing::info!(
+                        target: "autonoetic::session_phase",
+                        tool = %tool_name,
+                        fact = %fact,
+                        "Session phase advanced; phase-gated guidance now active"
+                    );
                 }
             }
 

@@ -84,6 +84,7 @@ fn write_min_checkpoint(config: &GatewayConfig, session_id: &str) {
         },
         session_state: SessionState::Normal,
         tool_tier_escalated: false,
+        session_phase: Default::default(),
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
         extended_loaded: false,

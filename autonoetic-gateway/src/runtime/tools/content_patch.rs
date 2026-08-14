@@ -625,6 +625,7 @@ mod tests {
             active_tool_names: &tools,
             model_family: None,
             role: None,
+            phase: None,
         };
 
         // Claude → replace-first hint (it's not gpt/codex), not the v4a one.

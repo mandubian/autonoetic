@@ -12,7 +12,8 @@
 //! in [`builtin_blocks`] (#466, e.g. the clarification principle).
 
 use autonoetic_types::capability::Capability;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 
 /// Predicate describing when a [`GuidanceBlock`] should be injected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,12 +29,152 @@ pub enum GuidanceCondition {
     ModelFamily(&'static [&'static str]),
     /// The agent's role matches (e.g. `"coder"`).
     Role(&'static str),
+    /// The session has reached a phase (see [`SessionPhase`]) — e.g.
+    /// [`PHASE_ARTIFACT_BUILT`]. This is the only condition whose truth changes
+    /// *during* a session; every other condition is fixed at spawn.
+    Phase(&'static str),
     /// All sub-conditions hold.
     All(Vec<GuidanceCondition>),
     /// Any sub-condition holds.
     Any(Vec<GuidanceCondition>),
     /// The sub-condition does NOT hold (for exclusions).
     Not(Box<GuidanceCondition>),
+}
+
+/// An artifact exists in this workflow — built by this agent, or observed in a
+/// tool result (a child's `artifact_ref`, `workflow_state.reuse_guards`).
+pub const PHASE_ARTIFACT_BUILT: &str = "artifact_built";
+/// At least one federation gate verdict has been recorded this session.
+pub const PHASE_GATE_VERDICT_RECORDED: &str = "gate_verdict_recorded";
+/// A candidate revision has been seeded (`agent_revision_create`).
+pub const PHASE_REVISION_SEEDED: &str = "revision_seeded";
+/// This agent has spawned at least one child.
+pub const PHASE_CHILD_SPAWNED: &str = "child_spawned";
+/// A credential has been configured this session.
+pub const PHASE_CREDENTIAL_CONFIGURED: &str = "credential_configured";
+
+/// Monotonic, mechanically-derived record of how far a session has progressed.
+///
+/// This is the axis [`GuidanceCondition`] was missing. Capabilities, tools,
+/// model and role are all decided at spawn, so a block gated only on them is
+/// effectively static: prose that *might* matter at turn 40 is paid for at
+/// turn 1. `SessionPhase` lets a block say "not until the work reaches this
+/// point", which is what actually distinguishes a 32k prompt from a 14k one.
+///
+/// **Derivation is a pure function of gateway-observed tool results** (P-5.14,
+/// Lawful Executor): agent prose never sets a fact. Facts are monotonic —
+/// never retracted — so a block cannot flicker in and out across turns and
+/// invalidate the provider's prompt cache more than once.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPhase {
+    #[serde(default)]
+    facts: BTreeSet<String>,
+}
+
+impl SessionPhase {
+    pub fn is_empty(&self) -> bool {
+        self.facts.is_empty()
+    }
+
+    pub fn has(&self, fact: &str) -> bool {
+        self.facts.contains(fact)
+    }
+
+    /// Record a fact. Returns `true` when it was newly added.
+    pub fn insert(&mut self, fact: &str) -> bool {
+        self.facts.insert(fact.to_string())
+    }
+
+    pub fn facts(&self) -> impl Iterator<Item = &str> {
+        self.facts.iter().map(String::as_str)
+    }
+
+    /// Derive phase facts from one executed tool result. Returns the facts newly
+    /// added by this observation (empty in the overwhelmingly common case).
+    ///
+    /// Two mechanical sources, both gateway-observed:
+    ///
+    /// 1. **The agent's own successful action** — `artifact_build` succeeding
+    ///    means an artifact exists. See [`fact_for_tool`].
+    /// 2. **Evidence carried in any result** — a planner never calls
+    ///    `artifact_build` itself (its coder child does), so tool-name mapping
+    ///    alone would leave a lead agent permanently pre-phase. Any result
+    ///    carrying a non-empty `artifact_ref`, or `reuse_guards.has_coder_artifact`,
+    ///    is proof the workflow has an artifact regardless of who made it.
+    pub fn observe(&mut self, tool_name: &str, result_json: &str) -> Vec<&'static str> {
+        let mut added = Vec::new();
+        let parsed: Option<serde_json::Value> = serde_json::from_str(result_json).ok();
+
+        // A result that explicitly failed proves nothing about progress.
+        let failed = parsed.as_ref().is_some_and(|v| {
+            v.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+                || v.get("error_type").is_some()
+        });
+
+        if !failed {
+            if let Some(fact) = fact_for_tool(tool_name) {
+                if self.insert(fact) {
+                    added.push(fact);
+                }
+            }
+        }
+
+        // Evidence-carried facts survive a failed envelope: `workflow_state`
+        // reporting a prior artifact is true whether or not this call errored.
+        if let Some(value) = parsed.as_ref() {
+            if json_has_artifact_evidence(value, 0) && self.insert(PHASE_ARTIFACT_BUILT) {
+                added.push(PHASE_ARTIFACT_BUILT);
+            }
+        }
+
+        added
+    }
+}
+
+/// Tool name → the phase fact a successful call proves. Exhaustive by intent:
+/// only tools whose success is *unambiguous* evidence of progress belong here.
+pub fn fact_for_tool(tool_name: &str) -> Option<&'static str> {
+    match tool_name {
+        "artifact_build" => Some(PHASE_ARTIFACT_BUILT),
+        "promotion_record" => Some(PHASE_GATE_VERDICT_RECORDED),
+        "agent_revision_create" | "agent_revision_create_from_intent" => {
+            Some(PHASE_REVISION_SEEDED)
+        }
+        "agent_spawn" => Some(PHASE_CHILD_SPAWNED),
+        "credential_setup" => Some(PHASE_CREDENTIAL_CONFIGURED),
+        _ => None,
+    }
+}
+
+/// Depth-bounded scan for proof that an artifact exists somewhere in a result.
+/// Bounded so a pathological nested result can't make this quadratic.
+fn json_has_artifact_evidence(value: &serde_json::Value, depth: usize) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            if map
+                .get("artifact_ref")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                return true;
+            }
+            if map
+                .get("has_coder_artifact")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                return true;
+            }
+            map.values().any(|v| json_has_artifact_evidence(v, depth + 1))
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().any(|v| json_has_artifact_evidence(v, depth + 1))
+        }
+        _ => false,
+    }
 }
 
 /// A unit of prompt prose with a declarative activation condition.
@@ -56,6 +197,10 @@ pub struct GuidanceContext<'a> {
     pub active_tool_names: &'a [String],
     pub model_family: Option<&'a str>,
     pub role: Option<&'a str>,
+    /// How far the session has progressed. `None` for composition paths with no
+    /// live session (bootstrap, static analysis) — `Phase` then never matches,
+    /// so a phase-gated block stays out of the prompt.
+    pub phase: Option<&'a SessionPhase>,
 }
 
 impl GuidanceCondition {
@@ -78,6 +223,9 @@ impl GuidanceCondition {
                 None => false,
             },
             GuidanceCondition::Role(role) => ctx.role == Some(*role),
+            GuidanceCondition::Phase(fact) => {
+                ctx.phase.is_some_and(|phase| phase.has(fact))
+            }
             GuidanceCondition::All(conds) => conds.iter().all(|c| c.matches(ctx)),
             GuidanceCondition::Any(conds) => conds.iter().any(|c| c.matches(ctx)),
             GuidanceCondition::Not(cond) => !cond.matches(ctx),
@@ -366,6 +514,93 @@ mod tests {
         // any agent, even with no capabilities/tools.
         let out = compose_guidance(&builtin_blocks(), &GuidanceContext::default());
         assert!(out.contains("Don't fabricate a missing fact"), "got: {out:?}");
+    }
+
+    #[test]
+    fn phase_condition_requires_the_fact() {
+        let mut phase = SessionPhase::default();
+        let b = block("p", GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT), 0);
+
+        // No phase context at all (bootstrap/static paths) → never matches.
+        assert_eq!(compose_guidance(&[b.clone()], &GuidanceContext::default()), "");
+
+        let ctx = GuidanceContext { phase: Some(&phase), ..Default::default() };
+        assert_eq!(compose_guidance(&[b.clone()], &ctx), "");
+
+        phase.insert(PHASE_ARTIFACT_BUILT);
+        let ctx = GuidanceContext { phase: Some(&phase), ..Default::default() };
+        assert_eq!(compose_guidance(&[b], &ctx), "p");
+    }
+
+    #[test]
+    fn observe_maps_successful_tool_to_fact() {
+        let mut phase = SessionPhase::default();
+        assert_eq!(
+            phase.observe("artifact_build", r#"{"ok":true,"artifact_ref":"ar.abc"}"#),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+        // Monotonic: a second observation adds nothing.
+        assert!(phase
+            .observe("artifact_build", r#"{"ok":true,"artifact_ref":"ar.abc"}"#)
+            .is_empty());
+    }
+
+    #[test]
+    fn observe_ignores_failed_results() {
+        let mut phase = SessionPhase::default();
+        assert!(phase.observe("artifact_build", r#"{"ok":false}"#).is_empty());
+        assert!(phase
+            .observe("promotion_record", r#"{"error_type":"validation"}"#)
+            .is_empty());
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
+        assert!(!phase.has(PHASE_GATE_VERDICT_RECORDED));
+    }
+
+    #[test]
+    fn observe_derives_artifact_from_evidence_not_just_own_action() {
+        // The planner never calls artifact_build — its coder child does. Tool-name
+        // mapping alone would leave a lead agent permanently pre-phase, which is
+        // exactly the agent the RFC is trying to make cheaper.
+        let mut phase = SessionPhase::default();
+        let workflow_state = r#"{"ok":true,"reuse_guards":{"has_coder_artifact":true}}"#;
+        assert_eq!(
+            phase.observe("workflow_state", workflow_state),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+
+        let mut phase = SessionPhase::default();
+        let child_done = r#"{"ok":true,"result":{"status":"ok","artifact_ref":"ar.deadbeef"}}"#;
+        assert_eq!(
+            phase.observe("workflow_wait", child_done),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+    }
+
+    #[test]
+    fn observe_ignores_empty_or_absent_artifact_ref() {
+        let mut phase = SessionPhase::default();
+        assert!(phase.observe("agent_list", r#"{"ok":true,"artifact_ref":""}"#).is_empty());
+        assert!(phase.observe("agent_list", r#"{"ok":true,"agents":[]}"#).is_empty());
+        assert!(phase.observe("agent_list", "not json at all").is_empty());
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
+    }
+
+    #[test]
+    fn session_phase_survives_a_serde_round_trip() {
+        // Checkpoint persistence: a resumed session must keep the guidance it
+        // earned, or the prompt silently loses procedure at the most advanced
+        // point of the work.
+        let mut phase = SessionPhase::default();
+        phase.insert(PHASE_ARTIFACT_BUILT);
+        phase.insert(PHASE_REVISION_SEEDED);
+        let json = serde_json::to_string(&phase).expect("serialize");
+        let back: SessionPhase = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(phase, back);
+        assert!(back.has(PHASE_REVISION_SEEDED));
+
+        // Checkpoints predating the field deserialize as "no phase yet".
+        let old: SessionPhase = serde_json::from_str("{}").expect("empty");
+        assert!(old.is_empty());
     }
 
     #[test]

@@ -1952,6 +1952,7 @@ impl GatewayExecutionService {
                 },
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
+                session_phase: Default::default(),
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
                 // Emergency-stop checkpoint: no extended instructions were
@@ -6019,6 +6020,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,

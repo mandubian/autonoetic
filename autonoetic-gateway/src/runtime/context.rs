@@ -1032,6 +1032,7 @@ mod agentskills_bridging_tests {
             active_tool_names: &[],
             model_family: None,
             role: Some("planner"),
+            phase: None,
         };
         let guidance = compose_guidance(&builtin_blocks(), &ctx);
         assert!(
@@ -1054,6 +1055,7 @@ mod agentskills_bridging_tests {
             active_tool_names: &[],
             model_family: None,
             role: Some("coder"),
+            phase: None,
         };
         let guidance = compose_guidance(&builtin_blocks(), &ctx);
         assert!(

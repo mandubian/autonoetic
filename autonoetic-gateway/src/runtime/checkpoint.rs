@@ -174,6 +174,13 @@ pub struct SessionCheckpoint {
     /// Whether the session had escalated to all tool tiers.
     #[serde(default)]
     pub tool_tier_escalated: bool,
+    /// Session-phase facts earned so far (RFC `prompt-burden-phase-gated-guidance`).
+    /// Persisted so a resumed session keeps the phase-gated guidance it had
+    /// already earned: losing it would silently strip procedure from the prompt
+    /// at exactly the point the work is most advanced. `#[serde(default)]` +
+    /// skip-if-empty, so checkpoints predating the field load as "no phase yet".
+    #[serde(default, skip_serializing_if = "crate::runtime::guidance::SessionPhase::is_empty")]
+    pub session_phase: crate::runtime::guidance::SessionPhase,
     /// Tool names explicitly discovered via `tool_discover`.
     #[serde(default)]
     pub discovered_tools: std::collections::HashSet<String>,
@@ -306,6 +313,7 @@ impl SessionCheckpoint {
         runtime.egress_ask_state = self.egress_ask.clone();
         runtime.session_state = self.session_state;
         runtime.tool_tier_escalated = self.tool_tier_escalated;
+        runtime.session_phase = self.session_phase.clone();
         runtime.discovered_tools = self.discovered_tools.clone();
         runtime.extended_loaded = self.extended_loaded;
         runtime.session_started = true;
@@ -1116,6 +1124,7 @@ mod tests {
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1171,6 +1180,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1336,6 +1346,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1400,6 +1411,7 @@ mod tests {
                 loop_guard_state: LoopGuard::default(),
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
+                session_phase: Default::default(),
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
                 extended_loaded: expected,
@@ -1446,6 +1458,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: true,
@@ -1516,6 +1529,7 @@ mod tests {
             },
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1591,6 +1605,7 @@ mod tests {
                 },
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
+                session_phase: Default::default(),
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
                 extended_loaded: false,
@@ -1686,6 +1701,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1771,6 +1787,7 @@ mod tests {
                 loop_guard_state: LoopGuard::default(),
                 session_state: autonoetic_types::agent::SessionState::Normal,
                 tool_tier_escalated: false,
+                session_phase: Default::default(),
                 discovered_tools: Default::default(),
                 blocked_state_event_emitted: false,
                 extended_loaded: false,
@@ -1835,6 +1852,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1911,6 +1929,7 @@ mod tests {
             loop_guard_state: guard,
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,
@@ -1975,6 +1994,7 @@ mod tests {
             loop_guard_state: LoopGuard::default(),
             session_state: autonoetic_types::agent::SessionState::Normal,
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: false,
             extended_loaded: false,

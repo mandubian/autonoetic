@@ -308,6 +308,7 @@ fn replay_checkpoint(
         turn_counter: 1,
         session_state: Default::default(),
         tool_tier_escalated: false,
+        session_phase: Default::default(),
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
         extended_loaded: false,
