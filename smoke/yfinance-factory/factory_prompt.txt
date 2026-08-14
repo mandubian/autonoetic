@@ -1,0 +1,55 @@
+Build and install a simple script agent `yfinance-quote` that fetches a stock's
+daily price history from Yahoo Finance via the yfinance library and returns
+structured JSON. No credentials involved.
+
+## Agent spec
+- agent_id: yfinance-quote, execution_mode: script (deterministic, no LLM), entrypoint: main.py
+- Single runtime dependency: yfinance (declare it in runtime.lock layers so the
+  sandbox mounts it; pip install works through the proxy env in this environment).
+- Input via stdin (script_input_mode: stdin), io.accepts (REQUIRED, strict):
+  {"symbol": "AAPL", "period": "5d", "interval": "1d"}
+  - symbol: regex ^[A-Za-z0-9.\-]{1,10}$; period: 1d|5d|1mo|3mo|6mo|1y|2y|5y|10y|ytd|max;
+    interval: 1d|1wk|1mo. Validate and reject anything else with a clear error.
+- Output (io.returns, strict, single JSON on stdout):
+  {"ok": true, "symbol": "...", "period": "...", "rows": <n>,
+   "history": [{"date", "open", "high", "low", "close", "volume"}, ...]}
+  (yfinance columns mapped explicitly; no extra fields on stdout; logs to stderr)
+
+## Network declaration (critical)
+- SKILL.md metadata.autonoetic.remote_access and capabilities NetworkAccess must
+  declare ONLY: query1.finance.yahoo.com:443, query2.finance.yahoo.com:443,
+  fc.yahoo.com:443.
+- yfinance uses `requests`, which honors http_proxy/https_proxy from the
+  environment automatically; the sandbox inherits the gateway env — do NOT write
+  custom proxy code, do NOT hardcode proxy URLs.
+
+## Robustness (critical for the smoke test)
+- Yahoo rate-limits (HTTP 429): implement bounded retries with exponential
+  backoff (3 attempts, ~2s/4s/8s) before failing.
+- On final failure, print a one-line stderr error naming the cause (e.g.
+  "network unreachable" / "HTTP 429 rate limited after 3 attempts") and exit
+  non-zero. Never hang or print partial JSON.
+
+## Tests (hermetic, no network — the promotion gates run offline)
+- test_main.py using unittest ONLY (no pytest). Mock yfinance with
+  unittest.mock: input validation cases, output schema shape, retry-then-succeed
+  on 429, retry-exhausted failure path. Tests must never open a socket.
+
+## Pipeline (use the standard factory flow, avoid loops)
+- coder → artifact_build (kind agent_bundle, entrypoints [main.py]) → hermetic
+  unit_test_runner → static_evaluator + auditor promotion records →
+  specialized_builder create_candidate → live smoke test with input
+  {"symbol": "AAPL", "period": "5d", "interval": "1d"} → promote.
+- Use async spawns + a single workflow_wait join; never poll workflow_state.
+- If the smoke run fails with a network_isolated/environmental egress error,
+  retry once, then stop and report the diagnosis instead of re-running the same
+  failing smoke in a loop.
+
+## Environment note
+Proxy-only egress: Yahoo Finance HTTPS (443) is reachable through the proxy
+(verified), but direct TCP to arbitrary hosts is not. Stick to the three
+declared hosts.
+
+## Completion
+Report the promoted revision_id, the smoke task id, and the number of pipeline
+gates passed. Work fully autonomously and do not ask questions.
