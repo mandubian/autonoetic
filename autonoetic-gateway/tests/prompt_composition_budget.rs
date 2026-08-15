@@ -205,17 +205,84 @@ fn print_report(r: &Report) {
     );
 }
 
+impl Report {
+    /// Everything the agent pays for in a steady-state turn.
+    fn steady_state_chars(&self) -> usize {
+        self.tool_chars
+            + self.skill_core
+            + self.skill_extended
+            + self.foundation
+            + self.guidance_post
+    }
+
+    /// What turn 1 costs, before the extended SKILL half is inlined (#1015) and
+    /// before any phase fact lands. Tracked separately because the two totals
+    /// respond to different levers: the `<!-- extended -->` split moves turn 1
+    /// only (the extended half is inlined permanently from turn 2), while
+    /// exclusions, tiering, and phase gating move both.
+    fn turn_one_chars(&self) -> usize {
+        self.tool_chars + self.skill_core + self.foundation + self.guidance_pre
+    }
+}
+
+/// Steady-state prompt ceilings, in characters.
+///
+/// **These are a ratchet, not a target.** Before this harness existed, nothing
+/// measured the fixed prompt — `context_governor` treats `system_prompt_tokens`
+/// as a constant — so every doctrine addition was free at the point of
+/// authorship and the prompt grew unobserved to ~28k tokens for the planner.
+///
+/// A failure here is not a request to raise the number. It means a change added
+/// prompt weight, and the question to answer in review is whether that weight
+/// earns its place in *every* turn. If it genuinely does, lower-bound it
+/// deliberately and say why in the commit. As the RFC rollout lands (P2–P5),
+/// these should be ratcheted **down**, never up.
+/// `(turn-1 ceiling, steady-state ceiling)` per agent.
+const PLANNER_CEILINGS: (usize, usize) = (86_000, 115_000);
+const CODER_CEILINGS: (usize, usize) = (61_000, 72_000);
+/// `planner.collaborative` is the chat-heavy twin and the agent currently being
+/// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
+/// an agent nothing measures is how the prompt got here in the first place.
+const PLANNER_COLLAB_CEILINGS: (usize, usize) = (116_000, 118_000);
+
 #[test]
 fn prompt_composition_report() {
     let planner = measure("planner.default", "agents/lead/planner.default/SKILL.md");
     let coder = measure("coder.default", "agents/specialists/coder.default/SKILL.md");
+    let collab = measure(
+        "planner.collaborative",
+        "agents/lead/planner.collaborative/SKILL.md",
+    );
     print_report(&planner);
     print_report(&coder);
+    print_report(&collab);
 
     // Tool schemas are the largest SINGLE layer for both main agents. This is
     // the finding the RFC's lever ordering rests on; if it ever stops being
     // true, re-derive the ordering rather than silently ignoring it.
-    for r in [&planner, &coder] {
+    for (r, (turn1_ceiling, steady_ceiling)) in [
+        (&planner, PLANNER_CEILINGS),
+        (&coder, CODER_CEILINGS),
+        (&collab, PLANNER_COLLAB_CEILINGS),
+    ] {
+        // The ratchet. Growth used to be invisible AND free; the report made it
+        // visible, this makes it cost something.
+        for (label, actual, ceiling) in [
+            ("turn-1", r.turn_one_chars(), turn1_ceiling),
+            ("steady-state", r.steady_state_chars(), steady_ceiling),
+        ] {
+            assert!(
+                actual <= ceiling,
+                "{}: {label} prompt is {actual} ch (~{} tok), over the {ceiling} ch ceiling \
+                 by {}. Something added weight paid on every turn — justify it and lower-bound \
+                 the ceiling deliberately, or gate the addition (capability, tool, role, or \
+                 phase) so only the turns that need it pay.",
+                r.label,
+                tok(actual),
+                actual - ceiling
+            );
+        }
+
         let largest_other = r.largest_non_tool_layer();
         assert!(
             r.tool_chars > largest_other,
