@@ -56,13 +56,19 @@ Live diagnosis the operator can watch: the Session Room activity strip
 ## LLM presets
 
 `config:llm_presets` maps a preset *name* (agent manifests reference it via
-`llm_preset`) to a provider profile: `config:llm_presets.<name>.provider`,
-`.model`, `.temperature`, `.context_window_tokens`, `.base_url`,
-`.api_key_env`, `.request_timeout_secs`, `.fallback_provider`,
-`.fallback_model`. Which preset an agent uses *is* per-agent (in SKILL.md
-`llm_preset` + `llm_overrides` for temperature/thinking) — but the preset's
-*contents* are gateway config. `config:llm_preset_mapping` binds inference
-profiles (smart/coding/research/agentic) to preset names.
+`llm_preset`) to a provider profile:
+`config:llm_presets.<name>.provider`, `config:llm_presets.<name>.model`,
+`config:llm_presets.<name>.temperature`,
+`config:llm_presets.<name>.context_window_tokens`,
+`config:llm_presets.<name>.base_url`,
+`config:llm_presets.<name>.api_key_env`,
+`config:llm_presets.<name>.request_timeout_secs`,
+`config:llm_presets.<name>.fallback_provider`,
+`config:llm_presets.<name>.fallback_model`. Which preset an agent uses *is*
+per-agent (in SKILL.md `llm_preset` + `llm_overrides` for
+temperature/thinking) — but the preset's *contents* are gateway config.
+`config:llm_preset_mapping` binds inference profiles
+(smart/coding/research/agentic) to preset names.
 
 Env overrides for LLM endpoints exist but are gated:
 `env:AUTONOETIC_LLM_BASE_URL` and `env:AUTONOETIC_LLM_API_KEY` are honored
@@ -71,23 +77,29 @@ ignores them and logs a warning).
 
 ## Budgets
 
-Per-session: `config:session_budget.max_llm_rounds`, `.max_tool_invocations`,
-`.max_llm_tokens`, `.max_wall_clock_secs`, `.max_session_price_usd`
-(`.profile` and `.extensions` select named profiles). Root-tree (the tighter
-of session vs root wins): the same fields under `config:root_session_budget`.
-Hitting one ends the session with a `budget_exhausted` causal event. Advice
-shape: raise the cap *or* shrink the task — the per-agent token table in the
-verdict/session report shows where it went.
+Per-session: `config:session_budget.max_llm_rounds`,
+`config:session_budget.max_tool_invocations`,
+`config:session_budget.max_llm_tokens`,
+`config:session_budget.max_wall_clock_secs`,
+`config:session_budget.max_session_price_usd` — plus
+`config:session_budget.profile` and `config:session_budget.extensions` to
+select named profiles. Root-tree (the tighter of session vs root wins): the
+same five `max_*` caps under `config:root_session_budget` — no
+`profile`/`extensions` there. Hitting one ends the session with a
+`budget_exhausted` causal event. Advice shape: raise the cap *or* shrink the
+task — the per-agent token table in the verdict/session report shows where
+it went.
 
 ## LoopGuard
 
 `config:loop_guard.max_loops_without_progress` (reset by any successful tool
-call), `.max_tool_failures` (per tool name, **not** reset by progress),
-`.max_child_failures` (permanent budget), plus the rotation/repeat knobs
-(`.max_consecutive_same_progress`, `.rotation_window_size`,
-`.recurring_error_window`, …). A LoopGuard trip is usually a pipeline
-problem (repeated identical failures), not a "raise the limit" problem — say
-which trip reason fired.
+call), `config:loop_guard.max_tool_failures` (per tool name, **not** reset by
+progress), `config:loop_guard.max_child_failures` (permanent budget), plus
+the rotation/repeat knobs (`config:loop_guard.max_consecutive_same_progress`,
+`config:loop_guard.rotation_window_size`,
+`config:loop_guard.recurring_error_window`, …). A LoopGuard trip is usually
+a pipeline problem (repeated identical failures), not a "raise the limit"
+problem — say which trip reason fired.
 
 ## Gate timeouts and flood caps
 

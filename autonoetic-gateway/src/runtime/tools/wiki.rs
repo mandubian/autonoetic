@@ -568,10 +568,24 @@ mod tests {
         structs
     }
 
+    /// Normalize a declared type for structural matching: strip the
+    /// `std::collections::` qualification (config.rs mixes bare `HashMap<...>`
+    /// and fully-qualified `std::collections::HashMap<...>`) and unwrap
+    /// `Option<T>`.
+    fn normalize_type(ty: &str) -> String {
+        let ty = ty.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')).unwrap_or(ty);
+        let ty = ty.strip_prefix("std::collections::").unwrap_or(ty);
+        ty.to_string()
+    }
+
     /// Validate one dotted `config:` path against the parsed schema.
     /// `HashMap<String, X>` fields consume one free-form segment (the map
     /// key, e.g. a preset name) before descending into `X`; scalar/leaf
-    /// types admit no further segments.
+    /// types admit no further segments. A citation may *end* on a field of
+    /// any type — enums (`SchemaEnforcementMode`) and externally-defined
+    /// types (`crate::agent::ThinkingConfig`) are real config surface even
+    /// though the parser can't see inside them — but cannot descend into
+    /// one.
     fn check_config_path(
         path: &str,
         structs: &std::collections::HashMap<String, std::collections::HashMap<String, String>>,
@@ -592,15 +606,11 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("'{seg}' is not a field of {current}"))?;
             i += 1;
-            // Unwrap Option<T> / plain generic wrappers down to the bare type
-            // text we care about.
-            let ty = ty
-                .strip_prefix("Option<")
-                .and_then(|t| t.strip_suffix('>'))
-                .unwrap_or(&ty)
-                .to_string();
+            let ty = normalize_type(&ty);
+            let terminal = i >= segments.len();
             // A map consumes one free-form key segment, then validates
-            // against the value type.
+            // against the value type. A terminal citation on the map (or on
+            // its `<key>`) is fine even when the value type is opaque.
             if let Some(value_ty) = ty
                 .strip_prefix("HashMap<String, ")
                 .and_then(|t| t.strip_suffix('>'))
@@ -608,7 +618,7 @@ mod tests {
                 if i < segments.len() {
                     i += 1; // the map key (e.g. the preset name)
                 }
-                let value_ty = value_ty.to_string();
+                let value_ty = normalize_type(value_ty);
                 if is_leaf_type(&value_ty) {
                     if i < segments.len() {
                         return Err(format!(
@@ -619,23 +629,42 @@ mod tests {
                     }
                     return Ok(());
                 }
+                if i >= segments.len() {
+                    return Ok(()); // ends on the map's value — real surface
+                }
+                if !structs.contains_key(&value_ty) {
+                    return Err(format!(
+                        "'{path}': map value type '{value_ty}' is not a known config struct; \
+                         cannot descend into '{}'",
+                        segments[i]
+                    ));
+                }
                 current = value_ty;
                 continue;
             }
             if is_leaf_type(&ty) {
-                if i < segments.len() {
+                if !terminal {
                     return Err(format!(
                         "'{path}': '{}' is a scalar ({}); no further segments",
-                        segments[i - 1],
+                        seg,
                         ty
                     ));
                 }
                 return Ok(());
             }
             if !structs.contains_key(&ty) {
+                // Unknown interior type (enum, or a type defined outside
+                // config.rs): citable as a terminal field, not descendable.
+                if terminal {
+                    return Ok(());
+                }
                 return Err(format!(
-                    "'{path}': field type '{ty}' is neither a leaf nor a known config struct"
+                    "'{path}': field type '{ty}' is opaque to the schema parser; \
+                     cannot descend into '{seg}'"
                 ));
+            }
+            if terminal {
+                return Ok(()); // ends on a struct-valued field — citable
             }
             current = ty;
         }
@@ -669,16 +698,7 @@ mod tests {
 
     #[test]
     fn config_citations_in_corpus_resolve_against_gateway_config_schema() {
-        let config_src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../autonoetic-types/src/config.rs");
-        let config_src = std::fs::read_to_string(&config_src_path).unwrap_or_else(|e| {
-            panic!("cannot read {} for the citation guard: {e}", config_src_path.display())
-        });
-        let structs = parse_config_structs(&config_src);
-        assert!(
-            structs.contains_key("GatewayConfig"),
-            "config.rs parse must find GatewayConfig — the drift guard is broken"
-        );
+        let structs = parsed_config_structs_for_tests();
 
         let dir = resolve_wiki_dir(None).expect("built-in corpus dir should exist");
         let index = load_index(&dir).expect("index should parse");
@@ -696,6 +716,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn parsed_config_structs_for_tests(
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, String>> {
+        let config_src_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../autonoetic-types/src/config.rs");
+        let config_src = std::fs::read_to_string(&config_src_path).unwrap_or_else(|e| {
+            panic!("cannot read {} for the citation guard: {e}", config_src_path.display())
+        });
+        let structs = parse_config_structs(&config_src);
+        assert!(
+            structs.contains_key("GatewayConfig"),
+            "config.rs parse must find GatewayConfig — the drift guard is broken"
+        );
+        structs
+    }
+
+    /// PR-review regressions for the path checker itself, against the live
+    /// parsed schema (so a schema change that breaks an assumption here also
+    /// breaks this test, not silently the guard):
+    /// - a citation may END on an enum/externally-typed field (real key,
+    ///   opaque interior) but not descend into one;
+    /// - fully-qualified `std::collections::HashMap<...>` field types match
+    ///   the same as bare `HashMap<...>`.
+    #[test]
+    fn config_path_checker_terminal_opaque_types_and_qualified_maps() {
+        let structs = parsed_config_structs_for_tests();
+        // Enum-typed scalar: citable as a terminal, not descendable.
+        assert!(check_config_path("schema_enforcement.mode", &structs).is_ok());
+        assert!(check_config_path("schema_enforcement.mode.bogus", &structs).is_err());
+        // Fully-qualified map (agent_overrides: std::collections::HashMap<String,
+        // SchemaEnforcementMode>): key-segment handling identical to bare maps.
+        assert!(check_config_path("schema_enforcement.agent_overrides", &structs).is_ok());
+        assert!(check_config_path("schema_enforcement.agent_overrides.<k>", &structs).is_ok());
+        assert!(check_config_path("schema_enforcement.agent_overrides.<k>.x", &structs).is_err());
+        // Externally-defined option type: terminal OK, descend Err.
+        assert!(check_config_path("llm_presets.<n>.thinking", &structs).is_ok());
+        assert!(check_config_path("llm_presets.<n>.thinking.x", &structs).is_err());
+        // Struct-typed field: citable bare AND descendable.
+        assert!(check_config_path("loop_guard", &structs).is_ok());
+        assert!(check_config_path("loop_guard.max_tool_failures", &structs).is_ok());
+        // Sanity: the incident's hallucinated key still fails.
+        assert!(check_config_path("stream_timeout", &structs).is_err());
     }
 
     #[test]
