@@ -94,8 +94,8 @@ impl SessionPhase {
     ///
     /// Two mechanical sources, both gateway-observed:
     ///
-    /// 1. **The agent's own successful action** — `artifact_build` succeeding
-    ///    means an artifact exists. See [`fact_for_tool`].
+    /// 1. **The agent's own successful action** — `artifact_build` returning an
+    ///    explicit `"ok": true` means an artifact exists. See [`fact_for_tool`].
     /// 2. **Evidence carried in any result** — a planner never calls
     ///    `artifact_build` itself (its coder child does), so tool-name mapping
     ///    alone would leave a lead agent permanently pre-phase. Any result
@@ -103,15 +103,25 @@ impl SessionPhase {
     ///    is proof the workflow has an artifact regardless of who made it.
     pub fn observe(&mut self, tool_name: &str, result_json: &str) -> Vec<&'static str> {
         let mut added = Vec::new();
-        let parsed: Option<serde_json::Value> = serde_json::from_str(result_json).ok();
+
+        // Fail closed on anything we cannot read. A result the gateway can't
+        // parse is not gateway-observed state, and treating it as success would
+        // let a malformed or truncated payload advance the phase.
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result_json) else {
+            return added;
+        };
 
         // A result that explicitly failed proves nothing about progress.
-        let failed = parsed.as_ref().is_some_and(|v| {
-            v.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
-                || v.get("error_type").is_some()
-        });
+        let failed = parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+            || parsed.get("error_type").is_some();
+        if failed {
+            return added;
+        }
 
-        if !failed {
+        // The agent's own action counts only under an explicit success envelope.
+        // Every tool in `fact_for_tool` emits `"ok": true` on success, so
+        // requiring it strands nothing while keeping the derivation sound.
+        if parsed.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             if let Some(fact) = fact_for_tool(tool_name) {
                 if self.insert(fact) {
                     added.push(fact);
@@ -119,12 +129,14 @@ impl SessionPhase {
             }
         }
 
-        // Evidence-carried facts survive a failed envelope: `workflow_state`
-        // reporting a prior artifact is true whether or not this call errored.
-        if let Some(value) = parsed.as_ref() {
-            if json_has_artifact_evidence(value, 0) && self.insert(PHASE_ARTIFACT_BUILT) {
-                added.push(PHASE_ARTIFACT_BUILT);
-            }
+        // Evidence carried by *any* non-failed result: `workflow_state`
+        // reporting a prior artifact is proof regardless of who built it. This
+        // deliberately does not require `ok: true` — the evidence-bearing
+        // results (child terminal state, reuse guards) do not all carry an
+        // envelope — but it is still gated on the call not having failed, so an
+        // error that merely *names* an artifact_ref cannot advance the phase.
+        if json_has_artifact_evidence(&parsed, 0) && self.insert(PHASE_ARTIFACT_BUILT) {
+            added.push(PHASE_ARTIFACT_BUILT);
         }
 
         added
@@ -554,6 +566,35 @@ mod tests {
             .is_empty());
         assert!(!phase.has(PHASE_ARTIFACT_BUILT));
         assert!(!phase.has(PHASE_GATE_VERDICT_RECORDED));
+    }
+
+    #[test]
+    fn observe_fails_closed_on_unreadable_or_unenveloped_results() {
+        // Derivation claims to be a pure function of gateway-observed state, so
+        // anything the gateway cannot actually read must advance nothing.
+        let mut phase = SessionPhase::default();
+        assert!(phase.observe("artifact_build", "not json at all").is_empty());
+        assert!(phase.observe("artifact_build", "").is_empty());
+        assert!(phase.observe("artifact_build", "truncated {\"ok\": tr").is_empty());
+        // Parseable but with no success envelope — still not proof.
+        assert!(phase.observe("artifact_build", r#"{"status":"maybe"}"#).is_empty());
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
+
+        // The explicit envelope is what advances it.
+        assert_eq!(
+            phase.observe("artifact_build", r#"{"ok":true}"#),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+    }
+
+    #[test]
+    fn observe_ignores_artifact_ref_named_by_a_failing_result() {
+        // An error that merely *names* an artifact is not proof one was built —
+        // otherwise "artifact not found" would advance the phase.
+        let mut phase = SessionPhase::default();
+        let err = r#"{"ok":false,"error_type":"resource","message":"artifact not found","artifact_ref":"ar.missing"}"#;
+        assert!(phase.observe("resolve", err).is_empty());
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
     }
 
     #[test]

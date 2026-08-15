@@ -95,8 +95,35 @@ struct Report {
     tool_chars: usize,
     skill_core: usize,
     skill_extended: usize,
+    foundation: usize,
     guidance_pre: usize,
     guidance_post: usize,
+}
+
+impl Report {
+    /// The largest prompt layer that is not the tool schemas. Every layer the
+    /// report prints participates — a canary that ignored one could pass while
+    /// the thing it guards had already flipped.
+    fn largest_non_tool_layer(&self) -> usize {
+        self.skill_core
+            .max(self.skill_extended)
+            .max(self.foundation)
+            .max(self.guidance_post)
+    }
+}
+
+/// Foundation layers are selected from the manifest and are the same files for
+/// every matching agent; read them from source so the total is honest.
+fn foundation_chars() -> usize {
+    ["core", "workflow", "artifact", "sdk"]
+        .iter()
+        .map(|n| {
+            let p = repo_root()
+                .join("autonoetic-gateway/src/runtime")
+                .join(format!("foundation_{n}.md"));
+            std::fs::read_to_string(p).map_or(0, |s| s.len())
+        })
+        .sum()
 }
 
 fn measure(label: &'static str, rel: &str) -> Report {
@@ -113,24 +140,14 @@ fn measure(label: &'static str, rel: &str) -> Report {
         tool_chars,
         skill_core: core.len(),
         skill_extended: extended.as_deref().map_or(0, str::len),
+        foundation: foundation_chars(),
         guidance_pre: guidance_for(&manifest, &empty).len(),
         guidance_post: guidance_for(&manifest, &built).len(),
     }
 }
 
 fn print_report(r: &Report) {
-    // Foundation layers are selected from the manifest and are the same files for
-    // every matching agent; report them from source so the total is honest.
-    let foundation: usize = ["core", "workflow", "artifact", "sdk"]
-        .iter()
-        .map(|n| {
-            let p = repo_root()
-                .join("autonoetic-gateway/src/runtime")
-                .join(format!("foundation_{n}.md"));
-            std::fs::read_to_string(p).map_or(0, |s| s.len())
-        })
-        .sum();
-
+    let foundation = r.foundation;
     let pre_total = r.tool_chars + r.skill_core + foundation + r.guidance_pre;
     let post_total = r.tool_chars + r.skill_core + r.skill_extended + foundation + r.guidance_post;
 
@@ -190,7 +207,7 @@ fn prompt_composition_report() {
     // the finding the RFC's lever ordering rests on; if it ever stops being
     // true, re-derive the ordering rather than silently ignoring it.
     for r in [&planner, &coder] {
-        let largest_other = r.skill_core.max(r.skill_extended).max(r.guidance_post);
+        let largest_other = r.largest_non_tool_layer();
         assert!(
             r.tool_chars > largest_other,
             "{}: tool schemas ({}) should be the largest single prompt layer, \
