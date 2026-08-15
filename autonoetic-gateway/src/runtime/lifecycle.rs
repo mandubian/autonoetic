@@ -2040,7 +2040,7 @@ impl AgentExecutor {
         &self,
         tier_filter: &crate::runtime::tools::ToolTierFilter,
         active_tool_names: &[String],
-    ) -> String {
+    ) -> crate::runtime::guidance::ComposedGuidance {
         let mut blocks = self.registry.collect_guidance_blocks(&self.manifest, tier_filter);
         blocks.extend(crate::runtime::guidance::builtin_blocks());
         // Resolve the model id (preset-aware) so `ModelFamily` matches even for
@@ -2080,7 +2080,8 @@ impl AgentExecutor {
                 .and_then(|io| io.output_policy.as_ref()),
             user_context.as_deref(),
             self.persona.as_deref(),
-            Some(guidance_rendered.as_str()),
+            Some(guidance_rendered.standing.as_str()),
+            Some(guidance_rendered.phase_tail.as_str()),
         );
         if let Some(ref snippet) = memory_context {
             system_instructions.push_str("\n\n");
@@ -2817,7 +2818,8 @@ impl AgentExecutor {
                     .and_then(|io| io.output_policy.as_ref()),
                 user_context.as_deref(),
                 self.persona.as_deref(),
-                Some(guidance_rendered.as_str()),
+                Some(guidance_rendered.standing.as_str()),
+                Some(guidance_rendered.phase_tail.as_str()),
             );
             // Prompt-cache boundary (#): everything composed so far — foundation
             // doctrine, SKILL instructions, tool/builtin guidance, output

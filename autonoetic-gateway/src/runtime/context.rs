@@ -128,7 +128,7 @@ pub(crate) fn compose_system_instructions_with_metadata(
     manifest: &AgentManifest,
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
 ) -> String {
-    compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None, None)
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, None, None, None, None)
 }
 
 /// Candidate pool size for task-matched recall: wider than `max_memories` so
@@ -315,7 +315,7 @@ pub(crate) fn compose_system_instructions_with_user_context(
     output_policy: Option<&autonoetic_types::agent::OutputPolicy>,
     user_context_snippet: Option<&str>,
 ) -> String {
-    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None, None)
+    compose_system_instructions_full(agent_instructions, manifest, output_policy, user_context_snippet, None, None, None)
 }
 
 /// Concatenate core + extended SKILL.md sections for the system prompt.
@@ -345,7 +345,14 @@ pub(crate) fn inline_extended(core: &str, extended: Option<&str>) -> String {
 /// Layer order (each layer is structurally positioned so it cannot override
 /// the previous one — foundation constitutional rules always win):
 ///
-///   Foundation → Guidance blocks → Tool bridging → Persona → User profile → Agent instructions → Output contract
+///   Foundation → Guidance blocks → Tool bridging → Persona → User profile → Agent instructions → Output contract → Phase guidance
+///
+/// `phase_guidance` is last **for cache reasons, not precedence**: it is the only
+/// layer that can appear mid-session, and everything before it must stay
+/// byte-stable when it does. Placed anywhere earlier, a newly-earned block would
+/// invalidate the cached bytes after it — which includes the whole `SKILL.md`
+/// body. At the tail, each earned fact is a pure append to the cache prefix. See
+/// `guidance::ComposedGuidance`.
 pub(crate) fn compose_system_instructions_full(
     agent_instructions: &str,
     manifest: &AgentManifest,
@@ -353,6 +360,7 @@ pub(crate) fn compose_system_instructions_full(
     user_context_snippet: Option<&str>,
     persona: Option<&str>,
     guidance: Option<&str>,
+    phase_guidance: Option<&str>,
 ) -> String {
     let foundation = compose_foundation(manifest);
 
@@ -480,9 +488,18 @@ pub(crate) fn compose_system_instructions_full(
         }
     };
 
-    match contract_section {
+    let with_contract = match contract_section {
         Some(section) => format!("{base}\n\n{section}"),
         None => base,
+    };
+
+    // Phase-earned guidance goes last — see the layer-order note above.
+    match phase_guidance
+        .map(str::trim)
+        .filter(|g| !g.is_empty())
+    {
+        Some(tail) => format!("{with_contract}\n\n---\n\nGuidance (earned this session)\n\n{tail}"),
+        None => with_contract,
     }
 }
 
@@ -1034,7 +1051,7 @@ mod agentskills_bridging_tests {
             role: Some("planner"),
             phase: None,
         };
-        let guidance = compose_guidance(&builtin_blocks(), &ctx);
+        let guidance = compose_guidance(&builtin_blocks(), &ctx).standing;
         assert!(
             guidance.contains("Sentinel notices are advisory"),
             "planner guidance must include Sentinel self-correction doctrine: {guidance}"
@@ -1057,7 +1074,7 @@ mod agentskills_bridging_tests {
             role: Some("coder"),
             phase: None,
         };
-        let guidance = compose_guidance(&builtin_blocks(), &ctx);
+        let guidance = compose_guidance(&builtin_blocks(), &ctx).standing;
         assert!(
             !guidance.contains("Sentinel notices are advisory"),
             "coder should not receive planner Sentinel guidance: {guidance}"

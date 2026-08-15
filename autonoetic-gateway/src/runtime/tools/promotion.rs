@@ -696,12 +696,12 @@ mod guidance_tests {
         let blocks = PromotionRecordTool.guidance();
         let tools = vec!["promotion_record".to_string()];
         let ctx = GuidanceContext { active_tool_names: &tools, ..Default::default() };
-        let out = compose_guidance(&blocks, &ctx);
+        let out = compose_guidance(&blocks, &ctx).standing;
         assert!(out.contains("Recording your verdict"), "block text missing: {out}");
         assert!(out.contains("not alternates like `outcome`"));
 
         // Absent when promotion_record isn't in the advertised tool set.
-        assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()), "");
+        assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()).standing, "");
     }
 }
 

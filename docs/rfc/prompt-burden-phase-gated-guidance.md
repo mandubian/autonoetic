@@ -177,17 +177,34 @@ procedure from the prompt at exactly the point the work is most advanced — the
 worst possible moment. `#[serde(default)]` + skip-if-empty, so pre-existing
 checkpoints load as "no phase yet".
 
-### 3.3 Render order is part of the design
+### 3.3 Placement and order are part of the design
 
-**Phase-gated blocks render after every unconditional block**
-(`PHASE_GATED_PRIORITY_FLOOR`, enforced by
-`phase_gated_blocks_render_after_unconditional_ones`).
+A fact landing mid-session must be a pure **append** to the cache prefix.
+Anything else invalidates every cached byte after the insertion point. Two
+decisions make that true, and only the second is obvious:
 
-This is a cache property, not cosmetics. A fact landing mid-session must
-*append* to the guidance section: appending extends the cached prompt prefix,
-while inserting into the middle invalidates everything after the insertion point
-and re-caches it. With P2 migrating many tools onto this mechanism, that is the
-difference between one cache extension per fact and a full re-cache per fact.
+**Placement — earned blocks render last, after the output contract.** Composition
+order is foundation → guidance → bridging → persona → user context → `SKILL.md` →
+output contract. The standing guidance section sits *early*, followed by the
+agent's entire `SKILL.md` (~11k tokens for the planner). An earned block rendered
+there re-caches all of it **regardless of its position within the section** —
+ordering inside the guidance section buys nothing on its own. So
+`compose_guidance` returns two sections ([`ComposedGuidance`]) and
+`compose_system_instructions_full` renders the phase tail at the very end of the
+cache prefix. Guarded by `phase_guidance_renders_after_the_standing_prompt`.
+
+**Order within the tail — by fact arrival, not priority or id.** Sorting by block
+id (the natural tie-break) means a block earned at fact 3 can render ahead of one
+earned at fact 1, which is an insertion, not an append. So `SessionPhase` holds
+facts in arrival order and the tail sorts by activation index — `max` for `All`
+(a block appears when its *last* required fact lands), `min` for `Any`. Guarded by
+`phase_tail_is_ordered_by_fact_arrival_not_id_or_priority` and
+`phase_tail_grows_by_appending_as_facts_land`, which asserts the tail at fact N is
+a prefix of the tail at fact N+1.
+
+`PHASE_GATED_PRIORITY_FLOOR` remains as a belt-and-braces guard — it keeps
+priorities legible and makes accidental mis-gating visible in review — but
+placement, not priority, is the mechanism.
 
 The prefix is therefore **stable between milestones, not byte-identical for the
 whole session**. Four monotonic flags shift it, each at most once:
@@ -197,20 +214,31 @@ whole session**. Four monotonic flags shift it, each at most once:
 corrects it to state the real invariant. Anything added above that boundary which
 can toggle *back* would churn the cache every turn and does not belong there.
 
-### 3.4 What the evidence scan actually reaches
+### 3.4 The evidence scan is allowlisted to the artifact domain
 
-The evidence path (§3.1) is deliberately broad, so it is worth knowing its real
-surface. Every tool whose result can carry an `artifact_ref` or
-`reuse_guards.has_coder_artifact` today is artifact-domain: `artifact_build`,
-`artifact_prepare`, `artifact_exec`, `promotion_*`, `federation_*`, `resolve`,
-`agent_revision_*`, `workflow_*`, `sandbox_exec`, `workbench_*`. Each such
-result genuinely implies an artifact exists in the workflow — including
-`resolve`, where successfully resolving an `ar.*` ref is itself proof.
+The evidence path (§3.1) reads *other tools'* results, so its surface is a
+contract every gated block inherits. It is restricted to an audited allowlist
+(`tool_emits_artifact_evidence`): `artifact_*`, `promotion_*`, `federation_*`,
+`agent_revision_*`, `workflow_*`, `workbench_*`, plus `resolve` and
+`sandbox_exec`. Every tool there operates *on* artifacts, so a non-failed result
+naming one is genuine proof — including `resolve`, where successfully resolving
+an `ar.*` ref is itself the proof.
 
-Notably `agent_inspect` — the case where "a planner merely *looked at* an
-installed agent" would over-trigger the fact — returns no `artifact_ref` at all,
-so that path does not exist today. The concern is drift, not a present bug: see
-Open Question 4.
+The bias is deliberate and asymmetric: **a missing block is recoverable** (the
+agent still holds the tool signature, and tool errors carry repair hints), while
+**a phantom block is paid by every session that trips it, forever**.
+
+Two narrower scopings were considered and rejected:
+
+- *Scan every result.* Sound against today's tool set — `agent_inspect` and
+  `execution_search` emit no `artifact_ref` — but it makes the fact hostage to any
+  future tool that echoes the key for unrelated reasons, at a point where many
+  blocks depend on it.
+- *Scan only `workflow_state` / `workflow_wait`.* Too tight, and it fails on the
+  primary case. The gateway's child-state notification tells the agent verbatim
+  *"you do not need to call `workflow_state`"* and arrives as a resume
+  user-message, **not a tool result** — so a planner following the documented
+  yield-based flow would never advance the phase. See Open Question 4.
 
 ---
 
@@ -349,12 +377,19 @@ routing knowledge, the split is wrong.
    case, letting a pure-Q&A session shed *more* than it currently can? This is
    the only place where a non-monotonic signal would genuinely pay, and it needs
    its own analysis before being adopted.
-4. **Should the evidence scan stay unrestricted, or become workflow-scoped?**
-   §3.4 shows the current surface is sound — every tool that can emit artifact
-   evidence is artifact-domain — but that is a property of today's tool set, not
-   an enforced invariant. Once P2 puts ~20 blocks behind `artifact_built`, a new
-   tool that echoes an `artifact_ref` for unrelated reasons would silently widen
-   the fact for all of them. Two candidate answers: restrict the scan to an
-   allowlist of evidence-bearing tools (mirroring `fact_for_tool`), or add a
-   registry guard test asserting no tool outside the artifact domain emits
-   `artifact_ref`. **This should be decided before P2 begins**, not after.
+4. **Derive the phase at the source, not from tool results — tracked, and due
+   before P2.** The evidence scan (§3.4) is an *inference* from tool output, and
+   there is one path it structurally cannot see: the gateway's child-state
+   notification, which carries the child's typed state — including its
+   `artifact_ref` — as a resume user-message rather than a tool result, while
+   explicitly telling the agent not to call `workflow_state`. That is the
+   documented happy path for a yield-based planner. Today such a planner earns
+   the fact only because it *subsequently* calls an allowlisted tool
+   (`artifact_inspect` preflight, `resolve` of `SKILL.md`, `promotion_query`) —
+   incidental, not designed.
+
+   The fix is to advance `session_phase` where the gateway already holds the
+   typed child state, making the notification path first-class and the scan a
+   fallback rather than the primary mechanism. This is **not optional polish**:
+   it completes the mechanism on its main case, and it should land before P2
+   multiplies the number of blocks depending on the fact.

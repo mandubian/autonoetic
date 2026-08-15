@@ -18,6 +18,8 @@
 use autonoetic_gateway::runtime::guidance::{
     self, GuidanceContext, SessionPhase, PHASE_ARTIFACT_BUILT,
 };
+#[allow(unused_imports)]
+use autonoetic_gateway::runtime::tools::NativeToolRegistry;
 use autonoetic_gateway::runtime::parser::{split_extended_instructions, SkillParser};
 use autonoetic_gateway::runtime::tools::{default_registry, ToolTierFilter};
 use autonoetic_types::agent::AgentManifest;
@@ -82,7 +84,14 @@ fn guidance_for(manifest: &AgentManifest, phase: &SessionPhase) -> String {
         role: role_owned.as_deref(),
         phase: Some(phase),
     };
-    guidance::compose_guidance(&blocks, &ctx)
+    let composed = guidance::compose_guidance(&blocks, &ctx);
+    // Both sections are prompt cost regardless of where they render, so the
+    // budget report counts them together.
+    [composed.standing, composed.phase_tail]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn tok(chars: usize) -> usize {
@@ -245,6 +254,51 @@ fn phase_gating_keeps_procedure_out_of_the_pre_phase_prompt() {
         "phase-gated block should add prose at the phase, got pre={} post={}",
         pre.len(),
         post.len()
+    );
+}
+
+#[test]
+fn phase_guidance_renders_after_the_standing_prompt() {
+    // Placement, not ordering, is what keeps the cache intact: the standing
+    // guidance section is followed by the agent's whole SKILL.md, so an earned
+    // block rendered there would re-cache all of it. The tail must come last.
+    let (manifest, _core, _ext) = load_agent("agents/lead/planner.default/SKILL.md");
+    let mut built = SessionPhase::default();
+    built.insert(PHASE_ARTIFACT_BUILT);
+
+    let registry = default_registry();
+    let filter = ToolTierFilter::all();
+    let mut blocks = registry.collect_guidance_blocks(&manifest, &filter);
+    blocks.extend(guidance::builtin_blocks());
+    let tool_names: Vec<String> = registry
+        .available_definitions_filtered(&manifest, Some(&filter))
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+    let role_owned = manifest.agent.id.split('.').next().map(str::to_string);
+    let composed = guidance::compose_guidance(
+        &blocks,
+        &GuidanceContext {
+            capabilities: &manifest.capabilities,
+            active_tool_names: &tool_names,
+            model_family: Some("claude-opus-4-8"),
+            role: role_owned.as_deref(),
+            phase: Some(&built),
+        },
+    );
+
+    assert!(
+        composed.phase_tail.contains("Escalating federation verdicts"),
+        "earned procedure belongs in the tail"
+    );
+    assert!(
+        !composed.standing.contains("Escalating federation verdicts"),
+        "earned procedure must NOT be in the standing section — that is the \
+         section followed by SKILL.md in the cache prefix"
+    );
+    assert!(
+        !composed.standing.is_empty(),
+        "standing guidance should still render normally"
     );
 }
 
