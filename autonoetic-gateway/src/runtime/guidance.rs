@@ -211,21 +211,19 @@ impl SessionPhase {
         };
 
         let evidence = match parsed.get("type").and_then(serde_json::Value::as_str) {
-            Some("child_state_notification") => {
-                let Some(notification) = parsed.get("notification") else {
-                    return added;
-                };
-                // Only a succeeded child is proof. A failed or aborted child may
-                // still name an artifact_ref in its summary while having produced
-                // nothing.
-                let succeeded = notification
-                    .get("child_status")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("succeeded");
-                succeeded && json_has_artifact_evidence(notification, 0)
-            }
-            // The join payload embeds the same per-child summaries.
-            Some("workflow_join_satisfied") => json_has_artifact_evidence(&parsed, 0),
+            Some("child_state_notification") => parsed
+                .get("notification")
+                .is_some_and(child_notification_proves_artifact),
+            // A join carries `child_summaries: Vec<ChildStateNotification>` — the
+            // same per-child shape. Each element is judged individually so a
+            // failed child in a mixed join cannot lend its `artifact_ref` to the
+            // group; scanning the payload as a whole would do exactly that.
+            Some("workflow_join_satisfied") => parsed
+                .get("child_summaries")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|children| {
+                    children.iter().any(child_notification_proves_artifact)
+                }),
             _ => false,
         };
 
@@ -234,6 +232,21 @@ impl SessionPhase {
         }
         added
     }
+}
+
+/// Whether one `ChildStateNotification` proves an artifact exists.
+///
+/// The single predicate behind both signal shapes — a standalone notification
+/// and each element of a join's `child_summaries` — so the "a child that did not
+/// succeed proves nothing" rule cannot hold on one path and be skipped on the
+/// other. A failed or aborted child may still name an `artifact_ref` in its
+/// summary while having produced nothing.
+fn child_notification_proves_artifact(notification: &serde_json::Value) -> bool {
+    notification
+        .get("child_status")
+        .and_then(serde_json::Value::as_str)
+        == Some("succeeded")
+        && json_has_artifact_evidence(notification, 0)
 }
 
 /// Tool name → the phase fact a successful call proves. Exhaustive by intent:
@@ -928,13 +941,60 @@ mod tests {
 
     #[test]
     fn workflow_join_payload_advances_phase() {
+        // Real payload shape: `child_summaries: Vec<ChildStateNotification>`
+        // (scheduler/signal.rs), not an invented `tasks` array — otherwise the
+        // test passes while the production path is never exercised.
         let joined = r#"{
             "type": "workflow_join_satisfied",
-            "tasks": [{"task_id": "t1", "summary": "{\"artifact_ref\":\"ar.abc\"}"}]
+            "workflow_id": "wf1",
+            "join_task_ids": ["t1"],
+            "child_summaries": [
+                {"workflow_id": "wf1", "task_id": "t1", "child_session_id": "s/c1",
+                 "child_status": "succeeded",
+                 "summary": "{\"status\":\"ok\",\"artifact_ref\":\"ar.abc\"}"}
+            ]
         }"#;
         let mut phase = SessionPhase::default();
         assert_eq!(
             phase.observe_gateway_signal(joined),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+    }
+
+    #[test]
+    fn workflow_join_judges_each_child_separately() {
+        // A failed child in a mixed join must not lend its artifact_ref to the
+        // group. Scanning the payload as a whole would let it, which is exactly
+        // the rule the notification path already enforces.
+        let mixed = r#"{
+            "type": "workflow_join_satisfied",
+            "workflow_id": "wf1",
+            "join_task_ids": ["t1", "t2"],
+            "child_summaries": [
+                {"task_id": "t1", "child_status": "failed",
+                 "summary": "{\"status\":\"failed\",\"artifact_ref\":\"ar.partial\"}"},
+                {"task_id": "t2", "child_status": "succeeded",
+                 "summary": "researched the docs, no artifact"}
+            ]
+        }"#;
+        let mut phase = SessionPhase::default();
+        assert!(
+            phase.observe_gateway_signal(mixed).is_empty(),
+            "a failed child's artifact_ref must not advance the phase"
+        );
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
+
+        // The same join, once the failing child is replaced by a succeeded one
+        // that really did build something.
+        let good = r#"{
+            "type": "workflow_join_satisfied",
+            "child_summaries": [
+                {"task_id": "t1", "child_status": "succeeded",
+                 "summary": "{\"status\":\"ok\",\"artifact_ref\":\"ar.real\"}"}
+            ]
+        }"#;
+        assert_eq!(
+            phase.observe_gateway_signal(good),
             vec![PHASE_ARTIFACT_BUILT]
         );
     }

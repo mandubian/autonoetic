@@ -258,6 +258,13 @@ applies the same discipline as the tool path — gateway-observed state only, an
 child that did not succeed proves nothing, since a failed child can still name an
 `artifact_ref` in its summary while having produced nothing.
 
+Both signal shapes go through one predicate
+(`child_notification_proves_artifact`): a standalone notification, and each
+element of a join's `child_summaries` (which is a
+`Vec<ChildStateNotification>` — the same per-child shape). Judging join children
+*individually* is what stops a failed child in a mixed join from lending its
+`artifact_ref` to the group; a whole-payload scan would allow exactly that.
+
 One shape had to be handled for either path to see anything: a child's reply
 travels as a **string** containing JSON (`summary: "{\"artifact_ref\":\"ar.x\"}"`),
 in both notifications and joined `workflow_wait` results. The evidence scan
