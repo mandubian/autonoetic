@@ -177,6 +177,41 @@ procedure from the prompt at exactly the point the work is most advanced — the
 worst possible moment. `#[serde(default)]` + skip-if-empty, so pre-existing
 checkpoints load as "no phase yet".
 
+### 3.3 Render order is part of the design
+
+**Phase-gated blocks render after every unconditional block**
+(`PHASE_GATED_PRIORITY_FLOOR`, enforced by
+`phase_gated_blocks_render_after_unconditional_ones`).
+
+This is a cache property, not cosmetics. A fact landing mid-session must
+*append* to the guidance section: appending extends the cached prompt prefix,
+while inserting into the middle invalidates everything after the insertion point
+and re-caches it. With P2 migrating many tools onto this mechanism, that is the
+difference between one cache extension per fact and a full re-cache per fact.
+
+The prefix is therefore **stable between milestones, not byte-identical for the
+whole session**. Four monotonic flags shift it, each at most once:
+`extended_loaded` (#1015), `tool_tier_escalated`, `discovered_tools`, and now
+`session_phase`. The first three predate this RFC — the cache-boundary comment in
+`lifecycle.rs` claimed byte-identity that was already untrue — and this branch
+corrects it to state the real invariant. Anything added above that boundary which
+can toggle *back* would churn the cache every turn and does not belong there.
+
+### 3.4 What the evidence scan actually reaches
+
+The evidence path (§3.1) is deliberately broad, so it is worth knowing its real
+surface. Every tool whose result can carry an `artifact_ref` or
+`reuse_guards.has_coder_artifact` today is artifact-domain: `artifact_build`,
+`artifact_prepare`, `artifact_exec`, `promotion_*`, `federation_*`, `resolve`,
+`agent_revision_*`, `workflow_*`, `sandbox_exec`, `workbench_*`. Each such
+result genuinely implies an artifact exists in the workflow — including
+`resolve`, where successfully resolving an `ar.*` ref is itself proof.
+
+Notably `agent_inspect` — the case where "a planner merely *looked at* an
+installed agent" would over-trigger the fact — returns no `artifact_ref` at all,
+so that path does not exist today. The concern is drift, not a present bug: see
+Open Question 4.
+
 ---
 
 ## 4. What the prototype ships
@@ -314,3 +349,12 @@ routing knowledge, the split is wrong.
    case, letting a pure-Q&A session shed *more* than it currently can? This is
    the only place where a non-monotonic signal would genuinely pay, and it needs
    its own analysis before being adopted.
+4. **Should the evidence scan stay unrestricted, or become workflow-scoped?**
+   §3.4 shows the current surface is sound — every tool that can emit artifact
+   evidence is artifact-domain — but that is a property of today's tool set, not
+   an enforced invariant. Once P2 puts ~20 blocks behind `artifact_built`, a new
+   tool that echoes an `artifact_ref` for unrelated reasons would silently widen
+   the fact for all of them. Two candidate answers: restrict the scan to an
+   allowlist of evidence-bearing tools (mirroring `fact_for_tool`), or add a
+   registry guard test asserting no tool outside the artifact domain emits
+   `artifact_ref`. **This should be decided before P2 begins**, not after.

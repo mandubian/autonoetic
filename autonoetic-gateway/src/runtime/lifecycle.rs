@@ -2821,10 +2821,29 @@ impl AgentExecutor {
             );
             // Prompt-cache boundary (#): everything composed so far — foundation
             // doctrine, SKILL instructions, tool/builtin guidance, output
-            // contract, persona, user context — is byte-identical across turns
-            // in this session, so it is safe to mark as a provider cache prefix.
-            // The volatile tails appended below (memory context, degradation
-            // notice, per-turn re-signed state attestation) must NOT be cached.
+            // contract, persona, user context — is safe to mark as a provider
+            // cache prefix. The volatile tails appended below (memory context,
+            // degradation notice, per-turn re-signed state attestation) must NOT
+            // be cached.
+            //
+            // The prefix is **stable between session milestones, not byte-identical
+            // for the whole session**. Four monotonic flags can shift it, each at
+            // most once, and each costing exactly one cache miss:
+            //
+            //   - `extended_loaded` — the extended SKILL half is inlined on the
+            //     first tool call (#1015), changing `composed_instructions`.
+            //   - `tool_tier_escalated` — a Specialized tool widens the tier
+            //     filter, changing the advertised tool set and therefore the
+            //     `ToolPresent`-gated guidance.
+            //   - `discovered_tools` — `tool_discover` adds names, same effect.
+            //   - `session_phase` — a phase fact activates a `Phase`-gated
+            //     guidance block (RFC `prompt-burden-phase-gated-guidance`).
+            //
+            // All four are monotonic and never retract, which is what bounds the
+            // damage: the prefix grows through a small number of stable states
+            // rather than churning per turn. Anything added here that can toggle
+            // *back* would invalidate the cache repeatedly and does not belong
+            // above this boundary.
             let system_cache_prefix_bytes = if self
                 .config
                 .as_ref()

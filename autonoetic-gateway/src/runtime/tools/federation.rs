@@ -24,10 +24,14 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// before an artifact exists, so [`PHASE_ARTIFACT_BUILT`] is the precise moment
 /// it becomes worth its tokens.
 pub fn escalate_procedure_block() -> crate::runtime::guidance::GuidanceBlock {
-    use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition, PHASE_ARTIFACT_BUILT};
+    use crate::runtime::guidance::{
+        GuidanceBlock, GuidanceCondition, PHASE_ARTIFACT_BUILT, PHASE_GATED_PRIORITY_FLOOR,
+    };
     GuidanceBlock {
         id: "federation.escalate_procedure",
-        priority: 40,
+        // Phase-gated blocks render last so a newly-earned fact appends to the
+        // prompt prefix rather than inserting into it.
+        priority: PHASE_GATED_PRIORITY_FLOOR,
         when: GuidanceCondition::All(vec![
             GuidanceCondition::ToolPresent("federation_escalate"),
             GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT),

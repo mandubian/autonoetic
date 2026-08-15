@@ -53,6 +53,18 @@ pub const PHASE_CHILD_SPAWNED: &str = "child_spawned";
 /// A credential has been configured this session.
 pub const PHASE_CREDENTIAL_CONFIGURED: &str = "credential_configured";
 
+/// Minimum `priority` for any block carrying a [`GuidanceCondition::Phase`].
+///
+/// Phase-gated blocks must render **after** every unconditional block, so that
+/// a newly-earned fact *appends* to the guidance section instead of inserting
+/// into the middle of it. Appending extends the cached prompt prefix; inserting
+/// invalidates everything after the insertion point and re-caches it. With the
+/// whole migration wave of RFC P2 landing on this mechanism, the difference is
+/// between one cache extension per fact and a full re-cache per fact.
+///
+/// Enforced by `phase_gated_blocks_render_after_unconditional_ones`.
+pub const PHASE_GATED_PRIORITY_FLOOR: i32 = 100;
+
 /// Monotonic, mechanically-derived record of how far a session has progressed.
 ///
 /// This is the axis [`GuidanceCondition`] was missing. Capabilities, tools,
@@ -216,6 +228,19 @@ pub struct GuidanceContext<'a> {
 }
 
 impl GuidanceCondition {
+    /// Whether this condition (or any sub-condition) depends on session phase —
+    /// i.e. whether the block can enter the prompt mid-session.
+    pub fn is_phase_gated(&self) -> bool {
+        match self {
+            GuidanceCondition::Phase(_) => true,
+            GuidanceCondition::All(conds) | GuidanceCondition::Any(conds) => {
+                conds.iter().any(GuidanceCondition::is_phase_gated)
+            }
+            GuidanceCondition::Not(cond) => cond.is_phase_gated(),
+            _ => false,
+        }
+    }
+
     fn matches(&self, ctx: &GuidanceContext) -> bool {
         match self {
             GuidanceCondition::Always => true,
@@ -642,6 +667,63 @@ mod tests {
         // Checkpoints predating the field deserialize as "no phase yet".
         let old: SessionPhase = serde_json::from_str("{}").expect("empty");
         assert!(old.is_empty());
+    }
+
+    #[test]
+    fn is_phase_gated_sees_through_combinators() {
+        let phase = GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT);
+        assert!(phase.is_phase_gated());
+        assert!(GuidanceCondition::All(vec![
+            GuidanceCondition::ToolPresent("x"),
+            phase.clone()
+        ])
+        .is_phase_gated());
+        assert!(GuidanceCondition::Any(vec![phase.clone()]).is_phase_gated());
+        assert!(GuidanceCondition::Not(Box::new(phase)).is_phase_gated());
+        assert!(!GuidanceCondition::ToolPresent("x").is_phase_gated());
+        assert!(!GuidanceCondition::Always.is_phase_gated());
+    }
+
+    #[test]
+    fn phase_gated_blocks_render_after_unconditional_ones() {
+        // A fact landing mid-session must APPEND to the guidance section, not
+        // insert into it: appending extends the cached prompt prefix, inserting
+        // re-caches everything after the insertion point. With RFC P2 migrating
+        // many tools onto this mechanism, that is the difference between one
+        // cache extension per fact and a full re-cache per fact.
+        let registry = crate::runtime::tools::default_registry();
+        let mut blocks = registry.all_guidance_blocks();
+        blocks.extend(builtin_blocks());
+
+        let lowest_phase_gated = blocks
+            .iter()
+            .filter(|b| b.when.is_phase_gated())
+            .map(|b| b.priority)
+            .min();
+        let highest_unconditional = blocks
+            .iter()
+            .filter(|b| !b.when.is_phase_gated())
+            .map(|b| b.priority)
+            .max();
+
+        if let (Some(lowest), Some(highest)) = (lowest_phase_gated, highest_unconditional) {
+            assert!(
+                lowest > highest,
+                "phase-gated blocks must render after every unconditional block \
+                 (lowest phase-gated priority {lowest} <= highest unconditional {highest}); \
+                 use PHASE_GATED_PRIORITY_FLOOR"
+            );
+        }
+
+        for block in blocks.iter().filter(|b| b.when.is_phase_gated()) {
+            assert!(
+                block.priority >= PHASE_GATED_PRIORITY_FLOOR,
+                "phase-gated block '{}' has priority {} below PHASE_GATED_PRIORITY_FLOOR ({})",
+                block.id,
+                block.priority,
+                PHASE_GATED_PRIORITY_FLOOR
+            );
+        }
     }
 
     #[test]
