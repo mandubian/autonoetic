@@ -87,3 +87,9 @@ id = "agent-messaging"
 title = "Agent-to-Agent Messaging"
 file = "agent-messaging.md"
 tags = ["messaging", "agent_message", "peer", "broadcast", "coordination", "async"]
+
+[[pages]]
+id = "gateway-config"
+title = "Gateway Configuration: Advising the Operator"
+file = "gateway-config.md"
+tags = ["config", "operator", "timeout", "budget", "loop-guard", "llm-presets", "advisory"]
