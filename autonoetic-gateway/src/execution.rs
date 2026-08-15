@@ -3042,6 +3042,7 @@ impl GatewayExecutionService {
                             self.gateway_store.as_deref(),
                             &session_id,
                         );
+                    observe_signal_phase(&mut runtime.session_phase, message);
                     history.extend(turn_start_messages);
                     history.push(crate::llm::Message::user(resume_message));
                 }
@@ -3059,6 +3060,7 @@ impl GatewayExecutionService {
                         self.gateway_store.as_deref(),
                         &session_id,
                     );
+                observe_signal_phase(&mut runtime.session_phase, message);
                 history.extend(turn_start_messages);
                 history.push(crate::llm::Message::user(resume_message));
             }
@@ -3810,6 +3812,8 @@ impl GatewayExecutionService {
                             self.gateway_store.as_deref(),
                             session_id,
                         );
+                    let signal_payload = runtime.initial_user_message.clone();
+                    observe_signal_phase(&mut runtime.session_phase, &signal_payload);
                     let mut history = build_initial_history(
                         &runtime.agent_dir,
                         &runtime.instructions,
@@ -3854,6 +3858,8 @@ impl GatewayExecutionService {
                             self.gateway_store.as_deref(),
                             session_id,
                         );
+                    let signal_payload = runtime.initial_user_message.clone();
+                    observe_signal_phase(&mut runtime.session_phase, &signal_payload);
                     let mut history = build_initial_history(
                         &runtime.agent_dir,
                         &runtime.instructions,
@@ -5164,6 +5170,26 @@ fn is_signal_delivered_for_terminal_workflow(
         return Ok(false);
     };
     crate::scheduler::workflow_store::is_workflow_terminal(config, store, &workflow_id)
+}
+
+/// Advance `phase` from a gateway signal payload and trace any fact it earns
+/// (RFC `prompt-burden-phase-gated-guidance`, OQ4).
+///
+/// Paired with every `gateway_signal_turn_start_context` call. That function
+/// renders the signal into turn-start *messages*, so the evidence inside it never
+/// becomes a tool result and `SessionPhase::observe` can never see it. This is
+/// the derive-at-source half: the gateway advancing the phase where it already
+/// holds the child's typed state, rather than waiting for the agent to
+/// incidentally call an artifact-domain tool afterwards.
+fn observe_signal_phase(phase: &mut crate::runtime::guidance::SessionPhase, signal_json: &str) {
+    for fact in phase.observe_gateway_signal(signal_json) {
+        tracing::info!(
+            target: "autonoetic::session_phase",
+            source = "gateway_signal",
+            fact = %fact,
+            "Session phase advanced from a gateway signal; phase-gated guidance now active"
+        );
+    }
 }
 
 fn gateway_signal_turn_start_context(

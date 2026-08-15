@@ -14,13 +14,22 @@ Code: `autonoetic-gateway/src/runtime/guidance.rs` (mechanism),
 Each turn, the gateway builds one system message by layering, in order:
 
 ```
-Foundation → Guidance blocks → Tool bridging → Persona → User profile
+Foundation → Guidance blocks (standing) → Tool bridging → Persona → User profile
    → Agent instructions (SKILL.md body) → Output contract
+   → Guidance blocks (earned this session)
 ```
 
 (then runtime tails are appended: prior-knowledge memory, degradation notice,
 state attestation.) Assembly lives in
 `context::compose_system_instructions_full`.
+
+Guidance renders in **two** places, and the split is a cache property, not
+presentation. Blocks whose activation is fixed at spawn go in the standing
+section. Blocks that can activate *mid-session* — phase-gated ones, §2.1 — go in
+a tail section after the output contract, at the very end of the cache prefix.
+Anything that appears mid-session invalidates every cached byte after it, and the
+standing section is followed by the agent's entire `SKILL.md`; from the tail, each
+new block is a pure append. See `guidance::ComposedGuidance`.
 
 The guiding principle of the factorization:
 
@@ -31,8 +40,23 @@ The guiding principle of the factorization:
 >
 > Litmus test: *if two agents would write the same sentence, it does not belong
 > in either `SKILL.md`.*
+>
+> Second litmus test (RFC `prompt-burden-phase-gated-guidance`): *if most
+> sessions never reach the situation this sentence describes, it should not be
+> in the prompt from turn 1.* Gate it — §2.1.
 
 There are **three** prose mechanisms, each for a different kind of content.
+
+**Every addition costs tokens on every turn.** The fixed prompt is measured by
+`tests/prompt_composition_budget.rs`, which prints a per-layer breakdown and
+enforces a steady-state ceiling per agent:
+
+```bash
+cargo test -p autonoetic-gateway --test prompt_composition_budget -- --nocapture
+```
+
+If that test fails, a change added weight paid on every turn. The fix is
+normally to gate the addition, not to raise the ceiling.
 
 ## 1. Foundation layers (static, manifest-gated)
 
@@ -71,13 +95,15 @@ pub enum GuidanceCondition {
     ToolPresent(&str),      // tool name is in the advertised set this turn
     ModelFamily(&[&str]),   // case-insensitive substring vs the model id
     Role(&str),             // agent role (id segment before the first '.')
+    Phase(&str),            // the session has reached a milestone — see §2.1
     All(Vec<…>), Any(Vec<…>), Not(Box<…>),
 }
 ```
 
-`compose_guidance(blocks, ctx)` filters by `when`, orders by `priority` (then
-`id` for determinism), **dedupes by `id`** (first wins), and renders the prose
-joined by blank lines. The `GuidanceContext` is the live-turn facts:
+`compose_guidance(blocks, ctx)` filters by `when`, **dedupes by `id`** (first
+wins), and returns a `ComposedGuidance { standing, phase_tail }`. `standing` is
+ordered by `priority` then `id`; `phase_tail` is ordered by **fact arrival**
+(§2.1). The `GuidanceContext` is the live-turn facts:
 
 - `capabilities` — from the manifest.
 - `active_tool_names` — the **final advertised** tool set (after MCP merge,
@@ -89,6 +115,49 @@ joined by blank lines. The `GuidanceContext` is the live-turn facts:
   substring-matches it (`["claude"]` matches `claude-opus-4-8`).
 - `role` — the agent id segment before the first `.` (e.g. `coder.default` →
   `coder`).
+- `phase` — how far the session has progressed (§2.1). `None` on composition
+  paths with no live session (bootstrap, static analysis), so `Phase` never
+  matches there.
+
+### 2.1 Phase gating — the only condition that changes mid-session
+
+Every other condition is decided at spawn, which makes a block gated only on them
+effectively static: prose that *might* matter at turn 40 is paid for at turn 1.
+`GuidanceCondition::Phase` gates on `SessionPhase` — a monotonic set of facts the
+gateway derives from what it observes:
+
+| Fact | Proven by |
+|---|---|
+| `artifact_built` | `artifact_build` succeeded; **or** a succeeded child's state / an artifact-domain tool result carries an `artifact_ref` or `reuse_guards.has_coder_artifact` |
+| `gate_verdict_recorded` | `promotion_record` succeeded |
+| `revision_seeded` | `agent_revision_create[_from_intent]` succeeded |
+| `child_spawned` | `agent_spawn` succeeded |
+| `credential_configured` | `credential_setup` succeeded |
+
+Rules that keep this sound — respect them when adding a fact:
+
+- **Mechanical only** (P-5.14). Facts come from gateway-observed state, never
+  from agent prose. A result must parse, must not be a failure, and the agent's
+  own action must carry an explicit `"ok": true`.
+- **Monotonic.** Facts are never retracted, so a block cannot flicker in and out
+  and churn the prompt cache. A condition that could toggle back does not belong
+  in the tail.
+- **Two derivation sites.** `SessionPhase::observe` reads tool results;
+  `SessionPhase::observe_gateway_signal` reads child-state notifications and
+  workflow joins, which arrive as turn-start messages and never become tool
+  results. The second is the primary path for a yield-based planner.
+- **Evidence is allowlisted** (`tool_emits_artifact_evidence`) to artifact-domain
+  tools, so an unrelated tool that echoes an `artifact_ref` cannot widen a fact
+  that many blocks depend on.
+- **Phase never widens reach.** Blocks are still collected only from tools that
+  passed the tier/capability filter, so `Phase` can only further restrict.
+  Guarded by `agents_without_the_tool_never_see_its_procedure`.
+
+Give phase-gated blocks `priority: PHASE_GATED_PRIORITY_FLOOR`. Placement in the
+tail is what protects the cache; the floor keeps priorities legible and makes
+mis-gating visible in review.
+
+Full rationale and the migration plan: `docs/rfc/prompt-burden-phase-gated-guidance.md`.
 
 ### Where blocks come from
 
@@ -117,6 +186,7 @@ real advertised set).
 | `promotion.record_protocol` | `promotion_record` | `ToolPresent` | how to call `promotion_record` (role+pass required) |
 | `resumption.workflow_state_first` | `workflow_state` | `ToolPresent` | on wake, call `workflow_state` first; never restart |
 | `orchestration.coordinate_children` | `agent_spawn` | `ToolPresent` | yield/Ri-0.14: spawn async → end turn → auto-wake; one `workflow_wait` join; never poll |
+| `federation.escalate_procedure` | `federation_escalate` | ToolPresent **+ Phase** `artifact_built` | how to escalate: read verdicts via `promotion_query`, seed the revision first, worked payload — renders in the phase tail |
 
 ## 3. Output contract (driven by `io.returns`)
 

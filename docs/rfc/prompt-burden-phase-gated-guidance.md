@@ -238,7 +238,34 @@ Two narrower scopings were considered and rejected:
   primary case. The gateway's child-state notification tells the agent verbatim
   *"you do not need to call `workflow_state`"* and arrives as a resume
   user-message, **not a tool result** — so a planner following the documented
-  yield-based flow would never advance the phase. See Open Question 4.
+  yield-based flow would never advance the phase this way. That path is handled
+  at the source instead: §3.5.
+
+### 3.5 Derivation at the source, for the path no scan can see
+
+There are **two** derivation sites, and the tool scan is the lesser one.
+
+When a child reaches a terminal state, the gateway wakes the parent with a
+`child_state_notification` carrying the child's typed state — and tells it
+verbatim *"you do not need to call `workflow_state`"*. That notification is
+rendered into turn-start **messages**, so no tool result ever exists for
+`SessionPhase::observe` to read. For a planner following the documented
+yield-based flow, this is precisely the moment an artifact enters the workflow.
+
+`SessionPhase::observe_gateway_signal` therefore advances the phase directly from
+the signal payload, at every `gateway_signal_turn_start_context` call site. It
+applies the same discipline as the tool path — gateway-observed state only, and a
+child that did not succeed proves nothing, since a failed child can still name an
+`artifact_ref` in its summary while having produced nothing.
+
+One shape had to be handled for either path to see anything: a child's reply
+travels as a **string** containing JSON (`summary: "{\"artifact_ref\":\"ar.x\"}"`),
+in both notifications and joined `workflow_wait` results. The evidence scan
+descends into strings that already look like JSON — the most common shape of "my
+child produced an artifact" is otherwise invisible.
+
+Without this, a yield-based planner earned the fact only *incidentally*, when it
+later happened to call an artifact-domain tool.
 
 ---
 
@@ -277,9 +304,12 @@ under review; the rollout is §5.
 
 Each phase is independently valuable and independently revertible.
 
-**P1 — Instrument (this branch).** Harness + `Phase` mechanism + one migrated
-tool. Merging this alone makes prompt growth visible in CI, which is the change
-that stops the bleeding.
+**P1 — Instrument. ✅ Landed** (#1084, plus the follow-up completing §3.5 and the
+budget ratchet). Harness + `Phase` mechanism + one migrated tool. The harness now
+*enforces* a per-agent steady-state ceiling rather than only reporting, so prompt
+growth costs something at the point of authorship instead of being invisible and
+free. **The ceilings ratchet down as P2–P5 land; they are never raised to
+accommodate a new addition.**
 
 **P2 — Migrate the heavy tool descriptions.** By measured size, the candidates
 after `federation_escalate` are `credential_setup`, `promotion_record`,
@@ -377,19 +407,6 @@ routing knowledge, the split is wrong.
    case, letting a pure-Q&A session shed *more* than it currently can? This is
    the only place where a non-monotonic signal would genuinely pay, and it needs
    its own analysis before being adopted.
-4. **Derive the phase at the source, not from tool results — tracked, and due
-   before P2.** The evidence scan (§3.4) is an *inference* from tool output, and
-   there is one path it structurally cannot see: the gateway's child-state
-   notification, which carries the child's typed state — including its
-   `artifact_ref` — as a resume user-message rather than a tool result, while
-   explicitly telling the agent not to call `workflow_state`. That is the
-   documented happy path for a yield-based planner. Today such a planner earns
-   the fact only because it *subsequently* calls an allowlisted tool
-   (`artifact_inspect` preflight, `resolve` of `SKILL.md`, `promotion_query`) —
-   incidental, not designed.
-
-   The fix is to advance `session_phase` where the gateway already holds the
-   typed child state, making the notification path first-class and the scan a
-   fallback rather than the primary mechanism. This is **not optional polish**:
-   it completes the mechanism on its main case, and it should land before P2
-   multiplies the number of blocks depending on the fact.
+4. ~~**Derive the phase at the source, not from tool results.**~~ **Resolved**
+   (see §3.5). The child-state notification path is now first-class; the tool
+   scan is the fallback rather than the primary mechanism.

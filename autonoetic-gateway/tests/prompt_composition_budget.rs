@@ -205,6 +205,32 @@ fn print_report(r: &Report) {
     );
 }
 
+impl Report {
+    /// Everything the agent pays for in a steady-state turn.
+    fn steady_state_chars(&self) -> usize {
+        self.tool_chars
+            + self.skill_core
+            + self.skill_extended
+            + self.foundation
+            + self.guidance_post
+    }
+}
+
+/// Steady-state prompt ceilings, in characters.
+///
+/// **These are a ratchet, not a target.** Before this harness existed, nothing
+/// measured the fixed prompt — `context_governor` treats `system_prompt_tokens`
+/// as a constant — so every doctrine addition was free at the point of
+/// authorship and the prompt grew unobserved to ~28k tokens for the planner.
+///
+/// A failure here is not a request to raise the number. It means a change added
+/// prompt weight, and the question to answer in review is whether that weight
+/// earns its place in *every* turn. If it genuinely does, lower-bound it
+/// deliberately and say why in the commit. As the RFC rollout lands (P2–P5),
+/// these should be ratcheted **down**, never up.
+const PLANNER_STEADY_STATE_CEILING: usize = 115_000;
+const CODER_STEADY_STATE_CEILING: usize = 72_000;
+
 #[test]
 fn prompt_composition_report() {
     let planner = measure("planner.default", "agents/lead/planner.default/SKILL.md");
@@ -215,7 +241,24 @@ fn prompt_composition_report() {
     // Tool schemas are the largest SINGLE layer for both main agents. This is
     // the finding the RFC's lever ordering rests on; if it ever stops being
     // true, re-derive the ordering rather than silently ignoring it.
-    for r in [&planner, &coder] {
+    for (r, ceiling) in [
+        (&planner, PLANNER_STEADY_STATE_CEILING),
+        (&coder, CODER_STEADY_STATE_CEILING),
+    ] {
+        // The ratchet. Growth used to be invisible AND free; the report made it
+        // visible, this makes it cost something.
+        let actual = r.steady_state_chars();
+        assert!(
+            actual <= ceiling,
+            "{}: steady-state prompt is {actual} ch (~{} tok), over the {ceiling} ch ceiling \
+             by {}. Something added weight paid on EVERY turn — justify it and lower-bound \
+             the ceiling deliberately, or gate the addition (capability, tool, role, or phase) \
+             so only the turns that need it pay.",
+            r.label,
+            tok(actual),
+            actual - ceiling
+        );
+
         let largest_other = r.largest_non_tool_layer();
         assert!(
             r.tool_chars > largest_other,

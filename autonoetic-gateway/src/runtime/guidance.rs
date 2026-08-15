@@ -187,6 +187,55 @@ impl SessionPhase {
     }
 }
 
+impl SessionPhase {
+    /// Derive phase facts from a **gateway signal** delivered at turn start
+    /// rather than as a tool result (RFC `prompt-burden-phase-gated-guidance`,
+    /// OQ4).
+    ///
+    /// This is the path [`Self::observe`] structurally cannot see. When a child
+    /// reaches a terminal state, the gateway wakes the parent with a
+    /// `child_state_notification` carrying the child's typed state — and tells it
+    /// verbatim *"you do not need to call `workflow_state`"*. That notification
+    /// arrives as a turn-start message, so no tool result exists to scan. For a
+    /// planner following the documented yield-based flow, this is **the** moment
+    /// an artifact enters the workflow; without deriving here, the fact was only
+    /// earned incidentally, if the planner happened to call an artifact-domain
+    /// tool later.
+    ///
+    /// Same discipline as the tool path: gateway-observed state only, nothing
+    /// read from agent prose, and a child that did not succeed proves nothing.
+    pub fn observe_gateway_signal(&mut self, signal_json: &str) -> Vec<&'static str> {
+        let mut added = Vec::new();
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(signal_json) else {
+            return added;
+        };
+
+        let evidence = match parsed.get("type").and_then(serde_json::Value::as_str) {
+            Some("child_state_notification") => {
+                let Some(notification) = parsed.get("notification") else {
+                    return added;
+                };
+                // Only a succeeded child is proof. A failed or aborted child may
+                // still name an artifact_ref in its summary while having produced
+                // nothing.
+                let succeeded = notification
+                    .get("child_status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("succeeded");
+                succeeded && json_has_artifact_evidence(notification, 0)
+            }
+            // The join payload embeds the same per-child summaries.
+            Some("workflow_join_satisfied") => json_has_artifact_evidence(&parsed, 0),
+            _ => false,
+        };
+
+        if evidence && self.insert(PHASE_ARTIFACT_BUILT) {
+            added.push(PHASE_ARTIFACT_BUILT);
+        }
+        added
+    }
+}
+
 /// Tool name → the phase fact a successful call proves. Exhaustive by intent:
 /// only tools whose success is *unambiguous* evidence of progress belong here.
 pub fn fact_for_tool(tool_name: &str) -> Option<&'static str> {
@@ -259,6 +308,20 @@ fn json_has_artifact_evidence(value: &serde_json::Value, depth: usize) -> bool {
         }
         serde_json::Value::Array(items) => {
             items.iter().any(|v| json_has_artifact_evidence(v, depth + 1))
+        }
+        // A child's final reply travels as a *string* — `summary: "{\"status\":
+        // \"ok\",\"artifact_ref\":\"ar.x\"}"` — in both child-state notifications
+        // and joined `workflow_wait` results. Without descending into it, the
+        // most common shape of "my child produced an artifact" is invisible.
+        // Only strings that already look like JSON are parsed, so this costs
+        // nothing on ordinary prose.
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim_start();
+            if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+                return false;
+            }
+            serde_json::from_str::<serde_json::Value>(s)
+                .is_ok_and(|nested| json_has_artifact_evidence(&nested, depth + 1))
         }
         _ => false,
     }
@@ -808,6 +871,88 @@ mod tests {
         assert!(!phase.insert(PHASE_ARTIFACT_BUILT));
         assert_eq!(phase.arrival_index(PHASE_ARTIFACT_BUILT), Some(0));
         assert_eq!(phase.facts().collect::<Vec<_>>(), vec![PHASE_ARTIFACT_BUILT, PHASE_CHILD_SPAWNED]);
+    }
+
+    #[test]
+    fn gateway_signal_advances_phase_for_a_succeeded_child() {
+        // The primary path: a yield-based planner is woken with its coder's
+        // typed state. No tool result exists, so `observe` cannot see this —
+        // deriving here is what makes the mechanism work on the happy path
+        // rather than incidentally.
+        let signal = r#"{
+            "type": "child_state_notification",
+            "notification": {
+                "workflow_id": "wf1", "task_id": "t1",
+                "child_session_id": "s/child", "child_status": "succeeded",
+                "summary": "{\"status\":\"ok\",\"artifact_ref\":\"ar.deadbeef\"}"
+            }
+        }"#;
+        let mut phase = SessionPhase::default();
+        assert_eq!(
+            phase.observe_gateway_signal(signal),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+        // Monotonic across repeated wakes.
+        assert!(phase.observe_gateway_signal(signal).is_empty());
+    }
+
+    #[test]
+    fn gateway_signal_ignores_children_that_did_not_succeed() {
+        // A failed child can still name an artifact_ref in its summary while
+        // having produced nothing.
+        let failed = r#"{
+            "type": "child_state_notification",
+            "notification": {
+                "child_status": "failed",
+                "summary": "{\"status\":\"failed\",\"artifact_ref\":\"ar.partial\"}"
+            }
+        }"#;
+        let mut phase = SessionPhase::default();
+        assert!(phase.observe_gateway_signal(failed).is_empty());
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
+    }
+
+    #[test]
+    fn gateway_signal_ignores_unrelated_or_unreadable_payloads() {
+        let mut phase = SessionPhase::default();
+        assert!(phase.observe_gateway_signal("not json").is_empty());
+        assert!(phase.observe_gateway_signal(r#"{"type":"something_else"}"#).is_empty());
+        // A succeeded child with no artifact is a normal, non-advancing wake.
+        assert!(phase
+            .observe_gateway_signal(
+                r#"{"type":"child_state_notification","notification":{"child_status":"succeeded","summary":"looked things up"}}"#
+            )
+            .is_empty());
+        assert!(!phase.has(PHASE_ARTIFACT_BUILT));
+    }
+
+    #[test]
+    fn workflow_join_payload_advances_phase() {
+        let joined = r#"{
+            "type": "workflow_join_satisfied",
+            "tasks": [{"task_id": "t1", "summary": "{\"artifact_ref\":\"ar.abc\"}"}]
+        }"#;
+        let mut phase = SessionPhase::default();
+        assert_eq!(
+            phase.observe_gateway_signal(joined),
+            vec![PHASE_ARTIFACT_BUILT]
+        );
+    }
+
+    #[test]
+    fn evidence_scan_descends_into_json_encoded_strings() {
+        // A child's reply travels as a *string* containing JSON, in both
+        // notifications and joined workflow results. Without descending, the
+        // most common shape of "my child produced an artifact" is invisible.
+        let nested = serde_json::json!({
+            "ok": true,
+            "results": [{"summary": "{\"status\":\"ok\",\"artifact_ref\":\"ar.x\"}"}]
+        });
+        assert!(json_has_artifact_evidence(&nested, 0));
+
+        // Ordinary prose that merely mentions the words is not parsed as JSON.
+        let prose = serde_json::json!({"ok": true, "summary": "built artifact_ref for you"});
+        assert!(!json_has_artifact_evidence(&prose, 0));
     }
 
     #[test]
