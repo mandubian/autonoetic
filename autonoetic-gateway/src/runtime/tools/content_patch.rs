@@ -625,31 +625,32 @@ mod tests {
             active_tool_names: &tools,
             model_family: None,
             role: None,
+            phase: None,
         };
 
         // Claude → replace-first hint (it's not gpt/codex), not the v4a one.
         let claude = GuidanceContext { model_family: Some("claude-opus-4-8"), ..base.clone() };
-        let out = compose_guidance(&blocks, &claude);
+        let out = compose_guidance(&blocks, &claude).standing;
         assert!(out.contains("Editing existing content"));
         assert!(out.contains("prefer `mode=\"replace\"`"));
         assert!(!out.contains("most reliably"));
 
         // GPT/codex → v4a-for-multi-entry hint, not the replace-first one.
         let gpt = GuidanceContext { model_family: Some("gpt-4o"), ..base.clone() };
-        let out = compose_guidance(&blocks, &gpt);
+        let out = compose_guidance(&blocks, &gpt).standing;
         assert!(out.contains("most reliably"));
         assert!(!out.contains("Edit format: prefer `mode=\"replace\"`"));
 
         // Local/other models (qwen, minimax, …) → replace is the default.
         for m in ["qwen2.5-coder", "minimax/minimax-m2.7", "nemotron-4"] {
             let ctx = GuidanceContext { model_family: Some(m), ..base.clone() };
-            let out = compose_guidance(&blocks, &ctx);
+            let out = compose_guidance(&blocks, &ctx).standing;
             assert!(out.contains("prefer `mode=\"replace\"`"), "{m} should get replace hint");
             assert!(!out.contains("most reliably"), "{m} should not get v4a hint");
         }
 
         // Unknown model → replace is still the safe default.
-        let out = compose_guidance(&blocks, &base);
+        let out = compose_guidance(&blocks, &base).standing;
         assert!(out.contains("prefer `mode=\"replace\"`"));
         assert!(!out.contains("most reliably"));
     }

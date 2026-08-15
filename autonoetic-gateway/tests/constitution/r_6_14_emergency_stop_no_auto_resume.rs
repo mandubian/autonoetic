@@ -26,6 +26,7 @@ fn checkpoint_with_emergency_stop(session_id: &str) -> SessionCheckpoint {
         },
         session_state: Default::default(),
         tool_tier_escalated: false,
+        session_phase: Default::default(),
         discovered_tools: Default::default(),
         blocked_state_event_emitted: false,
         extended_loaded: false,

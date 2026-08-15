@@ -350,6 +350,16 @@ impl NativeToolRegistry {
             .collect()
     }
 
+    /// Every block contributed by every registered tool, ignoring manifest and
+    /// tier filtering. **Not for prompt composition** — use
+    /// [`Self::collect_guidance_blocks`] there, which keeps guidance and
+    /// capability in lockstep. This exists for registry-wide invariant checks
+    /// that must cover blocks no test manifest happens to hold (e.g. the
+    /// phase-gated render-order guard in `runtime::guidance`).
+    pub fn all_guidance_blocks(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        self.tools.iter().flat_map(|t| t.guidance()).collect()
+    }
+
     /// Guidance blocks contributed by the native tools available to `manifest`
     /// that pass `filter` (#464). `ToolPresent` gating is evaluated separately
     /// against the *final advertised* tool set (which includes MCP/discovered

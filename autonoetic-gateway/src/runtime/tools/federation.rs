@@ -15,6 +15,52 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
     registry.register(Box::new(FederationEscalateTool));
 }
 
+/// The `federation_escalate` *procedure*, gated on the session actually having
+/// an artifact (RFC `prompt-burden-phase-gated-guidance`).
+///
+/// This prose used to live in the tool's `description` and its `revision_id`
+/// schema field, i.e. in every planner turn from turn 1 — including the large
+/// majority of sessions that never build anything. Escalation is meaningless
+/// before an artifact exists, so [`PHASE_ARTIFACT_BUILT`] is the precise moment
+/// it becomes worth its tokens.
+pub fn escalate_procedure_block() -> crate::runtime::guidance::GuidanceBlock {
+    use crate::runtime::guidance::{
+        GuidanceBlock, GuidanceCondition, PHASE_ARTIFACT_BUILT, PHASE_GATED_PRIORITY_FLOOR,
+    };
+    GuidanceBlock {
+        id: "federation.escalate_procedure",
+        // Phase-gated blocks render last so a newly-earned fact appends to the
+        // prompt prefix rather than inserting into it.
+        priority: PHASE_GATED_PRIORITY_FLOOR,
+        when: GuidanceCondition::All(vec![
+            GuidanceCondition::ToolPresent("federation_escalate"),
+            GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT),
+        ]),
+        prose: "**Escalating federation verdicts.** Read the verdicts with `promotion_query({artifact_ref})` \
+— not from child reply JSON. Execution roles (`unit_test_runner`, `sealed_evaluator`) need an \
+`execution_trace_id`; the gateway derives `pass` from it. Then **seed the revision before escalating**: \
+call `agent_revision_create({agent_id, artifact_ref})` and pass the returned `revision_id` to \
+`federation_escalate`. Seeding routes the escalation through the robust path (capabilities read from the \
+revision record) instead of parsing the artifact's `SKILL.md` frontmatter at escalate time, which fails \
+opaquely and only after the operator has been bothered. Never invent placeholder ids like `rev-initial`.\n\n\
+```json\n\
+federation_escalate({\n\
+  \"artifact_ref\": \"<ar.* ref>\", \"agent_id\": \"<agent_id>\",\n\
+  \"revision_id\": \"<rev_sha256:... from agent_revision_create>\",\n\
+  \"root_session_id\": \"<root_session_id>\",\n\
+  \"role_verdicts\": [\n\
+    {\"role\": \"auditor\", \"agent_id\": \"auditor.default\", \"passed\": true, \"findings_summary\": \"...\", \"recorded_at\": \"...\"}\n\
+  ],\n\
+  \"planner_synthesis\": \"All federation roles passed. Recommend promotion.\"\n\
+})\n\
+```\n\n\
+Returns `{approval_request_id, status: \"pending\"}` and **gates `agent_spawn` for the whole session until \
+resolved** — surface the id and the resolution command, then end your turn. Do not open a second channel \
+with `user_ask`; it is a separate artifact and will not resolve the gate."
+            .to_string(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct FederationEscalateArgs {
     escalation_id: Option<String>,
@@ -48,12 +94,13 @@ impl NativeTool for FederationEscalateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Escalate federation jury verdicts to the operator for review. \
-                 Call this after spawning all federation roles (static_evaluator, \
-                 unit_test_runner, auditor) and collecting their verdicts via \
-                 promotion_query. Construct an EscalationMessage with all role \
-                 verdicts and your synthesis, then the operator will review and \
-                 decide. Returns the escalation_id on success."
+            // Signature only. The procedure — when to call it, the seeded-vs-unseeded
+            // choice, the worked payload — is a phase-gated guidance block below, so
+            // sessions that never reach an artifact don't pay for it (RFC
+            // `prompt-burden-phase-gated-guidance`).
+            description: "Escalate collected federation jury verdicts to the operator \
+                 for review; returns the escalation_id. Call after the federation roles \
+                 have run and their verdicts were read with promotion_query."
                 .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -81,19 +128,9 @@ impl NativeTool for FederationEscalateTool {
                     },
                     "revision_id": {
                         "type": "string",
-                        "description": "The seeded revision being proposed for promotion. \
-                            Accepted forms: the FULL id 'rev_sha256:<hex>' OR the SHORT id \
-                            'rev_<short>' / bare '<short>' (the short form from \
-                            agent_revision_create's short_ref, e.g. \
-                            'planner.default@rev_abc12345' → pass 'rev_abc12345'). \
-                            RECOMMENDED: call agent_revision_create first and pass the returned \
-                            revision_id here for BOTH new and existing agents — this routes the \
-                            escalation through the seeded path (capabilities read from the \
-                            revision record). FALLBACK (not recommended): for a NEW agent that \
-                            cannot be seeded yet, omit revision_id and pass artifact_ref; the \
-                            review then binds to the artifact and capabilities are read from its \
-                            SKILL.md (fails opaquely if the frontmatter is missing/invalid). \
-                            Do not invent placeholder ids like 'rev-initial'."
+                        "description": "The seeded revision being promoted, as returned by \
+                            agent_revision_create. Accepts 'rev_sha256:<hex>', 'rev_<short>', \
+                            or the bare '<short>'."
                     },
                     "role_verdicts": {
                         "type": "array",
@@ -125,6 +162,10 @@ impl NativeTool for FederationEscalateTool {
                 }
             }),
         }
+    }
+
+    fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
+        vec![escalate_procedure_block()]
     }
 
     fn execute(

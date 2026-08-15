@@ -280,6 +280,13 @@ pub struct AgentExecutor {
     /// the rest of the session (including across approval suspension/resume).
     pub tool_tier_escalated: bool,
 
+    /// How far this session has progressed, derived mechanically from observed
+    /// tool results (RFC `prompt-burden-phase-gated-guidance`). Drives
+    /// `GuidanceCondition::Phase`, so procedural prose enters the system prompt
+    /// at the turn the work actually reaches it instead of at turn 1. Monotonic
+    /// and checkpointed, so a resumed session keeps the guidance it had earned.
+    pub session_phase: crate::runtime::guidance::SessionPhase,
+
     /// Tool names explicitly discovered via `tool_discover`. These tools are
     /// included in subsequent turns even if they would be filtered by tier.
     pub discovered_tools: std::collections::HashSet<String>,
@@ -537,6 +544,7 @@ impl AgentExecutor {
             last_context_utilization: None,
             suppress_until_turn: Arc::new(AtomicU64::new(0)),
             tool_tier_escalated: false,
+            session_phase: Default::default(),
             discovered_tools: std::collections::HashSet::new(),
             discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pressure_high_warned: false,
@@ -1777,6 +1785,7 @@ impl AgentExecutor {
             loop_guard_state: self.guard.snapshot(),
             session_state: self.session_state,
             tool_tier_escalated: self.tool_tier_escalated,
+            session_phase: self.session_phase.clone(),
             discovered_tools: Default::default(),
             blocked_state_event_emitted: self.blocked_state_event_emitted,
             extended_loaded: self.extended_loaded,
@@ -2031,7 +2040,7 @@ impl AgentExecutor {
         &self,
         tier_filter: &crate::runtime::tools::ToolTierFilter,
         active_tool_names: &[String],
-    ) -> String {
+    ) -> crate::runtime::guidance::ComposedGuidance {
         let mut blocks = self.registry.collect_guidance_blocks(&self.manifest, tier_filter);
         blocks.extend(crate::runtime::guidance::builtin_blocks());
         // Resolve the model id (preset-aware) so `ModelFamily` matches even for
@@ -2049,6 +2058,7 @@ impl AgentExecutor {
             active_tool_names,
             model_family,
             role: crate::runtime::context::role_from_manifest(&self.manifest),
+            phase: Some(&self.session_phase),
         };
         crate::runtime::guidance::compose_guidance(&blocks, &ctx)
     }
@@ -2070,7 +2080,8 @@ impl AgentExecutor {
                 .and_then(|io| io.output_policy.as_ref()),
             user_context.as_deref(),
             self.persona.as_deref(),
-            Some(guidance_rendered.as_str()),
+            Some(guidance_rendered.standing.as_str()),
+            Some(guidance_rendered.phase_tail.as_str()),
         );
         if let Some(ref snippet) = memory_context {
             system_instructions.push_str("\n\n");
@@ -2807,14 +2818,34 @@ impl AgentExecutor {
                     .and_then(|io| io.output_policy.as_ref()),
                 user_context.as_deref(),
                 self.persona.as_deref(),
-                Some(guidance_rendered.as_str()),
+                Some(guidance_rendered.standing.as_str()),
+                Some(guidance_rendered.phase_tail.as_str()),
             );
             // Prompt-cache boundary (#): everything composed so far — foundation
             // doctrine, SKILL instructions, tool/builtin guidance, output
-            // contract, persona, user context — is byte-identical across turns
-            // in this session, so it is safe to mark as a provider cache prefix.
-            // The volatile tails appended below (memory context, degradation
-            // notice, per-turn re-signed state attestation) must NOT be cached.
+            // contract, persona, user context — is safe to mark as a provider
+            // cache prefix. The volatile tails appended below (memory context,
+            // degradation notice, per-turn re-signed state attestation) must NOT
+            // be cached.
+            //
+            // The prefix is **stable between session milestones, not byte-identical
+            // for the whole session**. Four monotonic flags can shift it, each at
+            // most once, and each costing exactly one cache miss:
+            //
+            //   - `extended_loaded` — the extended SKILL half is inlined on the
+            //     first tool call (#1015), changing `composed_instructions`.
+            //   - `tool_tier_escalated` — a Specialized tool widens the tier
+            //     filter, changing the advertised tool set and therefore the
+            //     `ToolPresent`-gated guidance.
+            //   - `discovered_tools` — `tool_discover` adds names, same effect.
+            //   - `session_phase` — a phase fact activates a `Phase`-gated
+            //     guidance block (RFC `prompt-burden-phase-gated-guidance`).
+            //
+            // All four are monotonic and never retract, which is what bounds the
+            // damage: the prefix grows through a small number of stable states
+            // rather than churning per turn. Anything added here that can toggle
+            // *back* would invalidate the cache repeatedly and does not belong
+            // above this boundary.
             let system_cache_prefix_bytes = if self
                 .config
                 .as_ref()
@@ -4881,6 +4912,22 @@ impl AgentExecutor {
                         );
                         break;
                     }
+                }
+            }
+
+            // Session-phase observation (RFC `prompt-burden-phase-gated-guidance`).
+            // Purely mechanical: derived from the gateway's own record of what
+            // each tool returned, never from agent prose. Facts are monotonic,
+            // so a block that has entered the prompt stays in it — the prompt
+            // prefix grows once and remains cacheable.
+            for (_id, tool_name, result_json) in &results {
+                for fact in self.session_phase.observe(tool_name, result_json) {
+                    tracing::info!(
+                        target: "autonoetic::session_phase",
+                        tool = %tool_name,
+                        fact = %fact,
+                        "Session phase advanced; phase-gated guidance now active"
+                    );
                 }
             }
 
