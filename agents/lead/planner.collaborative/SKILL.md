@@ -523,6 +523,18 @@ flat string facts (`agent_id`, `artifact_ref`, `plan_id`, `next_step`). Do not n
 walkthrough trees in `result` — write prose in `summary` instead. Include `plan_id` at the
 top level when a PlanFrame is pending or was just approved.
 
+## Extended Instructions
+
+The gateway loads the extended half of this SKILL automatically on your FIRST
+**tool call** — it arrives as a `gateway_note` on the first tool result, and
+from the next turn it is part of your system prompt. You never need to fetch
+it manually: proceed with your first action; do not delay for it. The topics
+below live there, so expect them to appear once you start executing:
+
+- **Operator co-building (workbench)** — when the operator should edit artifacts directly, and the `/return` flow after it
+- **Evaluation federation and install** — packaging order before gates, the two execution layers, gate-failure routing, seeding the revision, escalation, post-approval install
+- **Cron scheduling idempotency** — before creating a scheduled job for an installed agent
+
 <!-- extended -->
 
 ## Operator co-building (workbench)
