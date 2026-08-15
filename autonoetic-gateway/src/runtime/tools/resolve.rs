@@ -49,7 +49,12 @@ impl NativeTool for ResolveTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. `include` controls depth: 'metadata' (default — identity + existence), 'files' (an artifact's file list), or 'content' (inline the bytes; for an artifact pass `file` to choose which file inside it). To RUN an artifact use artifact_exec; to SEE one use resolve. IMPORTANT for include=content: the gateway truncates large tool results to a character budget (default 4000). The `content` field in the response may be shortened, but the JSON structure and metadata (`offset`, `next_offset`, `total_bytes`, `truncated`) are always preserved — use `next_offset` to page through the rest. Do NOT keep calling with the same `limit` expecting more; pass `offset=next_offset` to advance.".to_string(),
+            // Signature only (RFC P2). The `include` depth semantics and the
+            // whole pagination paragraph were restated verbatim by the
+            // `include` / `offset` / `limit` field descriptions below — ~430
+            // duplicated chars paid on every turn of every agent holding
+            // ReadAccess, which is nearly all of them.
+            description: "Resolve ANY artifact or content handle to what it points at — `art_`/`ar.` artifact refs, or `cnt_`/8-char alias/content name/`sha256:` content handles. The one front door for \"what is this / show me this\": you do not pick a tool by handle type. **Run it → `artifact_exec`; see it → `resolve`.** Large `include=content` reads are truncated — page with `next_offset`.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

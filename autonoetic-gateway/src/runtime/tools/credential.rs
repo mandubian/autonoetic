@@ -1628,28 +1628,31 @@ impl NativeTool for CredentialSetupTool {
         "credential_setup"
     }
 
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "credential_setup".to_string(),
-            description: "Register a new credential through a multi-step setup flow. \
-                Provide `skill_url` to ingest a skill.md spec and let the gateway \
-                execute all onboarding steps server-side — secrets are never returned to the LLM. \
-                skill_url accepts an HTTPS URL (fetched remotely, subject to approval) or a \
-                gateway-local .md path such as 'github.md' / 'skills/github.md'; \
-                file:// URLs are accepted only when they resolve under the gateway skills/ directory. \
-                Step types: `api_call` (gateway HTTP call; `extract_secrets` pulls values \
-                server-side into the vault), `user_prompt` (the gateway prompts the OPERATOR through \
-                a secure popup for secret fields — use this for any secret the human must provide, \
-                e.g. an app password or API key; the secret never enters chat), \
-                `user_action` (human does something in their browser), and `user_input` \
-                (a NON-secret question; the tool returns `suspended_for_user_input: true` and a \
-                `question`, you call `user_ask` with it, then call `credential_setup` again with \
-                `credential_id` + `resume_vars: { var_name: answer }`). \
-                IMPORTANT: `user_input` must never be used for secrets — user_ask \
-                heuristically rejects secret-collection-shaped questions and the gateway \
-                rejects `user_input` steps carrying `secret_fields`; use `user_prompt` for \
-                secrets so they never enter chat. \
-                Alternatively supply `service` + `steps` directly for programmatic setup.".to_string(),
+            // Signature only (RFC P2). What was removed and why it is not simply
+            // relocated — moving prose to a `ToolPresent` guidance block is a
+            // token wash, since the block fires exactly when the description
+            // would have:
+            //   - `skill_url` accepted forms → already the `skill_url` field's
+            //     own description, verbatim.
+            //   - per-step-type semantics → already each `oneOf` variant's
+            //     description in `credential_step_oneof_schema`.
+            //   - resume mechanics → already the `credential_id` / `resume_vars`
+            //     field descriptions.
+            //   - "never collect secrets via user_input" → gateway-enforced, and
+            //     the rejection carries a repair hint with the exact replacement
+            //     step. A self-explaining enforced rule does not need to be
+            //     pre-loaded into every turn.
+            description: "Register a credential through a gateway-run setup flow. Secrets are \
+                extracted server-side into the vault and never returned to the LLM. Supply either \
+                `skill_url` (ingest a skill.md spec) or `service` + `steps` (programmatic setup). \
+                When a step needs a non-secret answer the call returns \
+                `suspended_for_user_input: true` with a `question` — relay it with `user_ask`, then \
+                call again with `credential_id` + `resume_vars`."
+                .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -318,13 +318,48 @@ growth costs something at the point of authorship instead of being invisible and
 free. **The ceilings ratchet down as P2–P5 land; they are never raised to
 accommodate a new addition.**
 
-**P2 — Migrate the heavy tool descriptions.** By measured size, the candidates
-after `federation_escalate` are `credential_setup`, `promotion_record`,
-`agent_revision_create_from_intent`, `artifact_exec`, `skill_install`,
-`content_patch`. The test is mechanical: *does this sentence tell the model how
-to call the tool (signature — stays), or what to do around calling it
-(procedure — becomes a gated block)?* Expected: planner tool schemas 11.6k →
-~7k.
+**P2 — Migrate the heavy tool descriptions. 🔄 In progress — and the original
+premise was wrong.**
+
+The plan said: apply the signature/procedure test, move procedure into
+`ToolPresent`-gated blocks, expect planner tool schemas 11.6k → ~7k tokens.
+Measuring the first migration showed **that move saves nothing**. A
+`ToolPresent` block fires exactly when the tool is advertised — i.e. exactly
+when its description would have been in the prompt. Relocating prose from a
+description to such a block is a token *wash*; the first attempt at
+`credential_setup` came out **+743 chars** because the block was slightly longer
+than the text it replaced.
+
+Corrected, there are three distinct levers, and only two of them pay:
+
+1. **De-duplication — unconditional saving.** The heavy descriptions largely
+   restate their own schema. `credential_setup` repeated its `skill_url` field
+   verbatim, the per-variant semantics already in `credential_step_oneof_schema`,
+   and the resume mechanics already on `credential_id`/`resume_vars`. `resolve`
+   repeated its whole pagination paragraph in the `offset`/`limit` fields. This
+   is pure waste and deleting it costs nothing.
+2. **Rules the gateway already enforces belong in the rejection.** The
+   `credential_setup` warning "never collect secrets via `user_input`" is
+   enforced, and the rejection already carries a repair hint with the exact
+   replacement step. A self-explaining enforced rule does not need to be
+   pre-loaded into every turn — this is P4's principle applied to tool schemas.
+3. **Phase gating — conditional saving, and only where a genuine precondition
+   fact exists.** `promotion.record_protocol` and `promote.approval_continuation`
+   both presuppose an artifact, so both moved to `Phase(artifact_built)`.
+
+**What remains blocked.** The largest single item is `credential_setup`'s
+`steps` `oneOf` schema (~2.8k chars). It is genuine signature — it tells the
+model how to construct a valid argument — so it cannot move to a block, and it
+is only needed on the programmatic path (the documented planner flow uses
+`skill_url`). Shedding it needs **conditional schema shaping**: `definition()`
+currently takes no context, so a tool cannot present a narrower schema on turns
+where the wide one is irrelevant. That is the unlock for the rest of P2 and
+should be designed before more tools are migrated — see Open Question 5.
+
+Measured so far (this pass): planner tool schemas 46,224 → 44,734 ch; steady
+state 111,689 → 110,199 ch. Real, but ~1.3% — not the 40% the original
+projection implied. **The projection in §5's summary should be treated as
+unproven until OQ5 is resolved.**
 
 **P3 — Evict, don't defer, in `SKILL.md`.** Replace the one-shot
 `<!-- extended -->` inline with phase-gated sections. The planner's federation
@@ -357,6 +392,13 @@ harness.
 
 Projected steady-state after P1–P5: planner ~28k → 13–15k, coder ~17k → 9–10k,
 **without deleting a single rule**.
+
+> **Caveat added after P2 began.** This projection assumed moving procedure out
+> of tool descriptions saves tokens. It does not (see P2). Roughly 40% of the
+> projected tool-schema saving depends on **conditional schema shaping** (OQ5),
+> which does not exist yet. P3 and P4 are unaffected — they shed prose that is
+> genuinely absent when gated. Treat the planner target as ~17–19k until OQ5 is
+> resolved, and this line as the thing to re-derive rather than to trust.
 
 ---
 
@@ -417,3 +459,21 @@ routing knowledge, the split is wrong.
 4. ~~**Derive the phase at the source, not from tool results.**~~ **Resolved**
    (see §3.5). The child-state notification path is now first-class; the tool
    scan is the fallback rather than the primary mechanism.
+5. **Should `definition()` become context-aware, so a tool can present a
+   narrower schema on turns where the wide one is irrelevant?** Raised by P2:
+   the remaining tool-schema weight is *signature*, not procedure, so no amount
+   of prose migration reaches it. `credential_setup`'s `steps` `oneOf` (~2.8k
+   chars) is the type case — needed only on the programmatic path, while the
+   documented planner flow passes `skill_url`.
+
+   `NativeTool::definition(&self)` takes no arguments today. Giving it the same
+   `GuidanceContext` the guidance layer already receives would let a tool shed
+   irrelevant schema the same way a block sheds irrelevant prose — with the same
+   soundness obligation: **the narrow schema must never make a legitimate call
+   unconstructable**, so the fallback has to be "widen on demand", not "guess".
+   Options: (a) context-aware `definition()`; (b) a second `definition_full()`
+   surfaced via `tool_discover`; (c) leave it, and accept that tool schemas floor
+   out around 9–10k tokens for the planner.
+
+   **This gates the remainder of P2** and should be decided before more tools are
+   migrated.

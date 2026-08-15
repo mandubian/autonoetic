@@ -2812,11 +2812,18 @@ impl NativeTool for AgentRevisionPromoteTool {
     }
 
     fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
-        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        use crate::runtime::guidance::{
+            GuidanceBlock, GuidanceCondition, PHASE_ARTIFACT_BUILT, PHASE_GATED_PRIORITY_FLOOR,
+        };
         vec![GuidanceBlock {
             id: "promote.approval_continuation",
-            when: GuidanceCondition::ToolPresent("agent_revision_promote"),
-            priority: 9,
+            // Promotion presupposes an artifact; a session that never built one
+            // cannot reach this procedure (RFC P2).
+            when: GuidanceCondition::All(vec![
+                GuidanceCondition::ToolPresent("agent_revision_promote"),
+                GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT),
+            ]),
+            priority: PHASE_GATED_PRIORITY_FLOOR,
             prose: "**Promotion resumes automatically — don't loop.** If `agent_revision_promote` \
 returns `approval_required: true` (e.g. `capability_delta_requires_approval`), return the exact \
 `request_id`/`approval_ref` to your caller and end your turn. When the operator approves, the gateway \
