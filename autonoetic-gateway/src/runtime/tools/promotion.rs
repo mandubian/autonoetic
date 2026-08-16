@@ -144,7 +144,9 @@ impl NativeTool for PromotionRecordTool {
     }
 
     fn guidance(&self) -> Vec<crate::runtime::guidance::GuidanceBlock> {
-        use crate::runtime::guidance::{GuidanceBlock, GuidanceCondition};
+        use crate::runtime::guidance::{
+            GuidanceBlock, GuidanceCondition, PHASE_ARTIFACT_BUILT, PHASE_GATED_PRIORITY_FLOOR,
+        };
         // Centralized from static_evaluator/sealed_evaluator/auditor SKILL.md
         // (#466): the call protocol is uniform across promotion agents.
         // Role-specific exceptions (e.g. unit_test_runner's "no tests → don't
@@ -152,8 +154,14 @@ impl NativeTool for PromotionRecordTool {
         // those manifests.
         vec![GuidanceBlock {
             id: "promotion.record_protocol",
-            when: GuidanceCondition::ToolPresent("promotion_record"),
-            priority: 10,
+            // A verdict is recorded *on an artifact*, so the procedure cannot
+            // apply before one exists (RFC P2). Gate agents that never build
+            // out of paying for it.
+            when: GuidanceCondition::All(vec![
+                GuidanceCondition::ToolPresent("promotion_record"),
+                GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT),
+            ]),
+            priority: PHASE_GATED_PRIORITY_FLOOR,
             prose: "**Recording your verdict.** When your evaluation/audit reaches a verdict, call \
 `promotion_record` with the `artifact_ref` you reviewed. Execution roles (`unit_test_runner`, \
 `sealed_evaluator`) must attach `execution_trace_id` from the run — copy the UUID from the \
@@ -693,15 +701,35 @@ mod guidance_tests {
 
     #[test]
     fn promotion_record_contributes_verdict_block() {
+        use crate::runtime::guidance::{SessionPhase, PHASE_ARTIFACT_BUILT};
+
         let blocks = PromotionRecordTool.guidance();
         let tools = vec!["promotion_record".to_string()];
-        let ctx = GuidanceContext { active_tool_names: &tools, ..Default::default() };
-        let out = compose_guidance(&blocks, &ctx).standing;
+
+        // A verdict is recorded *on an artifact*, so the procedure is
+        // phase-gated (RFC P2): holding the tool is no longer enough.
+        let pre = GuidanceContext { active_tool_names: &tools, ..Default::default() };
+        assert!(
+            compose_guidance(&blocks, &pre).is_empty(),
+            "verdict protocol must not load before an artifact exists"
+        );
+
+        let mut phase = SessionPhase::default();
+        phase.insert(PHASE_ARTIFACT_BUILT);
+        let ctx = GuidanceContext {
+            active_tool_names: &tools,
+            phase: Some(&phase),
+            ..Default::default()
+        };
+        // Phase-gated blocks render in the tail, not the standing section.
+        let out = compose_guidance(&blocks, &ctx).phase_tail;
         assert!(out.contains("Recording your verdict"), "block text missing: {out}");
         assert!(out.contains("not alternates like `outcome`"));
 
-        // Absent when promotion_record isn't in the advertised tool set.
-        assert_eq!(compose_guidance(&blocks, &GuidanceContext::default()).standing, "");
+        // Absent when promotion_record isn't advertised, even once the phase is
+        // reached — phase narrows, it never widens reach.
+        let no_tool = GuidanceContext { phase: Some(&phase), ..Default::default() };
+        assert!(compose_guidance(&blocks, &no_tool).is_empty());
     }
 }
 

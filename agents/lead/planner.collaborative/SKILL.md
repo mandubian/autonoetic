@@ -35,6 +35,12 @@ metadata:
       - type: "PlanFrameAccess"
         patterns: ["*"]
     excluded_tools:
+      # Credential ceremony belongs to credential_onboarding.default (mirrors
+      # planner.default). `credential_check` stays as a read-only routing probe.
+      - "credential_setup"
+      - "credential_request"
+      - "credential_refresh"
+      - "skill_normalize"
       - "scheduler_*"
       - "eval_*"
       - "user_profile_*"
@@ -148,7 +154,7 @@ These are **agent IDs for `agent_spawn`** — not tool names. Use them in plan s
 | `agent-factory.default` | Building a new agent end-to-end **or** installing an approved artifact (create candidate → **smoke test** → promote). Pipeline owner for both greenfield builds and post-federation install. Do **not** call `specialized_builder.default` yourself — factory holds the smoke-test spine and delegates revision tools to the builder. | Install status + revision_id |
 | `discovery.default` | Finding a non-foundational agent (spawn with intent) | Agent roster match |
 | `auditor.default` / `static_evaluator.default` / `unit_test_runner.default` | Federation review roles | promotion_record against artifact_ref |
-| `credential_onboarding.default` | Human-in-the-loop **credential** ceremonies only (OAuth, identity verification, many `user_ask` turns). **Never** for artifact install or `agent_revision_promote`. | Credential onboarding result |
+| `credential_onboarding.default` | **All** credential work: cold start, additional accounts, and human-in-the-loop ceremonies. Owns fetch → `skill_normalize` → `credential_setup`. **Never** for artifact install or `agent_revision_promote`. | Credential onboarding result |
 
 **Role boundaries (do not cross):** `architect.default` produces a design
 brief only — it must never write code files (`.py`, `.js`, etc.) or
@@ -161,7 +167,7 @@ blueprint," as that primes the model to write code it should not produce.
 `artifact_ref` and federation escalation is approved, spawn **`agent-factory.default`** with that
 `artifact_ref` — it handles revision create + promote internally. Do **not** spawn
 `credential_onboarding.default`, `specialized_builder.default`, or roster-search for an "installer" agent.
-`credential_onboarding.default` is for cold-start credential onboarding only, not gateway promotion.
+`credential_onboarding.default` owns credentials only — never gateway promotion.
 
 You do not need `agent_list` to learn these names — they are stable. Prefer them
 in plans and spawns unless the task needs a specialized agent you do not know.
@@ -264,7 +270,7 @@ justify a one-step plan — the operator should see the real scope before approv
 | **Dependency packaging** (`packager.default` when code declares `requirements.txt` / `package.json` / etc.) | Yes, for code with non-stdlib deps |
 | Federation / promotion review (`federation_escalate`) | Yes, for installable artifacts — **after** packaging when deps exist |
 | Gateway install (`agent-factory.default` after escalation approval) | Yes, for installable artifacts |
-| Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — use planner `credential_setup` or `credential_onboarding.default` for long ceremonies |
+| Credential onboarding (only if APIs need keys) | Yes, once you know auth is required — always via `credential_onboarding.default`; you do not hold `credential_setup` |
 | A second agent because research found two deliverables | No — amend after discovery |
 
 **Anti-pattern:** proposing only `s1: Research` while telling the operator you

@@ -2074,8 +2074,13 @@ fn test_skill_normalize_requires_non_empty_intent() {
     );
 }
 
+/// The credential ceremony tools are exposed by capability, and that capability
+/// set now belongs to `credential_onboarding.default` — the planners hold
+/// `CredentialAccess` for the read-only `credential_check` probe but exclude
+/// setup/normalize by name. This test pins the *capability* gate, not any
+/// particular agent's tool list.
 #[test]
-fn test_credential_setup_and_skill_normalize_exposed_for_planner_like_caps() {
+fn test_credential_setup_and_skill_normalize_exposed_for_onboarding_caps() {
     let registry = default_registry();
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {

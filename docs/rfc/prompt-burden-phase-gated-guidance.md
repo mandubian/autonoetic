@@ -318,13 +318,48 @@ growth costs something at the point of authorship instead of being invisible and
 free. **The ceilings ratchet down as P2–P5 land; they are never raised to
 accommodate a new addition.**
 
-**P2 — Migrate the heavy tool descriptions.** By measured size, the candidates
-after `federation_escalate` are `credential_setup`, `promotion_record`,
-`agent_revision_create_from_intent`, `artifact_exec`, `skill_install`,
-`content_patch`. The test is mechanical: *does this sentence tell the model how
-to call the tool (signature — stays), or what to do around calling it
-(procedure — becomes a gated block)?* Expected: planner tool schemas 11.6k →
-~7k.
+**P2 — Migrate the heavy tool descriptions. 🔄 In progress — and the original
+premise was wrong.**
+
+The plan said: apply the signature/procedure test, move procedure into
+`ToolPresent`-gated blocks, expect planner tool schemas 11.6k → ~7k tokens.
+Measuring the first migration showed **that move saves nothing**. A
+`ToolPresent` block fires exactly when the tool is advertised — i.e. exactly
+when its description would have been in the prompt. Relocating prose from a
+description to such a block is a token *wash*; the first attempt at
+`credential_setup` came out **+743 chars** because the block was slightly longer
+than the text it replaced.
+
+Corrected, there are three distinct levers, and only two of them pay:
+
+1. **De-duplication — unconditional saving.** The heavy descriptions largely
+   restate their own schema. `credential_setup` repeated its `skill_url` field
+   verbatim, the per-variant semantics already in `credential_step_oneof_schema`,
+   and the resume mechanics already on `credential_id`/`resume_vars`. `resolve`
+   repeated its whole pagination paragraph in the `offset`/`limit` fields. This
+   is pure waste and deleting it costs nothing.
+2. **Rules the gateway already enforces belong in the rejection.** The
+   `credential_setup` warning "never collect secrets via `user_input`" is
+   enforced, and the rejection already carries a repair hint with the exact
+   replacement step. A self-explaining enforced rule does not need to be
+   pre-loaded into every turn — this is P4's principle applied to tool schemas.
+3. **Phase gating — conditional saving, and only where a genuine precondition
+   fact exists.** `promotion.record_protocol` and `promote.approval_continuation`
+   both presuppose an artifact, so both moved to `Phase(artifact_built)`.
+
+**What remains blocked.** The largest single item is `credential_setup`'s
+`steps` `oneOf` schema (~2.8k chars). It is genuine signature — it tells the
+model how to construct a valid argument — so it cannot move to a block, and it
+is only needed on the programmatic path (the documented planner flow uses
+`skill_url`). Shedding it needs **conditional schema shaping**: `definition()`
+currently takes no context, so a tool cannot present a narrower schema on turns
+where the wide one is irrelevant. That is the unlock for the rest of P2 and
+should be designed before more tools are migrated — see Open Question 5.
+
+Measured so far (this pass): planner tool schemas 46,224 → 44,734 ch; steady
+state 111,689 → 110,199 ch. Real, but ~1.3% — not the 40% the original
+projection implied. **The projection in §5's summary should be treated as
+unproven until OQ5 is resolved.**
 
 **P3 — Evict, don't defer, in `SKILL.md`.** Replace the one-shot
 `<!-- extended -->` inline with phase-gated sections. The planner's federation
@@ -350,6 +385,8 @@ emitted next to the classification cannot. This is the existing orchestration
 philosophy — gateway mechanical, agent semantic at decision time — applied in the
 prompt direction, where it has not been applied yet.
 
+**P2′ — Ownership beats compression. ✅ Landed.** See §7.
+
 **P5 — Use the tiering that already exists.** `allowed_tool_tiers` is declared by
 1 of 32 agents. Giving `planner.default` and `coder.default` explicit tiers drops
 the Specialized tail. Cheap, orthogonal, and independently testable via the
@@ -357,6 +394,13 @@ harness.
 
 Projected steady-state after P1–P5: planner ~28k → 13–15k, coder ~17k → 9–10k,
 **without deleting a single rule**.
+
+> **Caveat added after P2 began.** This projection assumed moving procedure out
+> of tool descriptions saves tokens. It does not (see P2). Roughly 40% of the
+> projected tool-schema saving depends on **conditional schema shaping** (OQ5),
+> which does not exist yet. P3 and P4 are unaffected — they shed prose that is
+> genuinely absent when gated. Treat the planner target as ~17–19k until OQ5 is
+> resolved, and this line as the thing to re-derive rather than to trust.
 
 ---
 
@@ -417,3 +461,161 @@ routing knowledge, the split is wrong.
 4. ~~**Derive the phase at the source, not from tool results.**~~ **Resolved**
    (see §3.5). The child-state notification path is now first-class; the tool
    scan is the fallback rather than the primary mechanism.
+5. **How should a tool shed schema that is irrelevant this turn?** Raised by P2:
+   the remaining tool-schema weight is *signature*, not procedure, so no amount
+   of prose migration reaches it. `credential_setup`'s `steps` `oneOf` is the
+   type case — needed only on the programmatic path, while the documented planner
+   flow passes `skill_url`.
+
+   **Two findings sharpen the question.**
+
+   *The soundness bar is lower than first stated.* Nothing validates tool
+   arguments against the advertised schema: `validate_against_schema` serves
+   agent I/O (`io.accepts` / `io.returns`), and each tool's `execute` deserializes
+   its full `Args` regardless of what was advertised. No provider is sent
+   `strict: true` either — `strict_schema_anyof` is only a *shape* accommodation
+   for Moonshot/Kimi's schema validator, not opt-in strict function calling. So a
+   narrow schema **cannot mechanically reject a legitimate wide call**. The real
+   failure mode is *discoverability* — the model not knowing the option exists —
+   which makes "narrow standing, widen on demand" safe provided the wide form has
+   a mechanical pointer (`tool_discover` plus a `repair_hint` naming it).
+
+   *De-dup does not dissolve the problem.* Running the P2 de-dup test inside
+   `credential_step_oneof_schema` (branch prose restating the top-level
+   description and the enforced secrets rule) recovered only **184 chars**. The
+   residual is **structural** — four branches × their properties, plus the nested
+   `secret_field_spec_schema` — roughly two-thirds of the tool's remaining
+   4,881 chars. The weight cannot be written away.
+
+   **Options.**
+
+   - **(a) Context-aware `definition()`.** Rejected for this type case. Schemas
+     sit in the cacheable prefix and cannot live in the phase tail, so a
+     mid-session schema change re-embeds everything after it — the problem §3.3
+     solved for guidance, reintroduced. Worse, there is no monotonic fact that
+     correlates with "skill_url vs programmatic": it is an in-session usage
+     decision, and `artifact_built` / `child_spawned` do not track it. Phase-gated
+     schema would be arbitrary here.
+   - **(a′) Static narrowing — `definition_for(&manifest)`.** Cheap to thread
+     (the registry call sites in `lifecycle.rs` and `prompt_budget.rs` already
+     hold the manifest, and an opt-in default keeps the 100+ impls untouched).
+     But **name the qualifying agents before building it**: narrowing is only
+     sound for an agent provably skill_url-only, and `planner.default`'s own
+     SKILL documents both paths. If the list is empty, this is dead machinery.
+   - **(b) Narrow standing schema + `definition_full()` via `tool_discover`.**
+     Cache-free by comparison: discovery already changes the schema section, so
+     narrow→wide piggybacks on an invalidation that happens anyway. Costs one
+     round-trip whenever the wide form is needed.
+   - **(c) Leave it.** Tool schemas floor out around 9–10k tokens for the planner.
+     Still live: `credential_setup` is ~1.2k tokens ≈ 4.4% of planner steady
+     state, so even perfect removal is far from the (already retracted) 40%.
+   - **(d) Split the tool** — `credential_setup` (skill_url) plus a
+     Specialized-tier programmatic variant, hidden from root sessions by
+     progressive disclosure until escalation. Needs **no new mechanism**: it
+     reuses tiering (P5) and `tool_discover`. Wrinkle: the resume path
+     (`credential_id` + `resume_vars`) is common to both and would have to be
+     duplicated or hosted on a third entry — possibly enough mess to sink it.
+
+   **What decides (b) vs (c):** how often the programmatic path is actually used.
+   (b) trades ~700 tokens per turn against one extra round-trip per session that
+   needs the wide form. Rare → (b); routine → (c). That is a query against session
+   history, not a judgement call, and it should be run before building anything.
+
+   **This gates the remainder of P2.** Anything that lands must also survive the
+   Moonshot/Kimi `anyOf`/`oneOf` sanitizer (`sanitize_schema_for_strict_anyof`) —
+   a narrowed schema has fewer branches, not a different shape, so this is a
+   check rather than an obstacle.
+
+---
+
+## 7. Amendment: ownership beats compression (P2′)
+
+Added 2026-08-16, after P2 measured 1.3%.
+
+P1–P5 all ask the same question — *how do we carry this prose more cheaply?*
+There is a prior question they skip: **should this agent be carrying it at all?**
+Applied once, to credentials, that question moved 4× what all of P2 achieved.
+
+### 7.1 The finding
+
+`credential_setup` was the single heaviest tool schema in the fleet (13% of the
+planner's), and the planner's Decision Flow devoted ~3.6k chars to driving it.
+But the planner **lacks `NetworkAccess`**, while cold-start onboarding
+inherently needs to fetch a skill spec. Its own SKILL therefore carried a
+step 1b: *"the URL is reachable but YOU lack NetworkAccess — delegate to
+`researcher.default`… then retry `skill_normalize`."*
+
+A documented mid-flow bounce to another agent and back, to work around a
+capability the owner does not have. That is not a prompt-size problem; it is a
+**misplaced responsibility** that shows up as prompt size.
+
+`credential_onboarding.default` already held the complete set —
+`CredentialAccess` + `NetworkAccess` + `WriteAccess` on `skills/*` — and could do
+fetch → normalize → setup in one session with no bounce.
+
+### 7.2 Why it had been the other way, and why that reason has expired
+
+The pendulum had already swung twice:
+
+- `19064522` extracted the flow **to** a specialist, explicitly to trim the
+  planner ("660 → 530 lines").
+- `e70db9f2` moved it **back** to the planner, narrowing the specialist to
+  "human-in-the-loop ceremonies only".
+
+The reason for the reversal is visible in the doctrine it deleted:
+
+> *"If output is not valid JSON or required keys are missing, ask
+> `registration.default` to restate output in the required JSON contract before
+> continuing."*
+
+The handoff was unreliable, so the planner had to babysit the child's output
+format — a hand-rolled retry loop for a contract nothing enforced. Delegation was
+reversed because **the handoff could not be trusted**, not because ownership was
+wrong.
+
+That reason has since expired. `credential_onboarding.default` now declares an
+`io.returns` contract with all seven handoff fields required, and the gateway has
+`returns_enforcement` + bounded repair. One gap remained: enforcement defaults to
+**`advisory`** for reasoning agents, so the contract was logged, not enforced.
+Setting `returns_enforcement: strict` closes exactly the failure that caused the
+reversal — the planner's manual "ask it to restate" loop becomes gateway repair.
+
+**Generalizable rule:** before re-litigating an old architectural decision, find
+what actually failed. Here the cause was a missing mechanism, and the mechanism
+now exists. Reversing without that check would have re-imported the bug.
+
+### 7.3 Result
+
+| | before | after |
+|---|---:|---:|
+| `planner.default` steady state | 110,015 ch | **100,103 ch** (−9%) |
+| `planner.default` turn 1 | 82,094 ch | **71,998 ch** (−12%) |
+| planner tool schemas | 44,550 ch (35 tools) | **36,583 ch** (31 tools) |
+| `planner.collaborative` turn 1 | 98,340 ch | **90,209 ch** |
+| `credential_onboarding.default` | ~66,100 ch | **54,939 ch** |
+
+The specialist ends up **smaller than before it absorbed the ceremony**: it had
+no `excluded_tools` at all and was advertising 41 tools for a credential job.
+Receiving the planner's shed weight was no reason to inherit its breadth, so it
+gained a scope list at the same time (41 → 26 tools).
+
+That is the point worth generalizing: **a transfer is only a win if the receiving
+agent is scoped**. Both agents are now in the budget harness so the move is a
+measured transfer, not weight pushed somewhere nobody looks.
+
+### 7.4 What this changes about the rollout
+
+It resolves **OQ5 for its own type case** — the `steps` `oneOf` now lives only on
+a specialist, where it is not paid per-turn by the fleet's busiest agent. No
+conditional-schema machinery is needed for it. OQ5 remains open for other heavy
+schemas, but its urgency drops.
+
+More importantly it reorders the remaining work. Before compressing a heavy tool
+schema, ask the ownership question first:
+
+> Does the agent holding this tool have the **full capability set** for the flow
+> the tool belongs to? If it has to bounce to another agent mid-flow, the tool is
+> in the wrong place, and moving it beats compressing it.
+
+Candidates to audit on that test, not yet examined: `skill_install`,
+`agent_revision_create_from_intent`, `artifact_prepare`.

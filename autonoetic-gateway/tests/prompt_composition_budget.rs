@@ -62,6 +62,27 @@ fn tool_schema_chars(manifest: &AgentManifest, filter: &ToolTierFilter) -> (usiz
     (defs.len(), chars)
 }
 
+/// Per-tool schema sizes, heaviest first. The work-list for RFC P2: tool schemas
+/// are the largest single prompt layer, and the weight is concentrated in a few
+/// definitions that carry *procedure* rather than signature.
+fn tool_schema_sizes(manifest: &AgentManifest, filter: &ToolTierFilter) -> Vec<(String, usize)> {
+    let registry = default_registry();
+    let mut sizes: Vec<(String, usize)> = registry
+        .available_definitions_filtered(manifest, Some(filter))
+        .iter()
+        .map(|d| {
+            (
+                d.name.clone(),
+                d.name.len()
+                    + d.description.len()
+                    + serde_json::to_string(&d.input_schema).map_or(0, |s| s.len()),
+            )
+        })
+        .collect();
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sizes
+}
+
 fn guidance_for(manifest: &AgentManifest, phase: &SessionPhase) -> String {
     let registry = default_registry();
     let filter = ToolTierFilter::all();
@@ -237,13 +258,34 @@ impl Report {
 /// earns its place in *every* turn. If it genuinely does, lower-bound it
 /// deliberately and say why in the commit. As the RFC rollout lands (P2–P5),
 /// these should be ratcheted **down**, never up.
-/// `(turn-1 ceiling, steady-state ceiling)` per agent.
-const PLANNER_CEILINGS: (usize, usize) = (86_000, 115_000);
-const CODER_CEILINGS: (usize, usize) = (61_000, 72_000);
+/// `(turn-1 ceiling, steady-state ceiling)` per agent. **Ratcheted down** as RFC
+/// phases land — #1085 (collaborative trim) and P2 (this pass) are both locked in
+/// below.
+const PLANNER_CEILINGS: (usize, usize) = (74_000, 102_500);
+const CODER_CEILINGS: (usize, usize) = (60_000, 70_000);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize) = (116_000, 118_000);
+const PLANNER_COLLAB_CEILINGS: (usize, usize) = (92_500, 103_000);
+/// The two phase-gated promotion procedures live in **disjoint** agent families,
+/// so covering one does not cover the other:
+///
+/// - `promotion_record` is restricted to the four gate roles by
+///   `manifest_may_record_promotion_verdicts` (sealed_evaluator, auditor,
+///   static_evaluator, unit_test_runner) — represented here by
+///   `unit_test_runner.default`.
+/// - `agent_revision_promote` requires `Capability::AgentRevision`, which the
+///   gate roles do **not** hold. Exactly one agent declares it in frontmatter:
+///   `specialized_builder.default`.
+///
+/// Both are measured so the phase-gating of each procedure is observable
+/// somewhere. The lead and coder agents see neither tool.
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize) = (49_500, 50_500);
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize) = (85_000, 86_000);
+/// Now the sole owner of the credential ceremony, so it absorbs the schema the
+/// planners shed. Measured here so the move is a *transfer with a ceiling*, not
+/// weight pushed somewhere nobody looks.
+const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize) = (56_500, 56_500);
 
 #[test]
 fn prompt_composition_report() {
@@ -253,9 +295,24 @@ fn prompt_composition_report() {
         "planner.collaborative",
         "agents/lead/planner.collaborative/SKILL.md",
     );
+    let utr = measure(
+        "unit_test_runner.default",
+        "agents/specialists/unit_test_runner.default/SKILL.md",
+    );
+    let builder = measure(
+        "specialized_builder.default",
+        "agents/evolution/specialized_builder.default/SKILL.md",
+    );
+    let onboarding = measure(
+        "credential_onboarding.default",
+        "agents/specialists/credential_onboarding.default/SKILL.md",
+    );
     print_report(&planner);
     print_report(&coder);
     print_report(&collab);
+    print_report(&utr);
+    print_report(&builder);
+    print_report(&onboarding);
 
     // Tool schemas are the largest SINGLE layer for both main agents. This is
     // the finding the RFC's lever ordering rests on; if it ever stops being
@@ -264,6 +321,9 @@ fn prompt_composition_report() {
         (&planner, PLANNER_CEILINGS),
         (&coder, CODER_CEILINGS),
         (&collab, PLANNER_COLLAB_CEILINGS),
+        (&utr, UNIT_TEST_RUNNER_CEILINGS),
+        (&builder, SPECIALIZED_BUILDER_CEILINGS),
+        (&onboarding, CREDENTIAL_ONBOARDING_CEILINGS),
     ] {
         // The ratchet. Growth used to be invisible AND free; the report made it
         // visible, this makes it cost something.
@@ -321,6 +381,29 @@ fn phase_gating_keeps_procedure_out_of_the_pre_phase_prompt() {
         "phase-gated block should add prose at the phase, got pre={} post={}",
         pre.len(),
         post.len()
+    );
+}
+
+/// The P2 work-list. Prints where the tool-schema weight actually sits, so the
+/// migration is driven by measurement rather than by which tool feels verbose.
+#[test]
+fn tool_schema_hotspots() {
+    let (manifest, _core, _ext) = load_agent("agents/lead/planner.default/SKILL.md");
+    let sizes = tool_schema_sizes(&manifest, &ToolTierFilter::all());
+    let total: usize = sizes.iter().map(|(_, n)| n).sum();
+
+    println!("\n=== planner.default — heaviest tool schemas (RFC P2 work-list) ===");
+    for (name, chars) in sizes.iter().take(15) {
+        println!(
+            "  {chars:>6} ch (~{:>4} tok)  {:>4.1}%  {name}",
+            chars / CHARS_PER_TOKEN,
+            100.0 * *chars as f64 / total as f64
+        );
+    }
+    let top10: usize = sizes.iter().take(10).map(|(_, n)| n).sum();
+    println!(
+        "  top 10 = {top10} ch of {total} ch ({:.0}% of all tool schema)",
+        100.0 * top10 as f64 / total as f64
     );
 }
 
