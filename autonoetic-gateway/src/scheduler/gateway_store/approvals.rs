@@ -673,15 +673,14 @@ impl GatewayStore {
 
     /// #1094: promotion-identity dedup. Find any `revision_promote` approval —
     /// pending, approved, or rejected — for the same promotion identity
-    /// `(agent_id, revision_id, outgoing_revision_id, added, broadened)`,
-    /// across all sessions. This is the key the `federation_escalate` merged
-    /// path shares with the bare promote gate: a decision on one must not
-    /// produce a second operator ask for the same promotion (the observed
-    /// double-approval in session-53043b4c). No root filter on purpose: the
-    /// bare ask may live in a child-session projection while the escalation is
-    /// filed from the root planner.
+    /// `(agent_id, revision_id, outgoing_revision_id, added, broadened)`.
+    /// Scoped to the escalation's own `root_session_id`: the bare ask may live
+    /// in a child-session projection (same root), but an approval minted under
+    /// a DIFFERENT root must not suppress a fresh operator decision here —
+    /// same boundary as `find_matching_revision_promote_approval_for_root`.
     pub fn find_matching_revision_promote_approval_for_identity(
         &self,
+        root_session_id: &str,
         agent_id: &str,
         revision_id: &str,
         outgoing_revision_id: &str,
@@ -692,10 +691,11 @@ impl GatewayStore {
         let mut stmt = conn.prepare(
             "SELECT request_id, action_payload, status FROM approvals
              WHERE action_type = 'revision_promote'
+               AND root_session_id = ?1
                AND status IN ('pending', 'approved', 'rejected')
              ORDER BY created_at DESC",
         )?;
-        let rows = stmt.query_map(params![], |row| {
+        let rows = stmt.query_map(params![root_session_id], |row| {
             let id: String = row.get(0)?;
             let payload: String = row.get(1)?;
             let status: String = row.get(2)?;
@@ -1829,9 +1829,10 @@ mod decided_by_kind_tests {
         };
         store.create_approval(&mut req).unwrap();
 
-        // Exact identity match, regardless of the filing session/root.
+        // Exact identity match within the root session.
         let matched = store
             .find_matching_revision_promote_approval_for_identity(
+                "root-1",
                 "weather-agent",
                 "rev-abc",
                 "rev-out",
@@ -1845,10 +1846,26 @@ mod decided_by_kind_tests {
         // for_root variant.
         assert_eq!(matched.status, None);
 
+        // Cross-root: the approval was filed under root-1; a lookup from
+        // another root must NOT see it (a different operator context must
+        // not suppress a fresh decision).
+        let cross_root = store
+            .find_matching_revision_promote_approval_for_identity(
+                "root-other",
+                "weather-agent",
+                "rev-abc",
+                "rev-out",
+                &["NetworkAccess".to_string()],
+                &["FileRead".to_string()],
+            )
+            .unwrap();
+        assert!(cross_root.is_none());
+
         // Same revision but different outgoing baseline must NOT match — a
         // stale approval acknowledged against a different alias state.
         let wrong_outgoing = store
             .find_matching_revision_promote_approval_for_identity(
+                "root-1",
                 "weather-agent",
                 "rev-abc",
                 "rev-other",
@@ -1861,6 +1878,7 @@ mod decided_by_kind_tests {
         // Same identity but different capability set must NOT match.
         let wrong_caps = store
             .find_matching_revision_promote_approval_for_identity(
+                "root-1",
                 "weather-agent",
                 "rev-abc",
                 "rev-out",
@@ -1883,6 +1901,7 @@ mod decided_by_kind_tests {
             .unwrap();
         let rejected = store
             .find_matching_revision_promote_approval_for_identity(
+                "root-1",
                 "weather-agent",
                 "rev-abc",
                 "rev-out",

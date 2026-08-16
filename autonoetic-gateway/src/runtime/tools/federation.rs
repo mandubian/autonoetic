@@ -771,13 +771,17 @@ impl NativeTool for FederationEscalateTool {
             //       projection when the operator decides.
             //   rejected                       → refuse the escalate without
             //       re-asking the operator for a decision they already made.
-            // Approved-with-failed-verdicts and cancelled fall through to the
-            // merged card (the verdicts still need a fresh operator review).
-            // The mirror direction (escalation first, promote second) is #738:
-            // the promote reuses the merged approval via its federation context.
+            // Approved-with-failed-verdicts falls through to the merged card
+            // (the verdicts still need a fresh operator review). The mirror
+            // direction (escalation first, promote second) is #738: the
+            // promote reuses the merged approval via its federation context.
+            // The lookup is scoped to this escalation's root session — an
+            // approval minted under a different root is a different operator
+            // context and must not suppress this decision.
             let verdicts_all_pass = escalation.role_verdicts.iter().all(|v| v.passed);
             if let Some(existing) = store
                 .find_matching_revision_promote_approval_for_identity(
+                    &args.root_session_id,
                     &args.agent_id,
                     &canonical_revision_id,
                     &outgoing_revision_id,
@@ -846,8 +850,8 @@ impl NativeTool for FederationEscalateTool {
                         )
                         .to_error_response());
                     }
-                    // Approved-but-verdicts-failed, cancelled, or unknown:
-                    // fall through and mint the merged card.
+                    // Approved-but-verdicts-failed, or any status the query
+                    // cannot surface: fall through and mint the merged card.
                     _ => {}
                 }
             }
