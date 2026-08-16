@@ -74,6 +74,7 @@ pub mod operator_pending;
 pub mod session_export;
 pub mod session_resume;
 pub mod session_context;
+pub mod session_handoff;
 pub mod session_outcome_writer;
 pub mod session_overview;
 pub mod host_probe_budget;

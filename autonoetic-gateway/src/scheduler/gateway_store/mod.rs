@@ -609,6 +609,13 @@ impl GatewayStore {
         residency::get_residency(&conn, session_id)
     }
 
+    /// Re-point a parked session's agent after a session handoff (#1088).
+    /// No-op when nothing is parked.
+    pub fn update_residency_agent(&self, session_id: &str, agent_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        residency::update_residency_agent(&conn, session_id, agent_id)
+    }
+
     /// Parked, unexpired sessions of `agent_id` — the recipients an
     /// `agent_message` broadcast can actually reach.
     pub fn list_resident_sessions_for_agent(&self, agent_id: &str) -> Result<Vec<String>> {

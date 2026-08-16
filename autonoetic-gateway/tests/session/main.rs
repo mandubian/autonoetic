@@ -14,6 +14,7 @@ mod envelope_promote_with;
 mod escalate;
 mod export;
 mod fork;
+mod handoff;
 mod grant_close_preservation;
 mod inference;
 mod pause_cooperative;

@@ -41,6 +41,19 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionResidency> {
 const SELECT: &str = "SELECT session_id, root_session_id, agent_id, turn_id, since, expires_at
      FROM session_residency";
 
+/// Update the `agent_id` of an existing park. Session handoff (#1088) rebinds
+/// a live session to another agent; the park row's agent is otherwise never
+/// rewritten by [`upsert_residency`] (which deliberately refreshes only TTL
+/// fields), leaving the session addressable under an agent that no longer
+/// executes it. No row, no-op — nothing is parked.
+pub(super) fn update_residency_agent(conn: &Connection, session_id: &str, agent_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE session_residency SET agent_id = ?2 WHERE session_id = ?1",
+        params![session_id, agent_id],
+    )?;
+    Ok(())
+}
+
 /// Park a session (or refresh an existing park after it handles a message).
 pub(super) fn upsert_residency(conn: &Connection, r: &SessionResidency) -> Result<()> {
     conn.execute(
