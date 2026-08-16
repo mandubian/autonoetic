@@ -261,12 +261,12 @@ impl Report {
 /// `(turn-1 ceiling, steady-state ceiling)` per agent. **Ratcheted down** as RFC
 /// phases land — #1085 (collaborative trim) and P2 (this pass) are both locked in
 /// below.
-const PLANNER_CEILINGS: (usize, usize) = (84_000, 112_500);
+const PLANNER_CEILINGS: (usize, usize) = (74_000, 102_500);
 const CODER_CEILINGS: (usize, usize) = (60_000, 70_000);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize) = (100_500, 111_500);
+const PLANNER_COLLAB_CEILINGS: (usize, usize) = (92_500, 103_000);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
@@ -282,6 +282,10 @@ const PLANNER_COLLAB_CEILINGS: (usize, usize) = (100_500, 111_500);
 /// somewhere. The lead and coder agents see neither tool.
 const UNIT_TEST_RUNNER_CEILINGS: (usize, usize) = (49_500, 50_500);
 const SPECIALIZED_BUILDER_CEILINGS: (usize, usize) = (85_000, 86_000);
+/// Now the sole owner of the credential ceremony, so it absorbs the schema the
+/// planners shed. Measured here so the move is a *transfer with a ceiling*, not
+/// weight pushed somewhere nobody looks.
+const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize) = (56_500, 56_500);
 
 #[test]
 fn prompt_composition_report() {
@@ -299,11 +303,16 @@ fn prompt_composition_report() {
         "specialized_builder.default",
         "agents/evolution/specialized_builder.default/SKILL.md",
     );
+    let onboarding = measure(
+        "credential_onboarding.default",
+        "agents/specialists/credential_onboarding.default/SKILL.md",
+    );
     print_report(&planner);
     print_report(&coder);
     print_report(&collab);
     print_report(&utr);
     print_report(&builder);
+    print_report(&onboarding);
 
     // Tool schemas are the largest SINGLE layer for both main agents. This is
     // the finding the RFC's lever ordering rests on; if it ever stops being
@@ -314,6 +323,7 @@ fn prompt_composition_report() {
         (&collab, PLANNER_COLLAB_CEILINGS),
         (&utr, UNIT_TEST_RUNNER_CEILINGS),
         (&builder, SPECIALIZED_BUILDER_CEILINGS),
+        (&onboarding, CREDENTIAL_ONBOARDING_CEILINGS),
     ] {
         // The ratchet. Growth used to be invisible AND free; the report made it
         // visible, this makes it cost something.

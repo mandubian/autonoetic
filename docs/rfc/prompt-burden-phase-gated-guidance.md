@@ -385,6 +385,8 @@ emitted next to the classification cannot. This is the existing orchestration
 philosophy — gateway mechanical, agent semantic at decision time — applied in the
 prompt direction, where it has not been applied yet.
 
+**P2′ — Ownership beats compression. ✅ Landed.** See §7.
+
 **P5 — Use the tiering that already exists.** `allowed_tool_tiers` is declared by
 1 of 32 agents. Giving `planner.default` and `coder.default` explicit tiers drops
 the Specialized tail. Cheap, orthogonal, and independently testable via the
@@ -523,3 +525,97 @@ routing knowledge, the split is wrong.
    Moonshot/Kimi `anyOf`/`oneOf` sanitizer (`sanitize_schema_for_strict_anyof`) —
    a narrowed schema has fewer branches, not a different shape, so this is a
    check rather than an obstacle.
+
+---
+
+## 7. Amendment: ownership beats compression (P2′)
+
+Added 2026-08-16, after P2 measured 1.3%.
+
+P1–P5 all ask the same question — *how do we carry this prose more cheaply?*
+There is a prior question they skip: **should this agent be carrying it at all?**
+Applied once, to credentials, that question moved 4× what all of P2 achieved.
+
+### 7.1 The finding
+
+`credential_setup` was the single heaviest tool schema in the fleet (13% of the
+planner's), and the planner's Decision Flow devoted ~3.6k chars to driving it.
+But the planner **lacks `NetworkAccess`**, while cold-start onboarding
+inherently needs to fetch a skill spec. Its own SKILL therefore carried a
+step 1b: *"the URL is reachable but YOU lack NetworkAccess — delegate to
+`researcher.default`… then retry `skill_normalize`."*
+
+A documented mid-flow bounce to another agent and back, to work around a
+capability the owner does not have. That is not a prompt-size problem; it is a
+**misplaced responsibility** that shows up as prompt size.
+
+`credential_onboarding.default` already held the complete set —
+`CredentialAccess` + `NetworkAccess` + `WriteAccess` on `skills/*` — and could do
+fetch → normalize → setup in one session with no bounce.
+
+### 7.2 Why it had been the other way, and why that reason has expired
+
+The pendulum had already swung twice:
+
+- `19064522` extracted the flow **to** a specialist, explicitly to trim the
+  planner ("660 → 530 lines").
+- `e70db9f2` moved it **back** to the planner, narrowing the specialist to
+  "human-in-the-loop ceremonies only".
+
+The reason for the reversal is visible in the doctrine it deleted:
+
+> *"If output is not valid JSON or required keys are missing, ask
+> `registration.default` to restate output in the required JSON contract before
+> continuing."*
+
+The handoff was unreliable, so the planner had to babysit the child's output
+format — a hand-rolled retry loop for a contract nothing enforced. Delegation was
+reversed because **the handoff could not be trusted**, not because ownership was
+wrong.
+
+That reason has since expired. `credential_onboarding.default` now declares an
+`io.returns` contract with all seven handoff fields required, and the gateway has
+`returns_enforcement` + bounded repair. One gap remained: enforcement defaults to
+**`advisory`** for reasoning agents, so the contract was logged, not enforced.
+Setting `returns_enforcement: strict` closes exactly the failure that caused the
+reversal — the planner's manual "ask it to restate" loop becomes gateway repair.
+
+**Generalizable rule:** before re-litigating an old architectural decision, find
+what actually failed. Here the cause was a missing mechanism, and the mechanism
+now exists. Reversing without that check would have re-imported the bug.
+
+### 7.3 Result
+
+| | before | after |
+|---|---:|---:|
+| `planner.default` steady state | 110,015 ch | **100,103 ch** (−9%) |
+| `planner.default` turn 1 | 82,094 ch | **71,998 ch** (−12%) |
+| planner tool schemas | 44,550 ch (35 tools) | **36,583 ch** (31 tools) |
+| `planner.collaborative` turn 1 | 98,340 ch | **90,209 ch** |
+| `credential_onboarding.default` | ~66,100 ch | **54,939 ch** |
+
+The specialist ends up **smaller than before it absorbed the ceremony**: it had
+no `excluded_tools` at all and was advertising 41 tools for a credential job.
+Receiving the planner's shed weight was no reason to inherit its breadth, so it
+gained a scope list at the same time (41 → 26 tools).
+
+That is the point worth generalizing: **a transfer is only a win if the receiving
+agent is scoped**. Both agents are now in the budget harness so the move is a
+measured transfer, not weight pushed somewhere nobody looks.
+
+### 7.4 What this changes about the rollout
+
+It resolves **OQ5 for its own type case** — the `steps` `oneOf` now lives only on
+a specialist, where it is not paid per-turn by the fleet's busiest agent. No
+conditional-schema machinery is needed for it. OQ5 remains open for other heavy
+schemas, but its urgency drops.
+
+More importantly it reorders the remaining work. Before compressing a heavy tool
+schema, ask the ownership question first:
+
+> Does the agent holding this tool have the **full capability set** for the flow
+> the tool belongs to? If it has to bounce to another agent mid-flow, the tool is
+> in the wrong place, and moving it beats compressing it.
+
+Candidates to audit on that test, not yet examined: `skill_install`,
+`agent_revision_create_from_intent`, `artifact_prepare`.
