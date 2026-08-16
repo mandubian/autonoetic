@@ -318,6 +318,26 @@ impl GatewayStore {
         Ok(rows.next().transpose()?)
     }
 
+    /// #1094: escalations linked to an approval purely via the projection's
+    /// `approval_request_id` (no `escalation_id` in the approval payload — the
+    /// bare-promote-first ordering). Used by the approval decision path so an
+    /// operator decision on the linked approval resolves the projection too.
+    pub fn find_escalation_ids_by_approval_request(
+        &self,
+        approval_request_id: &str,
+    ) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT escalation_id FROM escalations WHERE approval_request_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![approval_request_id], |row| row.get(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
     pub fn resolve_escalation(
         &self,
         escalation_id: &str,

@@ -1639,6 +1639,392 @@ fn merged_approval_baseline_drift_regates() {
 }
 
 // ---------------------------------------------------------------------------
+// #1094 — bare-promote-first ordering: one operator decision per promotion
+// ---------------------------------------------------------------------------
+
+/// Create a BARE `RevisionPromote` approval (no federation context, no
+/// escalation link in the payload) for the given promotion identity — exactly
+/// what the promote gate mints when it fires without an escalation in play.
+/// `decision` is "pending", "approved", or "rejected". Approved uses the real
+/// decision path (dwell backdated via created_at, acked caps, confirm phrase).
+fn create_bare_revision_promote_approval(
+    store: &Arc<GatewayStore>,
+    agent_id: &str,
+    revision_id: &str,
+    outgoing_revision_id: &str,
+    added_capabilities: Vec<String>,
+    decision: &str,
+) -> String {
+    let approval_id = format!("apr-bare-{}", uuid::Uuid::new_v4().as_simple());
+    let action = ScheduledAction::RevisionPromote {
+        agent_id: agent_id.to_string(),
+        revision_id: revision_id.to_string(),
+        outgoing_revision_id: outgoing_revision_id.to_string(),
+        added_capabilities: added_capabilities.clone(),
+        broadened_capabilities: vec![],
+        payload: None,
+        federation_context: None,
+    };
+    let mut approval = ApprovalRequest {
+        request_id: approval_id.clone(),
+        agent_id: agent_id.to_string(),
+        session_id: "session-bare".to_string(),
+        action,
+        created_at: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+        reason: None,
+        evidence_ref: None,
+        root_session_id: Some("test-root-session".to_string()),
+        workflow_id: None,
+        task_id: None,
+        status: None,
+        decided_at: None,
+        decided_by: None,
+        decision_reason: None,
+        approval_level: ApprovalLevel::Operator,
+        min_dwell_ms: None,
+        confirm_phrase: None,
+        code_excerpts: None,
+        risk_summary: None,
+        expires_at: None,
+    };
+    store.create_approval(&mut approval).unwrap();
+    match decision {
+        "approved" => {
+            let rev_prefix = &revision_id[..revision_id.len().min(16)];
+            let confirm = format!("promote {} {}", agent_id, rev_prefix);
+            approve_request_with_options(
+                &GatewayConfig::default(),
+                Some(store.as_ref()),
+                &approval_id,
+                "test-operator",
+                None,
+                None,
+                None,
+                None,
+                ApproveOptions {
+                    acknowledged_capabilities: added_capabilities.clone(),
+                    confirm_phrase: Some(confirm),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        "rejected" => {
+            store
+                .record_decision(
+                    &approval_id,
+                    "rejected",
+                    "operator",
+                    &chrono::Utc::now().to_rfc3339(),
+                    Some("rejected in test"),
+                )
+                .unwrap();
+        }
+        _ => {}
+    }
+    approval_id
+}
+
+fn run_federation_escalate(
+    setup: &TestSetup,
+    store: Arc<GatewayStore>,
+    agent_id: &str,
+    artifact_id: &str,
+    revision_id: &str,
+    verdicts: Vec<RoleVerdictSummary>,
+) -> serde_json::Value {
+    let args = serde_json::json!({
+        "agent_id": agent_id,
+        "artifact_id": artifact_id,
+        "revision_id": revision_id,
+        "root_session_id": "test-root-session",
+        "role_verdicts": serde_json::to_value(&verdicts).unwrap(),
+        "planner_synthesis": "All federation roles passed; capability delta acknowledged.",
+    });
+    let result = setup
+        .registry
+        .execute(
+            "federation_escalate",
+            &setup.b_manifest,
+            &setup.b_policy,
+            &setup.builder_dir,
+            Some(&setup.gateway_dir),
+            &serde_json::to_string(&args).unwrap(),
+            Some("session-escalate"),
+            None,
+            Some(&setup.config),
+            Some(store),
+            None,
+        )
+        .expect("federation_escalate should execute");
+    serde_json::from_str(&result).unwrap()
+}
+
+fn count_revision_promote_approvals(store: &GatewayStore) -> usize {
+    store
+        .list_all_approvals_for_session("test-root-session")
+        .unwrap()
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.action,
+                ScheduledAction::RevisionPromote { .. }
+            )
+        })
+        .count()
+}
+
+#[test]
+fn bare_promote_approved_then_escalate_single_decision() {
+    // #1094 core scenario (observed double-approval, session-53043b4c): the
+    // builder's bare R++2 approval lands first; the planner's escalation must
+    // NOT mint a second card. The escalation auto-clears from the approved
+    // decision, and the promote consumes the single decision — even without
+    // an explicit approval_ref.
+    let agent_id = "fed.barefirst.approved";
+    let (s, artifact_id, revision_id, outgoing_rev, store) =
+        setup_existing_agent_with_broadened_caps_and_federation(agent_id);
+    let verdicts = vec![
+        make_verdict(PromotionRole::StaticEvaluator, "static_evaluator.default", true),
+        make_verdict(PromotionRole::UnitTestRunner, "unit_test_runner.default", true),
+    ];
+    let bare_id = create_bare_revision_promote_approval(
+        &store,
+        agent_id,
+        &revision_id,
+        &outgoing_rev,
+        vec!["NetworkAccess".to_string()],
+        "approved",
+    );
+
+    let resp = run_federation_escalate(
+        &s,
+        store.clone(),
+        agent_id,
+        &artifact_id,
+        &revision_id,
+        verdicts,
+    );
+    assert_eq!(
+        resp.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "escalate must succeed: {resp}"
+    );
+    assert_eq!(resp["status"], "approved");
+    assert_eq!(
+        resp["approval_request_id"].as_str(),
+        Some(bare_id.as_str()),
+        "the escalation must surface the EXISTING decision, not a new card"
+    );
+    assert_eq!(
+        count_revision_promote_approvals(&store),
+        1,
+        "no second approval card may be created"
+    );
+
+    // The single decision covers BOTH gates — promote without approval_ref.
+    let result = try_promote(
+        &s.registry,
+        &s.b_manifest,
+        &s.b_policy,
+        &s.builder_dir,
+        &s.gateway_dir,
+        &s.config,
+        store,
+        agent_id,
+        &revision_id,
+    );
+    let json = result.unwrap();
+    assert_eq!(
+        json.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "single approved bare decision must cover R++2 + FullJury: {json}"
+    );
+}
+
+#[test]
+fn bare_promote_pending_then_escalate_links_no_second_card() {
+    // Pending bare approval first: the escalation links its projection to the
+    // pending card instead of minting a merged one. The operator's single
+    // approval of the bare card resolves the projection (approval.rs linked-
+    // escalation resolution), and the promote then proceeds.
+    let agent_id = "fed.barefirst.pending";
+    let (s, artifact_id, revision_id, outgoing_rev, store) =
+        setup_existing_agent_with_broadened_caps_and_federation(agent_id);
+    let verdicts = vec![
+        make_verdict(PromotionRole::StaticEvaluator, "static_evaluator.default", true),
+        make_verdict(PromotionRole::UnitTestRunner, "unit_test_runner.default", true),
+    ];
+    let bare_id = create_bare_revision_promote_approval(
+        &store,
+        agent_id,
+        &revision_id,
+        &outgoing_rev,
+        vec!["NetworkAccess".to_string()],
+        "pending",
+    );
+
+    let resp = run_federation_escalate(
+        &s,
+        store.clone(),
+        agent_id,
+        &artifact_id,
+        &revision_id,
+        verdicts,
+    );
+    assert_eq!(resp["status"], "pending");
+    assert_eq!(
+        resp["approval_request_id"].as_str(),
+        Some(bare_id.as_str()),
+        "escalation must surface the existing pending card"
+    );
+    assert_eq!(count_revision_promote_approvals(&store), 1);
+
+    // The operator approves the single card → the linked projection resolves.
+    let rev_prefix = &revision_id[..revision_id.len().min(16)];
+    let confirm = format!("promote {} {}", agent_id, rev_prefix);
+    approve_request_with_options(
+        &GatewayConfig::default(),
+        Some(store.as_ref()),
+        &bare_id,
+        "test-operator",
+        None,
+        None,
+        None,
+        None,
+        ApproveOptions {
+            acknowledged_capabilities: vec!["NetworkAccess".to_string()],
+            confirm_phrase: Some(confirm),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let esc = store
+        .find_escalation(
+            &artifact_id,
+            &revision_id,
+            EscalationStatus::Approved,
+        )
+        .unwrap();
+    assert!(
+        esc.is_some(),
+        "approving the single card must resolve the linked escalation projection"
+    );
+
+    let result = try_promote(
+        &s.registry,
+        &s.b_manifest,
+        &s.b_policy,
+        &s.builder_dir,
+        &s.gateway_dir,
+        &s.config,
+        store,
+        agent_id,
+        &revision_id,
+    );
+    let json = result.unwrap();
+    assert_eq!(
+        json.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "promote must succeed after the single decision: {json}"
+    );
+}
+
+#[test]
+fn bare_promote_rejected_then_escalate_refuses() {
+    // The operator already refused this promotion — the escalate must refuse
+    // to re-ask, not mint a new card.
+    let agent_id = "fed.barefirst.rejected";
+    let (s, artifact_id, revision_id, outgoing_rev, store) =
+        setup_existing_agent_with_broadened_caps_and_federation(agent_id);
+    let verdicts = vec![
+        make_verdict(PromotionRole::StaticEvaluator, "static_evaluator.default", true),
+        make_verdict(PromotionRole::UnitTestRunner, "unit_test_runner.default", true),
+    ];
+    create_bare_revision_promote_approval(
+        &store,
+        agent_id,
+        &revision_id,
+        &outgoing_rev,
+        vec!["NetworkAccess".to_string()],
+        "rejected",
+    );
+
+    let resp = run_federation_escalate(
+        &s,
+        store.clone(),
+        agent_id,
+        &artifact_id,
+        &revision_id,
+        verdicts,
+    );
+    assert_eq!(
+        resp.get("ok").and_then(|v| v.as_bool()),
+        Some(false),
+        "escalate must refuse after an operator rejection: {resp}"
+    );
+    let message = resp["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("REJECTED"),
+        "refusal must name the prior rejection: {message}"
+    );
+    assert_eq!(count_revision_promote_approvals(&store), 1);
+    assert!(
+        store
+            .find_escalation(&artifact_id, &revision_id, EscalationStatus::Pending)
+            .unwrap()
+            .is_none(),
+        "no escalation projection may be created for a refused promote"
+    );
+}
+
+#[test]
+fn bare_promote_approved_but_failed_verdict_still_asks() {
+    // An approved bare decision covers only the capability delta. When a jury
+    // verdict FAILED, the merged card must still be minted — the operator has
+    // not reviewed the verdicts, and auto-clearing would skip that review.
+    let agent_id = "fed.barefirst.failedverdict";
+    let (s, artifact_id, revision_id, outgoing_rev, store) =
+        setup_existing_agent_with_broadened_caps_and_federation(agent_id);
+    let verdicts = vec![
+        make_verdict(PromotionRole::StaticEvaluator, "static_evaluator.default", true),
+        make_verdict(
+            PromotionRole::UnitTestRunner,
+            "unit_test_runner.default",
+            false,
+        ),
+    ];
+    let bare_id = create_bare_revision_promote_approval(
+        &store,
+        agent_id,
+        &revision_id,
+        &outgoing_rev,
+        vec!["NetworkAccess".to_string()],
+        "approved",
+    );
+
+    let resp = run_federation_escalate(
+        &s,
+        store.clone(),
+        agent_id,
+        &artifact_id,
+        &revision_id,
+        verdicts,
+    );
+    assert_eq!(
+        resp["status"],
+        "pending",
+        "a failed verdict needs a fresh operator review — merged card expected: {resp}"
+    );
+    assert_ne!(
+        resp["approval_request_id"].as_str(),
+        Some(bare_id.as_str()),
+        "the merged card must be a NEW decision, not the approved delta card"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // federation_escalate revision resolution (escalate-before-install)
 // ---------------------------------------------------------------------------
 
