@@ -3186,6 +3186,48 @@ impl JsonRpcRouter {
                 }
             }
 
+            "session.handoff" => {
+                // #1088 — operator-only rebind of a live root session to
+                // another orchestrator. No native tool wraps this: agents may
+                // propose a handoff in prose, but only the operator (holder of
+                // the ingress shared secret) can pull the trigger. Logic lives
+                // in runtime/session_handoff.rs (keep this arm thin, #882).
+                let params: crate::runtime::session_handoff::HandoffParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32602,
+                                format!("Invalid params for session.handoff: {}", e),
+                            );
+                        }
+                    };
+                let store = match self.execution.gateway_store() {
+                    Some(s) => s,
+                    None => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32000,
+                            "Gateway store not available".to_string(),
+                        );
+                    }
+                };
+                match crate::runtime::session_handoff::perform_handoff(
+                    self.config.as_ref(),
+                    &store,
+                    &params,
+                ) {
+                    Ok(outcome) => JsonRpcResponse::success(
+                        req.id,
+                        serde_json::to_value(outcome).unwrap_or_else(|_| {
+                            serde_json::json!({ "ok": true, "session_id": params.session_id })
+                        }),
+                    ),
+                    Err(message) => JsonRpcResponse::error(req.id, -32000, message),
+                }
+            }
+
             "root_session.pause" => {
                 #[derive(Deserialize)]
                 struct PauseParams {

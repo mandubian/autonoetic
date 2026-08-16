@@ -4172,6 +4172,44 @@ pub fn run(
                                             status = Some(format!("→ switched to session {new_id}"));
                                         }
                                     }
+                                    SlashCommand::Handoff { target_agent_id: target, reason } => {
+                                        // /agent <id> [reason...] (#1088): the
+                                        // operator pulls the trigger — agents
+                                        // can only propose. On success the
+                                        // composer addresses the new agent and
+                                        // the next message starts its context
+                                        // from the handoff envelope.
+                                        if target.is_empty() {
+                                            status = Some(
+                                                "usage: /agent <id> [reason...] — e.g. /agent planner.collaborative task needs plan co-editing"
+                                                    .to_string(),
+                                            );
+                                        } else {
+                                            let mut params = serde_json::json!({
+                                                "session_id": &*root_session_id,
+                                                "target_agent_id": target,
+                                            });
+                                            if let Some(r) = reason.as_deref() {
+                                                params["reason"] = serde_json::json!(r);
+                                            }
+                                            match rpc(client, "session.handoff", params) {
+                                                Ok(value) => {
+                                                    let to = value
+                                                        .get("to_agent_id")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or(target.as_str())
+                                                        .to_string();
+                                                    *target_agent_id = Some(to.clone());
+                                                    status = Some(format!(
+                                                        "→ session handed off to {to}; your next message goes to it"
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    status = Some(format!("✗ handoff: {e}"));
+                                                }
+                                            }
+                                        }
+                                    }
                                     SlashCommand::ListSessions { agent } => {
                                         let (lines, ids) = list_sessions_detail(client, agent.as_deref());
                                         detail = Some(DetailPane::event(lines, None));
