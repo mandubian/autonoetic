@@ -2817,8 +2817,21 @@ impl NativeTool for AgentRevisionPromoteTool {
         };
         vec![GuidanceBlock {
             id: "promote.approval_continuation",
-            // Promotion presupposes an artifact; a session that never built one
-            // cannot reach this procedure (RFC P2).
+            // Promotion presupposes an artifact, so a session that never built
+            // one cannot reach this procedure (RFC P2).
+            //
+            // The one promote path with no artifact is zero-capability
+            // direct-promote (`allow_zero_capability_direct_promote`, see the
+            // gate in `execute`): `artifact_built` never fires there, so this
+            // block never renders. That is sound rather than lucky. The block is
+            // about handling `approval_required`, and the only thing that makes
+            // promote ask for approval is a capability delta — while a
+            // capability-bearing revision *cannot* reach the artifact-less path,
+            // because the gate fails closed on it ("declares capabilities but
+            // ships no reviewable artifact"). So approval-capable ⟹
+            // capability-bearing ⟹ an artifact exists. The block is present on
+            // every path that can need it, and vacuous on the one where it is
+            // absent.
             when: GuidanceCondition::All(vec![
                 GuidanceCondition::ToolPresent("agent_revision_promote"),
                 GuidanceCondition::Phase(PHASE_ARTIFACT_BUILT),

@@ -267,11 +267,21 @@ const CODER_CEILINGS: (usize, usize) = (60_000, 70_000);
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
 const PLANNER_COLLAB_CEILINGS: (usize, usize) = (100_500, 111_500);
-/// A promotion-gate role. Covered because the gate family is the only one that
-/// holds `promotion_record` / `agent_revision_promote`, so it is the only place
-/// the phase-gating of those procedures can be observed — the lead and coder
-/// agents never see those tools at all.
+/// The two phase-gated promotion procedures live in **disjoint** agent families,
+/// so covering one does not cover the other:
+///
+/// - `promotion_record` is restricted to the four gate roles by
+///   `manifest_may_record_promotion_verdicts` (sealed_evaluator, auditor,
+///   static_evaluator, unit_test_runner) — represented here by
+///   `unit_test_runner.default`.
+/// - `agent_revision_promote` requires `Capability::AgentRevision`, which the
+///   gate roles do **not** hold. Exactly one agent declares it in frontmatter:
+///   `specialized_builder.default`.
+///
+/// Both are measured so the phase-gating of each procedure is observable
+/// somewhere. The lead and coder agents see neither tool.
 const UNIT_TEST_RUNNER_CEILINGS: (usize, usize) = (49_500, 50_500);
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize) = (85_000, 86_000);
 
 #[test]
 fn prompt_composition_report() {
@@ -285,10 +295,15 @@ fn prompt_composition_report() {
         "unit_test_runner.default",
         "agents/specialists/unit_test_runner.default/SKILL.md",
     );
+    let builder = measure(
+        "specialized_builder.default",
+        "agents/evolution/specialized_builder.default/SKILL.md",
+    );
     print_report(&planner);
     print_report(&coder);
     print_report(&collab);
     print_report(&utr);
+    print_report(&builder);
 
     // Tool schemas are the largest SINGLE layer for both main agents. This is
     // the finding the RFC's lever ordering rests on; if it ever stops being
@@ -298,6 +313,7 @@ fn prompt_composition_report() {
         (&coder, CODER_CEILINGS),
         (&collab, PLANNER_COLLAB_CEILINGS),
         (&utr, UNIT_TEST_RUNNER_CEILINGS),
+        (&builder, SPECIALIZED_BUILDER_CEILINGS),
     ] {
         // The ratchet. Growth used to be invisible AND free; the report made it
         // visible, this makes it cost something.
