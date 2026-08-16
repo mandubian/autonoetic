@@ -3168,8 +3168,22 @@ do not re-issue."
             }
             None => false,
         };
+        // #1094: same single-decision guarantee for the bare-first ordering —
+        // an approved escalation whose linked approval is an approved
+        // `RevisionPromote` for this agent+revision satisfies R++2 without an
+        // explicit `approval_ref` (the caller may not know the linked id).
+        let escalation_linked_promote_approved = match rev.artifact_id.as_deref() {
+            Some(aid) => find_escalation_linked_approved_promote_approval(
+                &gateway_store,
+                &args.agent_id,
+                &args.revision_id,
+                aid,
+            )?,
+            None => false,
+        };
         let gate_bypassed_by_approval = new_agent_approved_via_escalation
             || merged_federation_promote_approved
+            || escalation_linked_promote_approved
             || if let Some(ref approval_ref) = args.approval_ref {
                 check_revision_promote_approval(
                     &gateway_store,
@@ -5343,6 +5357,61 @@ fn find_merged_federation_promote_approval(
         }
     }
     Ok(None)
+}
+
+/// #1094 mirror of the #738 merged lookup: when the escalation was auto-
+/// cleared from (or linked to) a BARE `RevisionPromote` approval (bare-
+/// promote-first ordering), the merged lookup above finds nothing — the
+/// linked approval carries no `federation_context`. The operator's decision
+/// is real nonetheless: an approved escalation whose linked approval is an
+/// approved `RevisionPromote` for this agent+revision (baseline-consistent)
+/// satisfies the R++2 capability gate without an explicit `approval_ref`.
+fn find_escalation_linked_approved_promote_approval(
+    gateway_store: &crate::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+    revision_id: &str,
+    artifact_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(esc) = gateway_store.find_escalation(
+        artifact_id,
+        revision_id,
+        autonoetic_types::escalation::EscalationStatus::Approved,
+    )?
+    else {
+        return Ok(false);
+    };
+    let Some(approval_id) = esc.approval_request_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(req) = gateway_store.get_approval(approval_id)? else {
+        return Ok(false);
+    };
+    if !matches!(
+        req.status,
+        Some(autonoetic_types::background::ApprovalStatus::Approved)
+    ) {
+        return Ok(false);
+    }
+    let autonoetic_types::background::ScheduledAction::RevisionPromote {
+        agent_id: a_id,
+        revision_id: r_id,
+        outgoing_revision_id: approved_outgoing,
+        ..
+    } = &req.action
+    else {
+        return Ok(false);
+    };
+    if a_id != agent_id || r_id != revision_id {
+        return Ok(false);
+    }
+    // Baseline TOCTOU: same rule as check_revision_promote_approval — the
+    // alias must still point at the revision the operator acknowledged
+    // against, or the approval is stale for this promote.
+    let current_outgoing = gateway_store
+        .resolve_alias(agent_id)?
+        .map(|a| a.revision_id)
+        .unwrap_or_default();
+    Ok(current_outgoing == approved_outgoing.as_str())
 }
 
 /// Lines of instruction body to show on the approval card. Enough to judge what

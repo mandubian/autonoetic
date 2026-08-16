@@ -661,24 +661,57 @@ pub fn apply_decision(
                 .and_then(|v| v.as_str()),
             _ => None,
         };
-        if let Some(esc_id) = linked_escalation_id {
+        // #1094: an escalation may also be linked purely via its projection's
+        // `approval_request_id` — the bare-promote-first ordering, where the
+        // merged path reused an existing (pending) `RevisionPromote` ask
+        // instead of minting a second card. The operator's decision on that
+        // approval must resolve the linked projection exactly like the
+        // payload-linked case above, or the escalation stays Pending forever
+        // and the later promote can never find an Approved escalation.
+        let mut linked_escalation_ids: Vec<String> = Vec::new();
+        if let Some(payload_linked) = linked_escalation_id {
+            linked_escalation_ids.push(payload_linked.to_string());
+        }
+        for id in store.find_escalation_ids_by_approval_request(&decision.request_id)? {
+            if !linked_escalation_ids.contains(&id) {
+                linked_escalation_ids.push(id);
+            }
+        }
+        for esc_id in linked_escalation_ids {
             let esc_status = if decision.status == ApprovalStatus::Approved {
                 autonoetic_types::escalation::EscalationStatus::Approved
             } else {
                 autonoetic_types::escalation::EscalationStatus::Rejected
             };
             if let Err(e) = store.resolve_escalation(
-                esc_id,
+                &esc_id,
                 esc_status,
                 &decision.decided_by,
                 decision.reason.as_deref(),
             ) {
-                tracing::warn!(
-                    target: "approval",
-                    escalation_id = %esc_id,
-                    error = %e,
-                    "Failed to resolve linked escalation"
-                );
+                // Already-resolved projections (e.g. a merged approval that
+                // carries BOTH the payload link and the projection link) are
+                // the expected double-link case — not an error worth a warning.
+                let already_resolved = store
+                    .get_escalation(&esc_id)
+                    .ok()
+                    .flatten()
+                    .map(|esc| {
+                        !matches!(
+                            esc.status,
+                            autonoetic_types::escalation::EscalationStatus::Pending
+                                | autonoetic_types::escalation::EscalationStatus::Stale
+                        )
+                    })
+                    .unwrap_or(false);
+                if !already_resolved {
+                    tracing::warn!(
+                        target: "approval",
+                        escalation_id = %esc_id,
+                        error = %e,
+                        "Failed to resolve linked escalation"
+                    );
+                }
             }
         }
     }

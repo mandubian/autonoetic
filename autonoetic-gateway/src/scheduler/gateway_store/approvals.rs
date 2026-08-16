@@ -671,6 +671,92 @@ impl GatewayStore {
         Ok(None)
     }
 
+    /// #1094: promotion-identity dedup. Find any `revision_promote` approval —
+    /// pending, approved, or rejected — for the same promotion identity
+    /// `(agent_id, revision_id, outgoing_revision_id, added, broadened)`.
+    /// Scoped to the escalation's own `root_session_id`: the bare ask may live
+    /// in a child-session projection (same root), but an approval minted under
+    /// a DIFFERENT root must not suppress a fresh operator decision here —
+    /// same boundary as `find_matching_revision_promote_approval_for_root`.
+    pub fn find_matching_revision_promote_approval_for_identity(
+        &self,
+        root_session_id: &str,
+        agent_id: &str,
+        revision_id: &str,
+        outgoing_revision_id: &str,
+        added_capabilities: &[String],
+        broadened_capabilities: &[String],
+    ) -> Result<Option<ApprovalRequest>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id, action_payload, status FROM approvals
+             WHERE action_type = 'revision_promote'
+               AND root_session_id = ?1
+               AND status IN ('pending', 'approved', 'rejected')
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![root_session_id], |row| {
+            let id: String = row.get(0)?;
+            let payload: String = row.get(1)?;
+            let status: String = row.get(2)?;
+            Ok((id, payload, status))
+        })?;
+        let added: std::collections::HashSet<String> = added_capabilities.iter().cloned().collect();
+        let broadened: std::collections::HashSet<String> =
+            broadened_capabilities.iter().cloned().collect();
+        for row in rows {
+            let (id, payload, status) = row?;
+            let action: autonoetic_types::background::ScheduledAction =
+                match serde_json::from_str(&payload) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+            if let autonoetic_types::background::ScheduledAction::RevisionPromote {
+                agent_id: a_id,
+                revision_id: r_id,
+                outgoing_revision_id: a_outgoing,
+                added_capabilities: a_caps,
+                broadened_capabilities: b_caps,
+                ..
+            } = action
+            {
+                if a_id == agent_id
+                    && r_id == revision_id
+                    && a_outgoing == outgoing_revision_id
+                    && a_caps
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                        == added
+                    && b_caps
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<String>>()
+                        == broadened
+                {
+                    return Self::get_approval_with_conn(&conn, &id).map(|opt| {
+                        opt.map(|mut req| {
+                            req.status = match status.as_str() {
+                                "approved" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Approved)
+                                }
+                                "rejected" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Rejected)
+                                }
+                                "cancelled" => {
+                                    Some(autonoetic_types::background::ApprovalStatus::Cancelled)
+                                }
+                                _ => None,
+                            };
+                            req
+                        })
+                    });
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub fn list_all_approvals_for_session(&self, session_id: &str) -> Result<Vec<ApprovalRequest>> {
         let root = crate::runtime::content_store::root_session_id(session_id);
         let conn = self.conn.lock().unwrap();
@@ -1699,6 +1785,133 @@ mod decided_by_kind_tests {
         assert_eq!(
             matched.unwrap().status,
             Some(autonoetic_types::background::ApprovalStatus::Approved)
+        );
+    }
+
+    #[test]
+    fn find_matching_revision_promote_approval_for_identity_matches_across_sessions() {
+        use autonoetic_types::background::{ApprovalLevel, ApprovalRequest, ScheduledAction};
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let store = GatewayStore::open(dir.path()).unwrap();
+
+        let mut req = ApprovalRequest {
+            request_id: "apr-identity-1".to_string(),
+            agent_id: "specialized_builder.default".to_string(),
+            session_id: "s-child".to_string(),
+            root_session_id: Some("root-1".to_string()),
+            action: ScheduledAction::RevisionPromote {
+                agent_id: "weather-agent".to_string(),
+                revision_id: "rev-abc".to_string(),
+                outgoing_revision_id: "rev-out".to_string(),
+                added_capabilities: vec!["NetworkAccess".to_string()],
+                broadened_capabilities: vec!["FileRead".to_string()],
+                payload: None,
+                federation_context: None,
+            },
+            approval_level: ApprovalLevel::Operator,
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            reason: None,
+            evidence_ref: None,
+            workflow_id: None,
+            task_id: None,
+            status: None,
+            decided_at: None,
+            decided_by: None,
+            decision_reason: None,
+            min_dwell_ms: None,
+            confirm_phrase: None,
+            code_excerpts: None,
+            risk_summary: None,
+
+            expires_at: None,
+        };
+        store.create_approval(&mut req).unwrap();
+
+        // Exact identity match within the root session.
+        let matched = store
+            .find_matching_revision_promote_approval_for_identity(
+                "root-1",
+                "weather-agent",
+                "rev-abc",
+                "rev-out",
+                &["NetworkAccess".to_string()],
+                &["FileRead".to_string()],
+            )
+            .unwrap();
+        let matched = matched.expect("identity match must be found");
+        assert_eq!(matched.request_id, "apr-identity-1");
+        // Pending surfaces as None (the query's catch-all), like the
+        // for_root variant.
+        assert_eq!(matched.status, None);
+
+        // Cross-root: the approval was filed under root-1; a lookup from
+        // another root must NOT see it (a different operator context must
+        // not suppress a fresh decision).
+        let cross_root = store
+            .find_matching_revision_promote_approval_for_identity(
+                "root-other",
+                "weather-agent",
+                "rev-abc",
+                "rev-out",
+                &["NetworkAccess".to_string()],
+                &["FileRead".to_string()],
+            )
+            .unwrap();
+        assert!(cross_root.is_none());
+
+        // Same revision but different outgoing baseline must NOT match — a
+        // stale approval acknowledged against a different alias state.
+        let wrong_outgoing = store
+            .find_matching_revision_promote_approval_for_identity(
+                "root-1",
+                "weather-agent",
+                "rev-abc",
+                "rev-other",
+                &["NetworkAccess".to_string()],
+                &["FileRead".to_string()],
+            )
+            .unwrap();
+        assert!(wrong_outgoing.is_none());
+
+        // Same identity but different capability set must NOT match.
+        let wrong_caps = store
+            .find_matching_revision_promote_approval_for_identity(
+                "root-1",
+                "weather-agent",
+                "rev-abc",
+                "rev-out",
+                &["FileWrite".to_string()],
+                &["FileRead".to_string()],
+            )
+            .unwrap();
+        assert!(wrong_caps.is_none());
+
+        // Rejected decisions are visible too (the escalation side refuses to
+        // re-ask on those).
+        store
+            .record_decision(
+                "apr-identity-1",
+                "rejected",
+                "operator",
+                "2026-06-01T01:00:00Z",
+                None,
+            )
+            .unwrap();
+        let rejected = store
+            .find_matching_revision_promote_approval_for_identity(
+                "root-1",
+                "weather-agent",
+                "rev-abc",
+                "rev-out",
+                &["NetworkAccess".to_string()],
+                &["FileRead".to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            rejected.unwrap().status,
+            Some(autonoetic_types::background::ApprovalStatus::Rejected)
         );
     }
 }

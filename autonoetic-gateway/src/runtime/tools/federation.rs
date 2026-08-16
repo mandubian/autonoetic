@@ -755,6 +755,106 @@ impl NativeTool for FederationEscalateTool {
                 .iter()
                 .map(|b| b.capability_type.clone())
                 .collect();
+
+            // #1094: promotion-identity dedup. The merged card exists so ONE
+            // operator decision covers both the R++2 capability delta and the
+            // jury verdicts. When a bare `RevisionPromote` approval for the
+            // same promotion identity `(agent, revision, outgoing, added,
+            // broadened)` already exists, the operator has already been asked
+            // about this promotion — do NOT mint a second card (observed
+            // double-approval: session-53043b4c, apr-6150b08d + apr-23d36590):
+            //   approved (all verdicts pass) → escalation auto-cleared and
+            //       linked to that approval; the promote side (FullJury + R++2)
+            //       consumes the single decision via the approved projection.
+            //   pending                        → escalation linked to it; the
+            //       one pending decision resolves both the approval and the
+            //       projection when the operator decides.
+            //   rejected                       → refuse the escalate without
+            //       re-asking the operator for a decision they already made.
+            // Approved-with-failed-verdicts falls through to the merged card
+            // (the verdicts still need a fresh operator review). The mirror
+            // direction (escalation first, promote second) is #738: the
+            // promote reuses the merged approval via its federation context.
+            // The lookup is scoped to this escalation's root session — an
+            // approval minted under a different root is a different operator
+            // context and must not suppress this decision.
+            let verdicts_all_pass = escalation.role_verdicts.iter().all(|v| v.passed);
+            if let Some(existing) = store
+                .find_matching_revision_promote_approval_for_identity(
+                    &args.root_session_id,
+                    &args.agent_id,
+                    &canonical_revision_id,
+                    &outgoing_revision_id,
+                    &added_capabilities,
+                    &broadened_capabilities,
+                )?
+            {
+                // Note: the store helper surfaces pending as `status: None`
+                // ("pending" is the query's catch-all), approved/rejected
+                // explicitly. None here therefore means pending.
+                match existing.status {
+                    Some(autonoetic_types::background::ApprovalStatus::Approved)
+                        if verdicts_all_pass =>
+                    {
+                        escalation.status = EscalationStatus::Approved;
+                        escalation.approval_request_id = Some(existing.request_id.clone());
+                        escalation.decided_by = Some(
+                            existing
+                                .decided_by
+                                .clone()
+                                .unwrap_or_else(|| "gate_service".to_string()),
+                        );
+                        escalation.resolved_at = Some(chrono::Utc::now().to_rfc3339());
+                        store.create_escalation(&mut escalation)?;
+                        return Ok(serde_json::json!({
+                            "ok": true,
+                            "escalation_id": escalation_id,
+                            "approval_request_id": existing.request_id,
+                            "status": "approved",
+                            "message": format!(
+                                "Capability delta for this promotion was already operator-approved \
+                                 via '{}'; escalation marked approved without a second ask.",
+                                existing.request_id
+                            ),
+                        })
+                        .to_string());
+                    }
+                    None => {
+                        // A pending approval for this same promotion exists —
+                        // surface it; the operator's single decision covers both.
+                        escalation.approval_request_id = Some(existing.request_id.clone());
+                        store.create_escalation(&mut escalation)?;
+                        return Ok(serde_json::json!({
+                            "ok": true,
+                            "escalation_id": escalation_id,
+                            "approval_request_id": existing.request_id,
+                            "status": "pending",
+                            "message": format!(
+                                "An approval request for this promotion is already pending \
+                                 ('{}'); the operator's single decision will cover this \
+                                 escalation. No second card was created.",
+                                existing.request_id
+                            ),
+                        })
+                        .to_string());
+                    }
+                    Some(autonoetic_types::background::ApprovalStatus::Rejected) => {
+                        return Ok(autonoetic_types::tool_error::ToolError::permission(
+                            format!(
+                                "Promotion of '{}' revision '{}' was already REJECTED by the \
+                                 operator (approval '{}'). Refusing to re-ask the same promotion \
+                                 decision (R++2). Escalate again only for a new revision or a new \
+                                 decision.",
+                                args.agent_id, canonical_revision_id, existing.request_id
+                            ),
+                        )
+                        .to_error_response());
+                    }
+                    // Approved-but-verdicts-failed, or any status the query
+                    // cannot surface: fall through and mint the merged card.
+                    _ => {}
+                }
+            }
             let action = ScheduledAction::RevisionPromote {
                 agent_id: args.agent_id.clone(),
                 revision_id: canonical_revision_id.clone(),
