@@ -466,6 +466,10 @@ impl LlmDriver for EgressChokepointDriver {
     fn request_timeout(&self) -> std::time::Duration {
         self.inner.request_timeout()
     }
+
+    fn ttfb_timeout(&self) -> Option<std::time::Duration> {
+        self.inner.ttfb_timeout()
+    }
 }
 
 /// Compute a [`FilterReport`] for a request without forwarding it — used by

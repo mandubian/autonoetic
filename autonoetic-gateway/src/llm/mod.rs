@@ -112,6 +112,19 @@ pub(crate) fn set_configured_request_timeout_secs(secs: Option<u64>) {
     }
 }
 
+/// The configured time-to-first-byte budget, published once at gateway startup
+/// from [`autonoetic_types::config::GatewayConfig::llm_ttfb_timeout_secs`].
+/// Same process-wide-cell rationale as [`CONFIGURED_REQUEST_TIMEOUT_SECS`].
+static CONFIGURED_TTFB_TIMEOUT_SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Publish the configured TTFB budget. Called once during gateway startup;
+/// later calls are ignored.
+pub(crate) fn set_configured_ttfb_timeout_secs(secs: Option<u64>) {
+    if let Some(secs) = secs {
+        let _ = CONFIGURED_TTFB_TIMEOUT_SECS.set(secs);
+    }
+}
+
 /// Pure resolution of the per-request timeout, in precedence order (#1045):
 /// `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` (ad-hoc override) → preset-level
 /// `request_timeout_secs` (carried on the resolved `LlmConfig`) → gateway
@@ -127,6 +140,23 @@ pub(crate) fn resolve_request_timeout_secs(
         .or_else(|| preset.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
         .or_else(|| configured.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
+}
+
+/// Pure resolution of the time-to-first-byte budget, in precedence order:
+/// `AUTONOETIC_LLM_TTFB_TIMEOUT_SECS` (ad-hoc override) → preset-level
+/// `ttfb_timeout_secs` (carried on the resolved `LlmConfig`) → gateway
+/// `llm_ttfb_timeout_secs` → `None`. `None` means "share the request-timeout
+/// budget" — the pre-separation behavior. Values below
+/// [`MIN_REQUEST_TIMEOUT_SECS`] are treated as unset and fall through.
+pub(crate) fn resolve_ttfb_timeout_secs(
+    env: Option<&str>,
+    preset: Option<u64>,
+    configured: Option<u64>,
+) -> Option<u64> {
+    env.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS)
+        .or_else(|| preset.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
+        .or_else(|| configured.filter(|s| *s >= MIN_REQUEST_TIMEOUT_SECS))
 }
 
 pub fn connection_retry_backoff_ms(attempt: u32) -> u64 {
@@ -964,6 +994,17 @@ pub trait LlmDriver: Send + Sync {
     fn request_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS)
     }
+
+    /// The resolved time-to-first-byte budget for this driver, when one is
+    /// configured separately from [`LlmDriver::request_timeout`]. On the
+    /// streaming turn path (#1044) it caps only the wait for the **first**
+    /// stream event (connect + upstream queueing); once the first byte
+    /// arrives, the idle-gap budget takes over for inter-chunk silence.
+    /// `None` (the default) shares the request-timeout budget — the
+    /// historical single-budget behavior.
+    fn ttfb_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
 }
 
 /// Shortest interval between stream heartbeats. Budgets below 4× this never
@@ -996,6 +1037,14 @@ pub(crate) fn stream_heartbeat_interval(idle: std::time::Duration) -> std::time:
 /// stall. A legitimately long generation that keeps emitting is no longer
 /// punished for its length.
 ///
+/// **Separate TTFB budget** — the wait for the *first* byte may carry its own
+/// budget (`driver.ttfb_timeout()`): an overloaded provider can queue a
+/// request far longer than any legitimate mid-stream silence, and a single
+/// shared budget forces operators to either fail fast on queued requests or
+/// tolerate equally long mid-stream stalls. When no separate budget is
+/// configured, the first-byte wait shares the idle-gap budget (the historical
+/// behavior).
+///
 /// **Heartbeat** — an overloaded provider can queue a request for a long time
 /// before the first byte (and a long generation can stream for minutes), so
 /// silence on the console is ambiguous: still waiting, or dead? While the
@@ -1027,10 +1076,15 @@ pub async fn complete_with_stall_detection(
     ctx: activity::LlmTurnCtx,
 ) -> anyhow::Result<CompletionResponse> {
     let idle = driver.request_timeout();
-    let beat = stream_heartbeat_interval(idle);
+    // The wait for the FIRST byte may carry its own budget; without one it
+    // shares the idle-gap budget (single-budget behavior).
+    let ttfb_budget = driver.ttfb_timeout().unwrap_or(idle);
+    let mut beat = stream_heartbeat_interval(ttfb_budget);
     // Publish the live stream to operator surfaces (Session Room activity
-    // strip). The guard removes the entry on every exit path below.
-    let _activity = activity::begin_activity(&ctx, &req.model, idle);
+    // strip). The guard removes the entry on every exit path below. The
+    // registered budget is the one in force at stream start (TTFB); it is
+    // swapped for the idle-gap budget when the first byte arrives.
+    let _activity = activity::begin_activity(&ctx, &req.model, ttfb_budget);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(256);
     let task_driver = driver.clone();
     let task_req = req.clone();
@@ -1047,7 +1101,14 @@ pub async fn complete_with_stall_detection(
     let mut last_event_at = std::time::Instant::now();
     let mut next_beat_at = start + beat;
     loop {
-        let idle_deadline = last_event_at + idle;
+        // Pre-first-byte the deadline is anchored at stream start against the
+        // TTFB budget; after the first event it slides with each chunk against
+        // the idle-gap budget.
+        let idle_deadline = if ttfb.is_none() {
+            start + ttfb_budget
+        } else {
+            last_event_at + idle
+        };
         let wait = next_beat_at
             .min(idle_deadline)
             .saturating_duration_since(std::time::Instant::now());
@@ -1056,12 +1117,20 @@ pub async fn complete_with_stall_detection(
                 last_event_at = std::time::Instant::now();
                 if ttfb.is_none() {
                     ttfb = Some(start.elapsed());
+                    // First byte arrived: the idle-gap budget takes over for
+                    // inter-chunk silence — re-arm the heartbeat cadence and
+                    // swap the registry's displayed budget.
+                    beat = stream_heartbeat_interval(idle);
+                    next_beat_at = last_event_at + beat;
                     // Count the first event's payload in the registry too —
                     // a TextDelta-first stream starts streaming with content.
-                    _activity.mark_first_byte(match &event {
-                        StreamEvent::TextDelta(t) => t.len() as u64,
-                        _ => 0,
-                    });
+                    _activity.mark_first_byte(
+                        match &event {
+                            StreamEvent::TextDelta(t) => t.len() as u64,
+                            _ => 0,
+                        },
+                        idle,
+                    );
                     tracing::info!(
                         target: "autonoetic.llm",
                         model = %req.model,
@@ -1096,6 +1165,9 @@ pub async fn complete_with_stall_detection(
             Ok(None) => break,
             Err(_elapsed) => {
                 let now = std::time::Instant::now();
+                // The budget that tripped (or is ticking): TTFB before the
+                // first byte, the idle-gap budget after.
+                let active_budget = if ttfb.is_none() { ttfb_budget } else { idle };
                 if now >= idle_deadline {
                     // Idle gap exceeded: the upstream stalled. Abort the
                     // attempt; the turn-level failover/retry starts clean.
@@ -1109,7 +1181,7 @@ pub async fn complete_with_stall_detection(
                     tracing::warn!(
                         target: "llm",
                         phase,
-                        idle_ms = idle.as_millis() as u64,
+                        idle_ms = active_budget.as_millis() as u64,
                         ttfb_ms = ttfb.map(|d| d.as_millis() as u64),
                         chunks,
                         text_chars,
@@ -1121,7 +1193,7 @@ pub async fn complete_with_stall_detection(
                          stream {} — no chunk for {}ms (chunks={}, text_chars={}, ttfb_ms={:?})",
                         elapsed_ms,
                         phase,
-                        idle.as_millis(),
+                        active_budget.as_millis(),
                         chunks,
                         text_chars,
                         ttfb.map(|d| d.as_millis()),
@@ -1143,7 +1215,7 @@ pub async fn complete_with_stall_detection(
                         chunks,
                         text_chars,
                         elapsed_ms = start.elapsed().as_millis() as u64,
-                        idle_ms = idle.as_millis() as u64,
+                        idle_ms = active_budget.as_millis() as u64,
                         "LLM stream heartbeat"
                     );
                     next_beat_at = now + beat;
@@ -1259,6 +1331,16 @@ pub fn build_driver(
         config.request_timeout_secs,
         CONFIGURED_REQUEST_TIMEOUT_SECS.get().copied(),
     ));
+    // Same precedence chain for the first-byte budget, except unset means
+    // "share the request timeout" rather than a built-in default.
+    let ttfb_timeout = resolve_ttfb_timeout_secs(
+        std::env::var("AUTONOETIC_LLM_TTFB_TIMEOUT_SECS")
+            .ok()
+            .as_deref(),
+        config.ttfb_timeout_secs,
+        CONFIGURED_TTFB_TIMEOUT_SECS.get().copied(),
+    )
+    .map(std::time::Duration::from_secs);
     let resolved = provider::resolve(
         &config.provider,
         &config.model,
@@ -1273,6 +1355,7 @@ pub fn build_driver(
         config.chat_only,
         config.egress_class,
         request_timeout,
+        ttfb_timeout,
     )?;
 
     // Capture the egress sink before `resolved` is moved into the inner driver.

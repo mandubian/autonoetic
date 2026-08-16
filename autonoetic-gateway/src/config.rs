@@ -29,12 +29,14 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
         }
         apply_prompt_budget_overrides(&config);
         apply_llm_request_timeout(&config);
+        apply_llm_ttfb_timeout(&config);
         Ok(config)
     } else {
         tracing::warn!("Config not found at {}, using defaults", path.display());
         let config = GatewayConfig::default();
         apply_prompt_budget_overrides(&config);
         apply_llm_request_timeout(&config);
+        apply_llm_ttfb_timeout(&config);
         Ok(config)
     }
 }
@@ -75,6 +77,28 @@ fn apply_llm_request_timeout(config: &GatewayConfig) {
         target: "autonoetic::llm",
         applied_secs = secs,
         "Configured per-request LLM timeout applied"
+    );
+}
+
+/// Publish `llm_ttfb_timeout_secs` to the LLM layer — same once-at-load
+/// rationale as [`apply_llm_request_timeout`].
+fn apply_llm_ttfb_timeout(config: &GatewayConfig) {
+    let Some(secs) = config.llm_ttfb_timeout_secs else {
+        return;
+    };
+    if secs < 5 {
+        tracing::warn!(
+            target: "autonoetic::llm",
+            requested = secs,
+            "llm_ttfb_timeout_secs below the 5s floor; sharing the request-timeout budget"
+        );
+        return;
+    }
+    crate::llm::set_configured_ttfb_timeout_secs(Some(secs));
+    tracing::info!(
+        target: "autonoetic::llm",
+        applied_secs = secs,
+        "Configured time-to-first-byte LLM budget applied"
     );
 }
 
@@ -197,6 +221,36 @@ mod tests {
         let cfg: GatewayConfig =
             serde_yaml::from_str("agents_dir: /tmp/agents\n").expect("config must parse");
         assert_eq!(cfg.llm_request_timeout_secs, None);
+    }
+
+    /// Same `deny_unknown_fields` pinning as `llm_request_timeout_secs`: an
+    /// operator must be able to write `llm_ttfb_timeout_secs` and have it
+    /// parse.
+    #[test]
+    fn llm_ttfb_timeout_secs_is_an_accepted_config_key() {
+        let cfg: GatewayConfig =
+            serde_yaml::from_str("agents_dir: /tmp/agents\nllm_ttfb_timeout_secs: 600\n")
+                .expect("config with llm_ttfb_timeout_secs must parse");
+        assert_eq!(cfg.llm_ttfb_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn duplicating_llm_ttfb_timeout_secs_is_rejected() {
+        let err = serde_yaml::from_str::<GatewayConfig>(
+            "agents_dir: /tmp/agents\nllm_ttfb_timeout_secs: 600\nllm_ttfb_timeout_secs: 300\n",
+        )
+        .expect_err("a duplicated key must not parse");
+        assert!(
+            err.to_string().contains("duplicate"),
+            "error should name the duplication, got: {err}"
+        );
+    }
+
+    #[test]
+    fn llm_ttfb_timeout_secs_is_optional() {
+        let cfg: GatewayConfig =
+            serde_yaml::from_str("agents_dir: /tmp/agents\n").expect("config must parse");
+        assert_eq!(cfg.llm_ttfb_timeout_secs, None);
     }
 
     #[test]

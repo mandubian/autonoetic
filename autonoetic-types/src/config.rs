@@ -70,6 +70,15 @@ pub struct LlmPreset {
     /// also makes the retry budget per-preset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+
+    /// Optional per-preset time-to-first-byte budget (seconds) for the
+    /// streaming turn path. Overrides the global `llm_ttfb_timeout_secs` for
+    /// this preset; when both are unset the first-byte wait shares
+    /// `request_timeout_secs`. Give queueing-prone models (overloaded
+    /// upstreams) a long first-byte budget without also tolerating equally
+    /// long mid-stream silences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_timeout_secs: Option<u64>,
 }
 
 /// Schema enforcement mode for agent.spawn payloads.
@@ -1117,6 +1126,21 @@ pub struct GatewayConfig {
     /// runs. Values below 5 are ignored in favour of the built-in default.
     #[serde(default)]
     pub llm_request_timeout_secs: Option<u64>,
+
+    /// Time-to-first-byte budget, in seconds, for a streaming LLM turn.
+    ///
+    /// Unset means the first-byte wait shares `llm_request_timeout_secs` (the
+    /// historical single-budget behavior). Set it when the upstream queues
+    /// requests under load: an overloaded provider can hold a request for
+    /// minutes before emitting the first byte, which is indistinguishable from
+    /// a stall under one shared budget. A separate TTFB budget tolerates the
+    /// queue without also tolerating equally long mid-stream silences.
+    ///
+    /// `AUTONOETIC_LLM_TTFB_TIMEOUT_SECS` overrides this for ad-hoc runs;
+    /// per-preset `ttfb_timeout_secs` overrides it per preset. Values below 5
+    /// are ignored in favour of the request-timeout budget.
+    #[serde(default)]
+    pub llm_ttfb_timeout_secs: Option<u64>,
 
     /// Default orchestrator agent ID for new sessions and workflows.
     /// When set, this agent is used as the lead/planner instead of `planner.default`.
@@ -3582,6 +3606,7 @@ impl Default for GatewayConfig {
             llm_presets: HashMap::new(),
             llm_preset_mapping: HashMap::new(),
             llm_request_timeout_secs: None,
+            llm_ttfb_timeout_secs: None,
             default_orchestrator: default_default_orchestrator(),
             code_analysis: CodeAnalysisConfig::default(),
             capability_delta_gate_mode: CapabilityDeltaGateMode::Strict,
@@ -3868,6 +3893,7 @@ mod tests {
             routing: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }
     }
 
@@ -4081,6 +4107,7 @@ mod tests {
                 routing: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
         config.llm_presets.insert(
@@ -4109,6 +4136,7 @@ mod tests {
                 }),
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
         config
@@ -4148,6 +4176,7 @@ mod tests {
                 }),
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
 
@@ -4177,6 +4206,7 @@ mod tests {
                 routing: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
 
@@ -4215,6 +4245,7 @@ mod tests {
                 }),
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
 
@@ -4257,6 +4288,7 @@ mod tests {
                 routing: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
         config.llm_presets.insert(
@@ -4285,6 +4317,7 @@ mod tests {
                 }),
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
         config

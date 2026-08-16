@@ -879,6 +879,16 @@ llm_presets:
 # e.g. a long-generating `coding` preset at 300 while digest presets stay lean.
 # llm_request_timeout_secs: 120
 
+# Time-to-first-byte budget for a streaming LLM turn, in seconds.
+# Unset (the default) means the first-byte wait shares llm_request_timeout_secs.
+# Set it when the upstream queues requests under load — an overloaded model can
+# hold a request for minutes before emitting the first byte: the queue wait gets
+# this budget while mid-stream silences keep the request-timeout budget, so you
+# tolerate the queue without also tolerating equally long stalls. Env
+# AUTONOETIC_LLM_TTFB_TIMEOUT_SECS overrides it for one-off runs; a fixed
+# preset may override it via `ttfb_timeout_secs`. Values below 5 are ignored.
+# llm_ttfb_timeout_secs: 300
+
 # Role → preset for agent init and agents without manifest llm_preset.
 # In-repo bundles declare llm_preset directly; mapping is fallback + cross-cutting roles.
 llm_preset_mapping:

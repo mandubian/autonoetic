@@ -27,6 +27,7 @@ fn local_preset(model: &str) -> LlmPreset {
         routing: None,
         egress_class: Some(EgressClass::Local),
         request_timeout_secs: None,
+        ttfb_timeout_secs: None,
     }
 }
 

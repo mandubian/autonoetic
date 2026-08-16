@@ -153,6 +153,7 @@ mod tests {
             routing: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }
     }
 
@@ -191,6 +192,7 @@ mod tests {
                 thinking: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             }),
             limits: None,
             background: None,

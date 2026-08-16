@@ -476,6 +476,11 @@ impl LlmDriver for OpenAiDriver {
         self.provider.request_timeout
     }
 
+    /// The separately-configured first-byte budget, when any (#1044).
+    fn ttfb_timeout(&self) -> Option<std::time::Duration> {
+        self.provider.ttfb_timeout
+    }
+
     async fn complete(&self, req: &CompletionRequest) -> anyhow::Result<CompletionResponse> {
         let body = self.build_body(req, false);
 
@@ -1203,6 +1208,7 @@ mod tests {
                 max_tokens: None,
                 egress_class: autonoetic_types::egress::EgressClass::Remote,
                 request_timeout: std::time::Duration::from_secs(120),
+                ttfb_timeout: None,
             },
         )
     }

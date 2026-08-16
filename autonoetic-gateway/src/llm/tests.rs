@@ -775,6 +775,83 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Time-to-first-byte budget resolution — env vs preset vs config vs unset
+    // -----------------------------------------------------------------------
+    //
+    // Same pure-core rationale as `request_timeout_resolution`. The terminal
+    // case differs: unset means "share the request-timeout budget", not a
+    // built-in default.
+    mod ttfb_timeout_resolution {
+        use crate::llm::resolve_ttfb_timeout_secs;
+
+        #[test]
+        fn unset_everywhere_shares_the_request_timeout() {
+            assert_eq!(resolve_ttfb_timeout_secs(None, None, None), None);
+        }
+
+        #[test]
+        fn configured_value_applies_when_env_and_preset_are_absent() {
+            assert_eq!(resolve_ttfb_timeout_secs(None, None, Some(600)), Some(600));
+        }
+
+        #[test]
+        fn env_overrides_configured_value() {
+            assert_eq!(
+                resolve_ttfb_timeout_secs(Some("300"), None, Some(600)),
+                Some(300)
+            );
+        }
+
+        #[test]
+        fn preset_applies_when_env_is_absent() {
+            assert_eq!(resolve_ttfb_timeout_secs(None, Some(300), None), Some(300));
+        }
+
+        #[test]
+        fn preset_beats_gateway_value() {
+            assert_eq!(
+                resolve_ttfb_timeout_secs(None, Some(300), Some(600)),
+                Some(300)
+            );
+        }
+
+        #[test]
+        fn env_beats_preset() {
+            assert_eq!(
+                resolve_ttfb_timeout_secs(Some("900"), Some(300), Some(600)),
+                Some(900)
+            );
+        }
+
+        /// A sub-floor value is a misconfiguration and falls through; when
+        /// nothing usable remains the budget stays unset (shares the request
+        /// timeout) rather than clamping to the floor.
+        #[test]
+        fn sub_floor_values_fall_through() {
+            assert_eq!(
+                resolve_ttfb_timeout_secs(None, Some(4), Some(600)),
+                Some(600)
+            );
+            assert_eq!(resolve_ttfb_timeout_secs(None, Some(4), None), None);
+            assert_eq!(resolve_ttfb_timeout_secs(Some("4"), None, None), None);
+        }
+
+        #[test]
+        fn surrounding_whitespace_in_env_is_tolerated() {
+            assert_eq!(
+                resolve_ttfb_timeout_secs(Some("  300 "), None, None),
+                Some(300)
+            );
+        }
+
+        #[test]
+        fn floor_value_is_accepted() {
+            assert_eq!(resolve_ttfb_timeout_secs(None, None, Some(5)), Some(5));
+            assert_eq!(resolve_ttfb_timeout_secs(Some("5"), None, None), Some(5));
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Fail-fast retry policy — retry_wait_decision / default timeout
     // -----------------------------------------------------------------------
     mod retry_policy {
@@ -1173,10 +1250,12 @@ mod stall_detection {
 
     /// A driver that emits scripted chunks with scripted delays, for timing
     /// tests without a network. `request_timeout` doubles as the idle-gap
-    /// budget the stall detector enforces.
+    /// budget the stall detector enforces; `ttfb` is the optional separate
+    /// first-byte budget (`None` = share the idle budget).
     struct ScriptedDriver {
         script: Vec<(Duration, Option<StreamEvent>)>,
         idle: Duration,
+        ttfb: Option<Duration>,
     }
 
     impl ScriptedDriver {
@@ -1218,6 +1297,10 @@ mod stall_detection {
         fn request_timeout(&self) -> Duration {
             self.idle
         }
+
+        fn ttfb_timeout(&self) -> Option<Duration> {
+            self.ttfb
+        }
     }
 
     fn req() -> CompletionRequest {
@@ -1248,6 +1331,7 @@ mod stall_detection {
         let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
             script: vec![(Duration::from_millis(500), None)], // silence past the gap
             idle: Duration::from_millis(50),
+            ttfb: None,
         });
         let err = complete_with_stall_detection(&driver, &req(), ctx())
             .await
@@ -1267,6 +1351,7 @@ mod stall_detection {
                 (Duration::from_millis(500), None), // then silence
             ],
             idle: Duration::from_millis(50),
+            ttfb: None,
         });
         let err = complete_with_stall_detection(&driver, &req(), ctx())
             .await
@@ -1291,10 +1376,93 @@ mod stall_detection {
                 })
                 .collect(), // total ~300ms, 6× the 50ms idle budget
             idle: Duration::from_millis(50),
+            ttfb: None,
         });
         let resp = complete_with_stall_detection(&driver, &req(), ctx())
             .await
             .expect("long but chatty stream must complete");
+        assert_eq!(resp.text, "hello");
+    }
+
+    /// A separately-configured TTFB budget caps only the first-byte wait: a
+    /// stream silent past that budget stalls pre-first-byte even though the
+    /// (much longer) idle-gap budget would still be ticking.
+    #[tokio::test]
+    async fn separate_ttfb_budget_trips_before_first_byte() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: vec![(Duration::from_millis(500), None)], // silence
+            idle: Duration::from_secs(60),
+            ttfb: Some(Duration::from_millis(50)),
+        });
+        let t0 = std::time::Instant::now();
+        let err = complete_with_stall_detection(&driver, &req(), ctx())
+            .await
+            .expect_err("the ttfb budget must trip");
+        assert!(
+            t0.elapsed() < Duration::from_secs(5),
+            "must trip on the 50ms ttfb budget, not the 60s idle budget"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("llm_transport:timeout"), "{msg}");
+        assert!(msg.contains("stalled before first byte"), "{msg}");
+    }
+
+    /// The inverse handover: the TTFB budget must NOT stretch mid-stream
+    /// gaps. First byte lands inside a long ttfb budget (past what the idle
+    /// budget alone would have allowed), then a gap longer than the idle
+    /// budget — the stall is declared mid-stream, on the idle budget.
+    #[tokio::test]
+    async fn first_byte_hands_over_to_idle_budget() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: vec![
+                // First byte at ~100ms: way over the 50ms idle budget, so only
+                // the 5s ttfb budget lets it through.
+                (
+                    Duration::from_millis(100),
+                    Some(StreamEvent::TextDelta("hi".into())),
+                ),
+                (Duration::from_millis(500), None), // then silence
+            ],
+            idle: Duration::from_millis(50),
+            ttfb: Some(Duration::from_secs(5)),
+        });
+        let err = complete_with_stall_detection(&driver, &req(), ctx())
+            .await
+            .expect_err("mid-stream silence past the idle budget must stall");
+        let msg = err.to_string();
+        assert!(msg.contains("llm_transport:timeout"), "{msg}");
+        assert!(msg.contains("stalled mid-stream"), "{msg}");
+    }
+
+    /// The overloaded-provider shape this split exists for: a long queue
+    /// before the first byte (tolerated by the ttfb budget), then a healthy
+    /// stream flowing well within the idle budget. Must complete.
+    #[tokio::test]
+    async fn queued_first_byte_then_healthy_stream_completes() {
+        let driver: Arc<dyn LlmDriver> = Arc::new(ScriptedDriver {
+            script: vec![
+                (
+                    Duration::from_millis(200), // queueing: 4× the idle budget
+                    Some(StreamEvent::TextDelta("a".into())),
+                ),
+                (
+                    Duration::from_millis(20),
+                    Some(StreamEvent::TextDelta("b".into())),
+                ),
+                (
+                    Duration::from_millis(0),
+                    Some(StreamEvent::Complete {
+                        stop_reason: StopReason::EndTurn,
+                        usage: TokenUsage::default(),
+                    }),
+                ),
+            ],
+            idle: Duration::from_millis(50),
+            ttfb: Some(Duration::from_secs(5)),
+        });
+        let resp = complete_with_stall_detection(&driver, &req(), ctx())
+            .await
+            .expect("a first byte inside the ttfb budget must not stall");
         assert_eq!(resp.text, "hello");
     }
 
@@ -1466,6 +1634,7 @@ mod stall_detection {
                 ),
             ],
             idle: Duration::from_secs(8), // beat every 2s
+            ttfb: None,
         });
         let (buf, _guard) = capture_logs();
         let resp = complete_with_stall_detection(&driver, &req(), ctx()).await;
@@ -1503,6 +1672,7 @@ mod stall_detection {
                 )))
                 .collect(),
             idle: Duration::from_secs(8), // beat every 2s
+            ttfb: None,
         });
         let (buf, _guard) = capture_logs();
         let resp = complete_with_stall_detection(&driver, &req(), ctx()).await;
@@ -1539,6 +1709,7 @@ mod stall_detection {
                 )))
                 .collect(),
             idle: Duration::from_secs(8), // beat every 2s; total run ~0.5s
+            ttfb: None,
         });
         let (buf, _guard) = capture_logs();
         let resp = complete_with_stall_detection(&driver, &req(), ctx()).await;

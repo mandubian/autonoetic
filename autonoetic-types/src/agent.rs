@@ -107,6 +107,16 @@ pub struct LlmConfig {
     /// process-wide budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_timeout_secs: Option<u64>,
+
+    /// Time-to-first-byte budget (seconds) for the streaming turn path,
+    /// carried from the preset at resolve time. `None` means "use the gateway
+    /// default (`llm_ttfb_timeout_secs`), or — when that is unset too — share
+    /// `request_timeout_secs`", preserving the single-budget behavior. An
+    /// overloaded provider can queue a request far longer than any legitimate
+    /// mid-stream silence, so the queue wait gets its own budget instead of
+    /// forcing operators to also tolerate equally long mid-stream gaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_timeout_secs: Option<u64>,
 }
 
 /// Extended thinking / reasoning configuration for models that support it.

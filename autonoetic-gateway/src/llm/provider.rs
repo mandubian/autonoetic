@@ -155,6 +155,10 @@ pub struct ResolvedProvider {
     /// env override → preset field → gateway config → default (#1045).
     /// Drivers read this field; they never read the global themselves.
     pub request_timeout: std::time::Duration,
+    /// Time-to-first-byte budget for the streaming turn path (#1044), resolved
+    /// at build time from env override → preset field → gateway config.
+    /// `None` means "share `request_timeout`" — the single-budget behavior.
+    pub ttfb_timeout: Option<std::time::Duration>,
 }
 
 /// Map a provider name to the reasoning-request schema its API expects.
@@ -414,6 +418,7 @@ pub fn resolve(
     chat_only: bool,
     egress_class_override: Option<EgressClass>,
     request_timeout: std::time::Duration,
+    ttfb_timeout: Option<std::time::Duration>,
 ) -> anyhow::Result<ResolvedProvider> {
     let defaults = provider_defaults(provider);
 
@@ -523,6 +528,7 @@ pub fn resolve(
         max_tokens,
         egress_class,
         request_timeout,
+        ttfb_timeout,
     })
 }
 
@@ -552,6 +558,7 @@ mod tests {
             false,
             override_class,
             std::time::Duration::from_secs(120),
+            None,
         ) {
             Ok(r) => r.egress_class,
             Err(_) => provider_defaults(provider)

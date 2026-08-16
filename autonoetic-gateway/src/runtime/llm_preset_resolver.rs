@@ -53,6 +53,7 @@ pub fn resolve_fixed_preset(preset: &LlmPreset) -> Option<LlmConfig> {
         thinking: preset.thinking.clone(),
         egress_class: preset.egress_class,
         request_timeout_secs: preset.request_timeout_secs,
+        ttfb_timeout_secs: preset.ttfb_timeout_secs,
     })
 }
 
@@ -134,6 +135,7 @@ mod tests {
             routing: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }
     }
 
@@ -162,6 +164,7 @@ mod tests {
             }),
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }
     }
 
