@@ -25,7 +25,7 @@ impl NativeTool for DigestAnnotateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: self.name().to_string(),
-            description: "Add a reasoning, decision, observation, or lesson line to the live session digest (markdown file). Use for audit trail and handoff context without bloating the model transcript.".to_string(),
+            description: "Add ONE reasoning, decision, observation, or lesson line to the live session digest. Annotations are audit notes — they are not work and do not advance the session. Record an event once; do not re-annotate the same event with reworded content, and never annotate in place of acting or ending your turn.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -74,11 +74,19 @@ impl NativeTool for DigestAnnotateTool {
             )
             .to_error_response());
         }
+        let mut annotations_total: Option<u32> = None;
         if let Some(ctx) = run_context {
             if let Some(w) = &ctx.live_digest {
                 if let Ok(mut g) = w.lock() {
                     g.record_annotation(&args.annotation_type, &args.content)?;
                 }
+            }
+            // #1092: echo the running total so redundancy is visible
+            // in-context. The counter is session-scoped; the hint escalates
+            // at 3+ (one or two annotations are legitimate audit notes).
+            if let Some(counter) = &ctx.annotation_counter {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                annotations_total = Some(n);
             }
             if let Some(w) = &ctx.live_report {
                 if let Ok(mut g) = w.lock() {
@@ -119,6 +127,78 @@ impl NativeTool for DigestAnnotateTool {
                 );
             }
         }
-        Ok(serde_json::to_string(&serde_json::json!({ "ok": true }))?)
+        let content_head: String = args.content.trim().chars().take(60).collect();
+        let mut out = serde_json::json!({
+            "ok": true,
+            "recorded": true,
+            "type": args.annotation_type,
+            "content_head": content_head,
+        });
+        if let Some(n) = annotations_total {
+            out["annotations_this_session"] = serde_json::json!(n);
+            if n >= 3 {
+                out["hint"] = serde_json::json!(
+                    "This session already carries several annotations. Annotations are \
+                     audit notes, not work: if the event is already recorded, do not \
+                     re-annotate it with reworded content. If you are waiting on a child \
+                     or an operator decision, END YOUR TURN — the gateway resumes you \
+                     when the result lands. Otherwise take the next real action."
+                );
+            }
+        }
+        Ok(serde_json::to_string(&out)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1092: the result echoes what was recorded (type + content head) so
+    /// redundancy is visible in-context. Without a run context (unit path)
+    /// there is no counter — the echo stays, the count/hint do not.
+    #[test]
+    fn echo_includes_type_and_content_head_without_context() {
+        let out = DigestAnnotateTool
+            .execute(
+                &Default::default(),
+                &crate::policy::PolicyEngine::new(Default::default()),
+                std::path::Path::new("."),
+                None,
+                r#"{"type":"decision","content":"build started"}"#,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("execute");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(v["ok"], serde_json::json!(true));
+        assert_eq!(v["recorded"], serde_json::json!(true));
+        assert_eq!(v["type"], serde_json::json!("decision"));
+        assert_eq!(v["content_head"], serde_json::json!("build started"));
+        assert!(v.get("annotations_this_session").is_none());
+        assert!(v.get("hint").is_none());
+    }
+
+    #[test]
+    fn invalid_type_is_rejected() {
+        let out = DigestAnnotateTool
+            .execute(
+                &Default::default(),
+                &crate::policy::PolicyEngine::new(Default::default()),
+                std::path::Path::new("."),
+                None,
+                r#"{"type":"bogus","content":"x"}"#,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("execute");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(v["ok"], serde_json::json!(false));
     }
 }

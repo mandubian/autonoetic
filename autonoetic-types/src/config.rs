@@ -2616,6 +2616,15 @@ pub struct LoopGuardConfig {
     /// many times, the LoopGuard trips `RepeatedSpawnIdentity`. 0 disables.
     #[serde(default = "default_max_spawn_identity_repeats")]
     pub max_spawn_identity_repeats: u32,
+
+    /// #1092 — floor for consecutive annotation-only LLM rounds. When every
+    /// successful tool call in this many consecutive rounds was an
+    /// annotation tool (`digest_annotate`), the LoopGuard trips
+    /// `RedundantAnnotationLoop`: each such call returns `ok: true` and the
+    /// model paraphrases the content, so fingerprint-based detectors never
+    /// fire — a successful no-op loop. 0 disables.
+    #[serde(default = "default_annotation_repeat_floor")]
+    pub annotation_repeat_floor: u32,
 }
 
 fn default_progress_budget_tools() -> HashMap<String, u32> {
@@ -2648,6 +2657,7 @@ impl Default for LoopGuardConfig {
             recurring_error_distinct_tools: default_recurring_error_distinct_tools(),
             max_irrecoverable_repeats: default_max_irrecoverable_repeats(),
             max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
+            annotation_repeat_floor: default_annotation_repeat_floor(),
         }
     }
 }
@@ -2697,6 +2707,10 @@ fn default_recurring_error_distinct_tools() -> usize {
 }
 
 fn default_max_irrecoverable_repeats() -> u32 {
+    3
+}
+
+fn default_annotation_repeat_floor() -> u32 {
     3
 }
 

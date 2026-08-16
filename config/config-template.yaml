@@ -653,6 +653,10 @@ max_session_turns: 25
 #  recurring_error_distinct_tools: 3
 #  max_irrecoverable_repeats: 3
 #  max_spawn_identity_repeats: 3
+#  # Consecutive LLM rounds whose ONLY successful tool was digest_annotate
+#  # (paraphrased content defeats fingerprint detectors; ok:true resets the
+#  # no-progress counter). 0 disables. (#1092)
+#  annotation_repeat_floor: 3
 
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.

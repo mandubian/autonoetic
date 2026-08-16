@@ -58,6 +58,7 @@ fn run_ctx(session_id: &str, taint: Option<EgressLabel>) -> NativeToolRunContext
         artifact_id: None,
         sentinel_suppress_target: None,
         discovered_tools: None,
+            annotation_counter: None,
         tool_discovery_catalog: None,
         wake_hint: None,
         wake_hints_map: None,

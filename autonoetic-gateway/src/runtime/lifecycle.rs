@@ -295,6 +295,10 @@ pub struct AgentExecutor {
     /// from within the `NativeTool::execute` context. Drained after each tool
     /// batch by the lifecycle loop into `discovered_tools`.
     pub discovered_tools_writer: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Session-scoped annotation counter (#1092) — shared into the tool run
+    /// context so `digest_annotate` can echo the running total and nudge the
+    /// model in-context before the LoopGuard trip fires.
+    pub annotation_counter: std::sync::Arc<std::sync::atomic::AtomicU32>,
 
     /// When true, we already emitted a `context.pressure_high` workflow event at the current
     /// pressure level. Cleared when estimated tokens drop below the threshold (85% of
@@ -547,6 +551,7 @@ impl AgentExecutor {
             session_phase: Default::default(),
             discovered_tools: std::collections::HashSet::new(),
             discovered_tools_writer: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            annotation_counter: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pressure_high_warned: false,
             resolved_inference: None,
             root_budget_exhausted: false,
@@ -4804,6 +4809,7 @@ impl AgentExecutor {
                     artifact_id: self.artifact_id.clone(),
                     sentinel_suppress_target: Some(self.suppress_until_turn.clone()),
                     discovered_tools: Some(self.discovered_tools_writer.clone()),
+                    annotation_counter: Some(self.annotation_counter.clone()),
                     tool_discovery_catalog: Some(std::sync::Arc::new(
                         crate::runtime::active_execution_registry::NativeToolDiscoveryCatalog {
                             registered: self.registry.registered_tool_names(),
@@ -5268,6 +5274,49 @@ impl AgentExecutor {
             // No approval or interaction required — commit assistant message + tool results to history.
             history.push(assistant_msg);
             let mut tool_feedback_events: Vec<FeedbackEvent> = Vec::new();
+
+            // Trip condition #11 (#1092): annotation-only round detection.
+            // Counted per ROUND (one LLM exchange), not per call — a batch of
+            // parallel annotations is one round, and any round carrying a
+            // successful non-annotation call resets the streak. This is the
+            // detector for the observed `digest_annotate` paraphrase loop:
+            // every other guard input (ok:true resets, fingerprint changes on
+            // reworded content) moves the WRONG way on that pattern.
+            {
+                let counts = |r: &str| {
+                    crate::runtime::tool_dispatch::tool_result_counts_as_progress(r)
+                };
+                let mut annotation_successes = 0usize;
+                let mut all_successes = 0usize;
+                let mut annotation_tool = String::new();
+                for (_id, name, result) in &results {
+                    if counts(result) {
+                        all_successes += 1;
+                        if crate::runtime::guard::is_annotation_tool(name) {
+                            annotation_successes += 1;
+                            if annotation_tool.is_empty() {
+                                annotation_tool = name.clone();
+                            }
+                        }
+                    }
+                }
+                if all_successes > 0 && annotation_successes == all_successes {
+                    if let Some(reason) = self
+                        .guard
+                        .register_annotation_round(&annotation_tool)
+                    {
+                        tracing::warn!(
+                            target: "autonoetic::guard",
+                            reason = ?reason,
+                            "Annotation loop guard tripped"
+                        );
+                        self.guard.trip(reason);
+                    }
+                } else {
+                    self.guard.reset_annotation_rounds();
+                }
+            }
+
             for (id, _name, result) in &results {
                 let mut content = result.clone();
                 // First tool result of the session carries the extended

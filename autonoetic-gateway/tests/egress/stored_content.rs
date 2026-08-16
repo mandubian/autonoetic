@@ -69,6 +69,7 @@ fn run_ctx(sink: Option<Sink>, taint: Option<EgressLabel>) -> NativeToolRunConte
         artifact_id: None,
         sentinel_suppress_target: None,
         discovered_tools: None,
+            annotation_counter: None,
         tool_discovery_catalog: None,
         wake_hint: None,
         wake_hints_map: None,
