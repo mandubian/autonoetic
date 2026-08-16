@@ -459,21 +459,67 @@ routing knowledge, the split is wrong.
 4. ~~**Derive the phase at the source, not from tool results.**~~ **Resolved**
    (see §3.5). The child-state notification path is now first-class; the tool
    scan is the fallback rather than the primary mechanism.
-5. **Should `definition()` become context-aware, so a tool can present a
-   narrower schema on turns where the wide one is irrelevant?** Raised by P2:
+5. **How should a tool shed schema that is irrelevant this turn?** Raised by P2:
    the remaining tool-schema weight is *signature*, not procedure, so no amount
-   of prose migration reaches it. `credential_setup`'s `steps` `oneOf` (~2.8k
-   chars) is the type case — needed only on the programmatic path, while the
-   documented planner flow passes `skill_url`.
+   of prose migration reaches it. `credential_setup`'s `steps` `oneOf` is the
+   type case — needed only on the programmatic path, while the documented planner
+   flow passes `skill_url`.
 
-   `NativeTool::definition(&self)` takes no arguments today. Giving it the same
-   `GuidanceContext` the guidance layer already receives would let a tool shed
-   irrelevant schema the same way a block sheds irrelevant prose — with the same
-   soundness obligation: **the narrow schema must never make a legitimate call
-   unconstructable**, so the fallback has to be "widen on demand", not "guess".
-   Options: (a) context-aware `definition()`; (b) a second `definition_full()`
-   surfaced via `tool_discover`; (c) leave it, and accept that tool schemas floor
-   out around 9–10k tokens for the planner.
+   **Two findings sharpen the question.**
 
-   **This gates the remainder of P2** and should be decided before more tools are
-   migrated.
+   *The soundness bar is lower than first stated.* Nothing validates tool
+   arguments against the advertised schema: `validate_against_schema` serves
+   agent I/O (`io.accepts` / `io.returns`), and each tool's `execute` deserializes
+   its full `Args` regardless of what was advertised. No provider is sent
+   `strict: true` either — `strict_schema_anyof` is only a *shape* accommodation
+   for Moonshot/Kimi's schema validator, not opt-in strict function calling. So a
+   narrow schema **cannot mechanically reject a legitimate wide call**. The real
+   failure mode is *discoverability* — the model not knowing the option exists —
+   which makes "narrow standing, widen on demand" safe provided the wide form has
+   a mechanical pointer (`tool_discover` plus a `repair_hint` naming it).
+
+   *De-dup does not dissolve the problem.* Running the P2 de-dup test inside
+   `credential_step_oneof_schema` (branch prose restating the top-level
+   description and the enforced secrets rule) recovered only **184 chars**. The
+   residual is **structural** — four branches × their properties, plus the nested
+   `secret_field_spec_schema` — roughly two-thirds of the tool's remaining
+   4,881 chars. The weight cannot be written away.
+
+   **Options.**
+
+   - **(a) Context-aware `definition()`.** Rejected for this type case. Schemas
+     sit in the cacheable prefix and cannot live in the phase tail, so a
+     mid-session schema change re-embeds everything after it — the problem §3.3
+     solved for guidance, reintroduced. Worse, there is no monotonic fact that
+     correlates with "skill_url vs programmatic": it is an in-session usage
+     decision, and `artifact_built` / `child_spawned` do not track it. Phase-gated
+     schema would be arbitrary here.
+   - **(a′) Static narrowing — `definition_for(&manifest)`.** Cheap to thread
+     (the registry call sites in `lifecycle.rs` and `prompt_budget.rs` already
+     hold the manifest, and an opt-in default keeps the 100+ impls untouched).
+     But **name the qualifying agents before building it**: narrowing is only
+     sound for an agent provably skill_url-only, and `planner.default`'s own
+     SKILL documents both paths. If the list is empty, this is dead machinery.
+   - **(b) Narrow standing schema + `definition_full()` via `tool_discover`.**
+     Cache-free by comparison: discovery already changes the schema section, so
+     narrow→wide piggybacks on an invalidation that happens anyway. Costs one
+     round-trip whenever the wide form is needed.
+   - **(c) Leave it.** Tool schemas floor out around 9–10k tokens for the planner.
+     Still live: `credential_setup` is ~1.2k tokens ≈ 4.4% of planner steady
+     state, so even perfect removal is far from the (already retracted) 40%.
+   - **(d) Split the tool** — `credential_setup` (skill_url) plus a
+     Specialized-tier programmatic variant, hidden from root sessions by
+     progressive disclosure until escalation. Needs **no new mechanism**: it
+     reuses tiering (P5) and `tool_discover`. Wrinkle: the resume path
+     (`credential_id` + `resume_vars`) is common to both and would have to be
+     duplicated or hosted on a third entry — possibly enough mess to sink it.
+
+   **What decides (b) vs (c):** how often the programmatic path is actually used.
+   (b) trades ~700 tokens per turn against one extra round-trip per session that
+   needs the wide form. Rare → (b); routine → (c). That is a query against session
+   history, not a judgement call, and it should be run before building anything.
+
+   **This gates the remainder of P2.** Anything that lands must also survive the
+   Moonshot/Kimi `anyOf`/`oneOf` sanitizer (`sanitize_schema_for_strict_anyof`) —
+   a narrowed schema has fewer branches, not a different shape, so this is a
+   check rather than an obstacle.

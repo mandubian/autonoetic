@@ -1561,7 +1561,9 @@ fn credential_step_oneof_schema() -> serde_json::Value {
         },
         {
             "type": "object",
-            "description": "Gateway prompts the OPERATOR through a secure out-of-band channel for secrets — use this for any secret the human must provide. The secret never enters chat.",
+            // "The secret never enters chat" is the tool description's opening
+            // claim; not repeated here (RFC P2 de-dup).
+            "description": "Gateway prompts the OPERATOR out-of-band — use for any secret the human must provide.",
             "properties": {
                 "step_type": {"const": "user_prompt"},
                 "message": {"type": "string", "description": "Instruction shown to the operator"},
@@ -1587,7 +1589,11 @@ fn credential_step_oneof_schema() -> serde_json::Value {
         },
         {
             "type": "object",
-            "description": "NON-secret question: the tool suspends, you call user_ask with the question, then credential_setup again with credential_id + resume_vars. NEVER for secrets — use user_prompt.",
+            // The suspend/user_ask/resume mechanics are the tool description's
+            // last sentence, and the secrets prohibition is enforced with a
+            // repair hint at execution time — neither is repeated here
+            // (RFC P2 de-dup).
+            "description": "NON-secret question; the call suspends for the operator's answer.",
             "properties": {
                 "step_type": {"const": "user_input"},
                 "question": {"type": "string", "description": "The question to ask (non-secret)"},
