@@ -545,6 +545,7 @@ mod tests {
                 routing: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
         GatewayConfig {

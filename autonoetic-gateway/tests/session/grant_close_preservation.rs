@@ -63,6 +63,7 @@ fn manifest_with(agent_id: &str) -> AgentManifest {
             thinking: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }),
         ..TestManifest::new().build()
     }

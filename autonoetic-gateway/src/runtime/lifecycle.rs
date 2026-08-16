@@ -1255,6 +1255,7 @@ impl AgentExecutor {
             thinking: preset.thinking.clone(),
             egress_class: preset.egress_class,
             request_timeout_secs: preset.request_timeout_secs,
+            ttfb_timeout_secs: preset.ttfb_timeout_secs,
         };
         crate::llm::build_driver(llm_config, self.http_client.clone()).ok()
     }
@@ -3200,6 +3201,7 @@ impl AgentExecutor {
                 thinking: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             };
             let mut routed_llm_cfg = self.manifest.llm_config.clone().unwrap_or(default_cfg);
 
@@ -3862,6 +3864,7 @@ impl AgentExecutor {
                                             thinking: preset.thinking.clone(),
                                             egress_class: preset.egress_class,
                                             request_timeout_secs: preset.request_timeout_secs,
+                                            ttfb_timeout_secs: preset.ttfb_timeout_secs,
                                         });
                                     match fb_config {
                                         Some(config) => {
@@ -6786,6 +6789,7 @@ mod tests {
             thinking: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         });
         let temp = tempdir().expect("tempdir should create");
         let captured = Arc::new(Mutex::new(None));
@@ -7535,6 +7539,7 @@ mod tests {
                 routing: None,
                 egress_class: Some(class),
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         )
     }

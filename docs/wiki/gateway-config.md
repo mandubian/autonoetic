@@ -45,6 +45,14 @@ Keys, in precedence order (highest wins):
 | Per-preset (one LLM profile, e.g. the `coding` preset) | `config:llm_presets.<name>.request_timeout_secs` |
 | Gateway-wide default | `config:llm_request_timeout_secs` |
 
+Default 120 s, floor 5 s. The wait for the **first byte** of a stream can be
+budgeted separately — an overloaded upstream queues far longer than any
+legitimate mid-stream silence: `env:AUTONOETIC_LLM_TTFB_TIMEOUT_SECS` →
+`config:llm_presets.<name>.ttfb_timeout_secs` →
+`config:llm_ttfb_timeout_secs` → unset (shares the request timeout). A
+`stalled before first byte` log line with `idle_ms` equal to the *request*
+timeout is the signature that this split would help.
+
 Default 120 s, floor 5 s. Related but different knobs people confuse with
 it: `config:llm_presets.<name>.context_window_tokens` (prompt budget) and
 the retry caps (not operator-configurable beyond the timeout).
@@ -63,6 +71,7 @@ Live diagnosis the operator can watch: the Session Room activity strip
 `config:llm_presets.<name>.base_url`,
 `config:llm_presets.<name>.api_key_env`,
 `config:llm_presets.<name>.request_timeout_secs`,
+`config:llm_presets.<name>.ttfb_timeout_secs`,
 `config:llm_presets.<name>.fallback_provider`,
 `config:llm_presets.<name>.fallback_model`. Which preset an agent uses *is*
 per-agent (in SKILL.md `llm_preset` + `llm_overrides` for
@@ -122,6 +131,7 @@ problem — say which trip reason fired.
 | Var | Effect |
 |---|---|
 | `env:AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` | LLM per-request timeout; re-read per driver build — no restart |
+| `env:AUTONOETIC_LLM_TTFB_TIMEOUT_SECS` | LLM first-byte (TTFB) budget; unset = shares the request timeout |
 | `env:AUTONOETIC_NODE_ID` / `env:AUTONOETIC_NODE_NAME` | Node identity; `effective-config` mirrors them |
 | `env:AUTONOETIC_LLM_BASE_URL` / `env:AUTONOETIC_LLM_API_KEY` | Endpoint/key override — **gated** by `env:AUTONOETIC_ALLOW_LLM_ENV_OVERRIDES` |
 | `env:AUTONOETIC_SHARED_SECRET` | JSON-RPC ingress auth (required by chat/room/SDK clients) |
@@ -132,7 +142,7 @@ problem — say which trip reason fired.
 | Wrong guess | Reality |
 |---|---|
 | "per-agent timeout in SKILL.md/capabilities" | Transport timeouts are gateway-level; SKILL.md only picks `llm_preset` + `llm_overrides` (temperature, thinking) |
-| `stream_timeout` / `ttfb_timeout` / `llm.timeout` | No such keys. It's `llm_presets.<name>.request_timeout_secs` / `llm_request_timeout_secs` |
+| `stream_timeout` / `ttfb_timeout` / `llm.timeout` | No such keys. It's `llm_presets.<name>.request_timeout_secs` / `llm_request_timeout_secs` — and, for the first-byte wait specifically, `llm_presets.<name>.ttfb_timeout_secs` / `llm_ttfb_timeout_secs` |
 | `AUTONOETIC_*_TIMEOUT_MS` | Env override is `AUTONOETIC_LLM_REQUEST_TIMEOUT_SECS` — seconds, one name |
 | sandbox driver per agent | Sandbox backend selection is gateway/deployment-level, not per-agent config |
 

@@ -269,6 +269,7 @@ impl NativeTool for SkillInstallTool {
                     thinking: preset.thinking.clone(),
                     egress_class: preset.egress_class,
                     request_timeout_secs: preset.request_timeout_secs,
+                    ttfb_timeout_secs: preset.ttfb_timeout_secs,
                 })
         });
 

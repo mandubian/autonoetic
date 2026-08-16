@@ -26,6 +26,7 @@ async fn stream_falls_back_to_json_when_endpoint_does_not_serve_sse() -> anyhow:
         false,
         None,
         std::time::Duration::from_secs(5),
+        None,
     )?;
     let driver: Arc<dyn llm::LlmDriver> =
         Arc::new(llm::openai::OpenAiDriver::new(reqwest::Client::new(), resolved));

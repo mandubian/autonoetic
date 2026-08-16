@@ -138,8 +138,11 @@ impl LlmActivityGuard {
     /// Record the first received event (the TTFB discriminator). `text_chars`
     /// is the payload size of that event — a stream whose first event is a
     /// `TextDelta` (the common shape) must count those chars too, or the
-    /// snapshot underreports.
-    pub fn mark_first_byte(&self, text_chars: u64) {
+    /// snapshot underreports. `idle_budget` is the budget now in force: the
+    /// entry is registered with the TTFB budget (the wait for this very
+    /// event); from here on inter-chunk silence is governed by the idle-gap
+    /// budget, so the displayed "about to stall" denominator must swap.
+    pub fn mark_first_byte(&self, text_chars: u64, idle_budget: Duration) {
         let mut map = lock();
         if let Some(e) = map.get_mut(&self.id) {
             e.phase = LlmStreamPhase::Streaming;
@@ -147,6 +150,7 @@ impl LlmActivityGuard {
             e.last_event_at = Instant::now();
             e.chunks += 1;
             e.text_chars += text_chars;
+            e.idle_budget = idle_budget;
         }
     }
 
@@ -168,7 +172,10 @@ impl Drop for LlmActivityGuard {
     }
 }
 
-/// Register a stream as started (phase: awaiting first byte).
+/// Register a stream as started (phase: awaiting first byte). `idle_budget`
+/// is the budget in force at registration — the TTFB budget; the stall
+/// detector swaps it for the idle-gap budget via
+/// [`LlmActivityGuard::mark_first_byte`] when the first event arrives.
 pub fn begin_activity(ctx: &LlmTurnCtx, model: &str, idle_budget: Duration) -> LlmActivityGuard {
     let id = next_id();
     let now = Instant::now();
@@ -243,7 +250,7 @@ mod tests {
     fn marks_advance_phase_and_counters() {
         let g = begin_activity(&ctx("s2"), "m", Duration::from_secs(10));
         // First event is a TextDelta (common shape): its chars must count.
-        g.mark_first_byte(50);
+        g.mark_first_byte(50, Duration::from_secs(10));
         g.mark_event(120);
         g.mark_event(80);
         let s = snapshot().into_iter().find(|s| s.session_id == "s2").unwrap();
@@ -251,6 +258,26 @@ mod tests {
         assert_eq!(s.chunks, 3);
         assert_eq!(s.text_chars, 250);
         assert!(s.ttfb_ms.is_some());
+        drop(g);
+    }
+
+    #[test]
+    fn first_byte_swaps_displayed_budget() {
+        // Registered with the TTFB budget (the wait for the first event);
+        // once the first byte lands the idle-gap budget governs, and the
+        // snapshot's "about to stall" denominator must reflect that.
+        let g = begin_activity(&ctx("s-budget"), "m", Duration::from_secs(600));
+        let s = snapshot()
+            .into_iter()
+            .find(|s| s.session_id == "s-budget")
+            .unwrap();
+        assert_eq!(s.idle_budget_ms, 600_000);
+        g.mark_first_byte(0, Duration::from_secs(120));
+        let s = snapshot()
+            .into_iter()
+            .find(|s| s.session_id == "s-budget")
+            .unwrap();
+        assert_eq!(s.idle_budget_ms, 120_000);
         drop(g);
     }
 
@@ -274,7 +301,7 @@ mod tests {
     #[test]
     fn awaiting_sorts_above_streaming() {
         let g1 = begin_activity(&ctx("s-flow"), "m", Duration::from_secs(10));
-        g1.mark_first_byte(0);
+        g1.mark_first_byte(0, Duration::from_secs(10));
         let g2 = begin_activity(&ctx("s-wait"), "m", Duration::from_secs(10));
         let snaps = snapshot();
         let wait_first = snaps

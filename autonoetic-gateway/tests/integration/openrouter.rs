@@ -23,6 +23,7 @@ fn make_openrouter_driver(model: &str) -> anyhow::Result<std::sync::Arc<dyn LlmD
         false, // chat_only
         None,  // egress_class (infer from provider defaults)
         std::time::Duration::from_secs(120),
+        None, // ttfb_timeout (share the request timeout)
     )?;
 
     use autonoetic_gateway::llm::openai::OpenAiDriver;

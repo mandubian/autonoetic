@@ -168,6 +168,7 @@ fn resolve_digest_llm_config(config: &GatewayConfig) -> anyhow::Result<LlmConfig
         thinking: None,
         egress_class: None,
         request_timeout_secs: None,
+        ttfb_timeout_secs: None,
     })
 }
 
@@ -234,6 +235,7 @@ fn llm_preset_to_config(p: &LlmPreset) -> LlmConfig {
         thinking: p.thinking.clone(),
         egress_class: p.egress_class,
         request_timeout_secs: p.request_timeout_secs,
+        ttfb_timeout_secs: p.ttfb_timeout_secs,
     }
 }
 

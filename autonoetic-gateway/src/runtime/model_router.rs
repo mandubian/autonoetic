@@ -608,6 +608,7 @@ pub fn create_router_from_preset(
                 thinking: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             });
             (
                 Box::new(LlmClassifierRouter::new(
@@ -633,6 +634,7 @@ pub fn create_router_from_preset(
                 thinking: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             });
             (
                 Box::new(HybridRouter::new(
@@ -682,6 +684,10 @@ pub fn decision_to_llm_config(
         request_timeout_secs: model_entry
             .and_then(|e| e.config.request_timeout_secs)
             .or(base_config.request_timeout_secs),
+        // And the same again for the first-byte budget.
+        ttfb_timeout_secs: model_entry
+            .and_then(|e| e.config.ttfb_timeout_secs)
+            .or(base_config.ttfb_timeout_secs),
     }
 }
 
@@ -711,6 +717,7 @@ mod tests {
                     thinking: None,
                     egress_class: None,
                     request_timeout_secs: None,
+                    ttfb_timeout_secs: None,
                 },
                 tier: CapabilityTier::Premium,
             },
@@ -730,6 +737,7 @@ mod tests {
                     thinking: None,
                     egress_class: None,
                     request_timeout_secs: None,
+                    ttfb_timeout_secs: None,
                 },
                 tier: CapabilityTier::Standard,
             },
@@ -749,6 +757,7 @@ mod tests {
                     thinking: None,
                     egress_class: None,
                     request_timeout_secs: None,
+                    ttfb_timeout_secs: None,
                 },
                 tier: CapabilityTier::Economy,
             },
@@ -770,6 +779,7 @@ mod tests {
             thinking: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }
     }
 

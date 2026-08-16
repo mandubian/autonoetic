@@ -75,6 +75,7 @@ pub fn resolve_compression_llm_config(
                 // even with per-envelope filtering (RFC §5.7).
                 egress_class: preset.egress_class,
                 request_timeout_secs: preset.request_timeout_secs,
+                ttfb_timeout_secs: preset.ttfb_timeout_secs,
             });
         }
         return None;
@@ -95,6 +96,7 @@ pub fn resolve_compression_llm_config(
             thinking: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         });
     }
 
@@ -817,6 +819,7 @@ mod tests {
                 routing: None,
                 egress_class: None,
                 request_timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
         let gateway = ContextCompressionConfig {

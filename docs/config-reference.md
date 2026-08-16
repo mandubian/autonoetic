@@ -745,6 +745,47 @@ llm_presets:
 Because `retry_deadline` derives from the per-attempt timeout, this also
 makes the retry budget per-preset.
 
+### Separating the first-byte budget (TTFB)
+
+On the streaming turn path (#1044) the per-request timeout doubles as the
+**idle-gap** budget: it caps both the wait for the *first* byte and the
+silence between streamed chunks. Those two silences have very different
+causes — the first is upstream queueing (an overloaded model can hold a
+request for minutes before emitting anything), the second is a genuine
+mid-generation stall. Sharing one budget forces a bad trade: fail fast on
+queued requests, or tolerate equally long real stalls.
+
+`llm_ttfb_timeout_secs` splits them. When set, the wait for the first byte
+gets the TTFB budget; once the first byte arrives, inter-chunk silence is
+governed by the (usually shorter) request-timeout budget. When unset, the
+first-byte wait shares the request-timeout budget — the historical behavior.
+
+```yaml
+llm_ttfb_timeout_secs: 300   # unset = share llm_request_timeout_secs; below 5 is ignored
+```
+
+Precedence mirrors the request timeout:
+`AUTONOETIC_LLM_TTFB_TIMEOUT_SECS` → preset `ttfb_timeout_secs` →
+`llm_ttfb_timeout_secs` → share the request timeout. Per preset:
+
+```yaml
+llm_presets:
+  overloaded-model:
+    provider: opencode
+    model: deepseek-v4-flash
+    request_timeout_secs: 120   # mid-stream gaps still fail fast
+    ttfb_timeout_secs: 600      # but a 10-minute queue is tolerated
+```
+
+Diagnosis: the gateway log's `LLM stream heartbeat` lines say
+`phase=awaiting first byte` while the TTFB budget ticks and `phase=streaming`
+afterwards; a stall is logged as `stalled before first byte` (TTFB budget
+tripped) or `stalled mid-stream` (idle-gap budget tripped), and the Session
+Room activity strip shows the budget currently in force. Non-streaming
+`complete()` calls are unaffected — a single request/response has no
+observable first byte, so the per-request timeout remains the only budget
+there.
+
 ## LLM Presets
 
 Unified registry for all LLM configurations. Each preset is either **fixed** (concrete provider/model) or **routing** (dynamic selection from fixed presets at call time).
@@ -770,6 +811,7 @@ Unified registry for all LLM configurations. Each preset is either **fixed** (co
 | `latency.tokens_per_second` | u64 | `null` | Expected output throughput. |
 | `egress_class` | string | inferred | Egress (data localization) classification of the endpoint: `"local"` or `"remote"`. See [RFC: data envelopes](rfc/data-envelopes-egress-localization.md) §5.1. Inferred `local` for `ollama`/`vllm`/`lmstudio`/`llamacpp`, `remote` otherwise (fail-closed). Set explicitly when inference is wrong — e.g. a remote Ollama server (`egress_class: remote`) or a localhost-hosted cloud proxy you want to treat as local. |
 | `request_timeout_secs` | integer | `null` | Per-preset per-request timeout (seconds). Overrides the global `llm_request_timeout_secs` for this preset (#1045) — a long-generating `coding` preset can outlast a `haiku` digest preset. The retry deadline derives from it, so the retry budget is per-preset too. Floor 5s; sub-floor values fall through to the global default. |
+| `ttfb_timeout_secs` | integer | `null` | Per-preset time-to-first-byte budget (seconds) for the streaming turn path. Overrides the global `llm_ttfb_timeout_secs` for this preset; when both are unset the first-byte wait shares `request_timeout_secs`. Give queueing-prone models a long first-byte budget without also tolerating equally long mid-stream silences. Floor 5s. |
 
 ### Routing Preset Fields
 

@@ -72,6 +72,7 @@ fn test_manifest() -> AgentManifest {
             thinking: None,
             egress_class: None,
             request_timeout_secs: None,
+            ttfb_timeout_secs: None,
         }),
         ..TestManifest::new().build()
     }
