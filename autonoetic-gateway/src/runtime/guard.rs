@@ -623,6 +623,9 @@ impl LoopGuard {
     /// legitimately interleaved, not a loop.
     pub fn reset_annotation_rounds(&mut self) {
         self.consecutive_annotation_rounds = 0;
+        // Keep the persisted/debug state honest: a zero streak must not
+        // carry a stale tool name (review #1097/#1093).
+        self.last_annotation_tool.clear();
     }
 
     /// Track an error tool-result for the recurring-unrecoverable-error
@@ -1214,6 +1217,11 @@ mod tests {
         let mut guard = LoopGuard::default();
         assert!(guard.register_annotation_round("digest_annotate").is_none());
         guard.reset_annotation_rounds();
+        assert_eq!(guard.consecutive_annotation_rounds, 0);
+        assert!(
+            guard.last_annotation_tool.is_empty(),
+            "reset must clear the tracked tool name so persisted state stays honest"
+        );
         assert!(guard.register_annotation_round("digest_annotate").is_none());
         assert!(
             guard.register_annotation_round("digest_annotate").is_none(),
