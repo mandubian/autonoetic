@@ -682,9 +682,12 @@ not a fact.
 
 The version that respects it is narrower and better: the gateway **already**
 emits the mechanical facts — `failure_class`, `retry_advice`, `side_effect_state`
-and `agent_outcome` ride on every child-state notification. The planner's SKILL
-never mentioned any of them, and instead carried a prose table re-deriving the
-same conclusions by matching error strings.
+and `agent_outcome` are carried on a child-state notification whenever the
+gateway could determine them (all four are `Option` with
+`skip_serializing_if`, so they are *omitted* rather than null when it could not,
+and absence means "undetermined"). The planner's SKILL never mentioned any of
+them, and instead carried a prose table re-deriving the same conclusions by
+matching error strings.
 
 That is the drift hazard, stated precisely: **two parallel classifications of the
 same failure, one typed and gateway-computed, one prose and hand-maintained.**
@@ -695,10 +698,20 @@ The planner now branches on the typed fields, and the routing table keeps only
 *where to send it* — the judgement the gateway deliberately does not make.
 `retry_advice` settles *whether* to retry; the table settles *where*.
 
-Saving is modest (−239 chars): the correctness gain is the point, not the tokens.
-Which is itself a finding — **P4 was projected at ~2.2k tokens on the assumption
-that the tables could simply be deleted.** They cannot: most rows encode routing
-that is genuinely the planner's, and only the rows restating typed fields were
-removable. The remaining P4 surface (coder's `Permission Denied`,
-`Persistent Test Failure`) should be re-estimated on the same basis before being
-scheduled.
+**The accurate version is 62 chars *longer* than the prose table it replaces.**
+Writing the wire contract correctly costs more than writing it loosely: the
+fields are snake_case (`retry_advice: "do_not_retry"`, not `DoNotRetry`) and
+optional, and doctrine that names the Rust variants tells an agent to match
+values it will never see. A first draft of this section made exactly that
+mistake, which is a good argument for stating serialized values in any doctrine
+that asks an agent to branch on a payload.
+
+So P4 yields **no token saving at all** here — the gain is removing a second,
+drifting classification of the same failure. Which is itself a finding:
+**P4 was projected at ~2.2k tokens on the assumption that the tables could simply
+be deleted.** They cannot. Most rows encode routing that is genuinely the
+planner's, only the rows restating typed fields were removable, and stating the
+replacement correctly costs back what those rows freed. The remaining P4 surface
+(coder's `Permission Denied`, `Persistent Test Failure`) should be re-estimated
+as a **correctness** change with roughly neutral token cost, not as a reduction
+lever.

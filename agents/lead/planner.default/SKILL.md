@@ -527,22 +527,26 @@ Inform user. If they want to continue, respawn (creates a new approval).
 | "no such column" / SQL | Gateway bug — report, don't retry with different strings |
 | "Promotion record not found" | Artifact rebuilt (new digest) — `artifact_diff` the old vs new `artifact_ref`, then re-federate (carry forward any code gate whose reviewed bytes are unchanged; re-run the rest) |
 
-**Child failures arrive typed — branch on the fields, not on error strings.** Every child-state
-notification carries `failure_class`, `retry_advice`, `side_effect_state` and `agent_outcome`,
-computed by the gateway from observed state (P-5.14). `retry_advice` settles *whether* to retry;
-`side_effect_state` warns when the failed stage may already have committed something;
-`agent_outcome: ClarificationNeeded` is penalty-free — answer it rather than treating it as a
-failure. Trust these over any string match: they cannot drift from the code.
+**Child failures arrive typed — branch on the fields, not on error strings.** A child-state
+notification carries `failure_class`, `retry_advice`, `side_effect_state` and `agent_outcome`
+**when the gateway could determine them** (they are omitted, not null, when it could not — so
+absence means "undetermined", and you fall back to reading `summary`). Values are snake_case
+strings: `retry_advice: "do_not_retry"`, `agent_outcome: "clarification_needed"`, and so on.
+
+`retry_advice` settles *whether* to retry; `side_effect_state` warns when the failed stage may
+already have committed something; `agent_outcome: "clarification_needed"` is penalty-free —
+answer it rather than treating it as a failure. Trust these over any string match on the error
+text: they cannot drift from the code.
 
 Routing — *where* to send it — is the judgement left to you:
 
 | Signal | Route |
 |---|---|
-| `DependencyMissing`, or third-party `ModuleNotFoundError` | `packager.default`, retry with the layered `artifact_ref` |
+| `failure_class: "dependency_missing"`, or third-party `ModuleNotFoundError` | `packager.default`, retry with the layered `artifact_ref` |
 | Unit test fails: local module missing, or any other test failure | `coder.default` |
 | `static_evaluator` fails | `coder.default` with the finding; on the rebuild re-run Step 0 preflight **before** re-gating, then `artifact_diff` and carry forward unchanged code gates |
-| `ArtifactInvalid`, or functional artifact failure | `coder.default`; if it recurs, `debugger.default` |
-| `InstallConflict` | `agent_inspect` / `agent_revision_list` — not a coder bug; escalate |
+| `failure_class: "artifact_invalid"`, or functional artifact failure | `coder.default`; if it recurs, `debugger.default` |
+| `failure_class: "install_conflict"` | `agent_inspect` / `agent_revision_list` — not a coder bug; escalate |
 | `stage: "smoke_test_failed"` | `coder.default`, then re-run the factory; never skip the smoke test |
 | `LoopGuard` trip on `sealed_evaluator` | Dep-related → `packager.default`; else `coder.default` / `debugger.default` |
 | Output schema error, `promotion_record` already called | The work completed — proceed, don't re-spawn |
