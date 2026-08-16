@@ -9,7 +9,7 @@
 //! Currently supported:
 //!
 //! - `/session <id>` — switch the room to that root session id
-//! - `/agent <id> [reason...]` — hand the current session to another orchestrator (#1088)
+//! - `/agent <id> [reason...]` — hand the current session to another agent (#1088)
 //! - `/session list [agent]` — list recent sessions (optionally filtered by agent)
 //! - `/session resume` — switch to the most recent session
 //! - `/cron` / `/cron list` — list scheduled jobs for the current session
@@ -36,7 +36,7 @@
 pub enum SlashCommand {
     /// Switch to a specific root session id (already trimmed).
     SwitchSession(String),
-    /// Hand the current session off to another orchestrator (#1088).
+    /// Hand the current session off to another agent (#1088).
     /// `reason` is the operator-facing motive recorded on the causal event.
     Handoff { target_agent_id: String, reason: Option<String> },
     /// Show a list of recent sessions, optionally filtered by agent.
@@ -184,7 +184,7 @@ pub fn help_lines() -> Vec<String> {
         "  /help  /?    this guide".to_string(),
         "  /quit  /q    exit (press q twice to confirm)".to_string(),
         "  /session <id>              switch to a root session".to_string(),
-        "  /agent <id> [reason...]    hand this session to another orchestrator".to_string(),
+        "  /agent <id> [reason...]    hand this session to another agent (root sessions)".to_string(),
         "  /session list|ls [agent]   list recent sessions (1–9 to pick)".to_string(),
         "  /session resume|latest|last [agent]  jump to most recent session".to_string(),
         "  /fork [--at-turn N] [msg]  branch this session and switch to it".to_string(),

@@ -223,6 +223,62 @@ fn handoff_refuses_noop_to_same_agent() {
     assert!(err.contains("already bound"), "{err}");
 }
 
+/// The no-op guard compares the RESOLVED logical agent, not the requested
+/// string. A second alias for the bound agent would be the bypass case — but
+/// the store enforces one alias per agent (`idx_agent_aliases_agent`
+/// UNIQUE(agent_id), every upsert site writes alias_id == agent_id), so the
+/// practical protection is against revision drift (same agent id, different
+/// revision): still a refused no-op with a "promote the alias" hint, never a
+/// pointless rebind of the same logical agent.
+#[test]
+fn handoff_noop_error_names_the_bound_agent() {
+    let sid = "session-handoff-noop";
+    bind_session(sid, "planner.default");
+    let err = handoff(sid, "planner.default", None).expect_err("must fail");
+    assert!(
+        err.contains("already bound to agent 'planner.default'"),
+        "got: {err}"
+    );
+}
+
+/// PR review: handoff is a root-session primitive — a child session's binding
+/// must be refused so the causal event / room bookkeeping cannot split.
+#[test]
+fn handoff_refuses_child_session_binding() {
+    let env = shared();
+    let sid = "session-handoff-child-1";
+    // Bind a CHILD session: root differs from the session id (the shape the
+    // gateway writes for spawned children — `root/child` ids).
+    let alias = env
+        .store
+        .resolve_alias("planner.default")
+        .expect("alias")
+        .expect("seeded");
+    env.store
+        .upsert_session_agent_binding(&SessionAgentBinding {
+            session_id: sid.to_string(),
+            root_session_id: "session-handoff-child-root".to_string(),
+            alias_id: Some(alias.alias_id.clone()),
+            agent_id: "planner.default".to_string(),
+            revision_id: alias.revision_id.clone(),
+            runtime_lock_hash: "sha256:seed-lock".to_string(),
+            constitution_version: None,
+            constitution_digest: None,
+            home_node_id: "gateway".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            requested_target: "planner.default".to_string(),
+        })
+        .expect("bind child");
+    let err = handoff(sid, "planner.collaborative", None).expect_err("must fail");
+    assert!(err.contains("child of root"), "{err}");
+    let after = env
+        .store
+        .get_session_agent_binding(sid)
+        .expect("binding")
+        .expect("bound");
+    assert_eq!(after.agent_id, "planner.default");
+}
+
 #[test]
 fn handoff_updates_parked_residency_agent() {
     let env = shared();
