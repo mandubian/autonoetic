@@ -2,7 +2,7 @@
 //! child PIDs for emergency stop.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 use tokio::task::AbortHandle;
 
@@ -34,6 +34,11 @@ pub struct NativeToolRunContext {
     /// Shared discovered-tools set. `tool_discover` writes here; the lifecycle
     /// reads and drains after tool execution to update the session surface.
     pub discovered_tools: Option<Arc<Mutex<std::collections::HashSet<String>>>>,
+    /// Shared per-executor annotation counter (#1092). `digest_annotate`
+    /// increments it and echoes the running total in its result, so the
+    /// model sees redundancy building up in-context instead of discovering
+    /// it via a LoopGuard trip. Session-scoped like the guard state.
+    pub annotation_counter: Option<Arc<AtomicU32>>,
     /// Capability-filtered native tool catalog used by `tool_discover` to
     /// distinguish available, forbidden, and unmatched requests.
     pub tool_discovery_catalog: Option<Arc<NativeToolDiscoveryCatalog>>,

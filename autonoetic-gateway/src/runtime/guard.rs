@@ -18,6 +18,14 @@
 //!    a pattern that defeats trip condition #1 because each call has a
 //!    different fingerprint and resets `current_loops`.
 //! 4. **Child failure budget**: A separate budget for child task failures.
+//! 5. **Redundant annotation loop** (#1092): the last N consecutive LLM
+//!    rounds produced *only* annotation-tool successes (`digest_annotate`).
+//!    Each call returns `ok: true` (so condition #1 resets) and the model
+//!    paraphrases the content (so the (tool, args) fingerprint changes and
+//!    conditions #3/#5 never fire) — a successful no-op loop that previously
+//!    fell through every detector. Counted per ROUND, not per call: a batch
+//!    of parallel annotations is one round, and any round containing a
+//!    non-annotation successful call resets the streak.
 //!
 //! "Meaningful progress" is determined by a fingerprint of the last
 //! successful tool call. Repeated calls with the same (tool, arguments)
@@ -104,6 +112,16 @@ pub enum LoopGuardTripReason {
         identity_hash: u64,
         occurrences: u32,
     },
+    /// Trip condition #11 (#1092): `rounds` consecutive LLM rounds whose only
+    /// successful tool calls were annotations (`digest_annotate`). Observed
+    /// live: a planner kept "annotating" the same already-spawned task with
+    /// paraphrased content — 8 rounds, all `ok: true`, invisible to every
+    /// other detector because each paraphrase produced a fresh fingerprint.
+    RedundantAnnotationLoop {
+        tool: String,
+        rounds: u32,
+        floor: u32,
+    },
 }
 
 impl LoopGuardTripReason {
@@ -125,6 +143,9 @@ impl LoopGuardTripReason {
             }
             LoopGuardTripReason::RepeatedSpawnIdentity { .. } => {
                 "repeated_spawn_identity"
+            }
+            LoopGuardTripReason::RedundantAnnotationLoop { .. } => {
+                "redundant_annotation_loop"
             }
         }
     }
@@ -160,6 +181,9 @@ impl LoopGuardTripReason {
             LoopGuardTripReason::RepeatedIrrecoverableRejection { .. } => "P-7.7",
             // RFC #776 Part B.4: delegation loop — same child, same contract.
             LoopGuardTripReason::RepeatedSpawnIdentity { .. } => "P-7.19",
+            // #1092: annotations-only rounds are successes with no semantic
+            // progress — same family as the roster fast-path.
+            LoopGuardTripReason::RedundantAnnotationLoop { .. } => "P-7.19",
         }
     }
 }
@@ -261,6 +285,19 @@ pub struct LoopGuard {
     /// Trip condition #10 — threshold for repeated spawn identity.
     #[serde(default = "default_max_spawn_identity_repeats")]
     pub max_spawn_identity_repeats: u32,
+    /// Trip condition #11 (#1092) — consecutive annotation-only LLM rounds.
+    /// The lifecycle calls [`Self::register_annotation_round`] once per tool
+    /// batch whose successful calls were all annotation tools, and
+    /// [`Self::reset_annotation_rounds`] otherwise. 0 disables.
+    #[serde(default)]
+    pub consecutive_annotation_rounds: u32,
+    /// Trip condition #11 — floor for `consecutive_annotation_rounds`.
+    #[serde(default = "default_annotation_repeat_floor")]
+    pub annotation_repeat_floor: u32,
+    /// Trip condition #11 — the annotation tool the streak is counting, so
+    /// the trip reason can name it (single-tool class today).
+    #[serde(default)]
+    pub last_annotation_tool: String,
 }
 
 impl LoopGuard {
@@ -292,6 +329,9 @@ impl LoopGuard {
             trip_reason: None,
             spawn_identity_counts: HashMap::new(),
             max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
+            consecutive_annotation_rounds: 0,
+            annotation_repeat_floor: default_annotation_repeat_floor(),
+            last_annotation_tool: String::new(),
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -326,6 +366,9 @@ impl LoopGuard {
             trip_reason: None,
             spawn_identity_counts: HashMap::new(),
             max_spawn_identity_repeats: cfg.max_spawn_identity_repeats,
+            consecutive_annotation_rounds: 0,
+            annotation_repeat_floor: cfg.annotation_repeat_floor,
+            last_annotation_tool: String::new(),
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -545,6 +588,41 @@ impl LoopGuard {
             return self.trip_reason.clone();
         }
         None
+    }
+
+    /// Trip condition #11 (#1092) — register an annotation-only round: every
+    /// successful tool call in this LLM round was an annotation tool
+    /// ([`is_annotation_tool`]). Returns `Some(reason)` when the streak
+    /// reaches `annotation_repeat_floor` — the caller should emit a causal
+    /// event and trip the guard. No-ops when the detector is disabled (floor
+    /// 0), the guard has already tripped, or repair mode is active.
+    pub fn register_annotation_round(&mut self, tool: &str) -> Option<LoopGuardTripReason> {
+        if self.annotation_repeat_floor == 0
+            || self.trip_reason.is_some()
+            || self.repair_mode
+        {
+            return None;
+        }
+        self.consecutive_annotation_rounds += 1;
+        self.last_annotation_tool = tool.to_string();
+        if self.consecutive_annotation_rounds >= self.annotation_repeat_floor {
+            let reason = LoopGuardTripReason::RedundantAnnotationLoop {
+                tool: tool.to_string(),
+                rounds: self.consecutive_annotation_rounds,
+                floor: self.annotation_repeat_floor,
+            };
+            self.trip_reason = Some(reason.clone());
+            return Some(reason);
+        }
+        None
+    }
+
+    /// Trip condition #11 — reset the annotation-round streak. Called for any
+    /// round that contained a successful non-annotation call (or no success
+    /// at all): real work between annotations means the annotations were
+    /// legitimately interleaved, not a loop.
+    pub fn reset_annotation_rounds(&mut self) {
+        self.consecutive_annotation_rounds = 0;
     }
 
     /// Track an error tool-result for the recurring-unrecoverable-error
@@ -826,6 +904,9 @@ impl Default for LoopGuard {
             trip_reason: None,
             spawn_identity_counts: HashMap::new(),
             max_spawn_identity_repeats: default_max_spawn_identity_repeats(),
+            consecutive_annotation_rounds: 0,
+            annotation_repeat_floor: default_annotation_repeat_floor(),
+            last_annotation_tool: String::new(),
             repair_mode: false,
             repair_loops: 0,
             max_repair_loops: 0,
@@ -917,6 +998,21 @@ fn format_trip_error(reason: &LoopGuardTripReason) -> anyhow::Error {
             tool,
             occurrences
         ),
+        LoopGuardTripReason::RedundantAnnotationLoop {
+            tool,
+            rounds,
+            floor,
+        } => anyhow::anyhow!(
+            "LoopGuard tripped: '{}' was the only successful tool for {} \
+             consecutive rounds (floor {}). Annotations are audit notes, not \
+             work — recording the same event with reworded content advances \
+             nothing. If you already delegated (async spawn), END YOUR TURN: \
+             the gateway resumes you with the child's result (Ri-0.14). If \
+             there is different work to do, do it instead of annotating.",
+            tool,
+            rounds,
+            floor
+        ),
         LoopGuardTripReason::RepeatedSpawnIdentity {
             agent_id,
             occurrences,
@@ -970,6 +1066,23 @@ fn default_max_irrecoverable_repeats() -> u32 {
 /// 3 spawns of the same agent with the same contract + input → trip.
 fn default_max_spawn_identity_repeats() -> u32 {
     3
+}
+
+/// #1092 — default floor for annotation-only rounds. 3 rounds of nothing but
+/// `digest_annotate` (each round = one LLM exchange) is the observed loop
+/// shape; one or two interleaved annotations are legitimate audit notes.
+fn default_annotation_repeat_floor() -> u32 {
+    3
+}
+
+/// Annotation tools (#1092): successes whose only effect is appending a note
+/// to the digest. Rounds consisting solely of these carry no workflow
+/// progress, so a streak of them is a successful no-op loop — each call
+/// returns `ok: true` and paraphrased content defeats fingerprint-based
+/// detectors. Class kept narrow on purpose; extend only with tools whose
+/// repeated success is equally meaningless.
+pub(crate) fn is_annotation_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "digest_annotate")
 }
 
 /// Read-only roster directory tools whose results are idempotent: repeating
@@ -1069,6 +1182,98 @@ mod tests {
             );
         }
         unreachable!("check_loop did not trip");
+    }
+
+
+    // ── #1092: annotation-only round loop ─────────────────────────────
+
+    /// The observed incident: 8 consecutive LLM rounds whose only successful
+    /// tool was `digest_annotate`, each round with *paraphrased* content.
+    /// Fingerprint-based detectors never fire (every fingerprint differs),
+    /// `ok: true` resets the no-progress counter — only round counting sees
+    /// it. Trip at the default floor (3).
+    #[test]
+    fn annotation_only_round_loop_trips() {
+        let mut guard = LoopGuard::default();
+        // Rounds 1 and 2 stay below the floor; round 3 trips.
+        assert!(guard.register_annotation_round("digest_annotate").is_none());
+        assert!(guard.register_annotation_round("digest_annotate").is_none());
+        let reason = guard
+            .register_annotation_round("digest_annotate")
+            .expect("third annotation-only round must trip");
+        assert!(matches!(
+            reason,
+            LoopGuardTripReason::RedundantAnnotationLoop { rounds: 3, floor: 3, .. }
+        ));
+    }
+
+    /// A round with real work between annotations resets the streak —
+    /// interleaved annotations are legitimate audit notes.
+    #[test]
+    fn real_work_between_annotations_resets_the_streak() {
+        let mut guard = LoopGuard::default();
+        assert!(guard.register_annotation_round("digest_annotate").is_none());
+        guard.reset_annotation_rounds();
+        assert!(guard.register_annotation_round("digest_annotate").is_none());
+        assert!(
+            guard.register_annotation_round("digest_annotate").is_none(),
+            "two post-reset rounds are below the floor of 3"
+        );
+        assert!(guard.trip_reason.is_none());
+    }
+
+    /// Floor 0 disables the detector.
+    #[test]
+    fn annotation_loop_disabled_at_floor_zero() {
+        let cfg = autonoetic_types::config::LoopGuardConfig {
+            annotation_repeat_floor: 0,
+            ..Default::default()
+        };
+        let mut guard = LoopGuard::with_config(&cfg);
+        for _ in 0..10 {
+            assert!(guard.register_annotation_round("digest_annotate").is_none());
+        }
+        assert!(guard.trip_reason.is_none());
+    }
+
+    /// The trip message carries the corrective instruction (end your turn —
+    /// Ri-0.14) and the tool name, and rule attribution is P-7.19.
+    #[test]
+    fn annotation_trip_message_and_rule() {
+        let mut guard = LoopGuard::default();
+        guard.register_annotation_round("digest_annotate");
+        guard.register_annotation_round("digest_annotate");
+        let reason = guard
+            .register_annotation_round("digest_annotate")
+            .expect("trip");
+        assert_eq!(reason.code(), "redundant_annotation_loop");
+        assert_eq!(reason.rule_id(), "P-7.19");
+        let err = guard.check_loop().expect_err("guard must trip");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("digest_annotate"), "{msg}");
+        assert!(msg.contains("END YOUR TURN"), "{msg}");
+    }
+
+    /// Guard state round-trips through serde (checkpoint persistence) with
+    /// the new fields — an in-progress streak survives a suspension.
+    #[test]
+    fn annotation_streak_survives_serde_round_trip() {
+        let mut guard = LoopGuard::default();
+        guard.register_annotation_round("digest_annotate");
+        let json = serde_json::to_string(&guard).expect("serialize");
+        let back: LoopGuard = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.consecutive_annotation_rounds, 1);
+        // A guard snapshot missing the new fields (legacy checkpoint shape)
+        // deserializes with the serde defaults: streak 0, default floor.
+        let mut legacy_json = serde_json::to_value(&guard).expect("to value");
+        if let Some(obj) = legacy_json.as_object_mut() {
+            obj.remove("consecutive_annotation_rounds");
+            obj.remove("annotation_repeat_floor");
+            obj.remove("last_annotation_tool");
+        }
+        let back: LoopGuard = serde_json::from_value(legacy_json).expect("legacy parse");
+        assert_eq!(back.consecutive_annotation_rounds, 0);
+        assert_eq!(back.annotation_repeat_floor, 3);
     }
 
     /// Fast-path trip (P-7.19): repeated read-only roster reads with the same

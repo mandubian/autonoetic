@@ -81,6 +81,7 @@ fn sentinel_suppress_accepts_reason_and_emits_causal_event() -> anyhow::Result<(
         artifact_id: None,
         sentinel_suppress_target: Some(target.clone()),
         discovered_tools: None,
+            annotation_counter: None,
         tool_discovery_catalog: None,
         wake_hint: None,
         wake_hints_map: None,

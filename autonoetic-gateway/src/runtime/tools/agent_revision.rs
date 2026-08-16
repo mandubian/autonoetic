@@ -5645,6 +5645,7 @@ mod approval_execution_context_tests {
             artifact_id: None,
             sentinel_suppress_target: None,
             discovered_tools: None,
+            annotation_counter: None,
             tool_discovery_catalog: None,
             wake_hints_map: None,
             wake_hint: None,
