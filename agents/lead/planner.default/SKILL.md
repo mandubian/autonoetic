@@ -527,22 +527,29 @@ Inform user. If they want to continue, respawn (creates a new approval).
 | "no such column" / SQL | Gateway bug — report, don't retry with different strings |
 | "Promotion record not found" | Artifact rebuilt (new digest) — `artifact_diff` the old vs new `artifact_ref`, then re-federate (carry forward any code gate whose reviewed bytes are unchanged; re-run the rest) |
 
-**Child task failures → routing:**
+**Child failures arrive typed — branch on the fields, not on error strings.** A child-state
+notification carries `failure_class`, `retry_advice`, `side_effect_state` and `agent_outcome`
+**when the gateway could determine them** (they are omitted, not null, when it could not — so
+absence means "undetermined", and you fall back to reading `summary`). Values are snake_case
+strings: `retry_advice: "do_not_retry"`, `agent_outcome: "clarification_needed"`, and so on.
 
-| Failure | Action |
+`retry_advice` settles *whether* to retry; `side_effect_state` warns when the failed stage may
+already have committed something; `agent_outcome: "clarification_needed"` is penalty-free —
+answer it rather than treating it as a failure. Trust these over any string match on the error
+text: they cannot drift from the code.
+
+Routing — *where* to send it — is the judgement left to you:
+
+| Signal | Route |
 |---|---|
-| Output schema error (`[output_schema]`) | If `promotion_record` was called, work completed — proceed, don't re-spawn |
-| `dependency_layer_required` | Spawn `packager.default`, retry with layered artifact_ref |
-| Install-state conflict (`already has active revision`, `rollback lineage mismatch`, etc.) | Inspect state (`agent_inspect`, `agent_revision_list`) — NOT a coder bug; escalate |
-| Smoke test failed (`stage: "smoke_test_failed"`) | Route to `coder.default` for fixes, re-run factory. Do NOT skip smoke test |
-| Transient infra failure (5xx, connection) | Environment failure — do NOT restart onboarding or re-spawn coder; escalate if persistent |
-| Static evaluator fails | Read the finding, route the specific fix to `coder.default`. Then, on the rebuilt artifact, in this order: (1) **re-run Step 0 manifest preflight** before spawning any gate — a one-field manifest fix must not let a second latent mismatch burn another full round; (2) `artifact_diff` prior vs current and carry forward `unit_test_runner`/`auditor` when code + contract are byte-identical (and not security-adjacent). Always re-spawn `static_evaluator` — it reviews prose. |
-| Unit test fails: `ModuleNotFoundError` **third-party** (`pytest`, `requests`…) | `packager.default` (code is correct, needs layered deps) |
-| Unit test fails: **local** module missing | `coder.default` (wrong import path / missing file) |
-| Unit test fails: other | Route test output to `coder.default` |
-| Unit tests absent | Proceed without them (no verdict recorded) |
-| LoopGuard trip on sealed_evaluator | Dep-related → packager; else `coder.default` or `debugger.default` |
-| Functional artifact failure | `coder.default` → if unresolved, `debugger.default` |
+| `failure_class: "dependency_missing"`, or third-party `ModuleNotFoundError` | `packager.default`, retry with the layered `artifact_ref` |
+| Unit test fails: local module missing, or any other test failure | `coder.default` |
+| `static_evaluator` fails | `coder.default` with the finding; on the rebuild re-run Step 0 preflight **before** re-gating, then `artifact_diff` and carry forward unchanged code gates |
+| `failure_class: "artifact_invalid"`, or functional artifact failure | `coder.default`; if it recurs, `debugger.default` |
+| `failure_class: "install_conflict"` | `agent_inspect` / `agent_revision_list` — not a coder bug; escalate |
+| `stage: "smoke_test_failed"` | `coder.default`, then re-run the factory; never skip the smoke test |
+| `LoopGuard` trip on `sealed_evaluator` | Dep-related → `packager.default`; else `coder.default` / `debugger.default` |
+| Output schema error, `promotion_record` already called | The work completed — proceed, don't re-spawn |
 
 **`agent_message` validation:** success only when `ok == true`, `status == "delivered"`, `recipients_count > 0`.
 

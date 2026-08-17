@@ -619,3 +619,99 @@ schema, ask the ownership question first:
 
 Candidates to audit on that test, not yet examined: `skill_install`,
 `agent_revision_create_from_intent`, `artifact_prepare`.
+
+---
+
+## 8. P2″ — the ownership audit, and what it did not find
+
+Added 2026-08-16, running §7's test across the fleet.
+
+### 8.1 Negative result
+
+§7's rule says: *if the agent holding a tool must bounce to another agent
+mid-flow because it lacks a capability, the tool is in the wrong place.* Applied
+to every `SKILL.md` (grep for documented "you lack X — delegate to Y" patterns)
+and to the three named candidates, it finds **no second misplacement**:
+
+- **`skill_install`** — declared by **no agent** in the fleet. It is never
+  advertised, so it costs zero prompt. (Worth a separate look as possibly dead
+  capability plumbing; not a prompt-burden item.)
+- **`artifact_prepare`** — held by `executor.default`, which has
+  `ArtifactExecution` + `CredentialAccess` + `CodeExecution`: the full set for
+  one-pass credential resolution → approval → exec. No bounce.
+- **`agent_revision_create_from_intent`** — `specialized_builder.default` holds
+  `AgentRevision`; `agent-factory.default` orchestrates and spawns it. That is
+  pipeline delegation, not a capability bounce.
+
+**So the credential case was exceptional, not the first of many.** Recording the
+negative result matters: it bounds how much more the ownership lever can return,
+and stops the next person re-running the same audit hopefully.
+
+### 8.2 The rule needs one qualifier
+
+The audit found exactly one other documented bounce, in `coder.default`:
+
+> *"You lack `NetworkAccess` — if code needs external packages, return
+> `needs_packager` … so the planner spawns `packager.default`."*
+
+This is a bounce, and it is **correct**. The coder's no-network sandbox is a
+deliberate security boundary (hermetic tests, P-3.10); granting it
+`NetworkAccess` to remove the bounce would trade a real invariant for prompt
+tokens.
+
+So §7's test needs a second clause:
+
+> A mid-flow bounce marks a misplacement **only when no privilege is being
+> contained by it**. If the bounce exists so the holder *cannot* do something,
+> it is a boundary and must stay. The credential case qualified because the
+> receiving specialist held the *same* `CredentialAccess` — nothing was being
+> contained, only fetched.
+
+---
+
+## 9. P4 — first slice, and a constraint the plan missed
+
+### 9.1 The plan conflicted with a decided question
+
+P4 proposed moving the failure-routing tables into `ToolError::repair_hint`,
+i.e. having the gateway emit *where to route* a failure. That collides with an
+established decision: `on_failure` declarative fallback was **rejected** (#14) in
+favour of the gateway staying mechanical (classify / dedupe / wake / bound retry)
+and the agent deciding semantically at the time. Emitting a route is an opinion,
+not a fact.
+
+The version that respects it is narrower and better: the gateway **already**
+emits the mechanical facts — `failure_class`, `retry_advice`, `side_effect_state`
+and `agent_outcome` are carried on a child-state notification whenever the
+gateway could determine them (all four are `Option` with
+`skip_serializing_if`, so they are *omitted* rather than null when it could not,
+and absence means "undetermined"). The planner's SKILL never mentioned any of
+them, and instead carried a prose table re-deriving the same conclusions by
+matching error strings.
+
+That is the drift hazard, stated precisely: **two parallel classifications of the
+same failure, one typed and gateway-computed, one prose and hand-maintained.**
+
+### 9.2 What landed
+
+The planner now branches on the typed fields, and the routing table keeps only
+*where to send it* — the judgement the gateway deliberately does not make.
+`retry_advice` settles *whether* to retry; the table settles *where*.
+
+**The accurate version is 62 chars *longer* than the prose table it replaces.**
+Writing the wire contract correctly costs more than writing it loosely: the
+fields are snake_case (`retry_advice: "do_not_retry"`, not `DoNotRetry`) and
+optional, and doctrine that names the Rust variants tells an agent to match
+values it will never see. A first draft of this section made exactly that
+mistake, which is a good argument for stating serialized values in any doctrine
+that asks an agent to branch on a payload.
+
+So P4 yields **no token saving at all** here — the gain is removing a second,
+drifting classification of the same failure. Which is itself a finding:
+**P4 was projected at ~2.2k tokens on the assumption that the tables could simply
+be deleted.** They cannot. Most rows encode routing that is genuinely the
+planner's, only the rows restating typed fields were removable, and stating the
+replacement correctly costs back what those rows freed. The remaining P4 surface
+(coder's `Permission Denied`, `Persistent Test Failure`) should be re-estimated
+as a **correctness** change with roughly neutral token cost, not as a reduction
+lever.
