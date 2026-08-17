@@ -20,6 +20,7 @@ use autonoetic_gateway::runtime::guidance::{
 };
 #[allow(unused_imports)]
 use autonoetic_gateway::runtime::tools::NativeToolRegistry;
+use autonoetic_gateway::runtime::context::partition_gated_sections;
 use autonoetic_gateway::runtime::parser::{split_extended_instructions, SkillParser};
 use autonoetic_gateway::runtime::tools::{default_registry, ToolTierFilter};
 use autonoetic_types::agent::AgentManifest;
@@ -125,6 +126,9 @@ struct Report {
     tool_chars: usize,
     skill_core: usize,
     skill_extended: usize,
+    /// Sections evicted until a phase is reached (RFC P3), measured at
+    /// `artifact_built`. Absent from turn 1, present in steady state.
+    skill_earned: usize,
     foundation: usize,
     guidance_pre: usize,
     guidance_post: usize,
@@ -164,12 +168,28 @@ fn measure(label: &'static str, rel: &str) -> Report {
     let mut built = SessionPhase::default();
     built.insert(PHASE_ARTIFACT_BUILT);
 
+    // Section gates (RFC P3) evict from the standing body until their phase is
+    // reached. Measure the standing halves, and the earned sections separately,
+    // so turn 1 reflects the eviction and steady state reflects their return.
+    let (core_standing, core_earned) =
+        partition_gated_sections(&core, &manifest.sections, &built);
+    let (ext_standing, ext_earned) = match extended.as_deref() {
+        Some(e) => partition_gated_sections(e, &manifest.sections, &built),
+        None => (String::new(), Vec::new()),
+    };
+    let earned: usize = core_earned
+        .iter()
+        .chain(ext_earned.iter())
+        .map(String::len)
+        .sum();
+
     Report {
         label,
         tools,
         tool_chars,
-        skill_core: core.len(),
-        skill_extended: extended.as_deref().map_or(0, str::len),
+        skill_core: core_standing.len(),
+        skill_extended: ext_standing.len(),
+        skill_earned: earned,
         foundation: foundation_chars(),
         guidance_pre: guidance_for(&manifest, &empty).len(),
         guidance_post: guidance_for(&manifest, &built).len(),
@@ -179,7 +199,12 @@ fn measure(label: &'static str, rel: &str) -> Report {
 fn print_report(r: &Report) {
     let foundation = r.foundation;
     let pre_total = r.tool_chars + r.skill_core + foundation + r.guidance_pre;
-    let post_total = r.tool_chars + r.skill_core + r.skill_extended + foundation + r.guidance_post;
+    let post_total = r.tool_chars
+        + r.skill_core
+        + r.skill_extended
+        + r.skill_earned
+        + foundation
+        + r.guidance_post;
 
     println!("\n=== {} — fixed system prompt ===", r.label);
     println!(
@@ -198,6 +223,13 @@ fn print_report(r: &Report) {
         r.skill_extended,
         tok(r.skill_extended)
     );
+    if r.skill_earned > 0 {
+        println!(
+            "  SKILL.md phase-earned     {:>7} ch  (~{:>5} tok)   [evicted until artifact_built]",
+            r.skill_earned,
+            tok(r.skill_earned)
+        );
+    }
     println!(
         "  foundation layers         {:>7} ch  (~{:>5} tok)",
         foundation,
@@ -220,6 +252,11 @@ fn print_report(r: &Report) {
         tok(pre_total)
     );
     println!(
+        "  ---- working total        {:>7} ch  (~{:>5} tok)   [extended loaded, no phase yet]",
+        r.working_chars(),
+        tok(r.working_chars())
+    );
+    println!(
         "  ---- steady-state total   {:>7} ch  (~{:>5} tok)",
         post_total,
         tok(post_total)
@@ -232,6 +269,7 @@ impl Report {
         self.tool_chars
             + self.skill_core
             + self.skill_extended
+            + self.skill_earned
             + self.foundation
             + self.guidance_post
     }
@@ -243,6 +281,20 @@ impl Report {
     /// exclusions, tiering, and phase gating move both.
     fn turn_one_chars(&self) -> usize {
         self.tool_chars + self.skill_core + self.foundation + self.guidance_pre
+    }
+
+    /// The **modal** turn: extended half loaded (from turn 2 onward, #1015) but
+    /// no phase fact earned yet. This is what a session that never builds an
+    /// artifact pays on every turn — the majority of planner sessions — and it
+    /// is the only total RFC P3's section gating moves. Turn 1 already excludes
+    /// the extended half; steady state measures the post-`artifact_built` state
+    /// where the gated sections have legitimately returned.
+    fn working_chars(&self) -> usize {
+        self.tool_chars
+            + self.skill_core
+            + self.skill_extended
+            + self.foundation
+            + self.guidance_pre
     }
 }
 
@@ -258,15 +310,15 @@ impl Report {
 /// earns its place in *every* turn. If it genuinely does, lower-bound it
 /// deliberately and say why in the commit. As the RFC rollout lands (P2–P5),
 /// these should be ratcheted **down**, never up.
-/// `(turn-1 ceiling, steady-state ceiling)` per agent. **Ratcheted down** as RFC
+/// `(turn-1 ceiling, working ceiling, steady-state ceiling)` per agent. **Ratcheted down** as RFC
 /// phases land — #1085 (collaborative trim) and P2 (this pass) are both locked in
 /// below.
-const PLANNER_CEILINGS: (usize, usize) = (74_000, 102_500);
-const CODER_CEILINGS: (usize, usize) = (60_000, 70_000);
+const PLANNER_CEILINGS: (usize, usize, usize) = (74_000, 90_000, 102_500);
+const CODER_CEILINGS: (usize, usize, usize) = (60_000, 70_000, 70_000);
 /// `planner.collaborative` is the chat-heavy twin and the agent currently being
 /// trimmed by hand (#1085) — which is exactly why it needs a ceiling: hand-tuning
 /// an agent nothing measures is how the prompt got here in the first place.
-const PLANNER_COLLAB_CEILINGS: (usize, usize) = (92_500, 103_000);
+const PLANNER_COLLAB_CEILINGS: (usize, usize, usize) = (92_500, 103_000, 103_000);
 /// The two phase-gated promotion procedures live in **disjoint** agent families,
 /// so covering one does not cover the other:
 ///
@@ -280,12 +332,12 @@ const PLANNER_COLLAB_CEILINGS: (usize, usize) = (92_500, 103_000);
 ///
 /// Both are measured so the phase-gating of each procedure is observable
 /// somewhere. The lead and coder agents see neither tool.
-const UNIT_TEST_RUNNER_CEILINGS: (usize, usize) = (49_500, 50_500);
-const SPECIALIZED_BUILDER_CEILINGS: (usize, usize) = (85_000, 86_000);
+const UNIT_TEST_RUNNER_CEILINGS: (usize, usize, usize) = (49_500, 50_500, 50_500);
+const SPECIALIZED_BUILDER_CEILINGS: (usize, usize, usize) = (85_000, 86_000, 86_000);
 /// Now the sole owner of the credential ceremony, so it absorbs the schema the
 /// planners shed. Measured here so the move is a *transfer with a ceiling*, not
 /// weight pushed somewhere nobody looks.
-const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize) = (56_500, 56_500);
+const CREDENTIAL_ONBOARDING_CEILINGS: (usize, usize, usize) = (56_500, 56_500, 56_500);
 
 #[test]
 fn prompt_composition_report() {
@@ -317,7 +369,7 @@ fn prompt_composition_report() {
     // Tool schemas are the largest SINGLE layer for both main agents. This is
     // the finding the RFC's lever ordering rests on; if it ever stops being
     // true, re-derive the ordering rather than silently ignoring it.
-    for (r, (turn1_ceiling, steady_ceiling)) in [
+    for (r, (turn1_ceiling, working_ceiling, steady_ceiling)) in [
         (&planner, PLANNER_CEILINGS),
         (&coder, CODER_CEILINGS),
         (&collab, PLANNER_COLLAB_CEILINGS),
@@ -329,6 +381,7 @@ fn prompt_composition_report() {
         // visible, this makes it cost something.
         for (label, actual, ceiling) in [
             ("turn-1", r.turn_one_chars(), turn1_ceiling),
+            ("working (no phase reached)", r.working_chars(), working_ceiling),
             ("steady-state", r.steady_state_chars(), steady_ceiling),
         ] {
             assert!(

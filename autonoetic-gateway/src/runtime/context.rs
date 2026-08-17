@@ -340,6 +340,129 @@ pub(crate) fn inline_extended(core: &str, extended: Option<&str>) -> String {
     }
 }
 
+/// Split a `SKILL.md` body into `(standing, earned)` according to its section
+/// gates (RFC P3).
+///
+/// `standing` is everything ungated — the body minus any gated section, order
+/// preserved. `earned` is the gated sections whose phase has been reached, in
+/// **fact-arrival order** so the caller can append them to the prompt tail.
+///
+/// Gating **evicts** rather than defers: an unreached section is absent from the
+/// prompt entirely. That is what makes this worth more than `<!-- extended -->`,
+/// which inlines permanently from turn 2 and so only ever saves one turn.
+///
+/// A gate naming a heading the body does not contain is ignored here — that
+/// error belongs at parse time, where it can name the file. Failing closed at
+/// compose time would silently strip prose from a live session instead.
+pub fn partition_gated_sections(
+    body: &str,
+    gates: &[autonoetic_types::agent::SectionGate],
+    phase: &crate::runtime::guidance::SessionPhase,
+) -> (String, Vec<String>) {
+    if gates.is_empty() {
+        return (body.to_string(), Vec::new());
+    }
+
+    let mut standing: Vec<&str> = Vec::new();
+    // (arrival index, section text) so the tail stays append-only.
+    let mut earned: Vec<(usize, &str)> = Vec::new();
+
+    for section in split_top_level_sections(body) {
+        match gates
+            .iter()
+            .find(|g| section_matches_heading(section, &g.heading))
+        {
+            Some(gate) => {
+                if let Some(at) = gate.phase_fact().and_then(|f| phase.arrival_index(f)) {
+                    earned.push((at, section));
+                }
+                // Gated but not yet reached → evicted from this turn entirely.
+            }
+            None => standing.push(section),
+        }
+    }
+
+    earned.sort_by_key(|(at, _)| *at);
+    // No trimming: the standing body must be the original bytes minus exactly
+    // the evicted sections, matching the byte-identical guarantee the no-gates
+    // path gives. Whitespace normalization belongs to `join_phase_tail`, which
+    // renders the earned sections as standalone blocks.
+    (
+        standing.join(""),
+        earned.into_iter().map(|(_, s)| s.to_string()).collect(),
+    )
+}
+
+/// Split a markdown body on top-level `## ` headings, keeping each heading with
+/// its content. Any prose before the first `##` is its own leading chunk.
+fn split_top_level_sections(body: &str) -> Vec<&str> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut offset = 0usize;
+    for line in body.split_inclusive('\n') {
+        // `## ` but not `### ` — only top-level sections are gateable, so a gate
+        // always carries its subsections with it.
+        if line.starts_with("## ") {
+            starts.push(offset);
+        }
+        offset += line.len();
+    }
+    if starts.is_empty() {
+        return vec![body];
+    }
+
+    let mut out = Vec::new();
+    if starts[0] > 0 {
+        out.push(&body[..starts[0]]);
+    }
+    for (i, start) in starts.iter().enumerate() {
+        let end = starts.get(i + 1).copied().unwrap_or(body.len());
+        out.push(&body[*start..end]);
+    }
+    out
+}
+
+/// Whether `section` opens with the given `## ` heading.
+fn section_matches_heading(section: &str, heading: &str) -> bool {
+    section
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("## "))
+        .is_some_and(|h| h.trim() == heading.trim())
+}
+
+/// Join phase-earned guidance and phase-earned `SKILL.md` sections into the one
+/// tail block that renders at the end of the cache prefix.
+///
+/// Everything that can appear mid-session goes here, so the prefix only ever
+/// grows at its end (§3.3). Guidance first, then sections: guidance is the
+/// mechanical how-to-call layer and sections are role doctrine, matching the
+/// standing order.
+pub(crate) fn join_phase_tail(guidance_tail: &str, earned_sections: &[String]) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    let g = guidance_tail.trim();
+    if !g.is_empty() {
+        parts.push(g);
+    }
+    for section in earned_sections {
+        let s = section.trim();
+        if !s.is_empty() {
+            parts.push(s);
+        }
+    }
+    parts.join("\n\n")
+}
+
+/// Every top-level heading in a body — used by the parser to validate that a
+/// declared gate names a section that actually exists.
+pub fn top_level_headings(body: &str) -> Vec<String> {
+    split_top_level_sections(body)
+        .into_iter()
+        .filter_map(|s| s.lines().next())
+        .filter_map(|l| l.strip_prefix("## "))
+        .map(|h| h.trim().to_string())
+        .collect()
+}
+
 /// Full system prompt composition.
 ///
 /// Layer order (each layer is structurally positioned so it cannot override
@@ -1115,6 +1238,7 @@ mod agentskills_bridging_tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1534,5 +1658,105 @@ mod injected_recall_tests {
             lines[0].contains("newer fact") && lines[1].contains("older fact"),
             "expected recency (newest first) order preserved when task_text is None: {snippet}"
         );
+    }
+}
+
+#[cfg(test)]
+mod section_gate_tests {
+    use super::*;
+    use autonoetic_types::agent::SectionGate;
+    use crate::runtime::guidance::{SessionPhase, PHASE_ARTIFACT_BUILT, PHASE_CHILD_SPAWNED};
+
+    fn gate(heading: &str, fact: &str) -> SectionGate {
+        SectionGate { heading: heading.into(), when: format!("phase({fact})") }
+    }
+
+    const BODY: &str = "intro prose\n\n## Alpha\na\n\n## Gated\ng\n\n### Sub\nsub\n\n## Omega\no\n";
+
+    #[test]
+    fn no_gates_is_passthrough() {
+        // Byte-identical, not merely equivalent: the ~30 agents without gates
+        // must see exactly the body they see today.
+        let (standing, earned) = partition_gated_sections(BODY, &[], &SessionPhase::default());
+        assert_eq!(standing, BODY);
+        assert!(earned.is_empty());
+    }
+
+    #[test]
+    fn gated_section_is_evicted_until_its_phase() {
+        let gates = vec![gate("Gated", PHASE_ARTIFACT_BUILT)];
+        let (standing, earned) = partition_gated_sections(BODY, &gates, &SessionPhase::default());
+        assert!(!standing.contains("## Gated"), "evicted section leaked: {standing}");
+        assert!(standing.contains("## Alpha") && standing.contains("## Omega"));
+        assert!(earned.is_empty());
+        // A gate carries its subsections with it — `### Sub` belongs to `## Gated`.
+        assert!(!standing.contains("### Sub"));
+    }
+
+    #[test]
+    fn gated_section_returns_once_earned() {
+        let gates = vec![gate("Gated", PHASE_ARTIFACT_BUILT)];
+        let mut phase = SessionPhase::default();
+        phase.insert(PHASE_ARTIFACT_BUILT);
+        let (standing, earned) = partition_gated_sections(BODY, &gates, &phase);
+        assert!(!standing.contains("## Gated"), "earned sections render in the tail, not in place");
+        assert_eq!(earned.len(), 1);
+        assert!(earned[0].starts_with("## Gated"));
+        assert!(earned[0].contains("### Sub"));
+    }
+
+    #[test]
+    fn earned_sections_follow_fact_arrival_order() {
+        // `Omega` is gated on the fact earned FIRST, so it must render first —
+        // otherwise the tail is not append-only.
+        let body = "## Alpha\na\n\n## Omega\no\n";
+        let gates = vec![
+            gate("Alpha", PHASE_ARTIFACT_BUILT),
+            gate("Omega", PHASE_CHILD_SPAWNED),
+        ];
+        let mut phase = SessionPhase::default();
+        phase.insert(PHASE_CHILD_SPAWNED);
+        phase.insert(PHASE_ARTIFACT_BUILT);
+        let (_, earned) = partition_gated_sections(body, &gates, &phase);
+        assert_eq!(earned.len(), 2);
+        assert!(earned[0].starts_with("## Omega"), "got {:?}", earned[0]);
+        assert!(earned[1].starts_with("## Alpha"));
+    }
+
+    #[test]
+    fn unmatched_gate_leaves_the_body_intact() {
+        // Compose-time must not fail closed — that would silently strip prose
+        // from a live session. The error belongs at parse time.
+        let gates = vec![gate("Nonexistent", PHASE_ARTIFACT_BUILT)];
+        let (standing, earned) = partition_gated_sections(BODY, &gates, &SessionPhase::default());
+        assert!(standing.contains("## Alpha") && standing.contains("## Gated"));
+        assert!(earned.is_empty());
+    }
+
+    #[test]
+    fn standing_body_is_the_original_bytes_minus_the_evicted_section() {
+        // Stronger than "the section is gone": nothing *else* may change, not
+        // even a trailing newline. The no-gates path is byte-identical, and the
+        // gated path must be byte-identical outside what it evicts.
+        let gates = vec![gate("Gated", PHASE_ARTIFACT_BUILT)];
+        let (standing, _) = partition_gated_sections(BODY, &gates, &SessionPhase::default());
+
+        let evicted = "## Gated\ng\n\n### Sub\nsub\n\n";
+        let expected = BODY.replace(evicted, "");
+        assert_eq!(standing, expected);
+        // Sanity: the fixture really did contain the block we removed.
+        assert!(BODY.contains(evicted));
+    }
+
+    #[test]
+    fn top_level_headings_ignores_subsections() {
+        assert_eq!(top_level_headings(BODY), vec!["Alpha", "Gated", "Omega"]);
+    }
+
+    #[test]
+    fn join_phase_tail_orders_guidance_before_sections() {
+        let out = join_phase_tail("G", &["S1".to_string(), "".to_string(), "S2".to_string()]);
+        assert_eq!(out, "G\n\nS1\n\nS2");
+        assert_eq!(join_phase_tail("", &[]), "");
     }
 }

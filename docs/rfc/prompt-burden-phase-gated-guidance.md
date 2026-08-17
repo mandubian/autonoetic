@@ -448,9 +448,12 @@ routing knowledge, the split is wrong.
 
 ## 8. Open questions
 
-1. **Section-gate syntax for `SKILL.md` (P3).** Frontmatter-declared section
-   gates, or an inline marker like the existing `<!-- extended -->`? The latter
-   is more discoverable to agent authors; the former is easier to validate.
+1. ~~**Section-gate syntax for `SKILL.md` (P3).**~~ **Resolved: frontmatter**
+   (see §10). Inline markers are more discoverable, but a marker that drifts from
+   a renamed heading fails silently — the section then loads always, or never,
+   with nothing to notice. Frontmatter gates are validated at parse time against
+   both the heading list and the phase-fact vocabulary. Silent drift has been the
+   recurring failure mode of this whole effort, so validatability won.
 2. **Should `repair_hint` routing (P4) be data or prose?** A structured
    `{class, suggested_route}` is machine-checkable and testable against the
    enforcement register; prose is what the model actually acts on today.
@@ -715,3 +718,77 @@ replacement correctly costs back what those rows freed. The remaining P4 surface
 (coder's `Permission Denied`, `Persistent Test Failure`) should be re-estimated
 as a **correctness** change with roughly neutral token cost, not as a reduction
 lever.
+
+---
+
+## 10. P3 — section gates: evict, don't defer
+
+Landed 2026-08-17. Resolves OQ1 in favour of **frontmatter-declared** gates.
+
+### 10.1 Syntax and validation
+
+```yaml
+sections:
+  - heading: "Evaluation Federation"
+    when: phase(artifact_built)
+```
+
+A gate names a top-level `##` heading and the phase that must be reached before
+that section enters the prompt. It carries its subsections with it, so `###`
+children move with their parent and cannot be orphaned.
+
+**Why frontmatter over an inline marker.** An inline marker is more discoverable
+— you see it while editing the section — but it can drift from a renamed heading
+and simply stop matching, after which the section silently loads always or never.
+That is the exact failure mode this effort has hit repeatedly (a doctrine table
+diverged from `failure_classification.rs`; three `SKILL.md` files disagreeing
+about one agent; doctrine naming Rust variants the wire never emits). Frontmatter
+gates are validated in `SkillParser::parse`, which rejects:
+
+- a gate naming a heading the body does not contain (and lists the headings it
+  did find);
+- a gate naming a phase fact the gateway never derives (validated against
+  `ALL_PHASE_FACTS`, and lists the known ones);
+- an unparseable `when`.
+
+The discoverability gap is cheap to close — the parse error names the agent and
+the heading. The validation gap in the inline form is not: you would end up
+building this validator anyway, against a weaker source of truth.
+
+### 10.2 Eviction, and where earned sections render
+
+`<!-- extended -->` **defers**: the extended half is inlined permanently from
+turn 2, so it saves exactly one turn. A section gate **evicts**: the section is
+absent until its phase is reached.
+
+Earned sections render in the **phase tail**, next to phase guidance — not back
+in their original position. Re-inserting in place would shift every cached byte
+after the insertion point; appending keeps prefix growth append-only (§3.3).
+Within the tail they are ordered by fact arrival, same as guidance.
+
+Compose-time is deliberately forgiving where parse-time is strict: a gate whose
+heading is missing is *ignored* during composition rather than failing closed,
+because failing closed would silently strip prose from a live session. The error
+belongs at parse time, where it can name the file.
+
+### 10.3 The metric this exposed
+
+Applying gates to the planner's federation cluster changed neither headline
+total, because both gated sections live in the **extended** half — already absent
+at turn 1, and legitimately present in the post-`artifact_built` steady state.
+The win lands between those two points, on the **modal turn**: extended loaded,
+no phase reached, which is every turn of a session that never builds anything.
+
+The harness gained a third measurement for it, `working_chars()`:
+
+| planner.default | before | after |
+|---|---:|---:|
+| turn 1 | 72,000 ch | 72,000 ch (unchanged) |
+| **working (no phase reached)** | 98,769 ch | **88,037 ch (−10.9%)** |
+| steady state (`artifact_built`) | 100,161 ch | 100,161 ch (unchanged) |
+
+**A lever whose effect falls between your measurements looks like a no-op.** P3
+was nearly recorded as one. Both prior levers (extended split, tool exclusions)
+moved turn-1 or steady-state, so those were the two numbers the harness tracked;
+eviction moves neither. All six agents now carry a working-state ceiling
+alongside the other two.
