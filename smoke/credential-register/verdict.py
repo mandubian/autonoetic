@@ -103,12 +103,27 @@ def wait_done(db_path: str, sid: str, timeout: int) -> int:
 
 
 def scan_bytes(path: Path, needle: str) -> int:
-    """Count occurrences of needle in a file's raw bytes (UTF-8 encoded)."""
+    """Count occurrences of needle in a file's raw bytes (UTF-8 encoded).
+
+    Streams in chunks with overlap so a multi-hundred-MB gateway.log or
+    gateway.db(+wal) doesn't have to fit in memory.
+    """
+    chunk = 8 * 1024 * 1024
+    needle_b = needle.encode("utf-8")
+    overlap = len(needle_b) - 1
+    count = 0
+    tail = b""
     try:
-        blob = path.read_bytes()
+        with open(path, "rb") as fh:
+            while True:
+                buf = fh.read(chunk)
+                if not buf:
+                    break
+                count += (tail + buf).count(needle_b)
+                tail = buf[-overlap:] if overlap > 0 else b""
     except FileNotFoundError:
         return 0
-    return blob.count(needle.encode("utf-8"))
+    return count
 
 
 def leak_scan(run_dir: Path, secret: str) -> list[str]:
@@ -173,8 +188,13 @@ def verdict(run_dir: Path, sid: str, secret: str, service: str,
         except sqlite3.OperationalError:
             creds = []
         try:
+            # Scoped to the root-session subtree: `gateway.db` is global, and
+            # this script must stay correct even pointed at a non-fresh store.
             approvals = list(conn.execute(
-                "SELECT action_type, status FROM approvals"))
+                "SELECT action_type, status FROM approvals "
+                "WHERE root_session_id = ? OR root_session_id LIKE ? || '/%' "
+                "OR session_id = ? OR session_id LIKE ? || '/%'",
+                (sid, sid, sid, sid)))
         except sqlite3.OperationalError:
             approvals = []
         tasks = subtree_rows(conn, "task_runs", sid)

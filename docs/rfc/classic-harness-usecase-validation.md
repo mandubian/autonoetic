@@ -338,11 +338,14 @@ While the operator runs cases 3–6 manually, demos get built under
 |---|---|---|
 | `smoke/research-brief` | yes (fetch approvals) | asserts source count + stored artifact mechanically |
 | `smoke/code-edit` | yes (sandbox + promotion) | fixed fixture project; asserts patch-not-rewrite via tool-call counts |
-| `smoke/credential-register` | secret pre-seeded via CLI (`agent credential put`) — the *agent* still goes through check→setup→request | asserts secret absence in all stores |
+| `smoke/credential-register` | yes — CredentialPrompt approved with `--secret` (the non-interactive form of the masked operator entry) | asserts secret absence in all stores; mock service log proves header injection |
 | `smoke/scheduled-heartbeat` | yes (job creation) | asserts tick count + cleanup from causal events |
 
-Case 5's demo pre-seeds the secret because no automated operator should
-hold a real key; the manual run exercises the true human-entry gate.
+Case 5's demo resolves the CredentialPrompt gate with `--secret` (the
+non-interactive equivalent of the masked operator entry) — the full
+agent-driven ceremony runs, and no automated operator ever holds a real
+key (the demo secret is a throwaway); the manual run exercises the true
+human-entry gate against a real service.
 
 ## 6. Conclusion criteria
 

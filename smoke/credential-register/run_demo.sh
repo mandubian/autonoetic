@@ -265,12 +265,16 @@ auto_resolve &
 RESOLVER_PID=$!
 
 # ------------------------------------------------------------------ the run
-# `chat --test-mode` treats each stdin line as ONE event.ingest message —
-# task_prompt.txt is already a single block, sent as-is.
+# `chat --test-mode` treats each stdin line as ONE event.ingest message, so
+# the multi-line prompt must be collapsed onto a single line first (same
+# convention as smoke/yfinance-factory).
+PROMPT_ONEBLOCK="$RUN_DIR/task_prompt.oneblock.txt"
+python3 -c 'import re,sys; print(re.sub(r"\s+", " ", open(sys.argv[1]).read()).strip())' \
+  "$DEMO_DIR/task_prompt.txt" > "$PROMPT_ONEBLOCK"
 log "sending credential task to planner.default (root session: $SID)"
 log "constraints: tokens=$MAX_LLM_TOKENS rounds=$MAX_LLM_ROUNDS tools=$MAX_TOOLS wall=${MAX_WALL}s"
 "$BIN" --config "$CFG" chat --test-mode --session-id "$SID" planner.default \
-  < "$DEMO_DIR/task_prompt.txt" > "$RUN_DIR/reply.txt" 2>&1 || true
+  < "$PROMPT_ONEBLOCK" > "$RUN_DIR/reply.txt" 2>&1 || true
 log "chat returned; waiting for the session tree to go quiet"
 python3 "$DEMO_DIR/verdict.py" wait-done --db "$DB" --sid "$SID" --timeout "$MAX_WALL" || true
 
