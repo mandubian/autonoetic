@@ -523,6 +523,26 @@ impl NativeTool for CredentialRequestTool {
                                 | "undeclared_remote_target"
                         ));
                 if fail_shut {
+                    // A host outside the credential's scope is *always* a
+                    // credential-scope violation, never a declaration-layer
+                    // one: the denial must not depend on which layer
+                    // happened to trip first (review: error taxonomy). The
+                    // later hard binding would return exactly this
+                    // permission denial even if the declaration passed —
+                    // surface the same shape here so callers (and tests)
+                    // see one failure mode for out-of-scope hosts.
+                    if !credential_covers_host
+                        && violation.error_type
+                            != "remote_preapproval_requires_network_capability"
+                    {
+                        return Ok(autonoetic_types::tool_error::ToolError::permission(
+                            format!(
+                                "Credential '{}' for service '{}' is not authorized for host '{}'. Allowed hosts: {:?}",
+                                args.credential_id, cred.service, url_host, cred.allowed_hosts
+                            ),
+                        )
+                        .to_error_response());
+                    }
                     return Ok(json!({
                         "ok": false,
                         "error_type": violation.error_type,

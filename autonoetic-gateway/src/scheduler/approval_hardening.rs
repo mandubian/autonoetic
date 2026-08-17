@@ -135,7 +135,9 @@ fn confirm_phrase_for(action: &ScheduledAction) -> String {
                     url::Url::parse(&url)
                         .ok()
                         .and_then(|u| u.host_str().map(String::from))
-                        .unwrap_or_else(|| url.clone())
+                        // Never fall back to the raw URL: path/query could
+                        // leak into an operator retype prompt (review).
+                        .unwrap_or_else(|| "unparsed-host".to_string())
                 });
             format!("use credential at {}", host)
         }
@@ -233,6 +235,24 @@ mod tests {
             confirm_phrase_for(&action),
             "use credential at example.org"
         );
+    }
+
+    #[test]
+    fn credential_request_phrase_never_leaks_raw_url() {
+        // An unparseable "url" must not surface in an operator retype
+        // prompt — a non-leaking placeholder is used instead (review).
+        let action = ScheduledAction::CredentialRequest {
+            credential_id: "cred_x".to_string(),
+            url: "not a url/with?query=secret".to_string(),
+            method: None,
+            headers: None,
+            body: None,
+            inject_secret_as: None,
+            payload: None,
+        };
+        let phrase = confirm_phrase_for(&action);
+        assert_eq!(phrase, "use credential at unparsed-host");
+        assert!(!phrase.contains("query"));
     }
 
     #[test]

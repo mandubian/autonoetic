@@ -535,7 +535,9 @@ fn run_credential_request(
 #[serial_test::serial]
 fn test_credential_request_uncovered_host_fails_shut_without_declaration() {
     // Empty-targets declaration (the onboarding shape) + a host the
-    // credential does NOT cover: hard error, no gate minted.
+    // credential does NOT cover: hard error, no gate minted. The denial is
+    // a credential-scope violation (permission) regardless of which policy
+    // layer tripped first — one failure mode for out-of-scope hosts.
     let manifest = egress_manifest();
     let policy = PolicyEngine::new(manifest.clone());
     let registry = default_registry();
@@ -555,11 +557,14 @@ fn test_credential_request_uncovered_host_fails_shut_without_declaration() {
     );
 
     assert_eq!(parsed["ok"], false);
-    assert!(
-        parsed["error_type"] == "undeclared_remote_target"
-            || parsed["error_type"] == "missing_remote_access_declaration",
-        "expected a fail-shut declaration error, got: {parsed}"
+    assert_eq!(
+        parsed["error_type"], "permission",
+        "out-of-scope host must read as a credential-scope violation, got: {parsed}"
     );
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap()
+        .contains("is not authorized for host 'evil.com'"));
     assert!(parsed.get("approval_required").is_none());
     // And nothing was minted.
     assert!(store.get_pending_approvals().unwrap().is_empty());
