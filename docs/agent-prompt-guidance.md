@@ -58,6 +58,33 @@ cargo test -p autonoetic-gateway --test prompt_composition_budget -- --nocapture
 If that test fails, a change added weight paid on every turn. The fix is
 normally to gate the addition, not to raise the ceiling.
 
+**Before adding doctrine, apply these three tests in order**
+(evidence and worked examples in [`prompt-burden-study.md`](prompt-burden-study.md)):
+
+1. **Ownership.** Does the agent holding this tool have the full capability set
+   for the flow it belongs to? If it has to bounce to another agent mid-flow —
+   and no privilege is being contained by that bounce — the tool is in the wrong
+   place. *Moving it beats compressing it:* that single question returned 9% of
+   the planner's prompt, against 1.3% for a whole compression pass.
+2. **Phase.** If most sessions never reach the situation this prose describes, it
+   should not be in the prompt from turn 1. Gate it — §2.1 for call mechanics,
+   §2.2 for role doctrine.
+3. **Litmus.** If two agents would write the same sentence, it belongs in
+   neither `SKILL.md`.
+
+And three anti-patterns, each of which cost real time to learn:
+
+- **Moving prose into a `ToolPresent` block does not save tokens.** The block
+  fires exactly when the tool is advertised — i.e. exactly when the description
+  would have been in the prompt. Move it for organisation; gate it on a *phase*
+  for size.
+- **Do not restate a schema field in its own tool description,** and do not
+  pre-load a rule the gateway already enforces with a repair hint.
+- **Never name internal types in doctrine that asks an agent to branch on a
+  payload.** State serialized values (`"do_not_retry"`, not `DoNotRetry`) and say
+  whether the field can be absent. Naming the Rust variant is a silent no-op at
+  runtime.
+
 ## 1. Foundation layers (static, manifest-gated)
 
 `foundation_*.md` files, embedded at compile time and selected by
@@ -187,6 +214,46 @@ real advertised set).
 | `resumption.workflow_state_first` | `workflow_state` | `ToolPresent` | on wake, call `workflow_state` first; never restart |
 | `orchestration.coordinate_children` | `agent_spawn` | `ToolPresent` | yield/Ri-0.14: spawn async → end turn → auto-wake; one `workflow_wait` join; never poll |
 | `federation.escalate_procedure` | `federation_escalate` | ToolPresent **+ Phase** `artifact_built` | how to escalate: read verdicts via `promotion_query`, seed the revision first, worked payload — renders in the phase tail |
+
+### 2.2 Section gates — phase gating for `SKILL.md` role doctrine
+
+Guidance blocks carry *mechanical* doctrine (how to call a tool). Role doctrine
+lives in the `SKILL.md` body, and gets the same phase axis through a frontmatter
+`sections:` declaration:
+
+```yaml
+sections:
+  - heading: "Evaluation Federation"
+    when: phase(artifact_built)
+```
+
+Each entry names a top-level `##` heading and the phase that must be reached
+before it enters the prompt. A gate carries its `###` subsections with it.
+
+**This evicts; `<!-- extended -->` only defers.** The extended half is inlined
+permanently from the first tool call, so that split saves exactly one turn. A
+gated section is *absent* until its phase lands — a planner that never builds
+anything never pays for the federation doctrine at all.
+
+Earned sections render in the **phase tail** beside phase-gated guidance, in
+fact-arrival order, not back in their original position (re-inserting in place
+would shift every cached byte after them).
+
+**Gates are declared in frontmatter, not as inline markers, because they are
+validated.** `SkillParser::parse` rejects four ways of being wrong, each of
+which would otherwise fail silently at runtime:
+
+| Rejected | Why it matters |
+|---|---|
+| heading not present in the body | a renamed heading would silently stop gating |
+| unknown phase fact (checked against `ALL_PHASE_FACTS`) | a typo'd gate would never fire |
+| unparseable `when` | ditto |
+| duplicate gate for one heading | composition uses `.find`, so the later one would be inert |
+
+Composition is deliberately *forgiving* where parsing is strict: an unmatched
+gate is ignored at compose time rather than failing closed, because failing
+closed would strip prose from a live session. The error belongs where it can
+name the file.
 
 ## 3. Output contract (driven by `io.returns`)
 

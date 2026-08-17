@@ -9,6 +9,12 @@ prompts than comparable agent stacks, attributed to "all the rules we impose".
 Measurement does not support that attribution — see §1 — and the real causes
 point somewhere else.
 
+> **Looking for the conclusions rather than the design?** Read
+> [`docs/prompt-burden-study.md`](../prompt-burden-study.md): what the prompt is
+> made of, which levers worked and which did not, and the rules for adding
+> doctrine without regrowing it. This RFC is the design record and keeps the
+> mechanism detail plus the chronological amendments (§9–§12).
+
 **Related:** `docs/agent-prompt-guidance.md` (the three prose mechanisms),
 `autonoetic-gateway/src/runtime/guidance.rs` (block mechanism, #463–#466),
 `autonoetic-gateway/src/runtime/context.rs` (composition, foundation, extended
@@ -385,7 +391,7 @@ emitted next to the classification cannot. This is the existing orchestration
 philosophy — gateway mechanical, agent semantic at decision time — applied in the
 prompt direction, where it has not been applied yet.
 
-**P2′ — Ownership beats compression. ✅ Landed.** See §7.
+**P2′ — Ownership beats compression. ✅ Landed.** See §9.
 
 **P5 — Use the tiering that already exists.** `allowed_tool_tiers` is declared by
 1 of 32 agents. Giving `planner.default` and `coder.default` explicit tiers drops
@@ -449,7 +455,7 @@ routing knowledge, the split is wrong.
 ## 8. Open questions
 
 1. ~~**Section-gate syntax for `SKILL.md` (P3).**~~ **Resolved: frontmatter**
-   (see §10). Inline markers are more discoverable, but a marker that drifts from
+   (see §12). Inline markers are more discoverable, but a marker that drifts from
    a renamed heading fails silently — the section then loads always, or never,
    with nothing to notice. Frontmatter gates are validated at parse time against
    both the heading list and the phase-fact vocabulary. Silent drift has been the
@@ -531,7 +537,7 @@ routing knowledge, the split is wrong.
 
 ---
 
-## 7. Amendment: ownership beats compression (P2′)
+## 9. Amendment: ownership beats compression (P2′)
 
 Added 2026-08-16, after P2 measured 1.3%.
 
@@ -539,7 +545,7 @@ P1–P5 all ask the same question — *how do we carry this prose more cheaply?*
 There is a prior question they skip: **should this agent be carrying it at all?**
 Applied once, to credentials, that question moved 4× what all of P2 achieved.
 
-### 7.1 The finding
+### 9.1 The finding
 
 `credential_setup` was the single heaviest tool schema in the fleet (13% of the
 planner's), and the planner's Decision Flow devoted ~3.6k chars to driving it.
@@ -556,7 +562,7 @@ capability the owner does not have. That is not a prompt-size problem; it is a
 `CredentialAccess` + `NetworkAccess` + `WriteAccess` on `skills/*` — and could do
 fetch → normalize → setup in one session with no bounce.
 
-### 7.2 Why it had been the other way, and why that reason has expired
+### 9.2 Why it had been the other way, and why that reason has expired
 
 The pendulum had already swung twice:
 
@@ -587,7 +593,7 @@ reversal — the planner's manual "ask it to restate" loop becomes gateway repai
 what actually failed. Here the cause was a missing mechanism, and the mechanism
 now exists. Reversing without that check would have re-imported the bug.
 
-### 7.3 Result
+### 9.3 Result
 
 | | before | after |
 |---|---:|---:|
@@ -606,7 +612,7 @@ That is the point worth generalizing: **a transfer is only a win if the receivin
 agent is scoped**. Both agents are now in the budget harness so the move is a
 measured transfer, not weight pushed somewhere nobody looks.
 
-### 7.4 What this changes about the rollout
+### 9.4 What this changes about the rollout
 
 It resolves **OQ5 for its own type case** — the `steps` `oneOf` now lives only on
 a specialist, where it is not paid per-turn by the fleet's busiest agent. No
@@ -625,13 +631,13 @@ Candidates to audit on that test, not yet examined: `skill_install`,
 
 ---
 
-## 8. P2″ — the ownership audit, and what it did not find
+## 10. P2″ — the ownership audit, and what it did not find
 
 Added 2026-08-16, running §7's test across the fleet.
 
-### 8.1 Negative result
+### 10.1 Negative result
 
-§7's rule says: *if the agent holding a tool must bounce to another agent
+§9's rule says: *if the agent holding a tool must bounce to another agent
 mid-flow because it lacks a capability, the tool is in the wrong place.* Applied
 to every `SKILL.md` (grep for documented "you lack X — delegate to Y" patterns)
 and to the three named candidates, it finds **no second misplacement**:
@@ -650,7 +656,7 @@ and to the three named candidates, it finds **no second misplacement**:
 negative result matters: it bounds how much more the ownership lever can return,
 and stops the next person re-running the same audit hopefully.
 
-### 8.2 The rule needs one qualifier
+### 10.2 The rule needs one qualifier
 
 The audit found exactly one other documented bounce, in `coder.default`:
 
@@ -662,7 +668,7 @@ deliberate security boundary (hermetic tests, P-3.10); granting it
 `NetworkAccess` to remove the bounce would trade a real invariant for prompt
 tokens.
 
-So §7's test needs a second clause:
+So §9's test needs a second clause:
 
 > A mid-flow bounce marks a misplacement **only when no privilege is being
 > contained by it**. If the bounce exists so the holder *cannot* do something,
@@ -672,9 +678,9 @@ So §7's test needs a second clause:
 
 ---
 
-## 9. P4 — first slice, and a constraint the plan missed
+## 11. P4 — first slice, and a constraint the plan missed
 
-### 9.1 The plan conflicted with a decided question
+### 11.1 The plan conflicted with a decided question
 
 P4 proposed moving the failure-routing tables into `ToolError::repair_hint`,
 i.e. having the gateway emit *where to route* a failure. That collides with an
@@ -695,7 +701,7 @@ matching error strings.
 That is the drift hazard, stated precisely: **two parallel classifications of the
 same failure, one typed and gateway-computed, one prose and hand-maintained.**
 
-### 9.2 What landed
+### 11.2 What landed
 
 The planner now branches on the typed fields, and the routing table keeps only
 *where to send it* — the judgement the gateway deliberately does not make.
@@ -721,11 +727,11 @@ lever.
 
 ---
 
-## 10. P3 — section gates: evict, don't defer
+## 12. P3 — section gates: evict, don't defer
 
 Landed 2026-08-17. Resolves OQ1 in favour of **frontmatter-declared** gates.
 
-### 10.1 Syntax and validation
+### 12.1 Syntax and validation
 
 ```yaml
 sections:
@@ -755,7 +761,7 @@ The discoverability gap is cheap to close — the parse error names the agent an
 the heading. The validation gap in the inline form is not: you would end up
 building this validator anyway, against a weaker source of truth.
 
-### 10.2 Eviction, and where earned sections render
+### 12.2 Eviction, and where earned sections render
 
 `<!-- extended -->` **defers**: the extended half is inlined permanently from
 turn 2, so it saves exactly one turn. A section gate **evicts**: the section is
@@ -771,7 +777,7 @@ heading is missing is *ignored* during composition rather than failing closed,
 because failing closed would silently strip prose from a live session. The error
 belongs at parse time, where it can name the file.
 
-### 10.3 The metric this exposed
+### 12.3 The metric this exposed
 
 Applying gates to the planner's federation cluster changed neither headline
 total, because both gated sections live in the **extended** half — already absent
