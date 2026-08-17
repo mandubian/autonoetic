@@ -5192,6 +5192,50 @@ fn observe_signal_phase(phase: &mut crate::runtime::guidance::SessionPhase, sign
     }
 }
 
+/// One-line outcome statement for a child-state notification (#1095).
+///
+/// Terminal statuses must lead with the fact: a model with a near-zero
+/// reasoning budget repeats its prior stance ("still waiting") when success
+/// has to be *inferred* from structured state — exactly what happened in the
+/// session-53043b4c smoke (the wake turn answered "still running" about a
+/// task that had succeeded one notification earlier). Non-terminal statuses
+/// return `None` and keep the neutral framing.
+fn child_state_one_liner(notification: &serde_json::Value) -> Option<String> {
+    let status = notification.get("child_status")?.as_str()?;
+    let task_id = notification
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("child task");
+    let summary = notification
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match status {
+        "succeeded" | "failed" | "cancelled" | "aborted" => {
+            let failure_class = notification.get("failure_class").and_then(|v| v.as_str());
+            let mut line = match status {
+                "failed" => format!(
+                    "Child {} FAILED{}.",
+                    task_id,
+                    failure_class
+                        .map(|class| format!(" (class: {})", class))
+                        .unwrap_or_default()
+                ),
+                _ => format!("Child {} {}.", task_id, status.to_uppercase()),
+            };
+            if let Some(summary) = summary {
+                line.push_str(&format!(
+                    " Result: {}",
+                    summary.chars().take(600).collect::<String>()
+                ));
+            }
+            Some(line)
+        }
+        _ => None,
+    }
+}
+
 fn gateway_signal_turn_start_context(
     user_message: &str,
     metadata: Option<&serde_json::Value>,
@@ -5229,20 +5273,37 @@ fn gateway_signal_turn_start_context(
         if let Some(notification_value) = parsed.get("notification") {
             let pretty = serde_json::to_string_pretty(notification_value)
                 .unwrap_or_else(|_| notification_value.to_string());
-            system_messages.push(Message::system(format!(
-                "[gateway child state notification]\n{}",
-                pretty
-            )));
+            // #1095: terminal wakes lead with the outcome. The structured
+            // state stays in the body for detail; the first line states the
+            // fact so a low-reasoning-budget model cannot miss it.
+            let mut content = format!("[gateway child state notification]\n{}", pretty);
+            if let Some(lead) = child_state_one_liner(notification_value) {
+                content = format!("{}\n\n{}", lead, content);
+            }
+            system_messages.push(Message::system(content));
         }
     } else if signal_type == "workflow_join_satisfied" {
         // Include the join payload as a system message so the planner sees
         // which tasks completed and any child summaries embedded in the signal.
         let pretty = serde_json::to_string_pretty(&parsed)
             .unwrap_or_else(|_| parsed.to_string());
-        system_messages.push(Message::system(format!(
-            "[workflow join satisfied]\n{}",
-            pretty
-        )));
+        // #1095: multi-child wakes lead with the count and one-line outcomes
+        // before the structured body.
+        let mut content = format!("[workflow join satisfied]\n{}", pretty);
+        if let Some(summaries) = parsed.get("child_summaries").and_then(|v| v.as_array()) {
+            let lines: Vec<String> = summaries.iter().filter_map(child_state_one_liner).collect();
+            if !lines.is_empty() {
+                let mut lead = format!(
+                    "All {} child task(s) have resolved:",
+                    lines.len()
+                );
+                for line in lines {
+                    lead.push_str(&format!("\n- {}", line));
+                }
+                content = format!("{}\n\n{}", lead, content);
+            }
+        }
+        system_messages.push(Message::system(content));
     }
 
     // Append the workflow status summary (same injection used at hibernate
@@ -5264,8 +5325,25 @@ fn gateway_signal_turn_start_context(
         user_message.to_string()
     } else {
         match signal_type {
-            "child_state_notification" => "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above.".to_string(),
-            "workflow_join_satisfied" => "Workflow join satisfied. The workflow status above is current — you do not need to call workflow_state. Review the completed tasks and continue planning.".to_string(),
+            "child_state_notification" => {
+                let terminal = parsed
+                    .get("notification")
+                    .and_then(|n| n.get("child_status"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| {
+                        matches!(s, "succeeded" | "failed" | "cancelled" | "aborted")
+                    });
+                if terminal {
+                    // #1095: the outcome is final — explicitly supersede any
+                    // prior "I'll wait" stance from the previous turn so the
+                    // model does not repeat it.
+                    "The child outcome above is final — it supersedes any previous wait stance: do not wait again or re-check this child. Continue with your next action; if this was the last outstanding work, produce your final answer for the operator now. The workflow status above is current — you do not need to call workflow_state."
+                        .to_string()
+                } else {
+                    "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above.".to_string()
+                }
+            }
+            "workflow_join_satisfied" => "Workflow join satisfied. The workflow status above is current — you do not need to call workflow_state. The completed-task results above are final — do not re-wait on them. Review the completed tasks and continue planning.".to_string(),
             _ => user_message.to_string(),
         }
     };
@@ -5562,14 +5640,135 @@ mod tests {
 
         assert_eq!(turn_start_messages.len(), 1);
         assert!(matches!(turn_start_messages[0].role, crate::llm::Role::System));
+        // #1095: a terminal wake must lead with the outcome, not bury it in
+        // the structured state.
+        assert!(turn_start_messages[0]
+            .content
+            .starts_with("Child task-1 FAILED (class: policy_denied). Result: approval_rejected"));
         assert!(turn_start_messages[0]
             .content
             .contains("[gateway child state notification]"));
         assert!(turn_start_messages[0].content.contains("\"task_id\": \"task-1\""));
+        assert!(user_message.contains("The child outcome above is final"));
+        assert!(user_message.contains("do not wait again or re-check this child"));
+        assert!(user_message.contains("produce your final answer for the operator now"));
+    }
+
+    #[test]
+    fn child_state_success_wake_leads_with_outcome_and_result() {
+        let message = serde_json::json!({
+            "type": "child_state_notification",
+            "notification": {
+                "workflow_id": "wf-1",
+                "task_id": "task-dd4518e8",
+                "child_session_id": "root/task-dd4518e8",
+                "child_status": "succeeded",
+                "summary": "{\"ok\": true, \"symbol\": \"AAPL\", \"rows\": 5}"
+            }
+        })
+        .to_string();
+        let metadata = serde_json::json!({
+            "signal_delivered": true,
+            "signal_request_id": "wf-child-test"
+        });
+
+        let (turn_start_messages, user_message) =
+            gateway_signal_turn_start_context(&message, Some(&metadata), None, None, "test-session");
+
+        assert_eq!(turn_start_messages.len(), 1);
+        assert!(turn_start_messages[0]
+            .content
+            .starts_with("Child task-dd4518e8 SUCCEEDED. Result: {\"ok\": true, \"symbol\": \"AAPL\", \"rows\": 5}"));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("[gateway child state notification]"));
+        // The structured state is still present for detail.
+        assert!(turn_start_messages[0]
+            .content
+            .contains("\"child_status\": \"succeeded\""));
+        assert!(user_message.contains("The child outcome above is final"));
+        assert!(user_message.contains("it supersedes any previous wait stance"));
+    }
+
+    #[test]
+    fn child_state_non_terminal_wake_keeps_neutral_framing() {
+        let message = serde_json::json!({
+            "type": "child_state_notification",
+            "notification": {
+                "workflow_id": "wf-1",
+                "task_id": "task-1",
+                "child_session_id": "root/task-1",
+                "child_status": "awaiting_approval"
+            }
+        })
+        .to_string();
+        let metadata = serde_json::json!({
+            "signal_delivered": true,
+            "signal_request_id": "wf-child-test"
+        });
+
+        let (turn_start_messages, user_message) =
+            gateway_signal_turn_start_context(&message, Some(&metadata), None, None, "test-session");
+
+        assert_eq!(turn_start_messages.len(), 1);
+        assert!(!turn_start_messages[0].content.starts_with("Child task-1"));
+        assert!(turn_start_messages[0]
+            .content
+            .starts_with("[gateway child state notification]"));
         assert_eq!(
             user_message,
             "Gateway child-state notification delivered. The workflow status above is current — you do not need to call workflow_state. Continue from the current workflow state and use the structured gateway child state above."
         );
+    }
+
+    #[test]
+    fn workflow_join_wake_leads_with_count_and_per_child_outcomes() {
+        let message = serde_json::json!({
+            "type": "workflow_join_satisfied",
+            "workflow_id": "wf-1",
+            "join_task_ids": ["task-a", "task-b"],
+            "child_summaries": [
+                {
+                    "workflow_id": "wf-1",
+                    "task_id": "task-a",
+                    "child_session_id": "root/task-a",
+                    "child_status": "succeeded",
+                    "summary": "{\"ok\": true, \"rows\": 3}"
+                },
+                {
+                    "workflow_id": "wf-1",
+                    "task_id": "task-b",
+                    "child_session_id": "root/task-b",
+                    "child_status": "failed",
+                    "failure_class": "policy_denied",
+                    "summary": "approval_rejected"
+                }
+            ]
+        })
+        .to_string();
+        let metadata = serde_json::json!({
+            "signal_delivered": true,
+            "signal_request_id": "wf-join-test"
+        });
+
+        let (turn_start_messages, user_message) =
+            gateway_signal_turn_start_context(&message, Some(&metadata), None, None, "test-session");
+
+        assert_eq!(turn_start_messages.len(), 1);
+        assert!(turn_start_messages[0]
+            .content
+            .starts_with("All 2 child task(s) have resolved:"));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("\n- Child task-a SUCCEEDED. Result: {\"ok\": true, \"rows\": 3}"));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("\n- Child task-b FAILED (class: policy_denied). Result: approval_rejected"));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("[workflow join satisfied]"));
+        assert!(user_message.contains("The completed-task results above are final — do not re-wait on them"));
+        assert!(user_message.contains("Review the completed tasks and continue planning"));
     }
 
     #[test]
