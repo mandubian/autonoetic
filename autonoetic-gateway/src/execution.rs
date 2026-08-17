@@ -5198,8 +5198,10 @@ fn observe_signal_phase(phase: &mut crate::runtime::guidance::SessionPhase, sign
 /// reasoning budget repeats its prior stance ("still waiting") when success
 /// has to be *inferred* from structured state — exactly what happened in the
 /// session-53043b4c smoke (the wake turn answered "still running" about a
-/// task that had succeeded one notification earlier). Non-terminal statuses
-/// return `None` and keep the neutral framing.
+/// task that had succeeded one notification earlier). `stale` is
+/// terminal-for-join (approval timeouts unblock joins, #722), so a stale
+/// child counts as resolved for join wakes. Non-terminal statuses return
+/// `None` and keep the neutral framing.
 fn child_state_one_liner(notification: &serde_json::Value) -> Option<String> {
     let status = notification.get("child_status")?.as_str()?;
     let task_id = notification
@@ -5212,7 +5214,7 @@ fn child_state_one_liner(notification: &serde_json::Value) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty());
     match status {
-        "succeeded" | "failed" | "cancelled" | "aborted" => {
+        "succeeded" | "failed" | "cancelled" | "aborted" | "stale" => {
             let failure_class = notification.get("failure_class").and_then(|v| v.as_str());
             let mut line = match status {
                 "failed" => format!(
@@ -5291,11 +5293,14 @@ fn gateway_signal_turn_start_context(
         // before the structured body.
         let mut content = format!("[workflow join satisfied]\n{}", pretty);
         if let Some(summaries) = parsed.get("child_summaries").and_then(|v| v.as_array()) {
+            // The count reflects the actual join payload, not the number of
+            // one-liners that could be rendered — entries that carry no
+            // status must not shrink the resolved count (review #1099).
             let lines: Vec<String> = summaries.iter().filter_map(child_state_one_liner).collect();
-            if !lines.is_empty() {
+            if !summaries.is_empty() {
                 let mut lead = format!(
                     "All {} child task(s) have resolved:",
-                    lines.len()
+                    summaries.len()
                 );
                 for line in lines {
                     lead.push_str(&format!("\n- {}", line));
@@ -5769,6 +5774,59 @@ mod tests {
             .contains("[workflow join satisfied]"));
         assert!(user_message.contains("The completed-task results above are final — do not re-wait on them"));
         assert!(user_message.contains("Review the completed tasks and continue planning"));
+    }
+
+    #[test]
+    fn workflow_join_wake_count_reflects_payload_not_rendered_lines() {
+        // A stale child is terminal-for-join and must be counted; an entry
+        // without a status must not shrink the resolved count (review #1099).
+        let message = serde_json::json!({
+            "type": "workflow_join_satisfied",
+            "workflow_id": "wf-1",
+            "join_task_ids": ["task-a", "task-b", "task-c"],
+            "child_summaries": [
+                {
+                    "workflow_id": "wf-1",
+                    "task_id": "task-a",
+                    "child_session_id": "root/task-a",
+                    "child_status": "stale"
+                },
+                {
+                    "workflow_id": "wf-1",
+                    "task_id": "task-b",
+                    "child_session_id": "root/task-b",
+                    "child_status": "succeeded",
+                    "summary": "rows: 3"
+                },
+                {
+                    "workflow_id": "wf-1",
+                    "task_id": "task-c",
+                    "child_session_id": "root/task-c"
+                }
+            ]
+        })
+        .to_string();
+        let metadata = serde_json::json!({
+            "signal_delivered": true,
+            "signal_request_id": "wf-join-test"
+        });
+
+        let (turn_start_messages, _user_message) =
+            gateway_signal_turn_start_context(&message, Some(&metadata), None, None, "test-session");
+
+        assert_eq!(turn_start_messages.len(), 1);
+        assert!(turn_start_messages[0]
+            .content
+            .starts_with("All 3 child task(s) have resolved:"));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("\n- Child task-a STALE."));
+        assert!(turn_start_messages[0]
+            .content
+            .contains("\n- Child task-b SUCCEEDED. Result: rows: 3"));
+        // task-c has no status: counted in the header, no bullet.
+        assert!(!turn_start_messages[0].content.contains("task-c SUCCEEDED"));
+        assert!(!turn_start_messages[0].content.contains("task-c FAILED"));
     }
 
     #[test]
