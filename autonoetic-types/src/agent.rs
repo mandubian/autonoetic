@@ -278,7 +278,7 @@ pub struct AgentManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_tools: Vec<String>,
     /// Per-section gates for the `SKILL.md` body (RFC
-    /// `prompt-burden-phase-gated-guidance`, P3). Each entry names a top-level
+    /// `docs/prompt-burden-study.md`, P3). Each entry names a top-level
     /// `##` heading and the session phase that must be reached before that
     /// section enters the prompt. Ungated sections are always present.
     ///

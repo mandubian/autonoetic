@@ -36,6 +36,8 @@ are in [`archived/`](archived/).
 - [`agent-learning.md`](./agent-learning.md) — Learning and memory retrieval.
 - [`context-compression.md`](./context-compression.md) — Context governor and overflow handling.
 - [`prompt-budget.md`](./prompt-budget.md) — Prompt budget controls.
+- [`prompt-burden-study.md`](./prompt-burden-study.md) — What makes the system prompt large and what actually shrank it: per-layer measurement, levers that worked vs. did not, and the rules to apply before adding doctrine.
+- [`agent-prompt-guidance.md`](./agent-prompt-guidance.md) — How the prompt is composed, and how to add doctrine (foundation layers, guidance blocks, phase and section gates, output contract).
 - [`session-budget.md`](./session-budget.md) — Session budget behavior.
 - [`budget-management.md`](./budget-management.md) — Broader budget policies.
 - [`approved-resources-caching.md`](./approved-resources-caching.md) — Approval/exec cache.
