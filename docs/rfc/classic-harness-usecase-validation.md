@@ -252,22 +252,20 @@ gate is confusing", or the redacted response still echoes the key.
    instructing pure-JSON final messages in delegation; the product fix
    (repair respawn on output_schema, or prose-stripping fallback) is
    open.
-4. *`credential_request` is unusable by installed agents*: the
+4. *`credential_request` is unusable by most installed agents*: the
    remote-target policy (`enforce_remote_target_policy`,
    `DeclarationRequirement::Required` + `Enforce`) requires the calling
    agent's SKILL.md `metadata.autonoetic.remote_access.targets` to cover
-   the destination host — and every reference agent ships `targets: []`.
-   The ceremony agent (which *created* the credential with
-   `allowed_hosts: ["127.0.0.1"]`) cannot then *use* it: the policy
-   hard-errors before any operator gate, and the lawful-next-move table's
-   answer is an agent-factory rebuild to widen a static declaration — a
-   full pipeline to make one GET. The demo falls back to the sanctioned
-   sandbox door (`executor.default` + `sandbox_exec` + `credential_env`,
-   gated by approval grants — the yfinance-proven path); the secret stays
-   vault-injected either way. Open product question: should a
-   credential's own `allowed_hosts` (operator-approved at the gate)
-   satisfy or at least route into an approvable flow for the
-   remote-target policy?
+   the destination host. The ceremony agent (which *created* the
+   credential with `allowed_hosts: ["127.0.0.1"]`) cannot then *use* it —
+   the policy hard-errors before any operator gate, and the
+   lawful-next-move table's answer is an agent-factory rebuild to widen a
+   static declaration. The demo completed only because
+   `executor.default` ships `targets: [{kind: "any"}]` — i.e. the
+   runtime host approval was the effective control anyway. Product
+   proposal: [`credential-egress-host-authorization.md`](credential-egress-host-authorization.md)
+   — route `allowed_hosts` through a host-named approval instead of
+   either bypassing (exfiltration risk) or rebuilding.
 
 ### 3.6 Case 6 — Scheduled recurring task
 
