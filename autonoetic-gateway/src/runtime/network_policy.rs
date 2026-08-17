@@ -238,6 +238,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,

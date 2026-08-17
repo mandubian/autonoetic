@@ -59,6 +59,17 @@ pub const PHASE_CHILD_SPAWNED: &str = "child_spawned";
 /// A credential has been configured this session.
 pub const PHASE_CREDENTIAL_CONFIGURED: &str = "credential_configured";
 
+/// Every phase fact the gateway can derive. The single source of truth for
+/// validating author-declared gates (`SectionGate.when`) at parse time — a typo
+/// like `phase(artifact_build)` fails loudly instead of silently never firing.
+pub const ALL_PHASE_FACTS: &[&str] = &[
+    PHASE_ARTIFACT_BUILT,
+    PHASE_GATE_VERDICT_RECORDED,
+    PHASE_REVISION_SEEDED,
+    PHASE_CHILD_SPAWNED,
+    PHASE_CREDENTIAL_CONFIGURED,
+];
+
 /// Minimum `priority` for any block carrying a [`GuidanceCondition::Phase`].
 ///
 /// Placement is what actually keeps the prompt cache intact — phase-gated blocks

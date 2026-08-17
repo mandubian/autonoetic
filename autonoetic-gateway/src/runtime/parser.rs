@@ -65,6 +65,8 @@ struct AutonoeticMetadata {
     #[serde(default)]
     excluded_tools: Option<Vec<String>>,
     #[serde(default)]
+    sections: Option<Vec<autonoetic_types::agent::SectionGate>>,
+    #[serde(default)]
     compression: Option<CompressionConfig>,
     #[serde(default)]
     open_web: Option<bool>,
@@ -104,8 +106,60 @@ impl SkillParser {
             }
         };
 
+        validate_section_gates(&manifest, &parsed.content)?;
+
         Ok((manifest, parsed.content))
     }
+}
+
+/// Fail a `SKILL.md` whose section gates cannot do what they claim (RFC P3).
+///
+/// This is the reason gates live in frontmatter rather than as inline markers.
+/// An inline marker can drift from a renamed heading and simply stop matching —
+/// the section then silently loads always, or never, with nothing to notice it.
+/// Both failure modes are caught here instead, at parse time, where the message
+/// can name the agent:
+///
+/// - a gate naming a heading the body does not contain;
+/// - a gate naming a phase fact the gateway never derives.
+fn validate_section_gates(manifest: &AgentManifest, body: &str) -> anyhow::Result<()> {
+    if manifest.sections.is_empty() {
+        return Ok(());
+    }
+
+    let headings = crate::runtime::context::top_level_headings(body);
+    for gate in &manifest.sections {
+        let Some(fact) = gate.phase_fact() else {
+            anyhow::bail!(
+                "agent '{}': section gate for '{}' has an unparseable `when` ({:?}); \
+                 expected `phase(<fact>)`",
+                manifest.agent.id,
+                gate.heading,
+                gate.when
+            );
+        };
+        anyhow::ensure!(
+            crate::runtime::guidance::ALL_PHASE_FACTS.contains(&fact),
+            "agent '{}': section gate for '{}' names unknown phase fact '{}'; known facts: {}",
+            manifest.agent.id,
+            gate.heading,
+            fact,
+            crate::runtime::guidance::ALL_PHASE_FACTS.join(", ")
+        );
+        anyhow::ensure!(
+            headings.iter().any(|h| h == gate.heading.trim()),
+            "agent '{}': section gate names heading '{}', which is not a top-level \
+             `## ` section of the body. Found: {}",
+            manifest.agent.id,
+            gate.heading,
+            if headings.is_empty() {
+                "(none)".to_string()
+            } else {
+                headings.join(" | ")
+            }
+        );
+    }
+    Ok(())
 }
 
 fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> AgentManifest {
@@ -214,6 +268,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
         gateway_token: meta.gateway_token,
         allowed_tool_tiers: meta.allowed_tool_tiers.unwrap_or_default(),
         excluded_tools: meta.excluded_tools.unwrap_or_default(),
+        sections: meta.sections.unwrap_or_default(),
         agentskills_import,
         compression: meta.compression,
         open_web: meta.open_web.unwrap_or(false),
@@ -1205,5 +1260,57 @@ metadata:
 "#;
         let (manifest, _body) = SkillParser::parse(content).expect("should parse");
         assert!(manifest.egress.is_none());
+    }
+}
+
+#[cfg(test)]
+mod section_gate_validation_tests {
+    use super::*;
+
+    fn skill(gates: &str, body: &str) -> String {
+        format!(
+            "---\nname: t\ndescription: d\nmetadata:\n  autonoetic:\n    agent:\n      id: \"t.default\"\n      name: t\n      description: d\n{gates}---\n{body}"
+        )
+    }
+
+    const GATES: &str = "    sections:\n      - heading: \"Federation\"\n        when: phase(artifact_built)\n";
+
+    #[test]
+    fn valid_gate_parses() {
+        let (m, _) = SkillParser::parse(&skill(GATES, "## Federation\nbody\n")).expect("should parse");
+        assert_eq!(m.sections.len(), 1);
+        assert_eq!(m.sections[0].phase_fact(), Some("artifact_built"));
+    }
+
+    #[test]
+    fn gate_naming_a_missing_heading_fails_at_parse_time() {
+        // The whole reason gates live in frontmatter: a renamed heading must be
+        // loud here, not silently stop gating at runtime.
+        let err = SkillParser::parse(&skill(GATES, "## Renamed\nbody\n")).unwrap_err().to_string();
+        assert!(err.contains("not a top-level"), "got: {err}");
+        assert!(err.contains("Renamed"), "error should list what it did find: {err}");
+    }
+
+    #[test]
+    fn gate_naming_an_unknown_fact_fails_at_parse_time() {
+        let gates = "    sections:\n      - heading: \"Federation\"\n        when: phase(artifact_build)\n";
+        let err = SkillParser::parse(&skill(gates, "## Federation\nbody\n")).unwrap_err().to_string();
+        assert!(err.contains("unknown phase fact"), "got: {err}");
+        assert!(err.contains("artifact_built"), "error should list known facts: {err}");
+    }
+
+    #[test]
+    fn malformed_when_fails_at_parse_time() {
+        let gates = "    sections:\n      - heading: \"Federation\"\n        when: always\n";
+        let err = SkillParser::parse(&skill(gates, "## Federation\nbody\n")).unwrap_err().to_string();
+        assert!(err.contains("unparseable"), "got: {err}");
+    }
+
+    #[test]
+    fn subsection_heading_does_not_satisfy_a_gate() {
+        // `### Federation` is not gateable — a gate must name a top-level section
+        // so it unambiguously carries its subsections.
+        let err = SkillParser::parse(&skill(GATES, "## Top\n### Federation\nbody\n")).unwrap_err().to_string();
+        assert!(err.contains("not a top-level"), "got: {err}");
     }
 }

@@ -32,6 +32,15 @@ metadata:
         scopes: ["self.*", "skills/*"]
       - type: "AgentMessage"
         patterns: ["*"]
+    # RFC P3 — evict, don't defer. These sections only make sense once the
+    # workflow has an artifact; a planner answering a question never reaches
+    # them, and paid for them on every turn until now. Gates are validated at
+    # parse time against both the heading and the phase-fact vocabulary.
+    sections:
+      - heading: "Evaluation Federation"
+        when: phase(artifact_built)
+      - heading: "Artifact Execution vs Script-Agent Promotion"
+        when: phase(artifact_built)
     excluded_tools:
       # The credential ceremony belongs to credential_onboarding.default, which
       # holds the full capability set for it (CredentialAccess + NetworkAccess +

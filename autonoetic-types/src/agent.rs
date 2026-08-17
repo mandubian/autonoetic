@@ -277,6 +277,17 @@ pub struct AgentManifest {
     /// unlock tools it never needs (e.g., a coder doesn't need `planframe_*`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub excluded_tools: Vec<String>,
+    /// Per-section gates for the `SKILL.md` body (RFC
+    /// `prompt-burden-phase-gated-guidance`, P3). Each entry names a top-level
+    /// `##` heading and the session phase that must be reached before that
+    /// section enters the prompt. Ungated sections are always present.
+    ///
+    /// Declared in frontmatter rather than as inline markers so a gate cannot
+    /// silently drift from a renamed heading: both an unknown heading and an
+    /// unrecognised phase fact fail at parse time rather than by prose quietly
+    /// going missing at runtime.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<SectionGate>,
     /// Metadata from AgentSkills.io import. Set when the agent was imported
     /// from an external AgentSkills-compatible SKILL.md. Used for tool name
     /// bridging, resource mounting, and trust mode enforcement.
@@ -1101,6 +1112,36 @@ pub struct UserAgentBinding {
     pub granted_at: String,
     /// Who approved the binding (user, admin, or agent via approval queue).
     pub granted_by: Option<String>,
+}
+
+/// A gate on one top-level section of a `SKILL.md` body (RFC P3).
+///
+/// The `<!-- extended -->` marker it generalizes is all-or-nothing and *defers*
+/// by a single turn — the extended half is inlined permanently from turn 2. A
+/// section gate **evicts**: the section stays out of the prompt entirely until
+/// the session reaches the named phase, so a planner that never builds anything
+/// never pays for the federation doctrine at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SectionGate {
+    /// Exact text of the top-level `##` heading this gates, without the `##`.
+    pub heading: String,
+    /// The gate expression. Currently only `phase(<fact>)`, e.g.
+    /// `phase(artifact_built)`. Validated at parse time against the known fact
+    /// vocabulary, so a typo fails loudly instead of silently never firing.
+    pub when: String,
+}
+
+impl SectionGate {
+    /// The phase fact this gate requires, or `None` if `when` is not a
+    /// well-formed `phase(...)` expression.
+    pub fn phase_fact(&self) -> Option<&str> {
+        let trimmed = self.when.trim();
+        let inner = trimmed
+            .strip_prefix("phase(")
+            .and_then(|rest| rest.strip_suffix(')'))?;
+        let fact = inner.trim();
+        (!fact.is_empty()).then_some(fact)
+    }
 }
 
 /// Metadata attached when an agent is imported from the AgentSkills.io format.

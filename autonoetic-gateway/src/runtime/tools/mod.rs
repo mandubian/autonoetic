@@ -1409,6 +1409,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1643,6 +1644,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1674,6 +1676,7 @@ mod tests {
         let registry = default_registry();
         let manifest = AgentManifest {
             excluded_tools: vec!["session_*".to_string()],
+            sections: Vec::new(),
             ..manifest_with_capabilities("scoped", vec![])
         };
         let names = registry.available_tool_names(&manifest);
@@ -1736,6 +1739,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1872,6 +1876,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,
@@ -1925,6 +1930,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,

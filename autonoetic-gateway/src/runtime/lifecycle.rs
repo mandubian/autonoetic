@@ -2814,7 +2814,13 @@ impl AgentExecutor {
             let guidance_rendered = self.render_tool_guidance(&tier_filter, &advertised_tool_names);
             let user_context = self.build_user_context_snippet();
             let memory_context = self.build_memory_context_snippet();
-            let inlined_instructions = self.composed_instructions();
+            let (inlined_instructions, earned_sections) = self.composed_instructions_split();
+            // Phase-earned SKILL sections join the guidance tail so everything
+            // that can appear mid-session lands at the end of the cache prefix.
+            let phase_tail = crate::runtime::context::join_phase_tail(
+                &guidance_rendered.phase_tail,
+                &earned_sections,
+            );
             let mut system_instructions = compose_system_instructions_full(
                 &inlined_instructions,
                 &self.manifest,
@@ -2825,7 +2831,7 @@ impl AgentExecutor {
                 user_context.as_deref(),
                 self.persona.as_deref(),
                 Some(guidance_rendered.standing.as_str()),
-                Some(guidance_rendered.phase_tail.as_str()),
+                Some(phase_tail.as_str()),
             );
             // Prompt-cache boundary (#): everything composed so far — foundation
             // doctrine, SKILL instructions, tool/builtin guidance, output
@@ -4699,11 +4705,30 @@ impl AgentExecutor {
     /// a `gateway_note` on the first tool result), so every compose from then
     /// on inlines both halves exactly as before the split.
     fn composed_instructions(&self) -> String {
-        if self.extended_loaded {
+        self.composed_instructions_split().0
+    }
+
+    /// `(standing instructions, sections earned this session)` — RFC P3.
+    ///
+    /// Gated sections are **evicted** from the standing body until their phase
+    /// is reached, then rendered in the prompt tail alongside phase guidance
+    /// rather than back in place. Re-inserting them in place would shift every
+    /// cached byte after the insertion point; appending keeps prefix growth
+    /// append-only (§3.3).
+    fn composed_instructions_split(&self) -> (String, Vec<String>) {
+        let full = if self.extended_loaded {
             inline_extended(&self.instructions, self.extended_instructions.as_deref())
         } else {
             self.instructions.clone()
+        };
+        if self.manifest.sections.is_empty() {
+            return (full, Vec::new());
         }
+        crate::runtime::context::partition_gated_sections(
+            &full,
+            &self.manifest.sections,
+            &self.session_phase,
+        )
     }
 
     /// Mechanically load the extended SKILL.md half on the FIRST tool call of
@@ -6042,6 +6067,7 @@ mod tests {
             gateway_token: None,
             allowed_tool_tiers: vec![],
             excluded_tools: vec![],
+            sections: Vec::new(),
             agentskills_import: None,
             compression: None,
             open_web: false,
