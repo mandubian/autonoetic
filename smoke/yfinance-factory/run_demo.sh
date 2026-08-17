@@ -11,11 +11,11 @@
 #   YF_MAX_LLM_ROUNDS   root-tree LLM rounds            (default 400)
 #   YF_MAX_TOOLS        root-tree tool invocations      (default 1500)
 #   YF_MAX_WALL_SECS    root-tree wall clock            (default 3600)
-#   YF_MODEL            llm preset model                (default minimax/minimax-m2.7)
+#   YF_MODEL            llm preset model                (default deepseek-v4-flash)
 #   YF_PORT             base port                       (default 4188)
 #   AUTONOETIC_BIN      prebuilt binary path            (default target/debug/autonoetic)
 #
-# Prerequisites: cargo build -p autonoetic, OPENROUTER_API_KEY, python3 (stdlib).
+# Prerequisites: cargo build -p autonoetic, OPENCODE_API_KEY, python3 (stdlib).
 #
 # Usage: smoke/yfinance-factory/run_demo.sh
 set -euo pipefail
@@ -24,7 +24,7 @@ DEMO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$DEMO_DIR/../.." && pwd)"
 RUN_DIR="$DEMO_DIR/.run"
 BIN="${AUTONOETIC_BIN:-$REPO_ROOT/target/debug/autonoetic}"
-MODEL="${YF_MODEL:-minimax/minimax-m2.7}"
+MODEL="${YF_MODEL:-deepseek-v4-flash}"
 PORT="${YF_PORT:-4188}"
 OFP_PORT=$((PORT + 100))
 SID="yf-factory"
@@ -55,8 +55,8 @@ if [ ! -x "$BIN" ]; then
   (cd "$REPO_ROOT" && cargo build -p autonoetic)
 fi
 [ -x "$BIN" ] || die "autonoetic binary not found at $BIN"
-if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-  log "WARNING: OPENROUTER_API_KEY is not set; LLM calls for model '$MODEL' will fail"
+if [ -z "${OPENCODE_API_KEY:-}" ]; then
+  log "WARNING: OPENCODE_API_KEY is not set; LLM calls for model '$MODEL' will fail"
 fi
 # Proxy env must be visible to the gateway process so sandboxes inherit it
 # (bubblewrap inherits the gateway env; yfinance/requests honor it).
@@ -89,27 +89,43 @@ max_background_due_per_tick: 8
 evidence_mode: full
 approval_timeout_secs: 900
 
+# opencode/DeepSeek queueing: the wait for the first byte can far exceed the
+# default 120s (observed TTFB up to 256s). Split the budgets (#1096): a long
+# TTFB allowance for upstream queueing, the default (shorter) request timeout
+# still governs mid-stream stalls.
+llm_ttfb_timeout_secs: 300
+
+# The 262144 context window would derive a soft budget capped at 50000 —
+# smaller than agent-factory turns' system+tools alone (~39k). Give
+# conversations real room.
+prompt_budget:
+  soft_budget_tokens: 150000
+
 llm_presets:
   smart:
-    provider: "openrouter"
+    provider: "opencode"
     model: "$MODEL"
+    api_key_env: "OPENCODE_API_KEY"
     temperature: 0.2
-    context_window_tokens: 128000
+    context_window_tokens: 262144
   coding:
-    provider: "openrouter"
+    provider: "opencode"
     model: "$MODEL"
+    api_key_env: "OPENCODE_API_KEY"
     temperature: 0.1
-    context_window_tokens: 128000
+    context_window_tokens: 262144
   research:
-    provider: "openrouter"
+    provider: "opencode"
     model: "$MODEL"
+    api_key_env: "OPENCODE_API_KEY"
     temperature: 0.3
-    context_window_tokens: 128000
+    context_window_tokens: 262144
   agentic:
-    provider: "openrouter"
+    provider: "opencode"
     model: "$MODEL"
+    api_key_env: "OPENCODE_API_KEY"
     temperature: 0.0
-    context_window_tokens: 128000
+    context_window_tokens: 262144
 
 # Root-tree resource constraints (R+4 / R-6.21) — the tighter of per-session
 # and root-tree wins; hitting them ends the session with a budget-exhaustion
@@ -136,7 +152,9 @@ log "bootstrapping reference agents into $RUN_DIR/agents"
 # ------------------------------------------------------------------ gateway
 # `gateway start --daemon` stays in the foreground as supervisor — launch with &.
 log "starting gateway (port $PORT)"
-"$BIN" --config "$CFG" gateway start --daemon >"$RUN_DIR/gateway.log" 2>&1 &
+# `gateway start` mirrors colored logs to stderr (for live terminal watching);
+# NO_COLOR keeps them readable when redirected into gateway.log.
+NO_COLOR=1 "$BIN" --config "$CFG" gateway start --daemon >"$RUN_DIR/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 RESOLVER_PID=""
 MIRROR_PID=""
