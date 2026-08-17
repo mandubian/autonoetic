@@ -128,7 +128,18 @@ fn validate_section_gates(manifest: &AgentManifest, body: &str) -> anyhow::Resul
     }
 
     let headings = crate::runtime::context::top_level_headings(body);
+    // Composition resolves a heading with `.find`, so a second gate on the same
+    // heading would be silently ignored — the exact class of quiet failure these
+    // gates live in frontmatter to avoid.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for gate in &manifest.sections {
+        anyhow::ensure!(
+            seen.insert(gate.heading.trim()),
+            "agent '{}': duplicate section gate for heading '{}'. Composition takes the \
+             first match, so the later gate would never apply.",
+            manifest.agent.id,
+            gate.heading
+        );
         let Some(fact) = gate.phase_fact() else {
             anyhow::bail!(
                 "agent '{}': section gate for '{}' has an unparseable `when` ({:?}); \
@@ -1304,6 +1315,15 @@ mod section_gate_validation_tests {
         let gates = "    sections:\n      - heading: \"Federation\"\n        when: always\n";
         let err = SkillParser::parse(&skill(gates, "## Federation\nbody\n")).unwrap_err().to_string();
         assert!(err.contains("unparseable"), "got: {err}");
+    }
+
+    #[test]
+    fn duplicate_gates_for_one_heading_fail_at_parse_time() {
+        // Composition takes the first match, so a duplicate would be silently
+        // inert — the failure mode frontmatter gates exist to prevent.
+        let gates = "    sections:\n      - heading: \"Federation\"\n        when: phase(artifact_built)\n      - heading: \"Federation\"\n        when: phase(child_spawned)\n";
+        let err = SkillParser::parse(&skill(gates, "## Federation\nbody\n")).unwrap_err().to_string();
+        assert!(err.contains("duplicate section gate"), "got: {err}");
     }
 
     #[test]

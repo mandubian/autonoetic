@@ -383,9 +383,13 @@ pub fn partition_gated_sections(
     }
 
     earned.sort_by_key(|(at, _)| *at);
+    // No trimming: the standing body must be the original bytes minus exactly
+    // the evicted sections, matching the byte-identical guarantee the no-gates
+    // path gives. Whitespace normalization belongs to `join_phase_tail`, which
+    // renders the earned sections as standalone blocks.
     (
-        standing.join("").trim_end().to_string(),
-        earned.into_iter().map(|(_, s)| s.trim().to_string()).collect(),
+        standing.join(""),
+        earned.into_iter().map(|(_, s)| s.to_string()).collect(),
     )
 }
 
@@ -1727,6 +1731,21 @@ mod section_gate_tests {
         let (standing, earned) = partition_gated_sections(BODY, &gates, &SessionPhase::default());
         assert!(standing.contains("## Alpha") && standing.contains("## Gated"));
         assert!(earned.is_empty());
+    }
+
+    #[test]
+    fn standing_body_is_the_original_bytes_minus_the_evicted_section() {
+        // Stronger than "the section is gone": nothing *else* may change, not
+        // even a trailing newline. The no-gates path is byte-identical, and the
+        // gated path must be byte-identical outside what it evicts.
+        let gates = vec![gate("Gated", PHASE_ARTIFACT_BUILT)];
+        let (standing, _) = partition_gated_sections(BODY, &gates, &SessionPhase::default());
+
+        let evicted = "## Gated\ng\n\n### Sub\nsub\n\n";
+        let expected = BODY.replace(evicted, "");
+        assert_eq!(standing, expected);
+        // Sanity: the fixture really did contain the block we removed.
+        assert!(BODY.contains(evicted));
     }
 
     #[test]
