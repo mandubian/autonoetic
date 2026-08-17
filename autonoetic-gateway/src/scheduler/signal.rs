@@ -329,11 +329,43 @@ pub fn send_child_state_notification(
     notification: ChildStateNotification,
 ) -> anyhow::Result<()> {
     let signal_id = autonoetic_types::id_format::short_random_id("wf-child-");
-    let signal = Signal::ChildStateNotification {
-        message: format!(
+    // #1095: terminal state changes lead with the outcome (and the result
+    // head) instead of a neutral "changed state to" notice — the parent must
+    // not have to infer success from structured state. Non-terminal changes
+    // keep the neutral wording.
+    let terminal = matches!(
+        notification.child_status.as_str(),
+        "succeeded" | "failed" | "cancelled" | "aborted"
+    );
+    let message = if terminal {
+        let mut msg = format!(
+            "Workflow child '{}' {}.",
+            notification.task_id,
+            notification.child_status.to_uppercase()
+        );
+        if let Some(class) = notification.failure_class {
+            if let Some(class) = serde_json::to_value(class)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+            {
+                msg.push_str(&format!(" Failure class: {}.", class));
+            }
+        }
+        if let Some(ref summary) = notification.summary {
+            let head: String = summary.trim().chars().take(600).collect();
+            if !head.is_empty() {
+                msg.push_str(&format!(" Result: {}.", head));
+            }
+        }
+        msg
+    } else {
+        format!(
             "Workflow child '{}' changed state to '{}'.",
             notification.task_id, notification.child_status
-        ),
+        )
+    };
+    let signal = Signal::ChildStateNotification {
+        message,
         notification,
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
