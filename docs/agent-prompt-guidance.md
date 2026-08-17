@@ -41,7 +41,7 @@ The guiding principle of the factorization:
 > Litmus test: *if two agents would write the same sentence, it does not belong
 > in either `SKILL.md`.*
 >
-> Second litmus test (RFC `prompt-burden-phase-gated-guidance`): *if most
+> Second litmus test (`docs/prompt-burden-study.md`): *if most
 > sessions never reach the situation this sentence describes, it should not be
 > in the prompt from turn 1.* Gate it — §2.1.
 
@@ -184,7 +184,7 @@ Give phase-gated blocks `priority: PHASE_GATED_PRIORITY_FLOOR`. Placement in the
 tail is what protects the cache; the floor keeps priorities legible and makes
 mis-gating visible in review.
 
-Full rationale and the migration plan: `docs/rfc/prompt-burden-phase-gated-guidance.md`.
+Full rationale and the migration plan: `docs/prompt-burden-study.md`.
 
 ### Where blocks come from
 

@@ -16,7 +16,7 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 }
 
 /// The `federation_escalate` *procedure*, gated on the session actually having
-/// an artifact (RFC `prompt-burden-phase-gated-guidance`).
+/// an artifact (`docs/prompt-burden-study.md`).
 ///
 /// This prose used to live in the tool's `description` and its `revision_id`
 /// schema field, i.e. in every planner turn from turn 1 — including the large
@@ -97,7 +97,7 @@ impl NativeTool for FederationEscalateTool {
             // Signature only. The procedure — when to call it, the seeded-vs-unseeded
             // choice, the worked payload — is a phase-gated guidance block below, so
             // sessions that never reach an artifact don't pay for it (RFC
-            // `prompt-burden-phase-gated-guidance`).
+            // `docs/prompt-burden-study.md`).
             description: "Escalate collected federation jury verdicts to the operator \
                  for review; returns the escalation_id. Call after the federation roles \
                  have run and their verdicts were read with promotion_query."

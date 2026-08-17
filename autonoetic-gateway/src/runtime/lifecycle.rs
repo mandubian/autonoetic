@@ -281,7 +281,7 @@ pub struct AgentExecutor {
     pub tool_tier_escalated: bool,
 
     /// How far this session has progressed, derived mechanically from observed
-    /// tool results (RFC `prompt-burden-phase-gated-guidance`). Drives
+    /// tool results (`docs/prompt-burden-study.md`). Drives
     /// `GuidanceCondition::Phase`, so procedural prose enters the system prompt
     /// at the turn the work actually reaches it instead of at turn 1. Monotonic
     /// and checkpointed, so a resumed session keeps the guidance it had earned.
@@ -2851,7 +2851,7 @@ impl AgentExecutor {
             //     `ToolPresent`-gated guidance.
             //   - `discovered_tools` — `tool_discover` adds names, same effect.
             //   - `session_phase` — a phase fact activates a `Phase`-gated
-            //     guidance block (RFC `prompt-burden-phase-gated-guidance`).
+            //     guidance block (`docs/prompt-burden-study.md`).
             //
             // All four are monotonic and never retract, which is what bounds the
             // damage: the prefix grows through a small number of stable states
@@ -4949,7 +4949,7 @@ impl AgentExecutor {
                 }
             }
 
-            // Session-phase observation (RFC `prompt-burden-phase-gated-guidance`).
+            // Session-phase observation (`docs/prompt-burden-study.md`).
             // Purely mechanical: derived from the gateway's own record of what
             // each tool returned, never from agent prose. Facts are monotonic,
             // so a block that has entered the prompt stays in it — the prompt

@@ -1,7 +1,9 @@
 # Prompt Burden: what makes Autonoetic's prompts large, and what actually shrank them
 
-**Status:** Study complete for the levers listed here — 2026-08-14 → 2026-08-17.
-Shipped in #1084, #1085, #1086, #1089, #1098, #1100. Tracking: [#1087].
+**Status:** Complete for the levers listed here — 2026-08-14 → 2026-08-17.
+Shipped across six PRs (§11). Tracking: [#1087]. This document absorbs the
+former `docs/rfc/prompt-burden-phase-gated-guidance.md`: the design it proposed
+is implemented, so the proposal and its results are now one record.
 
 **Origin:** an operator observation that Autonoetic agents carry far larger
 system prompts than comparable agent stacks, attributed to "all the rules we
@@ -12,9 +14,14 @@ out to be elsewhere.
 description, or wondering why the prompt is the size it is. The practical rules
 are §6; everything before it is the evidence for them.
 
-**Design detail** for the mechanisms lives in
-[`rfc/prompt-burden-phase-gated-guidance.md`](rfc/prompt-burden-phase-gated-guidance.md).
-Authoring guidance lives in [`agent-prompt-guidance.md`](agent-prompt-guidance.md).
+**Structure:** §1–§6 are the findings and the rules that follow from them —
+read those. §7–§9 are the mechanism design, risks and non-goals, for when you
+need to change how gating works rather than use it. §10–§11 are status and
+history.
+
+Day-to-day authoring guidance lives in
+[`agent-prompt-guidance.md`](agent-prompt-guidance.md); this document is the
+evidence behind it.
 
 ---
 
@@ -276,20 +283,403 @@ prose.
 
 ---
 
-## 7. Where it stands
+## 7. The mechanisms
 
-Remaining items are small or re-scoped — see [#1087] for live status:
+Add one condition whose truth changes *during* a session:
 
-- **P5 (tiering)** — largely overtaken by `excluded_tools` + the live
+```rust
+pub enum GuidanceCondition {
+    // … existing, all fixed at spawn …
+    Phase(&'static str),   // the session has reached this phase
+}
+```
+
+backed by a monotonic, gateway-derived record:
+
+```rust
+pub struct SessionPhase { facts: BTreeSet<String> }
+```
+
+with the initial fact vocabulary:
+
+| Fact | Proven by |
+|---|---|
+| `artifact_built` | `artifact_build` succeeded, **or** any result carries a non-empty `artifact_ref` / `reuse_guards.has_coder_artifact` |
+| `gate_verdict_recorded` | `promotion_record` succeeded |
+| `revision_seeded` | `agent_revision_create[_from_intent]` succeeded |
+| `child_spawned` | `agent_spawn` succeeded |
+| `credential_configured` | `credential_setup` succeeded |
+
+### 7.1 Three properties that make it safe
+
+**Derivation is mechanical (P-5.14, Lawful Executor).** Facts come from the
+gateway's own record of what each tool returned. Agent prose never sets a fact,
+so an agent cannot talk its way into extra guidance, and there is no reserved
+judgment to leak.
+
+**Facts are monotonic.** Nothing is ever retracted. A block that has entered the
+prompt stays there, so the prompt prefix grows at most once per fact and remains
+cacheable. A condition that could flip off would invalidate the provider's
+prompt cache repeatedly and cost more than it saved.
+
+**Evidence counts, not just authorship.** A planner never calls
+`artifact_build` — its coder child does. Mapping tool names alone would leave
+every lead agent permanently pre-phase, i.e. would fail precisely on the agent
+this study is trying to make cheaper. So any result carrying artifact evidence
+advances the phase, whoever produced it. (`SessionPhase::observe`, with a
+depth-bounded scan.)
+
+### 7.2 Persistence
+
+`SessionPhase` is checkpointed. Losing it on resume would silently strip
+procedure from the prompt at exactly the point the work is most advanced — the
+worst possible moment. `#[serde(default)]` + skip-if-empty, so pre-existing
+checkpoints load as "no phase yet".
+
+### 7.3 Placement and order are part of the design
+
+A fact landing mid-session must be a pure **append** to the cache prefix.
+Anything else invalidates every cached byte after the insertion point. Two
+decisions make that true, and only the second is obvious:
+
+**Placement — earned blocks render last, after the output contract.** Composition
+order is foundation → guidance → bridging → persona → user context → `SKILL.md` →
+output contract. The standing guidance section sits *early*, followed by the
+agent's entire `SKILL.md` (~11k tokens for the planner). An earned block rendered
+there re-caches all of it **regardless of its position within the section** —
+ordering inside the guidance section buys nothing on its own. So
+`compose_guidance` returns two sections ([`ComposedGuidance`]) and
+`compose_system_instructions_full` renders the phase tail at the very end of the
+cache prefix. Guarded by `phase_guidance_renders_after_the_standing_prompt`.
+
+**Order within the tail — by fact arrival, not priority or id.** Sorting by block
+id (the natural tie-break) means a block earned at fact 3 can render ahead of one
+earned at fact 1, which is an insertion, not an append. So `SessionPhase` holds
+facts in arrival order and the tail sorts by activation index — `max` for `All`
+(a block appears when its *last* required fact lands), `min` for `Any`. Guarded by
+`phase_tail_is_ordered_by_fact_arrival_not_id_or_priority` and
+`phase_tail_grows_by_appending_as_facts_land`, which asserts the tail at fact N is
+a prefix of the tail at fact N+1.
+
+`PHASE_GATED_PRIORITY_FLOOR` remains as a belt-and-braces guard — it keeps
+priorities legible and makes accidental mis-gating visible in review — but
+placement, not priority, is the mechanism.
+
+The prefix is therefore **stable between milestones, not byte-identical for the
+whole session**. Four monotonic flags shift it, each at most once:
+`extended_loaded` (#1015), `tool_tier_escalated`, `discovered_tools`, and now
+`session_phase`. The first three predate this work — the cache-boundary comment in
+`lifecycle.rs` claimed byte-identity that was already untrue — and it was
+corrected to state the real invariant. Anything added above that boundary which
+can toggle *back* would churn the cache every turn and does not belong there.
+
+### 7.4 The evidence scan is allowlisted to the artifact domain
+
+The evidence path (§7.1) reads *other tools'* results, so its surface is a
+contract every gated block inherits. It is restricted to an audited allowlist
+(`tool_emits_artifact_evidence`): `artifact_*`, `promotion_*`, `federation_*`,
+`agent_revision_*`, `workflow_*`, `workbench_*`, plus `resolve` and
+`sandbox_exec`. Every tool there operates *on* artifacts, so a non-failed result
+naming one is genuine proof — including `resolve`, where successfully resolving
+an `ar.*` ref is itself the proof.
+
+The bias is deliberate and asymmetric: **a missing block is recoverable** (the
+agent still holds the tool signature, and tool errors carry repair hints), while
+**a phantom block is paid by every session that trips it, forever**.
+
+Two narrower scopings were considered and rejected:
+
+- *Scan every result.* Sound against today's tool set — `agent_inspect` and
+  `execution_search` emit no `artifact_ref` — but it makes the fact hostage to any
+  future tool that echoes the key for unrelated reasons, at a point where many
+  blocks depend on it.
+- *Scan only `workflow_state` / `workflow_wait`.* Too tight, and it fails on the
+  primary case. The gateway's child-state notification tells the agent verbatim
+  *"you do not need to call `workflow_state`"* and arrives as a resume
+  user-message, **not a tool result** — so a planner following the documented
+  yield-based flow would never advance the phase this way. That path is handled
+  at the source instead: §7.5.
+
+### 7.5 Derivation at the source, for the path no scan can see
+
+There are **two** derivation sites, and the tool scan is the lesser one.
+
+When a child reaches a terminal state, the gateway wakes the parent with a
+`child_state_notification` carrying the child's typed state — and tells it
+verbatim *"you do not need to call `workflow_state`"*. That notification is
+rendered into turn-start **messages**, so no tool result ever exists for
+`SessionPhase::observe` to read. For a planner following the documented
+yield-based flow, this is precisely the moment an artifact enters the workflow.
+
+`SessionPhase::observe_gateway_signal` therefore advances the phase directly from
+the signal payload, at every `gateway_signal_turn_start_context` call site. It
+applies the same discipline as the tool path — gateway-observed state only, and a
+child that did not succeed proves nothing, since a failed child can still name an
+`artifact_ref` in its summary while having produced nothing.
+
+Both signal shapes go through one predicate
+(`child_notification_proves_artifact`): a standalone notification, and each
+element of a join's `child_summaries` (which is a
+`Vec<ChildStateNotification>` — the same per-child shape). Judging join children
+*individually* is what stops a failed child in a mixed join from lending its
+`artifact_ref` to the group; a whole-payload scan would allow exactly that.
+
+One shape had to be handled for either path to see anything: a child's reply
+travels as a **string** containing JSON (`summary: "{\"artifact_ref\":\"ar.x\"}"`),
+in both notifications and joined `workflow_wait` results. The evidence scan
+descends into strings that already look like JSON — the most common shape of "my
+child produced an artifact" is otherwise invisible.
+
+Without this, a yield-based planner earned the fact only *incidentally*, when it
+later happened to call an artifact-domain tool.
+
+---
+
+### 7.6 Section gates — the same axis for `SKILL.md` role doctrine
+
+Guidance blocks (§7.1–§7.5) gate *mechanical* doctrine. Role doctrine lives in
+the `SKILL.md` body and gets the same axis through **frontmatter-declared**
+gates.
+
+#### Syntax and validation
+
+```yaml
+sections:
+  - heading: "Evaluation Federation"
+    when: phase(artifact_built)
+```
+
+A gate names a top-level `##` heading and the phase that must be reached before
+that section enters the prompt. It carries its subsections with it, so `###`
+children move with their parent and cannot be orphaned.
+
+**Why frontmatter over an inline marker.** An inline marker is more discoverable
+— you see it while editing the section — but it can drift from a renamed heading
+and simply stop matching, after which the section silently loads always or never.
+That is the exact failure mode this effort has hit repeatedly (a doctrine table
+diverged from `failure_classification.rs`; three `SKILL.md` files disagreeing
+about one agent; doctrine naming Rust variants the wire never emits). Frontmatter
+gates are validated in `SkillParser::parse`, which rejects:
+
+- a gate naming a heading the body does not contain (and lists the headings it
+  did find);
+- a gate naming a phase fact the gateway never derives (validated against
+  `ALL_PHASE_FACTS`, and lists the known ones);
+- an unparseable `when`.
+
+The discoverability gap is cheap to close — the parse error names the agent and
+the heading. The validation gap in the inline form is not: you would end up
+building this validator anyway, against a weaker source of truth.
+
+#### Eviction, and where earned sections render
+
+`<!-- extended -->` **defers**: the extended half is inlined permanently from
+turn 2, so it saves exactly one turn. A section gate **evicts**: the section is
+absent until its phase is reached.
+
+Earned sections render in the **phase tail**, next to phase guidance — not back
+in their original position. Re-inserting in place would shift every cached byte
+after the insertion point; appending keeps prefix growth append-only (§7.3).
+Within the tail they are ordered by fact arrival, same as guidance.
+
+Compose-time is deliberately forgiving where parse-time is strict: a gate whose
+heading is missing is *ignored* during composition rather than failing closed,
+because failing closed would silently strip prose from a live session. The error
+belongs at parse time, where it can name the file.
+
+#### The metric this exposed
+
+Applying gates to the planner's federation cluster changed neither headline
+total, because both gated sections live in the **extended** half — already absent
+at turn 1, and legitimately present in the post-`artifact_built` steady state.
+The win lands between those two points, on the **modal turn**: extended loaded,
+no phase reached, which is every turn of a session that never builds anything.
+
+The harness gained a third measurement for it, `working_chars()`:
+
+| planner.default | before | after |
+|---|---:|---:|
+| turn 1 | 72,000 ch | 72,000 ch (unchanged) |
+| **working (no phase reached)** | 98,769 ch | **88,037 ch (−10.9%)** |
+| steady state (`artifact_built`) | 100,161 ch | 100,161 ch (unchanged) |
+
+**A lever whose effect falls between your measurements looks like a no-op.** P3
+was nearly recorded as one. Both prior levers (extended split, tool exclusions)
+moved turn-1 or steady-state, so those were the two numbers the harness tracked;
+eviction moves neither. All six agents now carry a working-state ceiling
+alongside the other two.
+
+---
+
+## 8. Risks and how each is contained
+
+**A phase never fires and the agent is stranded.** Mitigated by construction:
+the signature half always stays in the schema, so the tool remains callable; the
+gate is set *earlier* than the first turn the tool could succeed (an artifact
+must exist before escalation is meaningful); and evidence-based derivation
+(§7.1) covers the delegating-agent case that would otherwise be the common
+failure. P2 migrations must preserve this discipline — the review question for
+each is "could the agent still make a correct call with only the signature?"
+
+**Prompt-cache churn.** Monotonicity bounds it: each fact changes the prefix at
+most once per session, and facts fire early in the work rather than repeatedly.
+
+**Phase gating becomes a back door around capability gating.** Guarded by test:
+`agents_without_the_tool_never_see_its_procedure`. Blocks are still collected
+only from tools that survived the tier/capability filter, so a `Phase` condition
+can only ever *further* restrict.
+
+**Procedure arrives later than an agent's planning would like.** Real: a planner
+may want to describe the promotion path before an artifact exists. The mitigation
+is that *route selection* (Decision Flow, "which agent builds this") stays
+always-on; only *call mechanics* are gated. If a P2 migration finds itself gating
+routing knowledge, the split is wrong.
+
+---
+
+## 9. Non-goals — what was never on the table
+
+- **Deleting rules.** The constitution framing, rights, and `io.returns`
+  contract stay. They are 17% of the prompt and load-bearing for the
+  actors-as-citizens paradigm.
+- **Shrinking `SKILL.md` role intent.** Decision logic and verdict rubrics are
+  what a `SKILL.md` is *for*. The planner's Principles and Decision Flow spine
+  should stay long.
+- **A second doctrine-consolidation pass.** §1 shows there is nothing left to
+  consolidate.
+- **Lossy prompting.** No change may leave an agent unable to perform an action
+  it could perform before. Every mechanism here is *deferral to the moment of
+  need*, never removal.
+
+---
+
+## 10. Where it stands
+
+Remaining items are small or re-scoped — see [#1087] for live status.
+
+- **P5 (tiering)** — largely overtaken by `excluded_tools` plus the live
   `progressive_tool_disclosure` flag. Confirm `allowed_tool_tiers` still adds
   anything before spending effort.
 - **P4 remainder** — re-scoped as a correctness change with ~neutral token cost.
-- **§6 micro-items** in the RFC — the 8-file duplicated line, and two foundation
-  overlaps.
-- **OQ5 (conditional schema shaping)** — the remaining tool-schema weight is
-  signature, not procedure. Urgency dropped once ownership moved the type case
-  off the planner.
 - The semantic-intent install path (`agent_revision_create_from_intent`) cannot
   express section gates.
 
+### 10.1 Smaller items surfaced by the analysis
+
+**a.** *"Start working immediately on turn 1…"* appears verbatim in 8
+`SKILL.md` files. It is universal doctrine and belongs in `builtin_blocks()`.
+
+**b.** `foundation_workflow.md` §14 (Clarification Protocol) substantially
+restates the `clarification.ask_or_default` builtin block. One of the two should
+go; the block is the better home because it is `Always` and already deduped.
+
+**c.** `foundation_workflow.md` §7 and `foundation_artifact.md` §10 both carry
+the content-handoff rule ("Do NOT return file contents in your response"). Agents
+with both layers — every artifact-capable delegator, including the planner — get
+it twice.
+
+---
+
+### 10.2 Open questions
+
+1. ~~**Section-gate syntax for `SKILL.md` (P3).**~~ **Resolved: frontmatter**
+   (see §7.6). Inline markers are more discoverable, but a marker that drifts from
+   a renamed heading fails silently — the section then loads always, or never,
+   with nothing to notice. Frontmatter gates are validated at parse time against
+   both the heading list and the phase-fact vocabulary. Silent drift has been the
+   recurring failure mode of this whole effort, so validatability won.
+2. **Should `repair_hint` routing (P4) be data or prose?** A structured
+   `{class, suggested_route}` is machine-checkable and testable against the
+   enforcement register; prose is what the model actually acts on today.
+3. **Does the phase vocabulary want a `no_build_intent` fact** — the negative
+   case, letting a pure-Q&A session shed *more* than it currently can? This is
+   the only place where a non-monotonic signal would genuinely pay, and it needs
+   its own analysis before being adopted.
+4. ~~**Derive the phase at the source, not from tool results.**~~ **Resolved**
+   (see §7.5). The child-state notification path is now first-class; the tool
+   scan is the fallback rather than the primary mechanism.
+5. **How should a tool shed schema that is irrelevant this turn?** Raised by P2:
+   the remaining tool-schema weight is *signature*, not procedure, so no amount
+   of prose migration reaches it. `credential_setup`'s `steps` `oneOf` is the
+   type case — needed only on the programmatic path, while the documented planner
+   flow passes `skill_url`.
+
+   **Two findings sharpen the question.**
+
+   *The soundness bar is lower than first stated.* Nothing validates tool
+   arguments against the advertised schema: `validate_against_schema` serves
+   agent I/O (`io.accepts` / `io.returns`), and each tool's `execute` deserializes
+   its full `Args` regardless of what was advertised. No provider is sent
+   `strict: true` either — `strict_schema_anyof` is only a *shape* accommodation
+   for Moonshot/Kimi's schema validator, not opt-in strict function calling. So a
+   narrow schema **cannot mechanically reject a legitimate wide call**. The real
+   failure mode is *discoverability* — the model not knowing the option exists —
+   which makes "narrow standing, widen on demand" safe provided the wide form has
+   a mechanical pointer (`tool_discover` plus a `repair_hint` naming it).
+
+   *De-dup does not dissolve the problem.* Running the P2 de-dup test inside
+   `credential_step_oneof_schema` (branch prose restating the top-level
+   description and the enforced secrets rule) recovered only **184 chars**. The
+   residual is **structural** — four branches × their properties, plus the nested
+   `secret_field_spec_schema` — roughly two-thirds of the tool's remaining
+   4,881 chars. The weight cannot be written away.
+
+   **Options.**
+
+   - **(a) Context-aware `definition()`.** Rejected for this type case. Schemas
+     sit in the cacheable prefix and cannot live in the phase tail, so a
+     mid-session schema change re-embeds everything after it — the problem §7.3
+     solved for guidance, reintroduced. Worse, there is no monotonic fact that
+     correlates with "skill_url vs programmatic": it is an in-session usage
+     decision, and `artifact_built` / `child_spawned` do not track it. Phase-gated
+     schema would be arbitrary here.
+   - **(a′) Static narrowing — `definition_for(&manifest)`.** Cheap to thread
+     (the registry call sites in `lifecycle.rs` and `prompt_budget.rs` already
+     hold the manifest, and an opt-in default keeps the 100+ impls untouched).
+     But **name the qualifying agents before building it**: narrowing is only
+     sound for an agent provably skill_url-only, and `planner.default`'s own
+     SKILL documents both paths. If the list is empty, this is dead machinery.
+   - **(b) Narrow standing schema + `definition_full()` via `tool_discover`.**
+     Cache-free by comparison: discovery already changes the schema section, so
+     narrow→wide piggybacks on an invalidation that happens anyway. Costs one
+     round-trip whenever the wide form is needed.
+   - **(c) Leave it.** Tool schemas floor out around 9–10k tokens for the planner.
+     Still live: `credential_setup` is ~1.2k tokens ≈ 4.4% of planner steady
+     state, so even perfect removal is far from the (already retracted) 40%.
+   - **(d) Split the tool** — `credential_setup` (skill_url) plus a
+     Specialized-tier programmatic variant, hidden from root sessions by
+     progressive disclosure until escalation. Needs **no new mechanism**: it
+     reuses tiering (P5) and `tool_discover`. Wrinkle: the resume path
+     (`credential_id` + `resume_vars`) is common to both and would have to be
+     duplicated or hosted on a third entry — possibly enough mess to sink it.
+
+   **What decides (b) vs (c):** how often the programmatic path is actually used.
+   (b) trades ~700 tokens per turn against one extra round-trip per session that
+   needs the wide form. Rare → (b); routine → (c). That is a query against session
+   history, not a judgement call, and it should be run before building anything.
+
+   **This gates the remainder of P2.** Anything that lands must also survive the
+   Moonshot/Kimi `anyOf`/`oneOf` sanitizer (`sanitize_schema_for_strict_anyof`) —
+   a narrowed schema has fewer branches, not a different shape, so this is a
+   check rather than an obstacle.
+
+---
+
+## 11. Appendix: what shipped, in order
+
+| PR | What | Result |
+|---|---|---|
+| [#1084] | Phase axis, `SessionPhase`, one migrated tool, the measurement harness | made the prompt measurable |
+| [#1085] | `planner.collaborative` exclusions + extended split | collaborative turn 1 −11.6% |
+| [#1086] | Derive-at-source, budget ratchet, doc refresh | completed the mechanism on its primary path |
+| [#1089] | P2 compression pass **and its correction**; credential ownership move | −1.3% then **−9%** |
+| [#1098] | Ownership audit (negative), P4 first slice | drift fix, +60 ch |
+| [#1100] | P3 section gates | working state −10.9% |
+
+[#1084]: https://github.com/mandubian/autonoetic/pull/1084
+[#1085]: https://github.com/mandubian/autonoetic/pull/1085
+[#1086]: https://github.com/mandubian/autonoetic/pull/1086
+[#1089]: https://github.com/mandubian/autonoetic/pull/1089
+[#1098]: https://github.com/mandubian/autonoetic/pull/1098
+[#1100]: https://github.com/mandubian/autonoetic/pull/1100
 [#1087]: https://github.com/mandubian/autonoetic/issues/1087
