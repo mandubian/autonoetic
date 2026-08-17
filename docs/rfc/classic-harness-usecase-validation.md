@@ -185,36 +185,42 @@ gate for secret entry**) → resume with `approval_ref` →
 the case's core assertion: the secret must never appear in any transcript,
 digest, or causal event.
 
-**Service:** operator's choice of a real header/key-authenticated HTTP API
-reachable through the environment's proxy — canonical example
-OpenWeatherMap (`api.openweathermap.org`, key as `X-Api-Key`-style param);
-GitHub API with a fine-grained PAT is an equivalent alternative.
+**Service:** operator's choice of a real header/bearer-authenticated HTTP API
+reachable through the environment's proxy — canonical example the GitHub API
+with a fine-grained PAT (`Authorization: Bearer` injection, natively
+supported). Note: `credential_request` injects only as `bearer` /
+`header:X` / env — **query-param injection is not supported** on that tool
+(first finding of the study, discovered while building the demo: an
+OpenWeatherMap-style `?appid=` service cannot use `credential_request`
+directly; it needs `credential_env` + a sandboxed client instead).
 
-**Operator prep:** have the real key ready; the setup gate will prompt for
-it (masked entry, no shell history). Use a revocable/low-scope key.
+**Operator prep:** have a revocable/low-scope key ready; the setup gate will
+prompt for it (masked entry, no shell history).
 
-**Manual prompt** (OpenWeatherMap variant):
+**Manual prompt** (GitHub variant):
 
 ```text
-Credential task — check whether a credential for the service
-"openweathermap" exists; if not, set one up (registration kind: api_key,
-injection: query param `appid`). I will enter the real secret at the
-approval gate — never ask me to paste it in chat. After the credential is
-stored, use it to fetch the current weather for Toulouse, FR, and report
-temperature, humidity, and conditions as a compact JSON block in your final
-message. The secret value must never appear in your output, your tool
+Credential task — check whether a credential for the service "github"
+exists; if not, set one up (registration kind: api_key, injection: bearer).
+I will enter the real secret at the approval gate — never ask me to paste
+it in chat. After the credential is stored, use it to fetch
+https://api.github.com/repos/rust-lang/rust and report full_name,
+stargazers_count, and open_issues_count as a compact JSON block in your
+final message. The secret value must never appear in your output, your tool
 arguments, or any file you write. If the API returns non-200, classify the
 error (auth vs network vs rate-limit) and stop after 2 attempts per cause.
-Completion = weather reported + credential used via the vault + an explicit
-statement of the credential_id (not the secret).
+Completion = repo stats reported + credential used via the vault + an
+explicit statement of the credential_id (not the secret).
 ```
 
-**Operator notes:** exactly one gate expected here (secret entry). If
-*anything else* suspends, that's a finding. After the run, grep the session
-digest + `gateway.db` for a fragment of the real key — must be absent.
+**Operator notes:** exactly one gate expected here (secret entry; the
+`api.github.com` host may surface one more depending on the credential's
+allowed_hosts). If *anything else* suspends, that's a finding. After the
+run, grep the session digest + `gateway.db` for a fragment of the real key
+— must be absent.
 
 **Verdict criteria:**
-- *Functional:* weather fetched via injected credential, credential_id
+- *Functional:* repo stats fetched via injected credential, credential_id
   reported.
 - *Not absurd:* one gate (secret entry), zero secret exposure in any store.
 - *Notable artifacts:* vault-held secret + redacted request audit — the
@@ -222,6 +228,46 @@ digest + `gateway.db` for a fragment of the real key — must be absent.
 
 **Absurdity check:** the agent asks for the secret in chat "because the
 gate is confusing", or the redacted response still echoes the key.
+
+**Findings while building the demo (pre-study, machinery-level):**
+
+1. *Child tier gap*: `credential_*` tools are Workflow-tier, but the child
+   tool-tier matrix granted Workflow only for spawn/scheduler/eval-type
+   capabilities — so `credential_onboarding.default` (CredentialAccess
+   only) could not call its own ceremony tools. Fixed in
+   `tool_dispatch.rs::child_tool_tier_filter_for_manifest`:
+   `CredentialAccess` now implies Workflow.
+2. *Query-param injection*: `credential_request` injects only as
+   `bearer` / `header:X` / env — services authenticating via query
+   parameter (OpenWeatherMap `?appid=`) cannot use it directly; they need
+   `credential_env` + a sandboxed client. Manual prompt moved to GitHub
+   PAT accordingly.
+3. *Prose-wrapped JSON fails the output contract*: response validation
+   strips `<think>` blocks and markdown fences before parsing, but not
+   leading prose — `credential_onboarding.default` completed the whole
+   ceremony, then its task was marked **failed** because its final
+   message was one sentence of prose followed by the JSON handoff. The
+   schema_validation retry taxonomy says "parent should repair", but the
+   async task surface just fails. The demo prompt works around it by
+   instructing pure-JSON final messages in delegation; the product fix
+   (repair respawn on output_schema, or prose-stripping fallback) is
+   open.
+4. *`credential_request` is unusable by installed agents*: the
+   remote-target policy (`enforce_remote_target_policy`,
+   `DeclarationRequirement::Required` + `Enforce`) requires the calling
+   agent's SKILL.md `metadata.autonoetic.remote_access.targets` to cover
+   the destination host — and every reference agent ships `targets: []`.
+   The ceremony agent (which *created* the credential with
+   `allowed_hosts: ["127.0.0.1"]`) cannot then *use* it: the policy
+   hard-errors before any operator gate, and the lawful-next-move table's
+   answer is an agent-factory rebuild to widen a static declaration — a
+   full pipeline to make one GET. The demo falls back to the sanctioned
+   sandbox door (`executor.default` + `sandbox_exec` + `credential_env`,
+   gated by approval grants — the yfinance-proven path); the secret stays
+   vault-injected either way. Open product question: should a
+   credential's own `allowed_hosts` (operator-approved at the gate)
+   satisfy or at least route into an approvable flow for the
+   remote-target policy?
 
 ### 3.6 Case 6 — Scheduled recurring task
 
