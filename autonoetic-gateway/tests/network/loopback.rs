@@ -7,8 +7,18 @@ use crate::support::{
     TestWorkspace,
 };
 
-#[tokio::test]
-async fn test_loopback_content_audit_and_negatives() {
+#[test]
+#[serial_test::serial]
+fn test_loopback_content_audit_and_negatives() -> anyhow::Result<()> {
+    // #1090: the chat turn chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds under plain `cargo test`; run on
+    // the big-stack runtime instead. Serial: mutates the process-global LLM
+    // env vars (EnvGuard) and must not overlap other env-mutating tests in
+    // the shared cargo-test process.
+    crate::support::run_with_big_stack(test_loopback_content_audit_and_negatives_body)
+}
+
+async fn test_loopback_content_audit_and_negatives_body() -> anyhow::Result<()> {
     let stub = OpenAiStub::spawn(|_, body_json| async move {
         let messages = body_json["messages"].as_array().cloned().unwrap_or_default();
         let latest_user_idx = messages.iter().rposition(|message| {
@@ -314,4 +324,5 @@ async fn test_loopback_content_audit_and_negatives() {
     // `.gateway/history/causal_chain.jsonl` is no longer populated (gateway uses gateway.db).
 
     server_task.abort();
+    Ok(())
 }

@@ -129,9 +129,10 @@ pub fn initialize_constitution(config: &GatewayConfig) -> anyhow::Result<()> {
             // Production keeps the strict single-process drift guard. In the
             // gateway crate's own unit tests, however, each test constructs a
             // router/store with its own tempdir `gateway_dir`, so the guard
-            // (which compares gateway_dir) would fail the 2nd router built in
-            // the shared lib-test process. Allow re-init to replace the global
-            // under test — the unit suite runs single-threaded, so no two tests
+            // (which compares the constitution artifacts + signature policy)
+            // would reject a differently-pathed second router in the shared
+            // lib-test process. Allow re-init to replace the global under
+            // test — the unit suite runs single-threaded, so no two tests
             // race on it. Integration tests run as separate processes (fresh
             // global each), so they exercise the production path below.
             #[cfg(test)]
@@ -174,16 +175,21 @@ fn ensure_same_runtime_config(
     existing: &ConstitutionRuntime,
     loaded: &ConstitutionRuntime,
 ) -> anyhow::Result<()> {
+    // `gateway_dir` is deliberately NOT compared (#1090): it only locates the
+    // `gateway:` signer public key at verify time. Constitution identity is
+    // the artifacts + signature policy below, so two gateway dirs sharing the
+    // same constitution must not panic a shared process (cargo test runs many
+    // tests in one process, each with its own tempdir gateway_dir). A
+    // `gateway:` signer resolved against a different dir still fails loudly at
+    // key-fingerprint verification.
     anyhow::ensure!(
         existing.source_path == loaded.source_path
             && existing.lock_path == loaded.lock_path
-            && existing.gateway_dir == loaded.gateway_dir
             && existing.require_signature == loaded.require_signature
             && existing.trusted_signers == loaded.trusted_signers,
-        "constitution runtime already initialized and cannot switch constitutional config in the same process (existing source='{}', lock='{}', gateway_dir='{}')",
+        "constitution runtime already initialized and cannot switch constitutional config in the same process (existing source='{}', lock='{}')",
         existing.source_path.display(),
         existing.lock_path.display(),
-        existing.gateway_dir.display(),
     );
     Ok(())
 }

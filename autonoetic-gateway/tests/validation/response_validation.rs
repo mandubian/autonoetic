@@ -151,8 +151,14 @@ fn setup_store_and_seed(
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_passes_with_valid_output() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_passes_with_valid_output_body)
+}
+
+async fn test_response_validation_passes_with_valid_output_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -200,8 +206,14 @@ async fn test_response_validation_passes_with_valid_output() -> anyhow::Result<(
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_skipped_when_disabled_body)
+}
+
+async fn test_response_validation_skipped_when_disabled_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     assert!(!config.response_validation.enabled);
@@ -249,8 +261,14 @@ async fn test_response_validation_skipped_when_disabled() -> anyhow::Result<()> 
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_fails_on_missing_required_artifact() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_fails_on_missing_required_artifact_body)
+}
+
+async fn test_response_validation_fails_on_missing_required_artifact_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -320,8 +338,14 @@ async fn test_response_validation_fails_on_missing_required_artifact() -> anyhow
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_fails_on_prohibited_text() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_fails_on_prohibited_text_body)
+}
+
+async fn test_response_validation_fails_on_prohibited_text_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -442,8 +466,14 @@ async fn test_response_validation_fails_on_non_json_reply_when_schema_declared(
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_manifest_io_returns_passes_without_explicit_output_policy() -> anyhow::Result<()> {
+#[test]
+fn test_manifest_io_returns_passes_without_explicit_output_policy() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_manifest_io_returns_passes_without_explicit_output_policy_body)
+}
+
+async fn test_manifest_io_returns_passes_without_explicit_output_policy_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 
@@ -585,8 +615,14 @@ async fn test_manifest_io_returns_rejects_and_logs_without_explicit_output_polic
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_reasoning_io_returns_advisory_skips_non_json() -> anyhow::Result<()> {
+#[test]
+fn test_reasoning_io_returns_advisory_skips_non_json() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_reasoning_io_returns_advisory_skips_non_json_body)
+}
+
+async fn test_reasoning_io_returns_advisory_skips_non_json_body() -> anyhow::Result<()> {
     // A reasoning agent that declares io.returns but no explicit
     // returns_enforcement defaults to ADVISORY: a non-JSON reply is logged, not
     // blocked. This is the documented default for LLM agents and is why the
@@ -658,8 +694,14 @@ execution_mode: "reasoning"
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_curator_decision_persisted_under_io_returns_advisory_skip() -> anyhow::Result<()> {
+#[test]
+fn test_curator_decision_persisted_under_io_returns_advisory_skip() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_curator_decision_persisted_under_io_returns_advisory_skip_body)
+}
+
+async fn test_curator_decision_persisted_under_io_returns_advisory_skip_body() -> anyhow::Result<()> {
     // Issue #752: when io.returns enforcement is Advisory and the reply has a
     // schema violation (missing required `status`), the response validator must
     // still persist any `decision_journal` entries before returning Ok. The
@@ -750,8 +792,14 @@ async fn test_curator_decision_persisted_under_io_returns_advisory_skip() -> any
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_curator_decision_persisted_after_repair_success() -> anyhow::Result<()> {
+#[test]
+fn test_curator_decision_persisted_after_repair_success() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_curator_decision_persisted_after_repair_success_body)
+}
+
+async fn test_curator_decision_persisted_after_repair_success_body() -> anyhow::Result<()> {
     // Issue #752 (repair path): a curator whose first reply fails io.returns
     // schema validation, then satisfies it on the repair turn while also
     // emitting a decision_journal, must still have its journal persisted.
@@ -855,8 +903,14 @@ async fn test_curator_decision_persisted_after_repair_success() -> anyhow::Resul
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_fails_when_artifact_build_evidence_missing() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_fails_when_artifact_build_evidence_missing_body)
+}
+
+async fn test_response_validation_fails_when_artifact_build_evidence_missing_body() -> anyhow::Result<()> {
 
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
@@ -918,8 +972,14 @@ async fn test_response_validation_fails_when_artifact_build_evidence_missing() -
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_skipped_on_suspended_session() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_skipped_on_suspended_session_body)
+}
+
+async fn test_response_validation_skipped_on_suspended_session_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -961,8 +1021,14 @@ async fn test_response_validation_skipped_on_suspended_session() -> anyhow::Resu
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_repair_enabled_includes_session_context() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_repair_enabled_includes_session_context() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_repair_enabled_includes_session_context_body)
+}
+
+async fn test_response_validation_repair_enabled_includes_session_context_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -1031,8 +1097,14 @@ async fn test_response_validation_repair_enabled_includes_session_context() -> a
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_repair_loop_exhausted_after_two_attempts_body)
+}
+
+async fn test_response_validation_repair_loop_exhausted_after_two_attempts_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -1117,8 +1189,14 @@ async fn test_response_validation_repair_loop_exhausted_after_two_attempts() -> 
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
+#[test]
+fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_response_validation_repair_success_path_body)
+}
+
+async fn test_response_validation_repair_success_path_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -1211,8 +1289,14 @@ async fn test_response_validation_repair_success_path() -> anyhow::Result<()> {
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_anomalies_missing_logs_advisory_event_with_marker() -> anyhow::Result<()> {
+#[test]
+fn test_anomalies_missing_logs_advisory_event_with_marker() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_anomalies_missing_logs_advisory_event_with_marker_body)
+}
+
+async fn test_anomalies_missing_logs_advisory_event_with_marker_body() -> anyhow::Result<()> {
     // RFC C.2 (#770): a reasoning agent declared in the standard AgentSkills
     // form gets a gateway-injected `anomalies` field in its io.returns schema
     // (see install_standard_reasoning_agent_with_returns). A reply that is
@@ -1282,8 +1366,14 @@ async fn test_anomalies_missing_logs_advisory_event_with_marker() -> anyhow::Res
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_anomalies_present_passes_with_no_advisory_event() -> anyhow::Result<()> {
+#[test]
+fn test_anomalies_present_passes_with_no_advisory_event() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_anomalies_present_passes_with_no_advisory_event_body)
+}
+
+async fn test_anomalies_present_passes_with_no_advisory_event_body() -> anyhow::Result<()> {
     // Counterpart to the above: when the reply includes `anomalies: []` (plus
     // every manifest-declared field), the injected schema is fully satisfied.
     // Validation passes cleanly — the `io.returns` pass event from

@@ -61,9 +61,15 @@ Reply with "Done".
     Ok(())
 }
 
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_schema_enforcement_hook_in_place() -> anyhow::Result<()> {
+fn test_schema_enforcement_hook_in_place() -> anyhow::Result<()> {
+    // #1090: the spawn/LLM chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_schema_enforcement_hook_in_place_body)
+}
+
+async fn test_schema_enforcement_hook_in_place_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = GatewayConfig {
         agents_dir: workspace.agents_dir.clone(),
@@ -118,9 +124,14 @@ async fn test_schema_enforcement_hook_in_place() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_schema_enforcement_with_disabled_mode() -> anyhow::Result<()> {
+fn test_schema_enforcement_with_disabled_mode() -> anyhow::Result<()> {
+    // #1090: see test_schema_enforcement_hook_in_place.
+    crate::support::run_with_big_stack(test_schema_enforcement_with_disabled_mode_body)
+}
+
+async fn test_schema_enforcement_with_disabled_mode_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = GatewayConfig {
         agents_dir: workspace.agents_dir.clone(),

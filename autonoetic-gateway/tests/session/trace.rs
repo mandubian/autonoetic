@@ -76,8 +76,19 @@ Reply with "Child completed task: <input>".
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
+#[serial_test::serial]
+#[test]
+fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
+    // #1090: multi-agent turns run the deep scheduler → router →
+    // spawn_agent chain on tokio workers; the default 2 MiB worker stack
+    // overflows in debug builds under plain `cargo test`. The big-stack
+    // runtime mirrors the gateway binary's 8 MiB workers. Serial: this test
+    // mutates the process-global LLM env vars, which must not overlap other
+    // env-mutating tests (escalate) in the shared cargo-test process.
+    crate::support::run_with_big_stack(test_multi_agent_session_trace_reconstruction_body)
+}
+
+async fn test_multi_agent_session_trace_reconstruction_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 
@@ -115,6 +126,7 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
                             "function": {
                                 "name": "agent_spawn",
                                 "arguments": serde_json::json!({
+                                    "intent": "delegate the work to the child agent",
                                     "agent_id": child_id,
                                     "message": "do work"
                                 }).to_string()
@@ -188,8 +200,6 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
     let parent_causal_path = parent_rev_dir.join("history/causal_chain.jsonl");
     let child_causal_path = child_rev_dir.join("history/causal_chain.jsonl");
 
-    let mut all_events: Vec<(String, String)> = Vec::new();
-
     let trace_label = |entry: &autonoetic_types::causal_chain::CausalChainEntry| -> String {
         let tool = entry
             .payload
@@ -204,35 +214,72 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
         }
     };
 
-    if gateway_causal_path.exists() {
-        let entries = read_causal_entries(&gateway_causal_path)?;
-        for entry in entries {
-            if entry.session_id == session_id {
-                all_events.push(("gateway".to_string(), trace_label(&entry)));
+    // The parent turn (LLM roundtrip → spawn → child turn → causal writes)
+    // completes asynchronously on the gateway server task. Poll the causal
+    // files for the spawn marker instead of a fixed sleep — the shared
+    // cargo-test process runs this binary's tests in parallel, so wall-clock
+    // deadlines race the pipeline (#1090).
+    let collect_events = || -> anyhow::Result<Vec<(String, String)>> {
+        let mut all_events: Vec<(String, String)> = Vec::new();
+        if gateway_causal_path.exists() {
+            let entries = read_causal_entries(&gateway_causal_path)?;
+            for entry in entries {
+                if entry.session_id == session_id {
+                    all_events.push(("gateway".to_string(), trace_label(&entry)));
+                }
             }
         }
-    }
+        if parent_causal_path.exists() {
+            let entries = read_causal_entries(&parent_causal_path)?;
+            for entry in entries {
+                if entry.session_id == session_id {
+                    all_events.push((parent_id.to_string(), trace_label(&entry)));
+                }
+            }
+        }
+        if child_causal_path.exists() {
+            let entries = read_causal_entries(&child_causal_path)?;
+            for entry in entries {
+                if entry.session_id == session_id {
+                    all_events.push((child_id.to_string(), trace_label(&entry)));
+                }
+            }
+        }
+        Ok(all_events)
+    };
 
-    if parent_causal_path.exists() {
-        let entries = read_causal_entries(&parent_causal_path)?;
-        for entry in entries {
-            if entry.session_id == session_id {
-                all_events.push((parent_id.to_string(), trace_label(&entry)));
+    let mut all_events = Vec::new();
+    let mut last_error: Option<anyhow::Error> = None;
+    for _ in 0..50 {
+        match collect_events() {
+            Ok(events) => {
+                last_error = None;
+                all_events = events;
+                if all_events
+                    .iter()
+                    .any(|(_, action)| action.contains("spawn"))
+                {
+                    break;
+                }
+            }
+            Err(err) => {
+                // Causal-chain files are written asynchronously; a read can
+                // hit a file mid-write. Retry instead of failing the test on
+                // a transient error, and surface the last error only if the
+                // wait window elapses.
+                last_error = Some(err);
             }
         }
-    }
-
-    if child_causal_path.exists() {
-        let entries = read_causal_entries(&child_causal_path)?;
-        for entry in entries {
-            if entry.session_id == session_id {
-                all_events.push((child_id.to_string(), trace_label(&entry)));
-            }
-        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
     tracing::info!(events = ?all_events, "Found events for session");
 
+    if all_events.is_empty() {
+        if let Some(err) = last_error {
+            return Err(err.context("collect_events never succeeded while polling for spawn events"));
+        }
+    }
     assert!(!all_events.is_empty(), "Should have events in the session");
 
     let has_spawn = all_events
@@ -243,8 +290,17 @@ async fn test_multi_agent_session_trace_reconstruction() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_session_trace_deterministic_ordering() -> anyhow::Result<()> {
+#[serial_test::serial]
+#[test]
+fn test_session_trace_deterministic_ordering() -> anyhow::Result<()> {
+    // #1090: deep scheduler → router → spawn_agent chain overflows the
+    // default 2 MiB `#[tokio::test]` stack in debug builds (SIGABRT under
+    // plain `cargo test`); run on an explicit big-stack runtime instead.
+    // Serial: mutates the process-global LLM env vars (see the sibling test).
+    crate::support::run_with_big_stack(test_session_trace_deterministic_ordering_body)
+}
+
+async fn test_session_trace_deterministic_ordering_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 

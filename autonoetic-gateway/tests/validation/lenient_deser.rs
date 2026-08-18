@@ -80,9 +80,15 @@ Reply with "Done".
     Ok(())
 }
 
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_agent_spawn_message_object_coerced_to_string() -> anyhow::Result<()> {
+fn test_agent_spawn_message_object_coerced_to_string() -> anyhow::Result<()> {
+    // #1090: the spawn/LLM chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_agent_spawn_message_object_coerced_to_string_body)
+}
+
+async fn test_agent_spawn_message_object_coerced_to_string_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = autonoetic_types::config::GatewayConfig {
         agents_dir: workspace.agents_dir.clone(),
@@ -136,9 +142,14 @@ async fn test_agent_spawn_message_object_coerced_to_string() -> anyhow::Result<(
     Ok(())
 }
 
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
+fn test_agent_spawn_async_string_bool_coerced() -> anyhow::Result<()> {
+    // #1090: see test_agent_spawn_message_object_coerced_to_string.
+    crate::support::run_with_big_stack(test_agent_spawn_async_string_bool_coerced_body)
+}
+
+async fn test_agent_spawn_async_string_bool_coerced_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = autonoetic_types::config::GatewayConfig {
         agents_dir: workspace.agents_dir.clone(),

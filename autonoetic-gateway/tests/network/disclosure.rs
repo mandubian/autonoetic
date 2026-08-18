@@ -6,8 +6,18 @@ use crate::support::{
     TestWorkspace,
 };
 
-#[tokio::test]
-async fn test_disclosure_policy_integration() {
+#[serial_test::serial]
+#[test]
+fn test_disclosure_policy_integration() -> anyhow::Result<()> {
+    // #1090: the chat turn chain (router → spawn_agent → LLM roundtrips)
+    // overflows the default 2 MiB `#[tokio::test]` stack in debug builds
+    // under plain `cargo test`; run on the big-stack runtime. Serial: this
+    // test mutates the process-global LLM env vars, which must not overlap
+    // other env-mutating tests in the shared cargo-test process.
+    crate::support::run_with_big_stack(test_disclosure_policy_integration_body)
+}
+
+async fn test_disclosure_policy_integration_body() -> anyhow::Result<()> {
     let stub = OpenAiStub::spawn(|body_str, _| async move {
         if body_str.contains("read secret") && !body_str.contains("\"role\":\"tool\"") {
             serde_json::json!({
@@ -257,4 +267,5 @@ disclosure:
     assert!(!filtered.contains("confidential_business_plan_v2"));
 
     server_task.abort();
+    Ok(())
 }

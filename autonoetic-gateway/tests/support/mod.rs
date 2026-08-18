@@ -535,3 +535,35 @@ pub async fn approve_pending_request_and_tick(
     run_scheduler_tick(execution).await?;
     Ok(decision)
 }
+
+/// Run an async test body on a tokio runtime with large worker stacks.
+///
+/// The gateway binary raises `thread_stack_size` to 8 MiB (autonoetic/src/
+/// main.rs) because the scheduler → notification-pump → router → spawn_agent
+/// chain is deep; `#[tokio::test]` leaves the default 2 MiB, which debug
+/// builds overflow with SIGABRT/#1090. `RUST_MIN_STACK` masks it locally but
+/// is invisible to the plain `cargo test` quick loop (CI runs nextest with
+/// per-test processes, which never hits either symptom). This helper uses a
+/// 16 MiB stack — with headroom over the binary's 8 MiB — on both the
+/// block_on thread and the runtime's worker threads.
+pub fn run_with_big_stack<F, Fut>(body: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    const BIG_STACK: usize = 16 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("big-stack-test".to_string())
+        .stack_size(BIG_STACK)
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(BIG_STACK)
+                .build()
+                .expect("big-stack tokio runtime should build");
+            rt.block_on(body())
+        })
+        .expect("big-stack test thread should spawn")
+        .join()
+        .map_err(|panic| anyhow::anyhow!("test body panicked: {panic:?}"))?
+}

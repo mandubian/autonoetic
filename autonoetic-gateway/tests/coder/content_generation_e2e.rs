@@ -12,9 +12,16 @@ use crate::support::{
 
 /// Test: Coder generates files via content.write tool calls.
 /// This verifies the tool execution is properly integrated into the agent lifecycle.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_coder_content_write_via_tool_calls() {
+fn test_coder_content_write_via_tool_calls() -> anyhow::Result<()> {
+    // #1090: the chat turn chain overflows the default 2 MiB `#[tokio::test]`
+    // stack in debug builds under plain `cargo test`; run on the big-stack
+    // runtime instead.
+    crate::support::run_with_big_stack(test_coder_content_write_via_tool_calls_body)
+}
+
+async fn test_coder_content_write_via_tool_calls_body() -> anyhow::Result<()> {
     let stub = OpenAiStub::spawn(|_, body_json| async move {
         let messages = body_json["messages"].as_array().cloned().unwrap_or_default();
         let latest_user_message = messages
@@ -186,12 +193,18 @@ async fn test_coder_content_write_via_tool_calls() {
     );
 
     server_task.abort();
+    Ok(())
 }
 
 /// Test: Multiple tool calls in a single turn (write script + SKILL.md).
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn test_coder_multiple_tool_calls_single_turn() {
+fn test_coder_multiple_tool_calls_single_turn() -> anyhow::Result<()> {
+    // #1090: see test_coder_content_write_via_tool_calls.
+    crate::support::run_with_big_stack(test_coder_multiple_tool_calls_single_turn_body)
+}
+
+async fn test_coder_multiple_tool_calls_single_turn_body() -> anyhow::Result<()> {
     let stub = OpenAiStub::spawn(|_, body_json| async move {
         let messages = body_json["messages"].as_array().cloned().unwrap_or_default();
         let latest_user_message = messages
@@ -334,4 +347,5 @@ async fn test_coder_multiple_tool_calls_single_turn() {
     );
 
     server_task.abort();
+    Ok(())
 }

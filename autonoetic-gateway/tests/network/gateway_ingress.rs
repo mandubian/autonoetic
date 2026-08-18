@@ -25,6 +25,7 @@ const LLM_API_KEY_OVERRIDE_ENV: &str = "AUTONOETIC_LLM_API_KEY";
 // stack-depth issue, not a production bug: production runs at release
 // with default stacks and never sees it.
 #[test]
+#[serial_test::serial]
 fn test_event_ingest_live_jsonrpc_ingress_writes_gateway_and_agent_traces(
 ) -> anyhow::Result<()> {
     // Spawn a worker thread with a bumped stack and run the runtime there.
