@@ -372,7 +372,7 @@ pub fn enforcement_register() -> &'static [EnforcementEntry] {
             check_id: "input_normalization_leak",
             code: "runtime/discretion_leak.rs::record_discretion_leak (tokio::task_local scope) \
                    + runtime/tool_call_processor.rs::note_llm_normalization \
-                   + runtime/response_validation.rs::strip_markdown_code_fences",
+                   + runtime/response_validation.rs::parse_reply_json (autonoetic_types::reply_json ladder)",
             test: "runtime::discretion_leak::tests",
             config: None,
         },

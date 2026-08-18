@@ -29,6 +29,7 @@ pub mod principal;
 pub mod promotion;
 pub mod recording;
 pub mod redaction;
+pub mod reply_json;
 pub mod runtime_lock;
 pub mod scheduled_job;
 pub mod schema_enforcement;
