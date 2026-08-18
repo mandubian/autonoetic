@@ -249,19 +249,37 @@ async fn test_multi_agent_session_trace_reconstruction_body() -> anyhow::Result<
     };
 
     let mut all_events = Vec::new();
+    let mut last_error: Option<anyhow::Error> = None;
     for _ in 0..50 {
-        all_events = collect_events()?;
-        if all_events
-            .iter()
-            .any(|(_, action)| action.contains("spawn"))
-        {
-            break;
+        match collect_events() {
+            Ok(events) => {
+                last_error = None;
+                all_events = events;
+                if all_events
+                    .iter()
+                    .any(|(_, action)| action.contains("spawn"))
+                {
+                    break;
+                }
+            }
+            Err(err) => {
+                // Causal-chain files are written asynchronously; a read can
+                // hit a file mid-write. Retry instead of failing the test on
+                // a transient error, and surface the last error only if the
+                // wait window elapses.
+                last_error = Some(err);
+            }
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
 
     tracing::info!(events = ?all_events, "Found events for session");
 
+    if all_events.is_empty() {
+        if let Some(err) = last_error {
+            return Err(err.context("collect_events never succeeded while polling for spawn events"));
+        }
+    }
     assert!(!all_events.is_empty(), "Should have events in the session");
 
     let has_spawn = all_events

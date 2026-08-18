@@ -542,8 +542,10 @@ pub async fn approve_pending_request_and_tick(
 /// main.rs) because the scheduler → notification-pump → router → spawn_agent
 /// chain is deep; `#[tokio::test]` leaves the default 2 MiB, which debug
 /// builds overflow with SIGABRT/#1090. `RUST_MIN_STACK` masks it locally but
-/// is invisible under `cargo test` in CI. Both the block_on thread and the
-/// runtime's worker threads get the big stack, mirroring the binary.
+/// is invisible to the plain `cargo test` quick loop (CI runs nextest with
+/// per-test processes, which never hits either symptom). This helper uses a
+/// 16 MiB stack — with headroom over the binary's 8 MiB — on both the
+/// block_on thread and the runtime's worker threads.
 pub fn run_with_big_stack<F, Fut>(body: F) -> anyhow::Result<()>
 where
     F: FnOnce() -> Fut + Send + 'static,
