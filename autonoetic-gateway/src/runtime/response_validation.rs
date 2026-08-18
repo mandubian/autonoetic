@@ -2726,6 +2726,39 @@ mod tests {
         assert!(v[0].message.contains("not valid JSON"), "got {:?}", v[0]);
     }
 
+    /// The other half of that boundary: the ladder decides *where* the payload
+    /// is, never *whether* it satisfies the contract. An extracted payload goes
+    /// through the full schema check like a verbatim one, so widening tolerance
+    /// to reach a decorated reply can never widen what the reply may say.
+    #[test]
+    fn test_prose_wrapped_payload_still_faces_the_full_schema_check() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({
+            "required": ["status", "summary"],
+            "properties": {"status": {"type": "string"}, "summary": {"type": "string"}}
+        });
+
+        // Extracted fine, missing a required field.
+        let r = make_result(vec![], vec![], Some("Here you go:\n{\"status\": \"pass\"}"));
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "output_schema" && x.message.contains("'summary' missing")),
+            "expected a missing-field violation, got: {:?}",
+            v
+        );
+
+        // Extracted fine, wrong type — a found payload is not a passing one.
+        let r = make_result(vec![], vec![], Some("Done. {\"status\": \"pass\", \"summary\": 42}"));
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "output_schema" && x.message.contains("expected type 'string'")),
+            "expected a type violation, got: {:?}",
+            v
+        );
+    }
+
     /// Issue #1104: `credential_onboarding.default` finished the whole ceremony
     /// and then had its task failed because the final message was one sentence
     /// of prose followed by the JSON handoff — no fence, so neither the raw nor
