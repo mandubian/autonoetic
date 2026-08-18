@@ -82,10 +82,13 @@ pub struct ReplyJson {
 ///
 /// Handles both closed (`<think>…</think>`) and unclosed (`<think>…` to end)
 /// blocks. Returns the text with all think blocks removed and leading/trailing
-/// whitespace trimmed.
+/// whitespace trimmed — including when there was nothing to strip, so the same
+/// reply does not come back shaped differently depending on whether the model
+/// happened to emit a think block. Trimming the no-tag case still borrows, so
+/// the fast path allocates nothing.
 pub fn strip_think_blocks(s: &str) -> std::borrow::Cow<'_, str> {
     if !s.contains("<think>") {
-        return std::borrow::Cow::Borrowed(s);
+        return std::borrow::Cow::Borrowed(s.trim());
     }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -470,6 +473,23 @@ mod tests {
     fn strip_think_blocks_preserves_text_without_think_tags() {
         let input = "plain reply";
         assert_eq!(strip_think_blocks(input).as_ref(), input);
+    }
+
+    /// The trim is part of the contract in both directions: a reply padded with
+    /// whitespace must come back the same shape whether or not the model
+    /// happened to wrap a think block around it.
+    #[test]
+    fn strip_think_blocks_trims_with_and_without_tags() {
+        assert_eq!(strip_think_blocks("\n  plain reply \n").as_ref(), "plain reply");
+        assert_eq!(
+            strip_think_blocks("\n <think>a</think> plain reply \n").as_ref(),
+            "plain reply"
+        );
+        // The no-tag path stays allocation-free.
+        assert!(matches!(
+            strip_think_blocks("  padded  "),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
