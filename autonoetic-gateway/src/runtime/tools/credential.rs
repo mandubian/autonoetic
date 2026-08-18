@@ -1306,6 +1306,16 @@ fn try_auto_refresh(
                 .iter()
                 .any(|h| h == "*" || normalize_allowed_host(h) == refresh_host);
         if !refresh_covered {
+            // The caller treats refresh failure as "surface the original
+            // 401", so this denial must be audible to operators — the
+            // agent only sees the 401, not why refresh never ran.
+            tracing::warn!(
+                target: "credential",
+                credential_id = %cred.credential_id,
+                refresh_host = %refresh_host,
+                allowed_hosts = ?cred.allowed_hosts,
+                "Refresh endpoint out of credential scope; refusing to send the refresh token"
+            );
             anyhow::bail!(
                 "Refresh endpoint host '{}' is not covered by credential '{}' allowed_hosts: {:?}. \
                  Refusing to send the refresh token out of the credential's scope.",

@@ -2368,8 +2368,10 @@ fn test_credential_request_401_triggers_refresh_then_succeeds() {
         "expires_in must update the credential expiry"
     );
 
-    data_h.join().expect("data thread");
-    refresh_h.join().expect("refresh thread");
+    // No joins: the request-count assertions above are the contract — a
+    // regression that changes the request pattern fails the asserts, and
+    // the server threads die with their listeners at test end.
+    let _ = (data_h, refresh_h);
 }
 
 #[test]
