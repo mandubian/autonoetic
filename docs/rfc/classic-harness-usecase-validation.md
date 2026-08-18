@@ -242,16 +242,31 @@ gate is confusing", or the redacted response still echoes the key.
    parameter (OpenWeatherMap `?appid=`) cannot use it directly; they need
    `credential_env` + a sandboxed client. Manual prompt moved to GitHub
    PAT accordingly.
-3. *Prose-wrapped JSON fails the output contract*: response validation
-   strips `<think>` blocks and markdown fences before parsing, but not
-   leading prose — `credential_onboarding.default` completed the whole
-   ceremony, then its task was marked **failed** because its final
-   message was one sentence of prose followed by the JSON handoff. The
-   schema_validation retry taxonomy says "parent should repair", but the
-   async task surface just fails. The demo prompt works around it by
-   instructing pure-JSON final messages in delegation; the product fix
-   (repair respawn on output_schema, or prose-stripping fallback) is
-   open.
+3. *Prose-wrapped JSON fails the output contract* — **fixed** (#1104):
+   response validation stripped `<think>` blocks and markdown fences
+   before parsing, but not leading prose — `credential_onboarding.default`
+   completed the whole ceremony, then its task was marked **failed**
+   because its final message was one sentence of prose followed by the
+   JSON handoff. The tolerance ladder now lives once in
+   `autonoetic-types/src/reply_json.rs` (verbatim → code fence → balanced
+   prose span) and is shared by the `io.returns` gate, the self-report
+   claim guards, and outcome detection; a rung past verbatim is recorded
+   as a `P-5.2` normalization, and a reply that is only prose still
+   fails. The demo prompt's workaround (instructing pure-JSON final
+   messages in delegation) is therefore **dropped** — that paragraph was
+   pure prompt burden compensating for a gateway gap, which is exactly
+   the kind of instruction this study exists to remove.
+
+   On the second half: the finding read the async task surface as having
+   no repair respawn. It has one — both surfaces reach
+   `validate_and_maybe_repair`, whose bounded loop respawns from the
+   checkpoint. Repair is *opt-in twice* (operator
+   `response_validation.repair_enabled` + agent
+   `io.output_policy.repair.auto`, both default off), and
+   `validation_max_loops: N` only sets the budget, so
+   `credential_onboarding` silently got no round. A terminal failure now
+   names the blocking switch (`RepairSkipReason` →
+   `io.returns.repair_skipped`), and that manifest opts in.
 4. *`credential_request` is unusable by most installed agents*: the
    remote-target policy (`enforce_remote_target_policy`,
    `DeclarationRequirement::Required` + `Enforce`) requires the calling
