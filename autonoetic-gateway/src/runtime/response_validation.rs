@@ -980,6 +980,78 @@ pub fn violations_to_final_error(
     }
 }
 
+/// Why the bounded repair loop did not run for a violating reply.
+///
+/// The loop is opt-in twice over — operator (`response_validation.repair_enabled`)
+/// and agent (`io.output_policy.repair.auto`) — which is the dumb-gateway
+/// doctrine working as intended (P-5.8: a gateway-authored repair prompt is a
+/// named DISCRETION LEAK, never a default). What was *not* intended is that the
+/// distinction is invisible after the fact: a manifest declaring
+/// `validation_max_loops: 2` reads like it asked for a repair round, and its
+/// author has no way to see that the round never happened, or which of the two
+/// switches swallowed it (#1104). Naming the reason is what turns a terminal
+/// failure into a fixable one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairSkipReason {
+    /// Deterministic re-execution ignores a natural-language repair prompt.
+    ScriptAgent,
+    /// The gateway subsystem is off (`response_validation.repair_enabled`).
+    SubsystemDisabled,
+    /// The manifest never opted in (`io.output_policy.repair.auto`).
+    ManifestOptOut,
+    /// Opted in, but the declared budget resolves to zero attempts.
+    ZeroAttemptsDeclared,
+}
+
+impl RepairSkipReason {
+    /// The reason repair was skipped, or `None` when the loop did run.
+    fn resolve(
+        subsystem_enabled: bool,
+        manifest_opt_in: bool,
+        execution_mode: ExecutionMode,
+        max_repair_rounds: usize,
+    ) -> Option<Self> {
+        if execution_mode == ExecutionMode::Script {
+            return Some(Self::ScriptAgent);
+        }
+        if !subsystem_enabled {
+            return Some(Self::SubsystemDisabled);
+        }
+        if !manifest_opt_in {
+            return Some(Self::ManifestOptOut);
+        }
+        if max_repair_rounds == 0 {
+            return Some(Self::ZeroAttemptsDeclared);
+        }
+        None
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ScriptAgent => "script_agent",
+            Self::SubsystemDisabled => "subsystem_disabled",
+            Self::ManifestOptOut => "manifest_opt_out",
+            Self::ZeroAttemptsDeclared => "zero_attempts_declared",
+        }
+    }
+
+    /// The one knob that would let this reply get a repair round.
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::ScriptAgent => {
+                "not applicable — a script re-executes deterministically; fix the script's output"
+            }
+            Self::SubsystemDisabled => "set response_validation.repair_enabled: true (gateway config)",
+            Self::ManifestOptOut => {
+                "declare io.output_policy.repair.auto: true in the agent manifest"
+            }
+            Self::ZeroAttemptsDeclared => {
+                "declare io.output_policy.repair.max_attempts >= 1 (or validation_max_loops >= 2)"
+            }
+        }
+    }
+}
+
 /// A bounded, char-boundary-safe excerpt of an agent reply for an error message.
 ///
 /// The failing reply is quoted back so the caller can see *what* the agent
@@ -1478,6 +1550,18 @@ impl GatewayExecutionService {
         }
 
         if !repair_enabled || max_repair_rounds == 0 {
+            // Name *why* no repair round ran. Without this the failure looks
+            // identical whether the agent never asked for a round, asked and had
+            // the operator's switch swallow it, or asked with a zero budget —
+            // and the async task surface has no other place to learn it, since
+            // the parent only sees a failed child (#1104).
+            let skip_reason = RepairSkipReason::resolve(
+                self.config().response_validation.repair_enabled,
+                output_policy.repair.auto,
+                execution_mode,
+                max_repair_rounds,
+            )
+            .unwrap_or(RepairSkipReason::ZeroAttemptsDeclared);
             if execution_mode == ExecutionMode::Script {
                 tracing::warn!(
                     target: "response_validation",
@@ -1486,7 +1570,34 @@ impl GatewayExecutionService {
                     violation_count = violations.len(),
                     "response.validation.script_fail_fast: script agent output violates io.returns; repair loop not applicable to deterministic scripts"
                 );
+            } else {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    session_id = %result.session_id,
+                    violation_count = violations.len(),
+                    skip_reason = skip_reason.label(),
+                    remedy = skip_reason.remedy(),
+                    "response.validation.repair_not_attempted: terminal validation failure with no repair round"
+                );
             }
+            log_contract_enforcement_event_to_gateway(
+                self.gateway_store().as_deref(),
+                agent_id,
+                &result.session_id,
+                "io.returns.repair_skipped",
+                EntryStatus::Denied,
+                source_agent_id,
+                serde_json::json!({
+                    "contract": "io.returns",
+                    "result": "repair_not_attempted",
+                    "skip_reason": skip_reason.label(),
+                    "remedy": skip_reason.remedy(),
+                    "declared_repair_attempts": output_policy.declared_repair_attempts(),
+                    "effective_repair_attempts": max_repair_rounds,
+                    "violated_rules": violations.iter().map(|v| &v.rule).collect::<Vec<_>>(),
+                }),
+            );
             // Persist validation feedback to the latest checkpoint so a later
             // retry/resume can detect ignored feedback even when repair is
             // disabled or exhausted.
@@ -2449,6 +2560,85 @@ mod tests {
         // The correct role still validates cleanly.
         let violations = validate_promotion_record(Some(temp.path()), "art_utr", "unit_test_runner");
         assert!(violations.is_empty());
+    }
+
+    // `RepairSkipReason` — which of the two opt-ins swallowed the repair round.
+
+    fn skip_reason(
+        subsystem: bool,
+        opt_in: bool,
+        mode: ExecutionMode,
+        rounds: usize,
+    ) -> Option<RepairSkipReason> {
+        RepairSkipReason::resolve(subsystem, opt_in, mode, rounds)
+    }
+
+    #[test]
+    fn repair_skip_reason_names_the_blocking_switch() {
+        // The #1104 configuration: manifest declared `validation_max_loops: 2`
+        // (one round) but never `repair.auto`, and the operator switch was off
+        // too. The operator's switch is the outer one, so it is named first.
+        assert_eq!(
+            skip_reason(false, false, ExecutionMode::Reasoning, 1),
+            Some(RepairSkipReason::SubsystemDisabled)
+        );
+        // Subsystem on, manifest silent — the manifest is the gap.
+        assert_eq!(
+            skip_reason(true, false, ExecutionMode::Reasoning, 1),
+            Some(RepairSkipReason::ManifestOptOut)
+        );
+        // Both opted in, but the declared budget resolves to zero rounds.
+        assert_eq!(
+            skip_reason(true, true, ExecutionMode::Reasoning, 0),
+            Some(RepairSkipReason::ZeroAttemptsDeclared)
+        );
+        // A script ignores a natural-language repair prompt regardless.
+        assert_eq!(
+            skip_reason(true, true, ExecutionMode::Script, 2),
+            Some(RepairSkipReason::ScriptAgent)
+        );
+        // Fully reachable — nothing to explain.
+        assert_eq!(skip_reason(true, true, ExecutionMode::Reasoning, 1), None);
+    }
+
+    #[test]
+    fn repair_skip_reasons_carry_a_distinct_remedy() {
+        let all = [
+            RepairSkipReason::ScriptAgent,
+            RepairSkipReason::SubsystemDisabled,
+            RepairSkipReason::ManifestOptOut,
+            RepairSkipReason::ZeroAttemptsDeclared,
+        ];
+        let labels: std::collections::HashSet<_> = all.iter().map(|r| r.label()).collect();
+        assert_eq!(labels.len(), all.len(), "labels must be distinct");
+        let remedies: std::collections::HashSet<_> = all.iter().map(|r| r.remedy()).collect();
+        assert_eq!(remedies.len(), all.len(), "remedies must be distinct");
+    }
+
+    /// The manifest that was bitten now opts in, so a fixable final message
+    /// gets its one round instead of discarding a completed ceremony.
+    #[test]
+    fn credential_onboarding_manifest_opts_into_repair() {
+        let manifest = include_str!(
+            "../../../agents/specialists/credential_onboarding.default/SKILL.md"
+        );
+        let (parsed, _body) = crate::runtime::parser::SkillParser::parse(manifest)
+            .expect("credential_onboarding.default manifest parses");
+        let policy = parsed
+            .io
+            .as_ref()
+            .and_then(|io| io.output_policy.clone())
+            .expect("manifest declares io.output_policy");
+        assert!(policy.repair.auto, "repair must be opted in");
+        assert!(
+            policy.declared_repair_attempts() >= 1,
+            "declared repair budget must be at least one round"
+        );
+        assert_eq!(
+            RepairSkipReason::resolve(true, policy.repair.auto, ExecutionMode::Reasoning, 1),
+            None,
+            "with the subsystem on, nothing should block the round"
+        );
     }
 
     // `parse_reply_json` — the gateway's view of the shared tolerance ladder.

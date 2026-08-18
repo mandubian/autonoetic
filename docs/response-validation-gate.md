@@ -35,6 +35,39 @@ Validation uses authoritative runtime state, not natural-language assertions:
 - `prohibited_text_patterns`: rejects replies that match forbidden regex patterns.
 - `min_artifact_builds`: checks durable execution-trace evidence for successful `artifact_build` calls in the current session branch.
 
+## How `io.returns` Reads A Reply
+
+`io.returns` asks for a JSON object. What arrives is a *message*, and models
+decorate messages. So before schema validation the gateway walks one tolerance
+ladder, defined once in `autonoetic-types/src/reply_json.rs` and shared by every
+reader of a reply-as-JSON:
+
+| Rung | Source | What it does |
+|---|---|---|
+| 0 | — | `<think>…</think>` blocks are removed (DeepSeek, minimax-m3, Qwen emit these inline in the reply body, unlike Anthropic's native thinking channel). |
+| 1 | `Whole` | The reply parses as JSON. No assumption made. |
+| 2 | `CodeFence` | The first fenced block whose contents parse. Fences are scanned in order, so a `bash` fence before the payload is skipped. |
+| 3 | `ProseSpan` | A balanced `{…}`/`[…]` span carved out of surrounding prose — the "Here is the handoff:" shape (#1104). |
+
+Rung 3 is ordered so the *whole* payload wins over a fragment of it: outermost
+object span (first `{` to last `}`), then outermost array span, then the longest
+balanced span of either shape. Objects precede arrays because a prose
+enumeration (`[1] vault the secret [2] verify`) parses as the JSON array `[1]`,
+which must not beat an object handoff later in the same reply. Balancing is
+string- and escape-aware, so `{"note": "}"}` is not cut short at the brace inside
+the string.
+
+Every rung must produce text that actually parses. A reply that is only prose
+stays a violation — the ladder extends tolerance to a *decorated* payload, it
+never invents one.
+
+Rungs 2 and 3 mean the gateway reshaped the agent's output, so each is emitted as
+an observable normalization (`markdown_code_fence`, `prose_wrapped_json`) — which
+inside response validation's ambient leak scope becomes a durable `P-5.2`
+DISCRETION LEAK event, not a silent convenience. The same ladder feeds the
+`delegated` / `plan_id` self-report claim guards, so a prose-wrapped reply cannot
+slip a truthfulness check just because it was decorated.
+
 ## Gateway-Injected `anomalies` Field
 
 For **reasoning** agents that declare an object-shaped `io.returns` schema, the gateway injects a required `anomalies` array property at manifest-load time (`map_standard_frontmatter_to_manifest` in `parser.rs`) — no SKILL.md edit needed:
@@ -74,6 +107,37 @@ The repair loop is bounded by:
 - `validation_max_duration_ms`: maximum wall-clock repair window, clamped to `0..30000`
 
 If the loop budget is exhausted, the gateway returns a final validation error to the caller.
+
+### When No Repair Round Runs
+
+Repair is opt-in twice over — operator (`response_validation.repair_enabled`) and
+agent (`io.output_policy.repair.auto`) — and both default to off. That is the
+dumb-gateway doctrine working as intended: a gateway-authored repair prompt is a
+named DISCRETION LEAK (`P-5.8`), never a default.
+
+What is *not* intended is that the distinction used to be invisible after the
+fact. `validation_max_loops: 2` reads like a request for a repair round, but it
+only sets the *budget*; without `repair.auto` the round never happens, and on the
+async task surface the parent just sees a failed child. So a terminal validation
+failure with no repair round now names the blocking switch, in a
+`response.validation.repair_not_attempted` trace and an
+`io.returns.repair_skipped` causal event:
+
+| `skip_reason` | Remedy |
+|---|---|
+| `subsystem_disabled` | set `response_validation.repair_enabled: true` (gateway config) |
+| `manifest_opt_out` | declare `io.output_policy.repair.auto: true` in the manifest |
+| `zero_attempts_declared` | declare `repair.max_attempts >= 1` (or `validation_max_loops >= 2`) |
+| `script_agent` | not applicable — a script re-executes deterministically; fix the script's output |
+
+The event also carries `declared_repair_attempts` vs `effective_repair_attempts`,
+so a budget clipped by `max_repair_attempts_ceiling` is visible rather than
+silently reduced.
+
+Opting in is worth it where a failed contract discards *completed side effects*.
+`credential_onboarding.default` is the reference case: by the time it writes its
+handoff the secret is vaulted and the credential registered, so one round of "say
+that again in the declared shape" beats throwing the ceremony away.
 
 ## Structured Errors vs Auto-Repair
 

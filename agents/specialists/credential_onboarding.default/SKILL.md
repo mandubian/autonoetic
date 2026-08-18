@@ -106,6 +106,18 @@ metadata:
           - "-----BEGIN"
         validation_max_loops: 2
         validation_max_duration_ms: 60000
+        # `validation_max_loops` alone buys nothing: the repair loop is opt-in
+        # per manifest (P-5.8 — a gateway-authored repair prompt is a named
+        # DISCRETION LEAK, never a default), so without `repair.auto` a bad
+        # final message ends the task outright. This ceremony is expensive and
+        # side-effecting — the secret is already vaulted and the credential
+        # registered by the time the handoff is written — so one round of "say
+        # that again in the declared shape" is strictly better than discarding
+        # a completed ceremony (#1104). Still gated on the operator's
+        # `response_validation.repair_enabled`.
+        repair:
+          auto: true
+          max_attempts: 1
 ---
 # Credential onboarding
 
