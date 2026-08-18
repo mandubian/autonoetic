@@ -439,20 +439,13 @@ pub fn validate_spawn_response(
                 });
             }
             Some(reply) => {
-                // Strip <think> reasoning blocks first (minimax-m3, DeepSeek),
-                // then try parsing as-is.
-                let reply_clean = strip_think_blocks(reply);
-                // First try: reply after stripping <think> blocks (may be valid
-                // JSON that happens to contain ``` inside a string value —
-                // stripping markdown fences would destroy it, so we try raw first).
-                let json = serde_json::from_str::<serde_json::Value>(reply_clean.trim())
-                    .ok()
-                    .or_else(|| {
-                        // Fallback: strip markdown code fences and retry.
-                        let stripped = strip_markdown_code_fences(&reply_clean);
-                        serde_json::from_str(&stripped).ok()
-                    });
-                match json {
+                // A reply is a *message*, not a payload: models put `<think>`
+                // blocks, markdown fences, and a polite sentence of prose around
+                // the JSON. `parse_reply_json` walks the shared tolerance ladder
+                // (verbatim → fence → prose span) and records anything beyond
+                // verbatim as a normalization. A reply with no parseable payload
+                // anywhere still fails — tolerance, not invention.
+                match parse_reply_json(reply) {
                     Some(parsed) => {
                         violations.extend(validate_json_against_schema(&parsed, schema));
                     }
@@ -512,11 +505,7 @@ fn compute_total_output_size_bytes(
 /// task listing only happens for actual delegation claims.
 fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
     assistant_reply
-        .and_then(|r| {
-            let clean = strip_think_blocks(r);
-            let stripped = strip_markdown_code_fences(&clean);
-            serde_json::from_str::<serde_json::Value>(stripped.trim()).ok()
-        })
+        .and_then(parse_reply_json)
         .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "delegated"))
         .unwrap_or(false)
 }
@@ -525,12 +514,10 @@ fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
 /// one is present. Used to catch a fabricated reference, NOT to require plans —
 /// agents that never mention a `plan_id` (e.g. `planner.default`) are unaffected.
 fn reply_claimed_plan_id(assistant_reply: Option<&str>) -> Option<String> {
-    // Strip <think> blocks and markdown code fences first — models often wrap
-    // their reasoning or JSON reply in these, and a fenced reply must not slip
-    // the fabricated-plan_id guard.
-    let cleaned = strip_think_blocks(assistant_reply?);
-    let stripped = strip_markdown_code_fences(&cleaned);
-    let v: serde_json::Value = serde_json::from_str(stripped.trim()).ok()?;
+    // Read the reply through the same tolerance ladder the output-schema gate
+    // uses — a reply wrapped in `<think>`, a markdown fence, or prose must not
+    // slip the fabricated-plan_id guard just because it was decorated.
+    let v = parse_reply_json(assistant_reply?)?;
     v.get("plan_id")
         .or_else(|| v.get("result").and_then(|r| r.get("plan_id")))
         .and_then(|p| p.as_str())
@@ -985,12 +972,7 @@ pub fn violations_to_final_error(
             hints
         );
         if let Some(reply) = actual_reply.filter(|r| !r.is_empty()) {
-            let snippet = if reply.len() > 200 {
-                format!("{}...", &reply[..200])
-            } else {
-                reply.to_string()
-            };
-            msg.push_str(&format!(". Agent produced: {}", snippet));
+            msg.push_str(&format!(". Agent produced: {}", reply_snippet(reply)));
         }
         anyhow::anyhow!(msg)
     } else {
@@ -998,99 +980,119 @@ pub fn violations_to_final_error(
     }
 }
 
-/// Strip `<think>…</think>` reasoning blocks that some models (minimax-m3,
-/// DeepSeek, Qwen) emit inline in the assistant reply text. Unlike Anthropic's
-/// native thinking channel, these are part of the reply payload and leak into
-/// validation, history, and display. Stripping them early ensures downstream
-/// JSON parsing, schema validation, and chat rendering see clean content.
+/// Why the bounded repair loop did not run for a violating reply.
 ///
-/// Handles both closed (`<think>…</think>`) and unclosed (`<think>…` to end)
-/// blocks. Returns the text with all think blocks removed and leading/trailing
-/// whitespace trimmed.
-pub fn strip_think_blocks(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.contains("<think>") {
-        return std::borrow::Cow::Borrowed(s);
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("<think>") {
-        out.push_str(&rest[..start]);
-        let after_open = &rest[start + 7..];
-        if let Some(end) = after_open.find("</think>") {
-            rest = &after_open[end + 8..];
-        } else {
-            // Unclosed think block — discard everything after `<think>`.
-            rest = "";
-        }
-    }
-    out.push_str(rest);
-    std::borrow::Cow::Owned(out.trim().to_string())
+/// The loop is opt-in twice over — operator (`response_validation.repair_enabled`)
+/// and agent (`io.output_policy.repair.auto`) — which is the dumb-gateway
+/// doctrine working as intended (P-5.8: a gateway-authored repair prompt is a
+/// named DISCRETION LEAK, never a default). What was *not* intended is that the
+/// distinction is invisible after the fact: a manifest declaring
+/// `validation_max_loops: 2` reads like it asked for a repair round, and its
+/// author has no way to see that the round never happened, or which of the two
+/// switches swallowed it (#1104). Naming the reason is what turns a terminal
+/// failure into a fixable one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairSkipReason {
+    /// Deterministic re-execution ignores a natural-language repair prompt.
+    ScriptAgent,
+    /// The gateway subsystem is off (`response_validation.repair_enabled`).
+    SubsystemDisabled,
+    /// The manifest never opted in (`io.output_policy.repair.auto`).
+    ManifestOptOut,
+    /// Opted in, but the declared budget resolves to zero attempts.
+    ZeroAttemptsDeclared,
 }
 
-/// Strip markdown code fences wrapping a JSON payload.
-///
-/// LLMs (especially DeepSeek) often return JSON wrapped in
-/// `` ```json ... ``` `` or `` ``` ... ``` ``, sometimes with prose
-/// before/after the fence. This helper extracts the first JSON-like
-/// code fence block so `serde_json::from_str` can parse the inner JSON.
-fn strip_markdown_code_fences(s: &str) -> std::borrow::Cow<'_, str> {
-    let trimmed = s.trim();
-    if !trimmed.contains("```") {
-        return std::borrow::Cow::Borrowed(s);
+impl RepairSkipReason {
+    /// The reason repair was skipped, or `None` when the loop did run.
+    fn resolve(
+        subsystem_enabled: bool,
+        manifest_opt_in: bool,
+        execution_mode: ExecutionMode,
+        max_repair_rounds: usize,
+    ) -> Option<Self> {
+        if execution_mode == ExecutionMode::Script {
+            return Some(Self::ScriptAgent);
+        }
+        if !subsystem_enabled {
+            return Some(Self::SubsystemDisabled);
+        }
+        if !manifest_opt_in {
+            return Some(Self::ManifestOptOut);
+        }
+        if max_repair_rounds == 0 {
+            return Some(Self::ZeroAttemptsDeclared);
+        }
+        None
     }
-    if let Some(extracted) = extract_first_fenced_json(trimmed) {
-        // Observable tolerance (M1 doctrine, #619): emitted only when we actually
-        // changed the input by unwrapping markdown fences. Both call sites
-        // (output_schema validation and the fabricated-plan_id guard) go through
-        // this single helper, so instrumenting here covers both. `detail` is a
-        // redacted summary — never the reply body.
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ScriptAgent => "script_agent",
+            Self::SubsystemDisabled => "subsystem_disabled",
+            Self::ManifestOptOut => "manifest_opt_out",
+            Self::ZeroAttemptsDeclared => "zero_attempts_declared",
+        }
+    }
+
+    /// The one knob that would let this reply get a repair round.
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::ScriptAgent => {
+                "not applicable — a script re-executes deterministically; fix the script's output"
+            }
+            Self::SubsystemDisabled => "set response_validation.repair_enabled: true (gateway config)",
+            Self::ManifestOptOut => {
+                "declare io.output_policy.repair.auto: true in the agent manifest"
+            }
+            Self::ZeroAttemptsDeclared => {
+                "declare io.output_policy.repair.max_attempts >= 1 (or validation_max_loops >= 2)"
+            }
+        }
+    }
+}
+
+/// A bounded, char-boundary-safe excerpt of an agent reply for an error message.
+///
+/// The failing reply is quoted back so the caller can see *what* the agent
+/// produced, and this is the one place a raw reply is interpolated. Slicing by
+/// byte offset would panic mid-codepoint — and a prose-wrapped reply is exactly
+/// where accented text and emoji show up (#1104), so the truncation point has to
+/// respect UTF-8 boundaries.
+fn reply_snippet(reply: &str) -> String {
+    const MAX: usize = 200;
+    if reply.len() <= MAX {
+        return reply.to_string();
+    }
+    let cut = (0..=MAX).rev().find(|i| reply.is_char_boundary(*i)).unwrap_or(0);
+    format!("{}...", &reply[..cut])
+}
+
+/// Re-export of the canonical `<think>` stripper (`autonoetic_types::reply_json`).
+///
+/// Kept as a re-export because the chat renderer and the turn loop strip think
+/// blocks for *display*, not for JSON parsing, and only need this step.
+pub use autonoetic_types::reply_json::strip_think_blocks;
+
+/// Locate the JSON payload in an agent reply, recording the tolerance.
+///
+/// The ladder itself lives in `autonoetic_types::reply_json` (shared with
+/// agent-outcome detection so both read a reply the same way). This wrapper adds
+/// the gateway's half of the deal: whenever the payload had to be *found* rather
+/// than read verbatim — unwrapped from a markdown fence, or carved out of
+/// surrounding prose — the reshaping is emitted as an observable normalization
+/// (M1 doctrine, #619), which inside the ambient `LeakScope` becomes a durable
+/// `P-5.2` DISCRETION LEAK event. `detail` is a redacted summary, never the
+/// reply body.
+fn parse_reply_json(reply: &str) -> Option<serde_json::Value> {
+    let parsed = autonoetic_types::reply_json::extract_reply_json(reply)?;
+    if parsed.source.is_normalization() {
         crate::runtime::tool_call_processor::note_llm_normalization(
-            "markdown_code_fence",
-            "stripped markdown code fences wrapping a JSON reply",
+            parsed.source.label(),
+            parsed.source.normalization_detail(),
         );
-        return std::borrow::Cow::Owned(extracted);
     }
-    std::borrow::Cow::Borrowed(s)
-}
-
-fn extract_first_fenced_json(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut pos = 0;
-    while pos < len {
-        if bytes[pos] == b'`' && pos + 2 < len && &bytes[pos..pos + 3] == b"```" {
-            let fence_start = pos;
-            pos += 3;
-            while pos < len && bytes[pos] != b'\n' && bytes[pos] != b'\r' {
-                pos += 1;
-            }
-            if pos < len && bytes[pos] == b'\r' {
-                pos += 1;
-            }
-            if pos < len && bytes[pos] == b'\n' {
-                pos += 1;
-            }
-            let content_start = pos;
-            let mut search = content_start;
-            while search < len {
-                if bytes[search] == b'`'
-                    && search + 2 < len
-                    && &bytes[search..search + 3] == b"```"
-                {
-                    let content = s[content_start..search].trim();
-                    if serde_json::from_str::<serde_json::Value>(content).is_ok() {
-                        return Some(content.to_owned());
-                    }
-                    break;
-                }
-                search += 1;
-            }
-            pos = if search + 3 < len { search + 3 } else { len };
-        } else {
-            pos += 1;
-        }
-    }
-    None
+    Some(parsed.value)
 }
 
 /// Lightweight JSON schema validation (required + type + enum + minLength).
@@ -1548,6 +1550,18 @@ impl GatewayExecutionService {
         }
 
         if !repair_enabled || max_repair_rounds == 0 {
+            // Name *why* no repair round ran. Without this the failure looks
+            // identical whether the agent never asked for a round, asked and had
+            // the operator's switch swallow it, or asked with a zero budget —
+            // and the async task surface has no other place to learn it, since
+            // the parent only sees a failed child (#1104).
+            let skip_reason = RepairSkipReason::resolve(
+                self.config().response_validation.repair_enabled,
+                output_policy.repair.auto,
+                execution_mode,
+                max_repair_rounds,
+            )
+            .unwrap_or(RepairSkipReason::ZeroAttemptsDeclared);
             if execution_mode == ExecutionMode::Script {
                 tracing::warn!(
                     target: "response_validation",
@@ -1556,7 +1570,34 @@ impl GatewayExecutionService {
                     violation_count = violations.len(),
                     "response.validation.script_fail_fast: script agent output violates io.returns; repair loop not applicable to deterministic scripts"
                 );
+            } else {
+                tracing::warn!(
+                    target: "response_validation",
+                    agent_id = %agent_id,
+                    session_id = %result.session_id,
+                    violation_count = violations.len(),
+                    skip_reason = skip_reason.label(),
+                    remedy = skip_reason.remedy(),
+                    "response.validation.repair_not_attempted: terminal validation failure with no repair round"
+                );
             }
+            log_contract_enforcement_event_to_gateway(
+                self.gateway_store().as_deref(),
+                agent_id,
+                &result.session_id,
+                "io.returns.repair_skipped",
+                EntryStatus::Denied,
+                source_agent_id,
+                serde_json::json!({
+                    "contract": "io.returns",
+                    "result": "repair_not_attempted",
+                    "skip_reason": skip_reason.label(),
+                    "remedy": skip_reason.remedy(),
+                    "declared_repair_attempts": output_policy.declared_repair_attempts(),
+                    "effective_repair_attempts": max_repair_rounds,
+                    "violated_rules": violations.iter().map(|v| &v.rule).collect::<Vec<_>>(),
+                }),
+            );
             // Persist validation feedback to the latest checkpoint so a later
             // retry/resume can detect ignored feedback even when repair is
             // disabled or exhausted.
@@ -2521,32 +2562,106 @@ mod tests {
         assert!(violations.is_empty());
     }
 
-    #[test]
-    fn test_strip_json_code_fence() {
-        let input = "```json\n{\"status\": \"pass\"}\n```";
-        let stripped = strip_markdown_code_fences(input);
-        assert_eq!(stripped, "{\"status\": \"pass\"}");
+    // `RepairSkipReason` — which of the two opt-ins swallowed the repair round.
+
+    fn skip_reason(
+        subsystem: bool,
+        opt_in: bool,
+        mode: ExecutionMode,
+        rounds: usize,
+    ) -> Option<RepairSkipReason> {
+        RepairSkipReason::resolve(subsystem, opt_in, mode, rounds)
     }
 
     #[test]
-    fn test_strip_plain_code_fence() {
-        let input = "```\n{\"status\": \"pass\"}\n```";
-        let stripped = strip_markdown_code_fences(input);
-        assert_eq!(stripped, "{\"status\": \"pass\"}");
+    fn repair_skip_reason_names_the_blocking_switch() {
+        // The #1104 configuration: manifest declared `validation_max_loops: 2`
+        // (one round) but never `repair.auto`, and the operator switch was off
+        // too. The operator's switch is the outer one, so it is named first.
+        assert_eq!(
+            skip_reason(false, false, ExecutionMode::Reasoning, 1),
+            Some(RepairSkipReason::SubsystemDisabled)
+        );
+        // Subsystem on, manifest silent — the manifest is the gap.
+        assert_eq!(
+            skip_reason(true, false, ExecutionMode::Reasoning, 1),
+            Some(RepairSkipReason::ManifestOptOut)
+        );
+        // Both opted in, but the declared budget resolves to zero rounds.
+        assert_eq!(
+            skip_reason(true, true, ExecutionMode::Reasoning, 0),
+            Some(RepairSkipReason::ZeroAttemptsDeclared)
+        );
+        // A script ignores a natural-language repair prompt regardless.
+        assert_eq!(
+            skip_reason(true, true, ExecutionMode::Script, 2),
+            Some(RepairSkipReason::ScriptAgent)
+        );
+        // Fully reachable — nothing to explain.
+        assert_eq!(skip_reason(true, true, ExecutionMode::Reasoning, 1), None);
     }
 
     #[test]
-    fn test_strip_code_fence_uppercase() {
-        let input = "```JSON\n{\"status\": \"pass\"}\n```";
-        let stripped = strip_markdown_code_fences(input);
-        assert_eq!(stripped, "{\"status\": \"pass\"}");
+    fn repair_skip_reasons_carry_a_distinct_remedy() {
+        let all = [
+            RepairSkipReason::ScriptAgent,
+            RepairSkipReason::SubsystemDisabled,
+            RepairSkipReason::ManifestOptOut,
+            RepairSkipReason::ZeroAttemptsDeclared,
+        ];
+        let labels: std::collections::HashSet<_> = all.iter().map(|r| r.label()).collect();
+        assert_eq!(labels.len(), all.len(), "labels must be distinct");
+        let remedies: std::collections::HashSet<_> = all.iter().map(|r| r.remedy()).collect();
+        assert_eq!(remedies.len(), all.len(), "remedies must be distinct");
+    }
+
+    /// The manifest that was bitten now opts in, so a fixable final message
+    /// gets its one round instead of discarding a completed ceremony.
+    #[test]
+    fn credential_onboarding_manifest_opts_into_repair() {
+        let manifest = include_str!(
+            "../../../agents/specialists/credential_onboarding.default/SKILL.md"
+        );
+        let (parsed, _body) = crate::runtime::parser::SkillParser::parse(manifest)
+            .expect("credential_onboarding.default manifest parses");
+        let policy = parsed
+            .io
+            .as_ref()
+            .and_then(|io| io.output_policy.clone())
+            .expect("manifest declares io.output_policy");
+        assert!(policy.repair.auto, "repair must be opted in");
+        assert!(
+            policy.declared_repair_attempts() >= 1,
+            "declared repair budget must be at least one round"
+        );
+        assert_eq!(
+            RepairSkipReason::resolve(true, policy.repair.auto, ExecutionMode::Reasoning, 1),
+            None,
+            "with the subsystem on, nothing should block the round"
+        );
+    }
+
+    // `parse_reply_json` — the gateway's view of the shared tolerance ladder.
+    // The ladder's own edge cases (span selection, string-aware balancing) are
+    // covered in `autonoetic_types::reply_json`; these pin the shapes the
+    // validation gate has actually been bitten by.
+
+    #[test]
+    fn test_parse_reply_json_fenced_variants() {
+        for input in [
+            "```json\n{\"status\": \"pass\"}\n```",
+            "```\n{\"status\": \"pass\"}\n```",
+            "```JSON\n{\"status\": \"pass\"}\n```",
+        ] {
+            let parsed = parse_reply_json(input).unwrap_or_else(|| panic!("no JSON in {input}"));
+            assert_eq!(parsed["status"], "pass");
+        }
     }
 
     #[test]
-    fn test_no_strip_bare_json() {
-        let input = "{\"status\": \"pass\"}";
-        let stripped = strip_markdown_code_fences(input);
-        assert_eq!(&*stripped, input);
+    fn test_parse_reply_json_bare_json() {
+        let parsed = parse_reply_json("{\"status\": \"pass\"}").unwrap();
+        assert_eq!(parsed["status"], "pass");
     }
 
     #[test]
@@ -2595,11 +2710,103 @@ mod tests {
         assert!(v.is_empty(), "expected no violations, got: {:?}", v);
     }
 
+    /// Prose with no payload anywhere stays a violation: the fallback extends
+    /// tolerance to a *decorated* payload, it never invents one.
     #[test]
-    fn test_no_strip_pure_prose() {
+    fn test_pure_prose_has_no_payload() {
         let input = "The artifact contains only moltbook_agent.py — no test files.";
-        let stripped = strip_markdown_code_fences(input);
-        assert_eq!(&*stripped, input);
+        assert!(parse_reply_json(input).is_none());
+
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(vec![], vec![], Some(input));
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].rule, "output_schema");
+        assert!(v[0].message.contains("not valid JSON"), "got {:?}", v[0]);
+    }
+
+    /// Issue #1104: `credential_onboarding.default` finished the whole ceremony
+    /// and then had its task failed because the final message was one sentence
+    /// of prose followed by the JSON handoff — no fence, so neither the raw nor
+    /// the fence-stripped parse reached the payload.
+    #[test]
+    fn test_output_schema_accepts_prose_wrapped_handoff() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({
+            "required": ["service", "credential_id", "ready_for_execution", "summary"],
+            "properties": {
+                "service": {"type": "string"},
+                "credential_id": {"type": ["string", "null"]},
+                "ready_for_execution": {"type": "boolean"},
+                "summary": {"type": "string"}
+            }
+        });
+        let reply = "The credential ceremony for GitHub is complete and verified. \
+                     Here is the execution-ready handoff:\n\
+                     {\"service\": \"github\", \"credential_id\": \"cred_7f3a\", \
+                     \"ready_for_execution\": true, \"summary\": \"PAT vaulted and verified\"}";
+        let r = make_result(vec![], vec![], Some(reply));
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    /// The same shape with the prose *after* the payload, and a `}` inside a
+    /// string value — the naive first-brace/last-brace cut would mangle it.
+    #[test]
+    fn test_output_schema_accepts_trailing_prose_and_braces_in_values() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({
+            "required": ["status", "summary"],
+            "properties": {"status": {"type": "string"}, "summary": {"type": "string"}}
+        });
+        let reply = "{\"status\": \"ok\", \"summary\": \"set ${TOKEN} (closing } included)\"}\n\n\
+                     Let me know if you need another account onboarded.";
+        let r = make_result(vec![], vec![], Some(reply));
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    /// A prose-wrapped reply must not slip the self-report claim guards either:
+    /// they read the reply through the same ladder, so a fabricated `plan_id`
+    /// is still visible when the model wrapped its JSON in a sentence.
+    #[test]
+    fn test_claim_guards_see_prose_wrapped_replies() {
+        assert!(reply_is_delegated(Some(
+            "Handing this to the coder now.\n{\"status\":\"delegated\",\"summary\":\"x\"}"
+        )));
+        assert_eq!(
+            reply_claimed_plan_id(Some(
+                "I proposed a plan. {\"status\":\"awaiting_approval\",\"plan_id\":\"plan-a1b2c3d4\"}"
+            ))
+            .as_deref(),
+            Some("plan-a1b2c3d4")
+        );
+    }
+
+    /// The failing reply is quoted back in the terminal error. Truncating a
+    /// prose reply by byte offset would panic mid-codepoint, and prose is
+    /// exactly where accented text and emoji live.
+    #[test]
+    fn test_final_error_snippet_is_char_boundary_safe() {
+        let reply = format!("{}é{}", "a".repeat(199), "b".repeat(100));
+        assert!(!reply.is_char_boundary(200));
+        let err = violations_to_final_error(
+            &[violation("output_schema", "nope")],
+            "session-1",
+            true,
+            Some(&reply),
+        );
+        assert!(err.to_string().contains("Agent produced:"));
+
+        let emoji = "🎉".repeat(100);
+        let err = violations_to_final_error(
+            &[violation("output_schema", "nope")],
+            "session-1",
+            true,
+            Some(&emoji),
+        );
+        assert!(err.to_string().contains("Agent produced:"));
     }
 
     #[test]

@@ -25,8 +25,5 @@ ever transits the vault: either gateway-side header injection
 paste it into a command, output, or file.
 
 Completion = weather reported + credential used via the vault + an explicit
-statement of the credential_id (not the secret). Output contract: any child
-you spawn whose io.returns schema requires JSON must be told to make its
-FINAL message exactly one JSON object — no prose before or after (the
-gateway enforces the schema strictly and fails the task on prose-wrapped
-JSON). Work autonomously; do not ask questions.
+statement of the credential_id (not the secret). Work autonomously; do not
+ask questions.

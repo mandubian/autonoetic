@@ -291,77 +291,14 @@ fn parse_status_str(s: &str) -> Option<AgentOutcome> {
     }
 }
 
+/// The reply-as-JSON payload, if the reply carries one.
+///
+/// Delegates to the canonical tolerance ladder in
+/// [`crate::reply_json::extract_reply_json`] so outcome detection sees exactly
+/// what the `io.returns` gate sees — including a payload wrapped in `<think>`
+/// blocks, a markdown fence, or surrounding prose (#1104).
 fn extract_json_value(reply: &str) -> Option<Value> {
-    let trimmed = reply.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-        return Some(v);
-    }
-    if let Some(inner) = extract_first_fenced_json(trimmed) {
-        if let Ok(v) = serde_json::from_str(&inner) {
-            return Some(v);
-        }
-    }
-    let start = trimmed.find('{')?;
-    let mut depth = 0i32;
-    for (i, ch) in trimmed[start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let slice = &trimmed[start..start + i + 1];
-                    if let Ok(v) = serde_json::from_str(slice) {
-                        return Some(v);
-                    }
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn extract_first_fenced_json(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut pos = 0;
-    while pos < len {
-        if bytes[pos] == b'`' && pos + 2 < len && &bytes[pos..pos + 3] == b"```" {
-            pos += 3;
-            while pos < len && bytes[pos] != b'\n' && bytes[pos] != b'\r' {
-                pos += 1;
-            }
-            if pos < len && bytes[pos] == b'\r' {
-                pos += 1;
-            }
-            if pos < len && bytes[pos] == b'\n' {
-                pos += 1;
-            }
-            let content_start = pos;
-            let mut search = content_start;
-            while search < len {
-                if bytes[search] == b'`'
-                    && search + 2 < len
-                    && &bytes[search..search + 3] == b"```"
-                {
-                    let content = s[content_start..search].trim();
-                    if serde_json::from_str::<Value>(content).is_ok() {
-                        return Some(content.to_owned());
-                    }
-                    break;
-                }
-                search += 1;
-            }
-            pos = if search + 3 < len { search + 3 } else { len };
-        } else {
-            pos += 1;
-        }
-    }
-    None
+    crate::reply_json::extract_reply_json_value(reply)
 }
 
 #[cfg(test)]

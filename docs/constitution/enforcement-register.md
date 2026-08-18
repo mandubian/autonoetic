@@ -22,7 +22,7 @@ The gateway normalizes model I/O only through deterministic, pre-committed toler
 
 | rule id | check | code | test | config |
 |---|---|---|---|---|
-| `P-5.2` | `input_normalization_leak` | `runtime/discretion_leak.rs::record_discretion_leak (tokio::task_local scope) + runtime/tool_call_processor.rs::note_llm_normalization + runtime/response_validation.rs::strip_markdown_code_fences` | `runtime::discretion_leak::tests` | — |
+| `P-5.2` | `input_normalization_leak` | `runtime/discretion_leak.rs::record_discretion_leak (tokio::task_local scope) + runtime/tool_call_processor.rs::note_llm_normalization + runtime/response_validation.rs::parse_reply_json (autonoetic_types::reply_json ladder)` | `runtime::discretion_leak::tests` | — |
 | `P-5.8` | `gateway_authored_repair_leak` | `runtime/response_validation.rs::validate_and_maybe_repair (gateway-authored repair prompt) + runtime/discretion_leak.rs::record_discretion_leak` | `runtime::discretion_leak::tests` | `response_validation.repair_enabled, response_validation.max_validation_loops, max_validation_duration_ms` |
 
 ### P-7 — Bounded progress
