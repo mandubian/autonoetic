@@ -424,6 +424,14 @@ pub(crate) fn child_tool_tier_filter_for_manifest(
                 | Capability::ApprovalQueue { .. }
                 | Capability::SchedulerSignal { .. }
                 | Capability::Evaluation { .. }
+                // CredentialAccess implies the `credential_*` tool family,
+                // which is Workflow-tier (config/tools.yaml — "planner-first
+                // orchestration, vault-side"). Without this arm the sole
+                // licensed ceremony agent (`credential_onboarding.default`)
+                // receives Core+Specialized but never the ceremony tools it
+                // exists to run — found by the credential-register study
+                // smoke (RFC classic-harness-usecase-validation §3.5).
+                | Capability::CredentialAccess { .. }
         )
     });
     if needs_workflow {
@@ -592,7 +600,50 @@ impl AgentExecutor {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_resolve_content_read, is_stagnant_poll, tool_result_counts_as_progress};
+    use super::{
+        child_tool_tier_filter_for_manifest, is_resolve_content_read, is_stagnant_poll,
+        tool_result_counts_as_progress,
+    };
+    use autonoetic_types::agent::{AgentManifest, ToolTier};
+    use autonoetic_types::capability::Capability;
+
+    #[test]
+    fn credential_access_child_gets_workflow_tier_for_credential_tools() {
+        // The ceremony agent's manifest shape: CredentialAccess only (plus
+        // network/storage). `credential_*` tools are Workflow-tier, so the
+        // child filter must include Workflow or the licensed ceremony agent
+        // cannot run its own ceremony (credential-register study finding).
+        let manifest = AgentManifest {
+            capabilities: vec![
+                Capability::CredentialAccess {
+                    services: vec!["*".to_string()],
+                },
+                Capability::NetworkAccess {
+                    hosts: vec!["*".to_string()],
+                },
+            ],
+            ..AgentManifest::default()
+        };
+        let filter = child_tool_tier_filter_for_manifest(&manifest);
+        assert!(
+            filter.allowed_tiers.contains(&ToolTier::Workflow),
+            "CredentialAccess child must see Workflow-tier (credential_*) tools, got {:?}",
+            filter.allowed_tiers
+        );
+    }
+
+    #[test]
+    fn plain_child_stays_core_tier() {
+        let manifest = AgentManifest {
+            capabilities: vec![Capability::ReadAccess {
+                scopes: vec!["self.*".to_string()],
+            }],
+            ..AgentManifest::default()
+        };
+        let filter = child_tool_tier_filter_for_manifest(&manifest);
+        assert!(!filter.allowed_tiers.contains(&ToolTier::Workflow));
+        assert!(!filter.allowed_tiers.contains(&ToolTier::Specialized));
+    }
 
     #[test]
     fn resolve_content_read_not_read_only() {

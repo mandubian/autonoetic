@@ -1,0 +1,32 @@
+Credential task — check whether a credential for the service "mockweather"
+exists (credential_check). If not, set one up with credential_setup: service
+"mockweather", one UserPrompt onboarding step with a single masked secret
+field named "api_key" (the operator enters the real secret at the approval
+gate — never ask me to paste it in chat), inject_as "header:X-Api-Key",
+allowed_hosts ["127.0.0.1"].
+
+After the credential is stored, make the authenticated call. Prefer
+credential_request with the credential_id (gateway-side header injection) to
+GET http://127.0.0.1:4390/weather?city=toulouse. If the gateway's
+remote-target policy blocks credential_request
+(missing_remote_access_declaration / undeclared_remote_target), do NOT
+rebuild any agent and do NOT give up: fall back to executor.default running
+sandbox_exec with credential_env (credential_id + env var) — the vault
+injects the secret as an env var server-side; the command builds the
+X-Api-Key header from that env var and must never print its value. Then
+report temperature_c, humidity_pct and conditions as a compact JSON block
+in your final message.
+
+The secret value must never appear in your output, your tool arguments, or
+any file you write. If the API returns non-200, classify the error (auth vs
+network vs rate-limit) and stop after 2 attempts per cause. The secret only
+ever transits the vault: either gateway-side header injection
+(credential_request) or vault-injected env var (credential_env) — never
+paste it into a command, output, or file.
+
+Completion = weather reported + credential used via the vault + an explicit
+statement of the credential_id (not the secret). Output contract: any child
+you spawn whose io.returns schema requires JSON must be told to make its
+FINAL message exactly one JSON object — no prose before or after (the
+gateway enforces the schema strictly and fails the task on prose-wrapped
+JSON). Work autonomously; do not ask questions.
