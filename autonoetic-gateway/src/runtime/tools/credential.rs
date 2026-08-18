@@ -497,14 +497,52 @@ impl NativeTool for CredentialRequestTool {
                 // credential paths, and those paths fail shut. This includes
                 // `remote_preapproval_requires_network_capability`: a manifest
                 // inconsistency, which an operator approval must not be able
-                // to override at runtime. Capability-layer violations fall
-                // through to the approval flow below (ask-the-operator).
-                if matches!(
-                    violation.error_type,
-                    "missing_remote_access_declaration"
-                        | "undeclared_remote_target"
-                        | "remote_preapproval_requires_network_capability"
-                ) {
+                // to override at runtime.
+                //
+                // RFC credential-egress-host-authorization: the ONE routing
+                // exception is the credential's own operator-approved scope.
+                // When `allowed_hosts` covers this host, the declaration
+                // violation routes to the host approval minted below — the
+                // gateway injects the secret, so that approval is precisely
+                // an "operator sends this secret to this host" decision, with
+                // the host on the card and in the R++4 confirm phrase. The
+                // static SKILL.md declaration stays authoritative for
+                // programmatic (sandbox) egress; a host covered by neither
+                // still fails shut here.
+                let credential_covers_host = !cred.allowed_hosts.is_empty()
+                    && cred
+                        .allowed_hosts
+                        .iter()
+                        .any(|h| h == "*" || normalize_allowed_host(h) == url_host);
+                let fail_shut = violation.error_type
+                    == "remote_preapproval_requires_network_capability"
+                    || (!credential_covers_host
+                        && matches!(
+                            violation.error_type,
+                            "missing_remote_access_declaration"
+                                | "undeclared_remote_target"
+                        ));
+                if fail_shut {
+                    // A host outside the credential's scope is *always* a
+                    // credential-scope violation, never a declaration-layer
+                    // one: the denial must not depend on which layer
+                    // happened to trip first (review: error taxonomy). The
+                    // later hard binding would return exactly this
+                    // permission denial even if the declaration passed —
+                    // surface the same shape here so callers (and tests)
+                    // see one failure mode for out-of-scope hosts.
+                    if !credential_covers_host
+                        && violation.error_type
+                            != "remote_preapproval_requires_network_capability"
+                    {
+                        return Ok(autonoetic_types::tool_error::ToolError::permission(
+                            format!(
+                                "Credential '{}' for service '{}' is not authorized for host '{}'. Allowed hosts: {:?}",
+                                args.credential_id, cred.service, url_host, cred.allowed_hosts
+                            ),
+                        )
+                        .to_error_response());
+                    }
                     return Ok(json!({
                         "ok": false,
                         "error_type": violation.error_type,
@@ -553,7 +591,7 @@ impl NativeTool for CredentialRequestTool {
                             format!("uses stored credential for {}", url_host),
                             "Approve if this host is an expected credential target for the agent's task; reject if the host is unexpected",
                         ),
-                        summary: format!("Credential request to {}", url_host),
+                        summary: format!("vault credential {} request to {}", cred.service, url_host),
                         approval_ref: None,
                         pre_validated: false,
                         cache_backfill: None,
@@ -574,7 +612,7 @@ impl NativeTool for CredentialRequestTool {
                             "repair_hint": "Wait for the existing approval to be resolved.",
                             "approval": {
                                 "kind": "credential_request",
-                                "summary": format!("Credential request to {}", url_host),
+                                "summary": format!("vault credential {} request to {}", cred.service, url_host),
                                 "retry_field": "approval_ref"
                             }
                         })
@@ -596,7 +634,7 @@ impl NativeTool for CredentialRequestTool {
                             "reason": reason,
                             "approval": {
                                 "kind": "credential_request",
-                                "summary": format!("Credential request to {}", url_host),
+                                "summary": format!("vault credential {} request to {}", cred.service, url_host),
                                 "reason": format!(
                                     "Credential request to {} requires approval because remote target policy is not declared for this host.",
                                     url_host
@@ -655,7 +693,7 @@ impl NativeTool for CredentialRequestTool {
                         format!("uses stored credential for {}", url_host),
                         "Approve if this host is an expected credential target for the agent's task; reject if the host is unexpected",
                     ),
-                    summary: format!("Credential request to {}", url_host),
+                    summary: format!("vault credential {} request to {}", cred.service, url_host),
                     approval_ref: None,
                     pre_validated: false,
                     cache_backfill: None,
@@ -676,7 +714,7 @@ impl NativeTool for CredentialRequestTool {
                         "repair_hint": "Wait for the existing approval to be resolved.",
                         "approval": {
                             "kind": "credential_request",
-                            "summary": format!("Credential request to {}", url_host),
+                            "summary": format!("vault credential {} request to {}", cred.service, url_host),
                             "retry_field": "approval_ref"
                         }
                     })
@@ -698,7 +736,7 @@ impl NativeTool for CredentialRequestTool {
                         "reason": reason,
                         "approval": {
                             "kind": "credential_request",
-                            "summary": format!("Credential request to {}", url_host),
+                            "summary": format!("vault credential {} request to {}", cred.service, url_host),
                             "reason": format!("HTTP request to {} requires approval", url_host),
                             "retry_field": "approval_ref"
                         }

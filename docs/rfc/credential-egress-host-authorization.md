@@ -1,12 +1,14 @@
 # RFC: Credential Egress — `allowed_hosts` as a Routing Input, Not a Bypass
 
-**Status:** Draft — 2026-08-17. Proposed out of the classic-harness
-validation study (credential-register case); no implementation yet.
-
-**Origin:** `docs/rfc/classic-harness-usecase-validation.md` §3.5 finding 4
-—the credential-register smoke completed only because `executor.default`
-happens to declare `remote_access.targets: [{kind: "any"}]`; every other
-installed agent is locked out of `credential_request`.
+**Status:** Implemented (§3 core + §4.2 card surfacing) on
+`feat/credential-egress-host-approval` — routing change in
+`credential.rs`, host-naming R++4 phrase in `approval_hardening.rs`,
+tests in `tests/credential/credential.rs`. §4.1 (tightening executor's
+`targets: [any]`) and §4.3 (declaration-load discrepancy) remain open.
+Proposed out of the classic-harness validation study (credential-register
+case); the study run completed only because `executor.default` happens to
+declare `remote_access.targets: [{kind: "any"}]`; every other installed
+agent is locked out of `credential_request`.
 
 **Related:** `autonoetic-gateway/src/runtime/tools/credential.rs`
 (`credential_request`), `autonoetic-gateway/src/runtime/network_policy.rs`

@@ -53,6 +53,14 @@ pub fn hardening_for_action(action: &ScheduledAction) -> ApprovalHardening {
     };
     let confirm_phrase = match risk {
         ApprovalRisk::Critical => Some(confirm_phrase_for(action)),
+        // RFC credential-egress-host-authorization: approving a
+        // credential_request approves *secret delivery to a host* (the
+        // gateway injects the secret), so the operator retypes a
+        // host-naming phrase — the same R++4 protection the registration
+        // class gets, even though the risk class is High.
+        ApprovalRisk::High if matches!(action, ScheduledAction::CredentialRequest { .. }) => {
+            Some(confirm_phrase_for(action))
+        }
         _ => None,
     };
     ApprovalHardening {
@@ -112,6 +120,27 @@ fn confirm_phrase_for(action: &ScheduledAction) -> String {
             credential_id,
             ..
         } => format!("register {} {}", service, credential_id),
+        // Host-naming phrase (RFC credential-egress-host-authorization):
+        // the host is the security-relevant part — the credential id is
+        // unwieldy to retype and the service is already on the card.
+        // Mint sites always stash the host in `payload.host`; the URL is
+        // the fallback for hand-built actions.
+        ScheduledAction::CredentialRequest { url, payload, .. } => {
+            let host = payload
+                .as_ref()
+                .and_then(|p| p.get("host"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    url::Url::parse(&url)
+                        .ok()
+                        .and_then(|u| u.host_str().map(String::from))
+                        // Never fall back to the raw URL: path/query could
+                        // leak into an operator retype prompt (review).
+                        .unwrap_or_else(|| "unparsed-host".to_string())
+                });
+            format!("use credential at {}", host)
+        }
         _ => "confirm".to_string(),
     }
 }
@@ -168,6 +197,62 @@ mod tests {
     fn dwell_ms_progresses() {
         assert!(DWELL_STANDARD_MS < DWELL_HIGH_MS);
         assert!(DWELL_HIGH_MS < DWELL_CRITICAL_MS);
+    }
+
+    #[test]
+    fn credential_request_high_risk_carries_host_phrase() {
+        // RFC credential-egress-host-authorization: the vault injects the
+        // secret, so approving a credential_request approves secret delivery
+        // to a host — High risk, but with the R++4 host-naming phrase.
+        let action = ScheduledAction::CredentialRequest {
+            credential_id: "cred_github_001".to_string(),
+            url: "https://api.github.com/repos/rust-lang/rust".to_string(),
+            method: None,
+            headers: None,
+            body: None,
+            inject_secret_as: None,
+            payload: Some(serde_json::json!({ "host": "api.github.com" })),
+        };
+        assert_eq!(classify_approval_risk(&action), ApprovalRisk::High);
+        let h = hardening_for_action(&action);
+        assert_eq!(h.min_dwell_ms, DWELL_HIGH_MS);
+        assert_eq!(h.confirm_phrase.as_deref(), Some("use credential at api.github.com"));
+    }
+
+    #[test]
+    fn credential_request_phrase_falls_back_to_url_host() {
+        // Hand-built actions without payload.host still name the host.
+        let action = ScheduledAction::CredentialRequest {
+            credential_id: "cred_x".to_string(),
+            url: "https://example.org/path".to_string(),
+            method: None,
+            headers: None,
+            body: None,
+            inject_secret_as: None,
+            payload: None,
+        };
+        assert_eq!(
+            confirm_phrase_for(&action),
+            "use credential at example.org"
+        );
+    }
+
+    #[test]
+    fn credential_request_phrase_never_leaks_raw_url() {
+        // An unparseable "url" must not surface in an operator retype
+        // prompt — a non-leaking placeholder is used instead (review).
+        let action = ScheduledAction::CredentialRequest {
+            credential_id: "cred_x".to_string(),
+            url: "not a url/with?query=secret".to_string(),
+            method: None,
+            headers: None,
+            body: None,
+            inject_secret_as: None,
+            payload: None,
+        };
+        let phrase = confirm_phrase_for(&action);
+        assert_eq!(phrase, "use credential at unparsed-host");
+        assert!(!phrase.contains("query"));
     }
 
     #[test]
