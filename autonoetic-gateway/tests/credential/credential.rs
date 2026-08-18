@@ -59,13 +59,40 @@ fn spawn_one_shot_http_server(
     (format!("http://{}", addr), handle)
 }
 
-fn setup_vault(_secret_name: &str, _secret_value: &str) -> tempfile::TempDir {
+/// Seed a vault with one stored secret and point the process at it.
+///
+/// NOTE: `AUTONOETIC_VAULT_PATH`/`AUTONOETIC_VAULT_KEY` are process-global;
+/// every test using this stays `#[serial]`, and after the gateway code has
+/// run, re-read the vault via `vault_file(&temp)` (a sibling test can
+/// retarget the env var mid-run).
+fn setup_vault(secret_name: &str, secret_value: &str) -> tempfile::TempDir {
     let temp = tempdir().unwrap();
     let vault_path = vault_file(&temp);
     let key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     std::env::set_var("AUTONOETIC_VAULT_KEY", key_hex);
     std::env::set_var("AUTONOETIC_VAULT_PATH", &vault_path);
+    // Actually store the secret (#1053: the args used to be ignored, which
+    // is why every caller was `#[ignore]`d). load_from_file creates the
+    // vault on first use, and persist encrypts it to disk.
+    let mut vault = autonoetic_gateway::Vault::load_from_file(&vault_path)
+        .expect("vault should load");
+    vault.load_secret(secret_name, secret_value.to_string());
+    vault
+        .persist_to_file(&vault_path)
+        .expect("vault should persist");
     temp
+}
+
+/// Seed an additional secret into the vault seeded by [`setup_vault`]
+/// (e.g. a refresh token under a second name).
+fn vault_add_secret(vault_temp: &tempfile::TempDir, secret_name: &str, secret_value: &str) {
+    let vault_path = vault_file(vault_temp);
+    let mut vault = autonoetic_gateway::Vault::load_from_file(&vault_path)
+        .expect("vault should load");
+    vault.load_secret(secret_name, secret_value.to_string());
+    vault
+        .persist_to_file(&vault_path)
+        .expect("vault should persist");
 }
 
 /// The vault file [`setup_vault`] pointed the gateway at. Read it back through
@@ -306,8 +333,11 @@ fn test_credential_check_denied_without_credential_access() {
 
 #[test]
 #[serial_test::serial]
-#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_check_service_scoped_denial() {
+    // Un-ignored with the working setup_vault (#1053): the old assertion
+    // expected ok:true for a DENIED service, which contradicts the
+    // service-scoping contract in credential.rs. Assert the real denial
+    // shape instead.
     let manifest = test_manifest(vec![Capability::CredentialAccess {
         services: vec!["github".to_string()],
     }]);
@@ -334,8 +364,12 @@ fn test_credential_check_service_scoped_denial() {
         .expect("credential_check should succeed");
 
     let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
-    assert_eq!(parsed["ok"], true);
-    assert_eq!(parsed["service"], "github");
+    assert_eq!(parsed["ok"], false);
+    assert_eq!(parsed["error_type"], "permission");
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap()
+        .contains("Credential access denied for service: stripe"));
 }
 
 #[test]
@@ -654,7 +688,6 @@ fn test_credential_request_wildcard_allowed_hosts_covers_any_host() {
 
 #[test]
 #[serial_test::serial]
-#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_request_allowed_when_host_matches() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -727,7 +760,6 @@ fn test_credential_request_allowed_when_host_matches() {
 
 #[test]
 #[serial_test::serial]
-#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_request_stored_inject_as_takes_precedence() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -800,7 +832,6 @@ fn test_credential_request_stored_inject_as_takes_precedence() {
 
 #[test]
 #[serial_test::serial]
-#[ignore = "needs a vault secret `setup_vault` never stores (its secret_name/secret_value args are unused) — see #1053 review"]
 fn test_credential_request_no_allowed_hosts_uses_network_access_only() {
     let manifest = test_manifest(vec![
         Capability::CredentialAccess {
@@ -2138,4 +2169,375 @@ autonoetic:
         vault.get_secret("app_password").is_none(),
         "no secret should be stored"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Credential auto-refresh on 401 (credential.rs ~L834) — zero-coverage flow
+// pinned here (#1109), including the refresh-endpoint allowed_hosts binding
+// (the gateway sends the refresh token to refresh_url; out-of-scope must
+// not receive it).
+// ---------------------------------------------------------------------------
+
+/// A tiny two-endpoint HTTP fixture sharing state across one-shot servers:
+/// - data server: first request -> 401 (token-1), any request whose
+///   Authorization carries `expected_token` -> 200
+/// - refresh server: POST -> `{"access_token": "<new>", "expires_in": 3600}`
+/// Returns (data_url, refresh_url, data_requests, refresh_requests, handles).
+fn spawn_refresh_fixture(
+    ok_body: &str,
+    expected_token: &str,
+    refresh_json: String,
+) -> (
+    String,
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    thread::JoinHandle<()>,
+    thread::JoinHandle<()>,
+) {
+    let expected_token = expected_token.to_string();
+    let data_requests: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let refresh_requests: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let data_listener = TcpListener::bind("127.0.0.1:0").expect("bind data");
+    let data_addr = data_listener.local_addr().unwrap();
+    let reqs = data_requests.clone();
+    let token = expected_token.clone();
+    let body = ok_body.to_string();
+    let data_handle = thread::spawn(move || {
+        // The fixture accepts TWO sequential requests: the 401 then the retry.
+        for i in 0..2 {
+            let Ok((mut stream, _)) = data_listener.accept() else {
+                return;
+            };
+            let mut request_buf = [0_u8; 4096];
+            let n = stream.read(&mut request_buf).unwrap_or(0);
+            let raw = String::from_utf8_lossy(&request_buf[..n]).to_string();
+            reqs.lock().unwrap().push(raw.clone());
+            let authorized = raw.contains(&format!("Bearer {token}")) || raw.contains(&token);
+            let (status, body) = if i == 0 {
+                ("401 Unauthorized", "expired token".to_string())
+            } else if authorized {
+                ("200 OK", body.clone())
+            } else {
+                ("401 Unauthorized", "wrong token".to_string())
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let refresh_listener = TcpListener::bind("127.0.0.1:0").expect("bind refresh");
+    let refresh_addr = refresh_listener.local_addr().unwrap();
+    let rreqs = refresh_requests.clone();
+    let refresh_handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = refresh_listener.accept() {
+            let mut request_buf = [0_u8; 4096];
+            let n = stream.read(&mut request_buf).unwrap_or(0);
+            rreqs
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&request_buf[..n]).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                refresh_json.len(),
+                refresh_json
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    (
+        format!("http://{data_addr}"),
+        format!("http://{refresh_addr}"),
+        data_requests,
+        refresh_requests,
+        data_handle,
+        refresh_handle,
+    )
+}
+
+fn refresh_credential(host: String, refresh_url: String) -> CredentialRecord {
+    CredentialRecord {
+        credential_id: "cred_refresh_001".to_string(),
+        service: "github".to_string(),
+        secret_name: "GITHUB_TOKEN".to_string(),
+        inject_as: Some("bearer".to_string()),
+        created_by_agent: None,
+        expires_at: None,
+        shared_with: vec![],
+        allowed_hosts: vec![host],
+        refresh_token_secret_name: Some("GITHUB_REFRESH".to_string()),
+        refresh_url: Some(refresh_url),
+        refresh_method: None,
+        refresh_headers: None,
+        refresh_extract_access_token: None,
+        refresh_extract_refresh_token: None,
+        refresh_extract_expires_in: Some("expires_in".to_string()),
+        label: None,
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_401_triggers_refresh_then_succeeds() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("GITHUB_TOKEN", "stale-token");
+    vault_add_secret(&_vault_temp, "GITHUB_REFRESH", "refresh-tok-abc");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let (data_url, refresh_url, data_requests, refresh_requests, data_h, refresh_h) =
+        spawn_refresh_fixture(
+            "fresh data",
+            "fresh-token-42",
+            r#"{"access_token":"fresh-token-42","expires_in":3600}"#.to_string(),
+        );
+    let host = url::Url::parse(&data_url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_string();
+    store
+        .upsert_credential(&refresh_credential(host, refresh_url))
+        .unwrap();
+
+    let result = registry
+        .execute(
+            "credential_request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_refresh_001",
+                "url": format!("{}/data", data_url)
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .expect("credential_request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], true, "refresh+retry must succeed: {parsed}");
+    assert_eq!(parsed["status"], 200);
+    assert_eq!(parsed["body"], "fresh data");
+
+    // Exactly one refresh call, carrying the refresh token to the refresh
+    // endpoint — and exactly two data calls (401 then authorized retry).
+    assert_eq!(refresh_requests.lock().unwrap().len(), 1);
+    assert!(refresh_requests.lock().unwrap()[0].contains("refresh-tok-abc"));
+    assert_eq!(data_requests.lock().unwrap().len(), 2);
+    assert!(data_requests.lock().unwrap()[1].contains("fresh-token-42"));
+
+    // The vault now holds the rotated access token, and the credential row
+    // picked up the computed expiry.
+    let vault = autonoetic_gateway::Vault::load_from_file(&vault_file(&_vault_temp)).unwrap();
+    assert_eq!(
+        vault.get_secret("GITHUB_TOKEN").map(|s| s.expose_secret()),
+        Some("fresh-token-42")
+    );
+    let cred = store
+        .get_credential("cred_refresh_001")
+        .unwrap()
+        .expect("credential row");
+    assert!(
+        cred.expires_at.is_some(),
+        "expires_in must update the credential expiry"
+    );
+
+    data_h.join().expect("data thread");
+    refresh_h.join().expect("refresh thread");
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_refresh_rejected_falls_back_to_original_401() {
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("GITHUB_TOKEN", "stale-token");
+    vault_add_secret(&_vault_temp, "GITHUB_REFRESH", "dead-refresh");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    // Data server: one 401, then done. Refresh server: 400 rejection.
+    let (data_url, _) = spawn_one_shot_http_server("401 Unauthorized", "text/plain", "expired".to_string());
+    let (reject_url, _) = spawn_one_shot_http_server("400 Bad Request", "application/json", r#"{"error":"invalid_grant"}"#.to_string());
+    let host = url::Url::parse(&data_url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_string();
+    store
+        .upsert_credential(&refresh_credential(host, reject_url))
+        .unwrap();
+
+    let result = registry
+        .execute(
+            "credential_request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_refresh_001",
+                "url": format!("{}/data", data_url)
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential_request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    // try_auto_refresh errors -> the original 401 response is what the agent sees.
+    assert_eq!(parsed["ok"], true);
+    assert_eq!(parsed["status"], 401);
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_refresh_endpoint_out_of_scope_is_denied() {
+    // The refresh endpoint host is NOT in allowed_hosts: the gateway must
+    // not send the refresh token there. The fixture runs on 127.0.0.2 —
+    // reachable (so without the binding the refresh would succeed and the
+    // retry would 200), making the assertion discriminate between
+    // binding-denial and a mere connection failure.
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["github".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string(), "127.0.0.2".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("GITHUB_TOKEN", "stale-token");
+    vault_add_secret(&_vault_temp, "GITHUB_REFRESH", "refresh-tok-abc");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let data_listener = TcpListener::bind("127.0.0.1:0").expect("bind data");
+    let data_addr = data_listener.local_addr().unwrap();
+    let data_requests: std::sync::Arc<std::sync::Mutex<usize>> =
+        std::sync::Arc::new(std::sync::Mutex::new(0));
+    let dr = data_requests.clone();
+    let data_handle = thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut stream, _)) = data_listener.accept() else {
+                return;
+            };
+            *dr.lock().unwrap() += 1;
+            let mut request_buf = [0_u8; 2048];
+            let _ = stream.read(&mut request_buf);
+            let body = "expired";
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let refresh_listener = TcpListener::bind("127.0.0.2:0").expect("bind refresh");
+    let refresh_addr = refresh_listener.local_addr().unwrap();
+    let refresh_hits: std::sync::Arc<std::sync::Mutex<usize>> =
+        std::sync::Arc::new(std::sync::Mutex::new(0));
+    let rh = refresh_hits.clone();
+    let refresh_handle = thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut stream, _)) = refresh_listener.accept() else {
+                return;
+            };
+            *rh.lock().unwrap() += 1;
+            let mut request_buf = [0_u8; 2048];
+            let _ = stream.read(&mut request_buf);
+            let body = r#"{"access_token":"fresh-token-42"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    // Data host allowed; the refresh endpoint on 127.0.0.2 is NOT.
+    let mut cred = refresh_credential(
+        "127.0.0.1".to_string(),
+        format!("http://{refresh_addr}/refresh"),
+    );
+    cred.allowed_hosts = vec!["127.0.0.1".to_string()];
+    store.upsert_credential(&cred).unwrap();
+
+    let result = registry
+        .execute(
+            "credential_request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_refresh_001",
+                "url": format!("http://{data_addr}/data")
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential_request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["status"], 401, "no refresh retry may happen: {parsed}");
+    assert_eq!(
+        *refresh_hits.lock().unwrap(),
+        0,
+        "the refresh endpoint must never receive the token"
+    );
+    assert_eq!(*data_requests.lock().unwrap(), 1, "no retry after denial");
+
+    // No joins: the servers are intentionally left waiting for the
+    // connections that the binding forbids (their threads die with the
+    // listener going out of scope at test end).
+    let _ = (data_handle, refresh_handle);
 }
