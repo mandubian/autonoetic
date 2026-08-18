@@ -78,8 +78,14 @@ fn stub_user_ask_then_text(
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> {
+#[test]
+fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> {
+    // #1090: the ask/resume turn chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_user_ask_suspend_answer_resume_checkpoint_body)
+}
+
+async fn test_user_ask_suspend_answer_resume_checkpoint_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -220,8 +226,14 @@ async fn test_user_ask_suspend_answer_resume_checkpoint() -> anyhow::Result<()> 
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
+#[test]
+fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
+    // #1090: the ask/resume turn chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_user_ask_resume_option_selected_value_body)
+}
+
+async fn test_user_ask_resume_option_selected_value_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -327,8 +339,14 @@ async fn test_user_ask_resume_option_selected_value() -> anyhow::Result<()> {
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
+#[test]
+fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
+    // #1090: the ask/resume turn chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_user_ask_freeform_in_session_history_body)
+}
+
+async fn test_user_ask_freeform_in_session_history_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");
@@ -449,8 +467,14 @@ async fn test_user_ask_freeform_in_session_history() -> anyhow::Result<()> {
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_duplicate_resume_claim_guard_skips_second_caller() -> anyhow::Result<()> {
+#[test]
+fn test_duplicate_resume_claim_guard_skips_second_caller() -> anyhow::Result<()> {
+    // #1090: the ask/resume turn chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(test_duplicate_resume_claim_guard_skips_second_caller_body)
+}
+
+async fn test_duplicate_resume_claim_guard_skips_second_caller_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
     let gateway_dir = workspace.agents_dir.join(".gateway");

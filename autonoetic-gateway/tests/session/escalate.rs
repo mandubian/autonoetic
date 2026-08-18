@@ -306,8 +306,19 @@ async fn test_session_escalate_specialist_no_approval() -> anyhow::Result<()> {
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()> {
+#[test]
+fn test_escalation_approval_resume_injects_guidance() -> anyhow::Result<()> {
+    // #1090: the scheduler → notification → router → spawn_agent chain
+    // overflows the default 2 MiB `#[tokio::test]` stack in debug builds
+    // (SIGABRT under plain `cargo test`); the gateway binary runs the same
+    // chain on 8 MiB worker stacks. Run the body on an explicit big-stack
+    // tokio runtime instead.
+    crate::support::run_with_big_stack(
+        test_escalation_approval_resume_injects_guidance_body,
+    )
+}
+
+async fn test_escalation_approval_resume_injects_guidance_body() -> anyhow::Result<()> {
     // The reply path reads the constitution version for the state-attestation
     // tail (P-6.23); initialize before the digest is touched. A config-mismatch
     // error only means a neighbor test initialized first — that runtime

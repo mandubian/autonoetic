@@ -127,8 +127,13 @@ async fn repair_disabled_by_default_without_manifest_opt_in() -> anyhow::Result<
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
+#[test]
+fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
+    // #1090: see repair_attempts_are_capped_by_system_ceiling.
+    crate::support::run_with_big_stack(repair_opt_in_runs_bounded_repair_turn_body)
+}
+
+async fn repair_opt_in_runs_bounded_repair_turn_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
@@ -191,8 +196,14 @@ async fn repair_opt_in_runs_bounded_repair_turn() -> anyhow::Result<()> {
 }
 
 #[serial_test::serial]
-#[tokio::test]
-async fn repair_attempts_are_capped_by_system_ceiling() -> anyhow::Result<()> {
+#[test]
+fn repair_attempts_are_capped_by_system_ceiling() -> anyhow::Result<()> {
+    // #1090: the LLM roundtrip chain overflows the default 2 MiB
+    // `#[tokio::test]` stack in debug builds; run on the big-stack runtime.
+    crate::support::run_with_big_stack(repair_attempts_are_capped_by_system_ceiling_body)
+}
+
+async fn repair_attempts_are_capped_by_system_ceiling_body() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.response_validation.enabled = true;
