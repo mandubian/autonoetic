@@ -451,6 +451,14 @@ pub fn validate_spawn_response(
                         // Fallback: strip markdown code fences and retry.
                         let stripped = strip_markdown_code_fences(&reply_clean);
                         serde_json::from_str(&stripped).ok()
+                    })
+                    .or_else(|| {
+                        // Last resort (#1104): prose-wrapped JSON — extract
+                        // the first balanced top-level span. Models answering
+                        // "Done — {...}" used to fail the whole task on the
+                        // output contract even though the payload was there.
+                        extract_json_span(&reply_clean)
+                            .and_then(|span| serde_json::from_str(&span).ok())
                     });
                 match json {
                     Some(parsed) => {
@@ -515,7 +523,16 @@ fn reply_is_delegated(assistant_reply: Option<&str>) -> bool {
         .and_then(|r| {
             let clean = strip_think_blocks(r);
             let stripped = strip_markdown_code_fences(&clean);
-            serde_json::from_str::<serde_json::Value>(stripped.trim()).ok()
+            serde_json::from_str::<serde_json::Value>(stripped.trim())
+                .ok()
+                .or_else(|| {
+                    // Same prose-span fallback as output_schema (#1104) —
+                    // here it closes a fail-open hole: a prose-wrapped
+                    // `{"status":"delegated"}` claim must still be detected
+                    // by the fabrication guard, not missed on parse shape.
+                    extract_json_span(&clean)
+                        .and_then(|span| serde_json::from_str(&span).ok())
+                })
         })
         .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "delegated"))
         .unwrap_or(false)
@@ -1051,6 +1068,93 @@ fn strip_markdown_code_fences(s: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Owned(extracted);
     }
     std::borrow::Cow::Borrowed(s)
+}
+
+/// Last-resort JSON extraction (#1104): pull the first *balanced* top-level
+/// `{...}` or `[...]` span out of a reply that wraps the payload in prose
+/// ("Done — here is the handoff:\n\n{...}"). Raw and fence-stripped parses
+/// run first; this only fires when both failed, so a genuinely prose-only
+/// reply still fails the contract.
+///
+/// Balanced-span (not first-brace-to-last-brace) extraction matters: prose
+/// braces (`{symbol}` in a sentence) or an early unbalanced snippet must not
+/// shadow the real payload further into the reply — each candidate span is
+/// parse-tried in order until one yields JSON.
+///
+/// Observable tolerance (M1 doctrine, #619): instrumented exactly like the
+/// fence-stripping fallback — normalization is registered, never silent.
+pub(crate) fn extract_json_span(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut start = 0;
+    while start < len {
+        let Some(open) = find_json_open(bytes, start) else {
+            return None;
+        };
+        let close_byte = if bytes[open] == b'{' { b'}' } else { b']' };
+        if let Some(close) = find_balanced_close(bytes, open, close_byte) {
+            let span = &s[open..close];
+            if serde_json::from_str::<serde_json::Value>(span).is_ok() {
+                crate::runtime::tool_call_processor::note_llm_normalization(
+                    "prose_wrapped_json",
+                    "extracted a JSON span from a prose-wrapped reply",
+                );
+                return Some(span.to_string());
+            }
+            start = close;
+        } else {
+            start = open + 1;
+        }
+    }
+    None
+}
+
+/// First byte index of `{` or `[` at or after `from`, skipping string
+/// content (a brace inside a quoted key/value is not a JSON opener — e.g.
+/// prose like `the {"key"} shape`).
+fn find_json_open(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the close byte balancing the opener at `open`.
+/// String-aware: quotes toggle string state, backslash escapes the next
+/// byte. Returns None when the span never balances.
+fn find_balanced_close(bytes: &[u8], open: usize, close_byte: u8) -> Option<usize> {
+    let open_byte = bytes[open];
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = open;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else if b == b'"' {
+            in_string = true;
+        } else if b == open_byte {
+            depth += 1;
+        } else if b == close_byte {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 fn extract_first_fenced_json(s: &str) -> Option<String> {
@@ -2573,6 +2677,85 @@ mod tests {
         );
         let v = validate_spawn_response(&r, Some(&schema), &p, None);
         assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn test_output_schema_passes_with_prose_wrapped_json() {
+        // #1104 — the exact credential-register study failure shape:
+        // one sentence of prose, then the unfenced JSON handoff.
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("`credential_check` confirms the credential is registered. Handing off.\n\n{\"status\": \"pass\"}"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn test_output_schema_prose_with_decoy_brace_before_payload() {
+        // The balanced-span extraction must skip prose braces like
+        // `{symbol}` and find the real payload after them.
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("The reply carries the {shape} you asked for.\n\n{\"status\": \"pass\"}"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn test_output_schema_prose_still_fails_when_no_json_present() {
+        // Prose-only replies must still fail the contract — the fallback
+        // is extraction, not tolerance.
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(vec![], vec![], Some("The task is complete, trust me."));
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.iter().any(|v| v.rule == "output_schema"));
+    }
+
+    #[test]
+    fn test_output_schema_prose_wrapped_invalid_json_still_fails_schema() {
+        // Extraction that parses but violates the schema is a real contract
+        // violation — not a parse-shape pass.
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("Here you go:\n{\"wrong_field\": true}"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.iter().any(|v| v.rule == "output_schema"));
+    }
+
+    #[test]
+    fn test_output_schema_prose_wrapped_json_with_escaped_quotes() {
+        let p = autonoetic_types::agent::OutputPolicy::default();
+        let schema = serde_json::json!({"required": ["status"]});
+        let r = make_result(
+            vec![],
+            vec![],
+            Some("Done.\n{\"status\": \"pass\", \"note\": \"he said \\\"hi}\\\" twice\"}"),
+        );
+        let v = validate_spawn_response(&r, Some(&schema), &p, None);
+        assert!(v.is_empty(), "expected no violations, got: {:?}", v);
+    }
+
+    #[test]
+    fn reply_is_delegated_detects_prose_wrapped_claim() {
+        // The fabrication guard must still catch a delegated claim wrapped
+        // in prose (previously fail-open on parse shape).
+        assert!(reply_is_delegated(Some(
+            "Delegated as planned.\n\n{\"status\": \"delegated\"}"
+        )));
+        assert!(!reply_is_delegated(Some("All good.\n\n{\"status\": \"ok\"}")));
     }
 
     #[test]

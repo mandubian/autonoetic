@@ -243,15 +243,17 @@ gate is confusing", or the redacted response still echoes the key.
    `credential_env` + a sandboxed client. Manual prompt moved to GitHub
    PAT accordingly.
 3. *Prose-wrapped JSON fails the output contract*: response validation
-   strips `<think>` blocks and markdown fences before parsing, but not
-   leading prose — `credential_onboarding.default` completed the whole
-   ceremony, then its task was marked **failed** because its final
-   message was one sentence of prose followed by the JSON handoff. The
-   schema_validation retry taxonomy says "parent should repair", but the
-   async task surface just fails. The demo prompt works around it by
-   instructing pure-JSON final messages in delegation; the product fix
-   (repair respawn on output_schema, or prose-stripping fallback) is
-   open.
+   stripped `<think>` blocks and markdown fences but not leading prose —
+   `credential_onboarding.default` completed the whole ceremony, then its
+   task was marked **failed** because its final message was one sentence
+   of prose followed by the JSON handoff. The repair-respawn machinery
+   exists (`respawn_from_checkpoint`) but is deliberately doubly opt-in
+   (config `response_validation.repair_enabled` + per-agent
+   `io.output_policy.repair.auto`), so it never fired. Fixed as #1104:
+   balanced-span extraction fallback (prose prefix/suffix around the JSON
+   parses now, without relaxing the contract), plus the same fallback in
+   `reply_is_delegated` (the fabrication guard was fail-open on the same
+   shape). Repair-defaults discussion stays open.
 4. *`credential_request` is unusable by most installed agents*: the
    remote-target policy (`enforce_remote_target_policy`,
    `DeclarationRequirement::Required` + `Enforce`) requires the calling
