@@ -18,8 +18,10 @@ fn parse_key_value(s: &str) -> anyhow::Result<(String, String)> {
 }
 
 /// Parse KEY=VALUE secret lines, skipping blanks and `#` comments.
-/// Shared by `--secret-file` / `--secret-stdin` so secrets never need to
-/// sit in the command line / shell history (#1108).
+/// Keys and values are trimmed; an empty key is an error (a `=value` line
+/// would silently mint an unnamed secret). Shared by `--secret-file` /
+/// `--secret-stdin` so secrets never need to sit in the command line /
+/// shell history (#1108).
 pub fn parse_secret_lines<R: std::io::BufRead>(reader: R) -> anyhow::Result<Vec<(String, String)>> {
     let mut out = Vec::new();
     for line in reader.lines() {
@@ -27,7 +29,14 @@ pub fn parse_secret_lines<R: std::io::BufRead>(reader: R) -> anyhow::Result<Vec<
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        out.push(parse_key_value(&line)?);
+        let value = line
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid KEY=VALUE format: {}", line))?;
+        let key = value.0.trim();
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("Invalid KEY=VALUE format: empty key in '{}'", line));
+        }
+        out.push((key.to_string(), value.1.trim().to_string()));
     }
     Ok(out)
 }
@@ -2207,6 +2216,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_secret_lines_trims_key_and_value() {
+        let lines = "  api_key =  sk-abc  \n";
+        let out = parse_secret_lines(std::io::Cursor::new(lines.as_bytes())).unwrap();
+        assert_eq!(out, vec![("api_key".to_string(), "sk-abc".to_string())]);
+    }
+
+    #[test]
     fn test_parse_secret_lines_skips_blanks_and_comments() {
         let lines = "# comment line\n\napi_key=sk-abc\n  \n";
         let out = parse_secret_lines(std::io::Cursor::new(lines.as_bytes())).unwrap();
@@ -2220,5 +2236,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("KEY=VALUE"), "error should name the format: {err}");
+    }
+
+    #[test]
+    fn test_parse_secret_lines_rejects_empty_key() {
+        let lines = "=sk-abc\n";
+        let err = parse_secret_lines(std::io::Cursor::new(lines.as_bytes()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("empty key"), "error should name the defect: {err}");
     }
 }

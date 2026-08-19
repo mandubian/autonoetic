@@ -431,6 +431,8 @@ pub async fn handle_gateway_approvals(
             acknowledge_capabilities,
             confirm_phrase,
         } => {
+            // `command` is borrowed (`&GatewayApprovalCommands`), so the match arm
+            // holds a reference; extend a local copy with file/stdin secrets.
             let mut secrets = secrets.clone();
             for path in secret_files {
                 let file = std::fs::File::open(path)?;
