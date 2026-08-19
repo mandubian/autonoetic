@@ -71,8 +71,10 @@ fn microvm_command(_entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial] // mutates AUTONOETIC_FIRECRACKER_CONFIG (process-global)
     fn test_microvm_command_requires_env() {
         let old = std::env::var(FIRECRACKER_CONFIG_ENV).ok();
         std::env::remove_var(FIRECRACKER_CONFIG_ENV);
