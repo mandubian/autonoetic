@@ -2683,6 +2683,18 @@ impl AgentExecutor {
         });
 
         loop {
+            // Hot-reload MCP servers whose registry file changed since the
+            // last turn (#1121): added servers join the advertised surface
+            // below; removed servers' tools fail closed at dispatch. A broken
+            // registry edit keeps the previously loaded tools.
+            if let Err(e) = mcp_runtime.reload_if_changed().await {
+                tracing::warn!(
+                    target: "autonoetic::mcp",
+                    error = %e,
+                    "MCP registry reload check failed; keeping current tools"
+                );
+            }
+
             // #719: mechanical re-execution of an operator-approved call on
             // resume. This MUST run before pre_turn_checks: the promote was
             // already operator-approved, so budget / loop-guard checks (designed
