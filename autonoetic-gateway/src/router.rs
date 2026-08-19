@@ -5365,7 +5365,7 @@ impl JsonRpcRouter {
                                 credential_id,
                                 message,
                                 secret_fields,
-                                ..
+                                payload,
                             } => {
                                 // Surface the secret-field spec so the TUI can render
                                 // an in-modal credential entry flow. The secret values
@@ -5383,6 +5383,19 @@ impl JsonRpcRouter {
                                     "secret_fields".into(),
                                     serde_json::json!(secret_fields),
                                 );
+                                // #1105: the operator types secrets into this
+                                // flow — the credential's egress scope must be
+                                // visible where the typing happens.
+                                if let Some(hosts) = payload
+                                    .as_ref()
+                                    .and_then(|p| p.get("allowed_hosts"))
+                                    .and_then(|v| v.as_array())
+                                {
+                                    extra.insert(
+                                        "allowed_hosts".into(),
+                                        serde_json::json!(hosts),
+                                    );
+                                }
                             }
                             _ => {}
                         }
