@@ -32,20 +32,26 @@ impl Drop for EnvGuard {
 
 /// Rewrite the registry file and wait until its mtime differs from `before`,
 /// so `reload_if_changed` cannot miss the change on coarse-mtime filesystems.
+/// Fails loudly when the mtime cannot be bumped within the deadline — silently
+/// returning would make the caller's reload assertion flaky instead of broken.
 fn rewrite_registry_bumping_mtime(
     path: &std::path::Path,
     servers: &serde_json::Value,
     before: Option<std::time::SystemTime>,
 ) -> anyhow::Result<()> {
-    std::fs::write(path, serde_json::to_vec(servers)?)?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
+        std::fs::write(path, serde_json::to_vec(servers)?)?;
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        if mtime != before || std::time::Instant::now() > deadline {
+        if mtime != before {
             return Ok(());
         }
+        anyhow::ensure!(
+            std::time::Instant::now() <= deadline,
+            "could not bump mtime of {} within 3s (filesystem mtime granularity?)",
+            path.display()
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(path, serde_json::to_vec(servers)?)?;
     }
 }
 
@@ -267,13 +273,18 @@ async fn mcp_hot_reload_broken_registry_keeps_previous_tools() -> anyhow::Result
     assert!(runtime.has_tool("mcp_mock_echo"));
 
     let mtime_before = std::fs::metadata(&registry_path).and_then(|m| m.modified()).ok();
-    std::fs::write(&registry_path, b"{not json")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::fs::metadata(&registry_path).and_then(|m| m.modified()).ok() == mtime_before
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    loop {
         std::fs::write(&registry_path, b"{not json")?;
+        let mtime = std::fs::metadata(&registry_path).and_then(|m| m.modified()).ok();
+        if mtime != mtime_before {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "could not bump registry mtime within 3s (filesystem mtime granularity?)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     assert!(runtime.reload_if_changed().await?);

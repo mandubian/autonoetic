@@ -131,7 +131,10 @@ impl McpToolRuntime {
 
     /// Re-read the registry file when it changed since the last load (#1121).
     ///
-    /// Returns `true` when the tool surface was rebuilt. Semantics:
+    /// Returns `true` when a registry change was detected and processed —
+    /// either the tool surface was rebuilt, or the change was a broken edit
+    /// and the previous surface was deliberately kept. `false` means nothing
+    /// changed (or the path is untracked/unstatable). Semantics:
     /// - unchanged mtime → no-op
     /// - file deleted → swap to empty (all MCP tools fail closed)
     /// - unparseable file → keep current tools, warn, remember mtime so the
