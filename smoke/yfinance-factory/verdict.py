@@ -109,6 +109,25 @@ def pending_approvals(conn: sqlite3.Connection, sid: str) -> list:
         return []
 
 
+def unadjudicated_flags(conn: sqlite3.Connection, sid: str) -> list:
+    """Anomaly flags still open in the root-session subtree: machinery filed
+    a complaint nobody has adjudicated (status not in the terminal set
+    `confirmed`/`dismissed`/`deferred`). A study verdict that PASSes while
+    its own grievances sit unread is the rubber-stamp pattern the RFCs warn
+    about, so they surface as a FAIL-worthy section (#1108/3)."""
+    terminal = ("confirmed", "dismissed", "deferred")
+    ph = ",".join("?" * len(terminal))
+    try:
+        return list(conn.execute(
+            f"SELECT flag_id, reporter_agent_id, severity, status, observation "
+            f"FROM anomaly_flags WHERE status NOT IN ({ph}) AND "
+            "(reporter_session_id = ? OR reporter_session_id LIKE ? || '/%') "
+            "ORDER BY created_at ASC",
+            (*terminal, sid, sid)))
+    except sqlite3.OperationalError:
+        return []
+
+
 def wait_done(db_path: str, sid: str, timeout: int) -> int:
     deadline = time.monotonic() + timeout
     last = -1
@@ -128,7 +147,8 @@ def wait_done(db_path: str, sid: str, timeout: int) -> int:
         last = n
         if stable >= STABLE_POLLS:
             print(f"[wait-done] {sid}: {n} traces, no running/queued tasks, "
-                  f"no open gates, quiet for {STABLE_POLLS} polls — done", flush=True)
+f"no open gates, quiet for {STABLE_POLLS} polls — done",
+                  flush=True)
             return 0
         print(f"[wait-done] {sid}: traces={n} active_tasks={active} "
               f"pending_gates={gates} (waiting)", flush=True)
@@ -193,6 +213,7 @@ def verdict(db_path: str, sid: str, log_path: str, agent: str, max_tokens: int) 
                 "SELECT action_type, status, reason FROM approvals"))
         except sqlite3.OperationalError:
             approvals = []
+        flags = unadjudicated_flags(conn, sid)
 
     smoke = [t for t in tasks if t["agent_id"] == agent]
     smoke_ok = any(t["status"] == "succeeded" for t in smoke)
@@ -227,6 +248,13 @@ def verdict(db_path: str, sid: str, log_path: str, agent: str, max_tokens: int) 
         print(f"rejected promotion attempts: {dict(gates)}")
     if approvals:
         print(f"approvals: {dict(Counter(a['action_type'] + '/' + a['status'] for a in approvals))}")
+    if flags:
+        print("UNADJUDICATED FLAGS (complaints filed, nobody read them):")
+        for f in flags:
+            print(f"  {f['flag_id']} [{f['severity']}/{f['status']}] "
+                  f"by {f['reporter_agent_id']}: {f['observation']}")
+    else:
+        print("unadjudicated anomaly flags: none")
     print()
     print(f"tokens (root tree): {tin + tout:,} used / {max_tokens:,} cap "
           f"({tin:,} in, {tout:,} out)")
@@ -240,6 +268,10 @@ def verdict(db_path: str, sid: str, log_path: str, agent: str, max_tokens: int) 
     if not traces:
         print("INCONCLUSIVE: no tool activity was recorded — the task never ran.")
         rc = 2
+    elif flags:
+        print("FAIL: machinery filed un-adjudicated anomaly flags (listed above) "
+              "that nobody reviewed — a PASS would rubber-stamp unread complaints.")
+        rc = 1
     elif "budget_exhausted" in sigs and not promoted:
         print("FAIL: the root-session budget was exhausted before promotion.")
         rc = 1

@@ -17,6 +17,21 @@ fn parse_key_value(s: &str) -> anyhow::Result<(String, String)> {
     Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
+/// Parse KEY=VALUE secret lines, skipping blanks and `#` comments.
+/// Shared by `--secret-file` / `--secret-stdin` so secrets never need to
+/// sit in the command line / shell history (#1108).
+pub fn parse_secret_lines<R: std::io::BufRead>(reader: R) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let line = line?.trim().to_string();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        out.push(parse_key_value(&line)?);
+    }
+    Ok(out)
+}
+
 // Re-exports for modules
 pub use autonoetic_mcp::{
     AgentExecutor as McpAgentExecutor, McpClient, McpServer, McpTool, McpTransportConfig,
@@ -788,6 +803,15 @@ pub enum GatewayApprovalCommands {
         /// Secret values to provide for credential prompts (KEY=VALUE format).
         #[arg(long = "secret", value_parser = parse_key_value)]
         secrets: Vec<(String, String)>,
+        /// Read secret values as KEY=VALUE lines from a file (repeatable).
+        /// Keeps the secret out of the command line and shell history.
+        #[arg(long = "secret-file", value_name = "PATH", action = clap::ArgAction::Append)]
+        secret_files: Vec<std::path::PathBuf>,
+        /// Read secret values as KEY=VALUE lines from stdin (e.g.
+        /// `gateway approvals approve <id> --secret-stdin < secrets.env`).
+        /// Keeps the secret out of the command line and shell history.
+        #[arg(long = "secret-stdin")]
+        secret_stdin: bool,
         /// Approver level used to authorize this decision.
         #[arg(long = "approval-level", value_enum, default_value_t = CliApprovalLevel::Operator)]
         approval_level: CliApprovalLevel,
@@ -2167,5 +2191,34 @@ mod tests {
             .expect("s1 should be present");
         assert_eq!(s1.event_count, 2);
         assert_eq!(s1.max_event_seq, 2);
+    }
+
+    #[test]
+    fn test_parse_secret_lines_parses_key_value_lines() {
+        let lines = "api_key=sk-abc\ngithub_token=ghp_xyz\n";
+        let out = parse_secret_lines(std::io::Cursor::new(lines.as_bytes())).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                ("api_key".to_string(), "sk-abc".to_string()),
+                ("github_token".to_string(), "ghp_xyz".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_secret_lines_skips_blanks_and_comments() {
+        let lines = "# comment line\n\napi_key=sk-abc\n  \n";
+        let out = parse_secret_lines(std::io::Cursor::new(lines.as_bytes())).unwrap();
+        assert_eq!(out, vec![("api_key".to_string(), "sk-abc".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_secret_lines_rejects_bare_key() {
+        let lines = "api_key\n";
+        let err = parse_secret_lines(std::io::Cursor::new(lines.as_bytes()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("KEY=VALUE"), "error should name the format: {err}");
     }
 }

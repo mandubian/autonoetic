@@ -567,9 +567,9 @@ export AUTONOETIC_VAULT_KEY_PATH=/tmp/autonoetic-demo/vault.key
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
   gateway approvals interactive
 
-# Non-interactive approval with secret
+# Non-interactive approval with secret (secret stays out of shell history)
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
-  gateway approvals approve apr-XXXXXXXX --secret github_token=ghp_xxxx
+  gateway approvals approve apr-XXXXXXXX --secret-stdin < secrets.env
 ```
 
 See `docs/credential-management.md` for details.
