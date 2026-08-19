@@ -210,6 +210,43 @@ pub fn approval_timeline_extra_from_action(
             "user_id": user_id,
             "scope": scope,
         })),
+        ScheduledAction::CredentialPrompt {
+            service,
+            secret_fields,
+            payload,
+            ..
+        } => {
+            // #1105: the card is where the credential's egress scope is
+            // operator-approved — surface allowed_hosts so approving secret
+            // entry is consciously an egress-scope approval. Deliberately NOT
+            // host_patterns: that key drives session-grant text
+            // ("hosts will be pre-approved for this session"), which is the
+            // wrong semantics for a durable credential scope.
+            let mut extra = serde_json::json!({
+                "service": service,
+                "secret_fields": secret_fields
+                    .iter()
+                    .map(|f| f.name.clone())
+                    .collect::<Vec<_>>(),
+            });
+            if let Some(obj) = extra.as_object_mut() {
+                if let Some(p) = payload {
+                    if let Some(inject) = p.get("inject_as").and_then(|v| v.as_str()) {
+                        obj.insert(
+                            "inject_as".into(),
+                            serde_json::Value::String(inject.to_string()),
+                        );
+                    }
+                    if let Some(hosts) = p.get("allowed_hosts").and_then(|v| v.as_array()) {
+                        obj.insert(
+                            "allowed_hosts".into(),
+                            serde_json::Value::Array(hosts.clone()),
+                        );
+                    }
+                }
+            }
+            Some(extra)
+        }
         ScheduledAction::SessionContinue {
             max_turns,
             turn_counter,
@@ -1307,6 +1344,39 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("loop_pressure"));
+    }
+
+    #[test]
+    fn approval_timeline_extra_surfaces_credential_prompt_allowed_hosts() {
+        use autonoetic_types::agent::SecretFieldSpec;
+        use autonoetic_types::background::ScheduledAction;
+        // #1105: the secret-entry card is where the credential's egress scope
+        // is operator-approved — allowed_hosts must surface top-level so the
+        // gate card (and the CLI list) can show it. Deliberately not under
+        // host_patterns: that key carries session-grant semantics.
+        let action = ScheduledAction::CredentialPrompt {
+            service: "mockweather".to_string(),
+            credential_id: "cred_abc".to_string(),
+            message: "provide keys".to_string(),
+            secret_fields: vec![SecretFieldSpec {
+                name: "api_key".to_string(),
+                label: "API key".to_string(),
+                masked: true,
+            }],
+            payload: Some(serde_json::json!({
+                "inject_as": "header:X-Api-Key",
+                "allowed_hosts": ["api.mockweather.local"],
+            })),
+        };
+        let extra = approval_timeline_extra_from_action(&action).expect("extra payload");
+        assert_eq!(extra["service"], "mockweather");
+        assert_eq!(extra["secret_fields"][0], "api_key");
+        assert_eq!(extra["inject_as"], "header:X-Api-Key");
+        assert_eq!(extra["allowed_hosts"][0], "api.mockweather.local");
+        assert!(
+            extra.get("host_patterns").is_none(),
+            "credential scope must not masquerade as a session grant"
+        );
     }
 
     #[test]

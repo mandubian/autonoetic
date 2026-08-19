@@ -2717,6 +2717,22 @@ fn execute_steps(
                     .map(|f| f.name.as_str())
                     .collect();
 
+                // The operator is approving two things with one card: the secret
+                // fields AND the credential's egress scope (allowed_hosts feeds
+                // real routing decisions post-#1103). Say so on the card —
+                // otherwise a secret-entry approval is unconsciously an
+                // egress-scope approval (#1105).
+                let hosts_display = if allowed_hosts.is_empty() {
+                    "(no host scope declared — requests will not be host-bound)".to_string()
+                } else if allowed_hosts.iter().any(|h| h == "*") {
+                    format!(
+                        "{} — WILDCARD: the secret can be sent to ANY host",
+                        allowed_hosts.join(", ")
+                    )
+                } else {
+                    allowed_hosts.join(", ")
+                };
+
                 let gate = crate::runtime::human_gate::GateService::new(store.clone());
                 let gate_result = gate.check(crate::runtime::human_gate::GateRequest {
                     kind: crate::runtime::human_gate::GateKind::Approval {
@@ -2731,7 +2747,11 @@ fn execute_steps(
                     context: crate::runtime::human_gate::DecisionContext::tier2(
                         format!("Credential setup for '{}'", service),
                         "Human input required for secret fields",
-                        format!("Prompt asks for: {}", field_names.join(", ")),
+                        format!(
+                            "Prompt asks for: {}; approving also grants this credential's egress scope (allowed_hosts): {}",
+                            field_names.join(", "),
+                            hosts_display
+                        ),
                         "Approve to allow the credential setup prompt; the operator must still provide the requested secret fields",
                     ),
                     summary: format!("Credential setup prompt for '{}'", service),

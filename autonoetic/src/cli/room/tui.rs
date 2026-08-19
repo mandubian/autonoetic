@@ -1973,6 +1973,10 @@ struct GateInput {
     /// CredentialPrompt approvals: secret fields to collect (empty = not a cred prompt).
     /// Populated from `approvals.inspect` when the approval action is `credential_prompt`.
     secret_fields: Vec<autonoetic_types::agent::SecretFieldSpec>,
+    /// CredentialPrompt approvals: the credential's egress scope (#1105) — the
+    /// card approves secret entry AND this scope, so it must be visible where
+    /// the operator types.
+    credential_allowed_hosts: Vec<String>,
     /// Collected secret values, parallel to `secret_fields`. Length = fields completed.
     secret_values: Vec<String>,
     /// True while collecting secrets (Phase 1). The `buffer` holds the current field's input.
@@ -3170,13 +3174,14 @@ fn approval_gate_input(
     // CredentialPrompt approvals need the operator to enter secret values at
     // approval time. Detect that here so the modal opens directly into the
     // secret-entry phase instead of showing a generic confirm-phrase prompt
-    // that fails with a cryptic backend error on submit.
-    let secret_fields = if action == GateAction::Approve
+    // that fails with a cryptic backend error on submit. The egress scope
+    // rides the same card (#1105) — surface it where the typing happens.
+    let (secret_fields, credential_allowed_hosts) = if action == GateAction::Approve
         && is_credential_prompt_entry(entries, &id)
     {
         fetch_credential_prompt_secret_fields(client, &id)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let secret_phase = !secret_fields.is_empty();
     GateInput {
@@ -3190,6 +3195,7 @@ fn approval_gate_input(
         required_confirm_phrase,
         acknowledged_capabilities,
         secret_fields,
+        credential_allowed_hosts,
         secret_values: Vec::new(),
         secret_phase,
         opened_in_modal,
@@ -3205,24 +3211,39 @@ fn is_credential_prompt_entry(entries: &[SessionTimelineEntry], request_id: &str
     })
 }
 
-/// Fetch the secret-field spec for a CredentialPrompt approval via `approvals.inspect`.
-/// Returns an empty vec on any failure — the operator can still fall back to the
-/// CLI `gateway approvals approve <id> --secret KEY=VALUE` flow.
+/// Fetch the secret-field spec and the credential's egress scope for a
+/// CredentialPrompt approval via `approvals.inspect`. Returns empty vecs on
+/// any failure — the operator can still fall back to the CLI
+/// `gateway approvals approve <id> --secret KEY=VALUE` flow.
 fn fetch_credential_prompt_secret_fields(
     client: &RoomClient,
     request_id: &str,
-) -> Vec<autonoetic_types::agent::SecretFieldSpec> {
-    rpc(
+) -> (
+    Vec<autonoetic_types::agent::SecretFieldSpec>,
+    Vec<String>,
+) {
+    let value = rpc(
         client,
         "approvals.inspect",
         serde_json::json!({ "request_id": request_id }),
     )
-    .ok()
-    .and_then(|v| {
-        v.get("secret_fields")
-            .and_then(|s| serde_json::from_value(s.clone()).ok())
-    })
-    .unwrap_or_default()
+    .ok();
+    let fields = value
+        .as_ref()
+        .and_then(|v| v.get("secret_fields"))
+        .and_then(|s| serde_json::from_value(s.clone()).ok())
+        .unwrap_or_default();
+    let hosts = value
+        .as_ref()
+        .and_then(|v| v.get("allowed_hosts"))
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (fields, hosts)
 }
 
 fn gate_commit_validation_error(gi: &GateInput) -> Option<String> {
@@ -5215,6 +5236,7 @@ pub fn run(
                                         required_confirm_phrase: None,
                                         acknowledged_capabilities: Vec::new(),
                                         secret_fields: Vec::new(),
+                                        credential_allowed_hosts: Vec::new(),
                                         secret_values: Vec::new(),
                                         secret_phase: false,
                                         opened_in_modal: true,
@@ -6098,6 +6120,7 @@ pub fn run(
                                     required_confirm_phrase: None,
                                     acknowledged_capabilities: Vec::new(),
                                     secret_fields: Vec::new(),
+                                    credential_allowed_hosts: Vec::new(),
                                     secret_values: Vec::new(),
                                     secret_phase: false,
                                     opened_in_modal: false,
@@ -6438,6 +6461,7 @@ pub fn run(
                                     required_confirm_phrase: None,
                                     acknowledged_capabilities: Vec::new(),
                                     secret_fields: Vec::new(),
+                                    credential_allowed_hosts: Vec::new(),
                                     secret_values: Vec::new(),
                                     secret_phase: false,
                                     opened_in_modal: false,
@@ -11471,6 +11495,38 @@ fn gate_modal_input_panel_lines(
                 )));
             }
         }
+        // #1105: the operator is approving two things with one card — the
+        // secret fields AND the credential's egress scope. Show the scope
+        // exactly where the typing happens, wildcard unmistakable. An empty
+        // scope is equally load-bearing: it means the credential is NOT
+        // host-bound, and the operator must see that too.
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Egress scope this approval also grants:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if gi.credential_allowed_hosts.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "(none declared — requests will not be host-bound)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for host in &gi.credential_allowed_hosts {
+                let text = if host == "*" {
+                    "· * — WILDCARD: the secret can be sent to ANY host".to_string()
+                } else {
+                    format!("· {host}")
+                };
+                let style = if host == "*" {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                lines.push(Line::from(Span::styled(text, style)));
+            }
+        }
         lines.push(Line::raw(""));
 
         let idx = gi.secret_values.len();
@@ -13050,6 +13106,7 @@ mod tests {
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
             secret_fields: Vec::new(),
+            credential_allowed_hosts: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
             opened_in_modal: false,
@@ -13084,6 +13141,7 @@ mod tests {
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
             secret_fields: Vec::new(),
+            credential_allowed_hosts: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
             opened_in_modal: false,
@@ -13110,6 +13168,7 @@ mod tests {
             required_confirm_phrase: Some("promote weather-lookup rev_sha256:abc".into()),
             acknowledged_capabilities: vec!["NetworkAccess".into()],
             secret_fields: Vec::new(),
+            credential_allowed_hosts: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
             opened_in_modal: false,
@@ -13145,6 +13204,7 @@ mod tests {
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
             secret_fields: Vec::new(),
+            credential_allowed_hosts: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
             opened_in_modal: false,
@@ -13170,6 +13230,7 @@ mod tests {
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
             secret_fields: Vec::new(),
+            credential_allowed_hosts: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
             opened_in_modal: false,
@@ -13195,6 +13256,7 @@ mod tests {
             required_confirm_phrase: None,
             acknowledged_capabilities: Vec::new(),
             secret_fields: Vec::new(),
+            credential_allowed_hosts: Vec::new(),
             secret_values: Vec::new(),
             secret_phase: false,
             opened_in_modal: false,

@@ -401,6 +401,38 @@ pub async fn handle_gateway_approvals(
                             all.join(", ")
                         )
                     }
+                    autonoetic_types::background::ScheduledAction::CredentialPrompt {
+                        service,
+                        secret_fields,
+                        payload,
+                        ..
+                    } => {
+                        // #1105: secret entry and egress scope ride the same
+                        // card — name both in the list, wildcard flagged.
+                        let fields: Vec<&str> =
+                            secret_fields.iter().map(|f| f.name.as_str()).collect();
+                        let hosts = payload
+                            .as_ref()
+                            .and_then(|p| p.get("allowed_hosts"))
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()
+                            });
+                        let hosts_display = match hosts {
+                            Some(h) if h.is_empty() => {
+                                "(explicitly unbound — requests will not be host-bound)".to_string()
+                            }
+                            Some(h) if h.iter().any(|x| *x == "*") => {
+                                format!("{} [WILDCARD — any host]", h.join(", "))
+                            }
+                            Some(h) => h.join(", "),
+                            None => "(no host scope declared)".to_string(),
+                        };
+                        format!(
+                            "credential setup '{service}': asks [{}]; egress scope: {hosts_display}",
+                            fields.join(", ")
+                        )
+                    }
                     other => format!("{}", other.kind()),
                 };
                 println!(

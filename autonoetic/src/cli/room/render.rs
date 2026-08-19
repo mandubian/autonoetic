@@ -880,6 +880,48 @@ fn approval_gate_card(entry: &SessionTimelineEntry) -> (String, Option<String>) 
             }
         }
     }
+    if action == "credential_prompt" {
+        if let Some(service) = field("service") {
+            lines.push(format!("  service: {service}"));
+        }
+        if let Some(fields) = p
+            .as_ref()
+            .and_then(|v| v.get("secret_fields"))
+            .and_then(|v| v.as_array())
+        {
+            let joined: Vec<_> = fields.iter().filter_map(|v| v.as_str()).collect();
+            if !joined.is_empty() {
+                lines.push(format!("  asks for: {}", joined.join(", ")));
+            }
+        }
+        // #1105: secret entry AND egress scope are approved by the same card —
+        // the scope must be visible, and a wildcard must be unmistakable.
+        if let Some(hosts) = p
+            .as_ref()
+            .and_then(|v| v.get("allowed_hosts"))
+            .and_then(|v| v.as_array())
+        {
+            let joined: Vec<_> = hosts.iter().filter_map(|v| v.as_str()).collect();
+            lines.push("  egress scope (allowed_hosts):".to_string());
+            if joined.is_empty() {
+                lines.push("    (none declared — requests will not be host-bound)".to_string());
+            } else {
+                for h in &joined {
+                    if *h == "*" {
+                        lines.push(
+                            "    · * — WILDCARD: the secret can be sent to ANY host".to_string(),
+                        );
+                    } else {
+                        lines.push(format!("    · {h}"));
+                    }
+                }
+            }
+            lines.push(
+                "  note: approving secret entry also grants this egress scope for the credential's lifetime"
+                    .to_string(),
+            );
+        }
+    }
     if let Some(cmd) = field("command") {
         if field("command_kind").as_deref() == Some("content_ref") {
             lines.push(format!("  command: {} (content ref)", one_line(&cmd, 120)));
@@ -5351,6 +5393,53 @@ mod tests {
         let ask_detail = ask_spec.detail.expect("ask card body");
         assert!(ask_detail.contains("[1] Postgres"));
         assert!(ask_detail.contains("Enter/i/r"));
+    }
+
+    #[test]
+    fn render_spec_credential_prompt_card_surfaces_egress_scope() {
+        // #1105: the secret-entry card approves the egress scope too — the
+        // hosts must be on the card, never buried in the payload.
+        let e = entry(
+            SessionRole::Planner,
+            Principal::agent("credential_onboarding.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-cred1",
+                "action": "credential_prompt",
+                "service": "mockweather",
+                "secret_fields": ["api_key"],
+                "inject_as": "header:X-Api-Key",
+                "allowed_hosts": ["api.mockweather.local", "*.weather.example"],
+            }),
+        );
+        let spec = render_spec(&e);
+        let detail = spec.detail.expect("approval card body");
+        assert!(detail.contains("egress scope (allowed_hosts):"));
+        assert!(detail.contains("api.mockweather.local"));
+        assert!(detail.contains("*.weather.example"));
+        assert!(detail.contains("egress scope for the credential's lifetime"));
+        assert!(
+            !detail.contains("pre-approved for this session"),
+            "credential scope must not read as a session grant: {detail}"
+        );
+
+        // Wildcard egress must be unmistakable.
+        let e2 = entry(
+            SessionRole::Planner,
+            Principal::agent("credential_onboarding.default"),
+            "approval.pending",
+            Altitude::Attention,
+            serde_json::json!({
+                "request_id": "apr-cred2",
+                "action": "credential_prompt",
+                "service": "anyapi",
+                "secret_fields": ["token"],
+                "allowed_hosts": ["*"],
+            }),
+        );
+        let detail2 = render_spec(&e2).detail.expect("approval card body");
+        assert!(detail2.contains("WILDCARD: the secret can be sent to ANY host"));
     }
 
     #[test]
