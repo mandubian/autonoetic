@@ -135,6 +135,20 @@ autonoetic gateway approvals approve <request_id> [--reason TEXT]
 autonoetic gateway approvals reject <request_id> [--reason TEXT]
 ```
 
+**Secret values** for credential-prompt approvals: the inline `--secret KEY=VALUE`
+form puts the secret in the process list and shell history. Prefer `--secret-stdin`
+or `--secret-file` (KEY=VALUE lines, `#` comments skipped):
+
+```bash
+autonoetic gateway approvals approve apr-xxxxxxxx --secret-stdin < secrets.env
+autonoetic gateway approvals approve apr-xxxxxxxx --secret-file secrets.env
+```
+
+**Confirm phrases (R++4)**: the `list` output shows the phrase an approval's
+class requires (e.g. `RevisionPromote`), so resolving a gate never depends on
+failing the approve once to learn the phrase. `--json` includes it as
+`confirm_phrase`.
+
 **Unified pending view (#722):** to see *everything* awaiting you for one root
 session — approvals, user interactions, escalations, and plans — in a single
 oldest-first list, each annotated with the command that resolves it:

@@ -559,7 +559,7 @@ export AUTONOETIC_VAULT_KEY_PATH=/tmp/autonoetic-demo/vault.key
 
 1. Agent calls `credential_check("github")` → sees if a credential exists (no secret exposed)
 2. Agent calls `credential_setup(...)` → may suspend for human approval if `user_prompt` step
-3. Operator approves via TUI or CLI (secrets entered via masked prompt or `--secret` flag)
+3. Operator approves via TUI or CLI (secrets entered via masked prompt, `--secret-stdin`/`--secret-file`, or the inline `--secret` flag)
 4. Agent calls `credential_request(...)` → gateway injects secret into HTTP request, returns redacted response
 
 ```bash
@@ -567,9 +567,9 @@ export AUTONOETIC_VAULT_KEY_PATH=/tmp/autonoetic-demo/vault.key
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
   gateway approvals interactive
 
-# Non-interactive approval with secret
+# Non-interactive approval with secret (secret stays out of shell history)
 cargo run -p autonoetic -- --config /tmp/autonoetic-demo/config.yaml \
-  gateway approvals approve apr-XXXXXXXX --secret github_token=ghp_xxxx
+  gateway approvals approve apr-XXXXXXXX --secret-stdin < secrets.env
 ```
 
 See `docs/credential-management.md` for details.

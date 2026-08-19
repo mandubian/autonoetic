@@ -410,12 +410,19 @@ pub async fn handle_gateway_approvals(
                     approval.action.kind(),
                     details
                 );
+                if let Some(phrase) = &approval.confirm_phrase {
+                    println!(
+                        "  ↳ R++4 confirm phrase required (verify before approving): \"{phrase}\""
+                    );
+                }
             }
         }
         super::common::GatewayApprovalCommands::Approve {
             request_id,
             reason,
             secrets,
+            secret_files,
+            secret_stdin,
             approval_level,
             scope,
             targets,
@@ -424,6 +431,18 @@ pub async fn handle_gateway_approvals(
             acknowledge_capabilities,
             confirm_phrase,
         } => {
+            // `command` is borrowed (`&GatewayApprovalCommands`), so the match arm
+            // holds a reference; extend a local copy with file/stdin secrets.
+            let mut secrets = secrets.clone();
+            for path in secret_files {
+                let file = std::fs::File::open(path)?;
+                secrets.extend(super::common::parse_secret_lines(
+                    std::io::BufReader::new(file),
+                )?);
+            }
+            if *secret_stdin {
+                secrets.extend(super::common::parse_secret_lines(std::io::stdin().lock())?);
+            }
             let approval_level = approval_level.to_runtime();
             let grant_scope = scope.to_runtime();
 
