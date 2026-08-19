@@ -372,7 +372,7 @@ impl NativeTool for SelfDescribeTool {
         // availability: a tool advertised here can still be filtered out of a
         // given turn by the tool-tier filter (see `allowed_tool_tiers` above).
         let available_tools =
-            crate::runtime::tools::default_registry().available_tool_names(manifest);
+            crate::runtime::tools::registry_for_config(config).available_tool_names(manifest);
         let store_ref = gateway_store.as_deref();
         let evolution_paths: Vec<serde_json::Value> = EVOLUTION_PATHS
             .iter()

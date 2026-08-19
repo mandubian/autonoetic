@@ -318,6 +318,16 @@ impl NativeToolRegistry {
         self.tools.iter().map(|tool| tool.name().to_string()).collect()
     }
 
+    /// Remove tools matching any disabled pattern (same syntax as
+    /// `excluded_tools`: exact name or trailing-`*` prefix). Returns the
+    /// number of tools removed.
+    fn remove_matching(&mut self, patterns: &[String]) -> usize {
+        let before = self.tools.len();
+        self.tools
+            .retain(|t| !patterns.iter().any(|p| matches_exclusion_pattern(p, t.name())));
+        before - self.tools.len()
+    }
+
     pub fn available_tool_names(
         &self,
         manifest: &AgentManifest,
@@ -1278,6 +1288,50 @@ pub fn default_registry() -> NativeToolRegistry {
     registry
 }
 
+/// The single registry-construction entry point for production code (#1120).
+///
+/// Builds the full native registry, then applies the operator's fleet-wide
+/// `tools.disabled` patterns from the gateway config. `None` (tests, bare
+/// embedders) yields the unfiltered registry — identical to
+/// [`default_registry`].
+///
+/// Patterns matching no registered tool are logged as warnings: a typo here
+/// silently *not* disabling a tool is a config smell worth surfacing, but
+/// never worth refusing to boot over (disabling only ever reduces the tool
+/// surface; enforcement lives in `PolicyEngine`, not in the registry).
+pub fn registry_for_config(
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+) -> NativeToolRegistry {
+    let mut registry = default_registry();
+    let Some(config) = config else {
+        return registry;
+    };
+    if config.tools.disabled.is_empty() {
+        return registry;
+    }
+    let registered = registry.registered_tool_names();
+    for pattern in &config.tools.disabled {
+        if !registered
+            .iter()
+            .any(|name| matches_exclusion_pattern(pattern, name))
+        {
+            tracing::warn!(
+                pattern = %pattern,
+                "tools.disabled pattern matches no registered tool; ignoring"
+            );
+        }
+    }
+    let removed = registry.remove_matching(&config.tools.disabled);
+    if removed > 0 {
+        tracing::info!(
+            removed = removed,
+            patterns = ?config.tools.disabled,
+            "tools.disabled: removed tools from the native registry"
+        );
+    }
+    registry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,6 +1373,43 @@ mod tests {
         assert!(filter.allows("agent_spawn"));
         assert!(!filter.allows("web_search"));
         assert!(!filter.allows("promotion_record"));
+    }
+
+    #[test]
+    fn registry_for_config_none_matches_default() {
+        let full = default_registry().registered_tool_names();
+        let none = registry_for_config(None).registered_tool_names();
+        assert_eq!(full, none);
+    }
+
+    #[test]
+    fn registry_for_config_disables_exact_and_wildcard_patterns() {
+        let mut config = autonoetic_types::config::GatewayConfig::default();
+        config.tools.disabled = vec![
+            "web_search".to_string(),
+            "agent_revision_*".to_string(),
+        ];
+        let names = registry_for_config(Some(&config)).registered_tool_names();
+        assert!(!names.contains("web_search"));
+        assert!(
+            !names.iter().any(|n| n.starts_with("agent_revision_")),
+            "wildcard pattern must remove all agent_revision_* tools, got: {:?}",
+            names
+                .iter()
+                .filter(|n| n.starts_with("agent_revision_"))
+                .collect::<Vec<_>>()
+        );
+        assert!(names.contains("sandbox_exec"));
+        assert!(names.contains("content_write"));
+    }
+
+    #[test]
+    fn registry_for_config_ignores_unmatched_patterns() {
+        let full = default_registry().registered_tool_names();
+        let mut config = autonoetic_types::config::GatewayConfig::default();
+        config.tools.disabled = vec!["no_such_tool_*".to_string(), "bogus".to_string()];
+        let names = registry_for_config(Some(&config)).registered_tool_names();
+        assert_eq!(full, names, "unmatched patterns must not remove anything");
     }
 
     #[test]

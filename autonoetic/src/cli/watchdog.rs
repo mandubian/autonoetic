@@ -6,7 +6,7 @@ use tracing::info;
 
 use autonoetic_gateway::llm::{build_driver, Message};
 use autonoetic_gateway::runtime::lifecycle::{AgentExecutor, TurnOutcome};
-use autonoetic_gateway::runtime::tools::default_registry;
+use autonoetic_gateway::runtime::tools::registry_for_config;
 use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
 use autonoetic_gateway::AgentRepository;
 
@@ -72,7 +72,7 @@ pub async fn run_watchdog(
         instructions,
         driver,
         agent_dir,
-        default_registry(),
+        registry_for_config(Some(gateway_config.as_ref())),
         Some(store),
     );
     runtime = runtime

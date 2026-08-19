@@ -3493,7 +3493,7 @@ impl JsonRpcRouter {
             // proposed rule set from known tool catalogs + the MCP server list.
             // Pure and deterministic — the proposal has no effect until the
             // operator confirms it through `session.egress_policy.set`.
-            "session.egress_policy.propose" => handle_egress_policy_propose(req),
+            "session.egress_policy.propose" => handle_egress_policy_propose(&self.config, req),
 
             // Operator label-listing RPC (#974, RFC §9.3). Read-only, metadata
             // only (never content), root-tree scoped. Out of line for the same
@@ -3507,7 +3507,7 @@ impl JsonRpcRouter {
             // path-taking source families. Read-only, pure data, no session
             // state needed — the room fetches it to complete `source` names so
             // the operator never has to remember `mcp.gmail.*` spellings.
-            "egress.sources" => handle_egress_sources(req),
+            "egress.sources" => handle_egress_sources(&self.config, req),
 
             "egress.audit" => handle_egress_audit(&self.execution, req),
 
@@ -6232,7 +6232,10 @@ fn handle_egress_policy_clear(
 /// function of declared inputs; the natural language is only an authoring
 /// convenience).
 #[inline(never)]
-fn handle_egress_policy_propose(req: JsonRpcRequest) -> JsonRpcResponse {
+fn handle_egress_policy_propose(
+    config: &GatewayConfig,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
     #[derive(Deserialize)]
     struct Params {
         session_id: String,
@@ -6250,7 +6253,8 @@ fn handle_egress_policy_propose(req: JsonRpcRequest) -> JsonRpcResponse {
         );
     }
     let catalog = crate::runtime::egress_proposal::SourceCatalog {
-        tool_names: crate::runtime::tools::default_registry().registered_tool_names(),
+        tool_names: crate::runtime::tools::registry_for_config(Some(config))
+            .registered_tool_names(),
         mcp_server_names: crate::runtime::egress_proposal::mcp_server_names_from_env(),
     };
     let proposal =
@@ -6273,7 +6277,7 @@ fn handle_egress_policy_propose(req: JsonRpcRequest) -> JsonRpcResponse {
 /// completing to it is lossless for matching. Mixed spellings would make
 /// `sandbox.` fail to complete the `sandbox_exec` tool.
 #[inline(never)]
-fn handle_egress_sources(req: JsonRpcRequest) -> JsonRpcResponse {
+fn handle_egress_sources(config: &GatewayConfig, req: JsonRpcRequest) -> JsonRpcResponse {
     // No parameters expected: the catalog is session-independent and pure.
     let empty = req
         .params
@@ -6287,7 +6291,7 @@ fn handle_egress_sources(req: JsonRpcRequest) -> JsonRpcResponse {
             "Invalid params for egress.sources: no parameters expected",
         );
     }
-    let mut tools: Vec<String> = crate::runtime::tools::default_registry()
+    let mut tools: Vec<String> = crate::runtime::tools::registry_for_config(Some(config))
         .registered_tool_names()
         .into_iter()
         .map(|t| t.replace('_', "."))
