@@ -47,6 +47,7 @@ drifted from the code and must be updated.
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |
+| `constitution.version` | string? | `null` | Pin a ratified constitution version (e.g. `"2026.07.19"`); derives the two paths below (#1123). See [Constitution](#constitution). |
 | `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.06.16/constitution.md"` | Active constitution markdown source used for digest/profile extraction. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"` | Active constitution lock manifest. Startup refuses to boot if lock integrity checks fail. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | Require a valid constitution lock signature at startup (`fail-shut` on missing/invalid signature). |
@@ -88,6 +89,7 @@ Controls which constitutional release the gateway enforces.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `constitution.version` | string? | `null` (⇒ code-pinned `ACTIVE_CONSTITUTION_VERSION`) | Ratified version to enforce, e.g. `"2026.07.19"` (#1123). Derives `source_path`/`lock_path` from `docs/constitution/versions/<version>/` at config load. Mutually exclusive with explicit `source_path`/`lock_path`; restricted to `[A-Za-z0-9._-]`, no `..`. Digest + signature verification still gate the resolved artifacts. |
 | `constitution.source_path` | string (path) | `"docs/constitution/versions/2026.06.16/constitution.md"` | Canonical constitution markdown used by `constitution_read`, `gateway.info`, and federation digest/profile checks. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.lock_path` | string (path) | `"docs/constitution/versions/2026.06.16/gateway-constitution.lock.json"` | Lock manifest containing pinned digest/version/metadata. Startup verifies this against computed values and fails shut on mismatch. Relative paths resolve in this order: `agents_dir/<path>`, `agents_dir` parent, current working directory, workspace root fallback. |
 | `constitution.require_signature` | bool | `true` | If `true`, unsigned locks are rejected and signed locks must verify. |

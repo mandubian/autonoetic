@@ -10,6 +10,7 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
     if path.exists() {
         let contents = std::fs::read_to_string(path)?;
         let mut config: GatewayConfig = serde_yaml::from_str(&contents)?;
+        apply_constitution_version(&mut config)?;
         // Canonicalize agents_dir to absolute path so all components resolve to the same location
         config.agents_dir = config
             .agents_dir
@@ -39,6 +40,56 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
         apply_llm_ttfb_timeout(&config);
         Ok(config)
     }
+}
+
+/// Resolve `constitution.version` into `source_path`/`lock_path` (#1123).
+///
+/// The version is only a *selector*: it chooses which signed artifact pair
+/// under `docs/constitution/versions/{version}/` to load. Digest + signature
+/// verification in `constitution_digest` still gate the result, so a bad or
+/// unsigned version fails closed at startup like any other lock violation.
+///
+/// Fail-closed rules:
+/// - `version` combined with explicit `source_path`/`lock_path` → error
+///   (ambiguous operator intent)
+/// - version strings are restricted to `[A-Za-z0-9._-]` and must not contain
+///   `..` — the value is interpolated into a filesystem path
+fn apply_constitution_version(config: &mut GatewayConfig) -> anyhow::Result<()> {
+    let Some(version) = config.constitution.version.clone() else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !version.is_empty()
+            && !version.contains("..")
+            && version
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')),
+        "constitution.version '{version}' is not a valid version label \
+         (allowed: ASCII alphanumerics, '.', '-', '_'; no '..')"
+    );
+    let default_source = autonoetic_types::config::default_constitution_source_path();
+    let default_lock = autonoetic_types::config::default_constitution_lock_path();
+    anyhow::ensure!(
+        config.constitution.source_path == default_source
+            && config.constitution.lock_path == default_lock,
+        "constitution.version is mutually exclusive with explicit \
+         constitution.source_path/lock_path — set one or the other"
+    );
+    config.constitution.source_path = std::path::PathBuf::from(format!(
+        "docs/constitution/versions/{version}/constitution.md"
+    ));
+    config.constitution.lock_path = std::path::PathBuf::from(format!(
+        "docs/constitution/versions/{version}/gateway-constitution.lock.json"
+    ));
+    tracing::info!(
+        version = %version,
+        "constitution.version set; enforcing that signed artifact pair"
+    );
+    // Clear after derivation: `save_config` re-serializes the struct, and a
+    // persisted `version` + now-non-default paths would trip the
+    // mutual-exclusion check on the next load.
+    config.constitution.version = None;
+    Ok(())
 }
 
 /// Persist a `GatewayConfig` to a YAML file (used for operator-local preset injection).
@@ -185,6 +236,57 @@ pub fn load_persona(config: &GatewayConfig, config_dir: &Path) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constitution_version_derives_signed_artifact_paths() {
+        let mut config = GatewayConfig::default();
+        config.constitution.version = Some("2026.07.19".to_string());
+        apply_constitution_version(&mut config).expect("version selector must apply");
+        assert_eq!(
+            config.constitution.source_path,
+            std::path::PathBuf::from("docs/constitution/versions/2026.07.19/constitution.md")
+        );
+        assert_eq!(
+            config.constitution.lock_path,
+            std::path::PathBuf::from(
+                "docs/constitution/versions/2026.07.19/gateway-constitution.lock.json"
+            )
+        );
+        // Cleared after derivation so a save_config round-trip stays loadable.
+        assert!(config.constitution.version.is_none());
+    }
+
+    #[test]
+    fn constitution_version_conflicts_with_explicit_paths() {
+        let mut config = GatewayConfig::default();
+        config.constitution.version = Some("2026.07.19".to_string());
+        config.constitution.source_path = std::path::PathBuf::from("/custom/constitution.md");
+        let err = apply_constitution_version(&mut config)
+            .expect_err("version + explicit paths must be rejected");
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn constitution_version_rejects_path_traversal() {
+        for bad in ["../escape", "2026.07.19/../../x", "a/b", "a\\b", "", ".."] {
+            let mut config = GatewayConfig::default();
+            config.constitution.version = Some(bad.to_string());
+            assert!(
+                apply_constitution_version(&mut config).is_err(),
+                "version '{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn constitution_version_absent_leaves_defaults() {
+        let mut config = GatewayConfig::default();
+        apply_constitution_version(&mut config).expect("absent version is a no-op");
+        assert_eq!(
+            config.constitution.source_path,
+            autonoetic_types::config::default_constitution_source_path()
+        );
+    }
 
     /// `GatewayConfig` is `deny_unknown_fields`, so a config naming a key the
     /// binary doesn't know fails to load and the gateway won't start. This pins
