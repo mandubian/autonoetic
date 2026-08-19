@@ -584,7 +584,7 @@ tools:
 
 Disabling a tool can only *reduce* the agent tool surface: capability
 enforcement lives in the policy engine, not in the registry, so no safety
-invariant weakens. Disabling load-bearing tools (approval, user-interaction,
+invariant weakens. Disabling load-bearing tools (`approval_*`, `user_ask`,
 `tool_discover`) will make agents fail loudly — disable with care. This is
 orthogonal to `DEFAULT_EXCLUDED_TOOLS` (registry-level hiding of
 operator-only tools, no override) and per-agent `excluded_tools` (manifest

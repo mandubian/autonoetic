@@ -668,7 +668,7 @@ max_session_turns: 25
 #
 # Disabling a tool can only *reduce* the agent tool surface: enforcement
 # lives in the policy engine, not in the registry, so no safety invariant
-# weakens. But disabling load-bearing tools (approval.*, user_interaction,
+# weakens. But disabling load-bearing tools (approval_*, user_ask,
 # tool_discover) will make agents fail loudly — disable with care.
 #tools:
 #  disabled:
