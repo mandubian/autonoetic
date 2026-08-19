@@ -1,4 +1,19 @@
-//! Sandbox runner supporting bubblewrap, docker, and firecracker.
+//! Sandbox runner: orchestrates one sandboxed execution end to end.
+//!
+//! This module owns what is *common* to every execution — the SDK bridge socket
+//! and its dispatch, dependency composition, spawning and waiting on the child.
+//! What differs per backend (command construction, SDK socket plumbing, child
+//! env, network guarantees, dependency support) lives behind the
+//! [`driver::SandboxDriver`] trait, one impl per file under [`driver`]. Nothing
+//! here matches on which driver is in play.
+
+pub mod driver;
+
+pub use driver::bubblewrap::{append_bwrap_isolation_flags, BWRAP_WORKSPACE_DIR};
+pub use driver::{
+    builtin_registry, DriverTier, InProcessRequest, SandboxDriver, SandboxDriverKind,
+    SandboxDriverRegistry, SpawnSpec,
+};
 
 use crate::exec_request::ExecutionKind;
 use autonoetic_types::capability::Capability;
@@ -24,34 +39,13 @@ pub const SDK_BRIDGE_MAX_PAYLOAD_BYTES: usize = 1_048_576;
 /// `(agent_dir, root_session_id)` within this idle window.
 const SDK_BRIDGE_IDLE_TTL: Duration = Duration::from_secs(300);
 
-const DOCKER_IMAGE_ENV: &str = "AUTONOETIC_DOCKER_IMAGE";
-const FIRECRACKER_CONFIG_ENV: &str = "AUTONOETIC_FIRECRACKER_CONFIG";
-pub(crate) const BWRAP_WORKSPACE_DIR: &str = "/tmp";
-/// In-container path the SDK socket is mounted at for the docker driver (P1).
-/// Bubblewrap exposes it under `BWRAP_WORKSPACE_DIR`; docker bind-mounts to a
-/// fixed path outside `/workspace` so the agent_dir mount can't shadow it.
-const DOCKER_SDK_SOCKET_PATH: &str = "/run/autonoetic-sdk.sock";
-/// In-container path the Python SDK source is mounted at for the docker driver.
-/// (For bubblewrap the host `/` is ro-bind-mounted, so the host SDK path is
-/// already visible; docker images are separate, so the SDK is mounted in.)
-const DOCKER_SDK_PYTHONPATH: &str = "/opt/autonoetic-sdk";
-const PYTHONPATH_ENV: &str = "PYTHONPATH";
+pub(crate) const PYTHONPATH_ENV: &str = "PYTHONPATH";
 const PYTHON_SDK_PATH_ENV: &str = "AUTONOETIC_PYTHON_SDK_PATH";
-const CCOS_SOCKET_ENV: &str = "CCOS_SOCKET_PATH";
-const BWRAP_SHARE_NET_ENV: &str = "AUTONOETIC_BWRAP_SHARE_NET";
-const BWRAP_DEV_MODE_ENV: &str = "AUTONOETIC_BWRAP_DEV_MODE";
-const ALLOW_SANDBOX_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES";
+pub(crate) const CCOS_SOCKET_ENV: &str = "CCOS_SOCKET_PATH";
+pub(crate) const ALLOW_SANDBOX_ENV_OVERRIDES_ENV: &str = "AUTONOETIC_ALLOW_SANDBOX_ENV_OVERRIDES";
 
 static SANDBOX_CONFIG: OnceLock<SandboxConfig> = OnceLock::new();
 static SDK_DEPLOYED_PATH: OnceLock<String> = OnceLock::new();
-/// Additional host paths to mask inside every bubblewrap sandbox. Stopgap for
-/// #1002: the host `/` is ro-bind-mounted, so without masking a sandboxed
-/// process can read gateway-internal files. The gateway directory's sensitive
-/// contents (vault key, session DB, identity key, sessions/, …) are ALWAYS
-/// masked — derived per-spawn from the agent dir (see [`bwrap_deny_path_flags`]).
-/// This list is for the operator config file and any other paths the operator
-/// chooses to add. Populated once at startup via [`init_sandbox_host_deny_paths`].
-static SANDBOX_HOST_DENY_PATHS: OnceLock<Vec<std::path::PathBuf>> = OnceLock::new();
 
 /// Per-execution overrides for bubblewrap isolation flags.
 /// Derived from the executing agent's capabilities.
@@ -151,6 +145,12 @@ pub fn init_sandbox_config(config: &SandboxConfig) {
     SANDBOX_CONFIG.get_or_init(|| config.clone());
 }
 
+/// The startup sandbox config, if [`init_sandbox_config`] has run. Drivers read
+/// their operator-set defaults (network sharing, `/dev` mode) from here.
+pub(crate) fn sandbox_config() -> Option<&'static SandboxConfig> {
+    SANDBOX_CONFIG.get()
+}
+
 /// Initialise the deployed-SDK path from the gateway directory so sandbox
 /// runners can find the SDK without relying on the source tree.
 pub fn init_sdk_deployed_path(gateway_dir: &Path) {
@@ -169,50 +169,13 @@ pub fn init_sdk_deployed_path(gateway_dir: &Path) {
 /// is for the config file and operator-specified paths. Non-existent paths are
 /// silently skipped at mount-build time. Idempotent — first call wins.
 ///
-/// Paths are normalized via [`normalize_deny_paths`] before storage: relative
-/// paths are made absolute (bwrap dests are namespace-absolute against the
-/// ro-mounted `/`, so a relative path would silently fail to mask), and
-/// symlinked targets are added alongside the link path so a config reachable
-/// via its real path can't escape masking.
+/// Paths are normalized before storage: relative paths are made absolute (bwrap
+/// dests are namespace-absolute against the ro-mounted host `/`, so a relative
+/// path would silently fail to mask), and symlinked targets are added alongside
+/// the link path so a config reachable via its real path can't escape masking.
+/// See `driver::bubblewrap` for the masking mechanics.
 pub fn init_sandbox_host_deny_paths(paths: Vec<PathBuf>) {
-    let _ = SANDBOX_HOST_DENY_PATHS.set(normalize_deny_paths(&paths));
-}
-
-/// Normalize a set of deny paths for use as bwrap mount destinations:
-/// - **Make absolute** — resolve relative paths against the gateway CWD. bwrap
-///   interprets bind destinations against the sandbox namespace (rooted at the
-///   ro-mounted host `/`), so a relative path would not mask the real file.
-/// - **Add canonical targets** — if a path is a symlink, `canonicalize` it and
-///   include the real target so the file can't be read via its underlying path
-///   (e.g. `~/.autonoetic/config.yaml` → `/etc/autonoetic/config.yaml`).
-/// - **Dedup** — identical absolute/canonical forms collapse to one entry.
-///
-/// Existence is *not* required here — the mount-builder
-/// ([`push_deny_file`]/[`push_deny_dir`]) skips non-existent paths at spawn
-/// time. A path that doesn't resolve canonically (missing now, created later)
-/// still contributes its absolute form for the common case.
-fn normalize_deny_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        let abs = if p.is_absolute() {
-            p.clone()
-        } else {
-            cwd.join(p)
-        };
-        // Cover symlinked configs: mask the real target too, so the file can't
-        // be read via its canonical path around the link.
-        let canon = std::fs::canonicalize(&abs).ok();
-        if !out.contains(&abs) {
-            out.push(abs);
-        }
-        if let Some(canon) = canon {
-            if !out.contains(&canon) {
-                out.push(canon);
-            }
-        }
-    }
-    out
+    driver::bubblewrap::init_host_deny_paths(paths);
 }
 
 #[derive(Hash, Eq, PartialEq, Clone)]
@@ -243,7 +206,7 @@ impl SdkBridgeShared {
     }
 }
 
-struct SdkBridgeGuard {
+pub(crate) struct SdkBridgeGuard {
     shared: Arc<SdkBridgeShared>,
 }
 
@@ -283,55 +246,6 @@ fn purge_idle_sdk_bridges(cache: &mut HashMap<SdkBridgeCacheKey, Arc<SdkBridgeSh
     });
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxDriverKind {
-    Bubblewrap,
-    Docker,
-    MicroVm,
-    /// In-process WebAssembly (WASI) tier — the portable execution backend
-    /// (RFC `docs/rfc/portable-wasm-execution-tier.md`, P4). Selected via
-    /// `sandbox: "wasm"`; runs declared modules in-process through
-    /// [`SandboxRunner::run_to_output`] when built with the `wasm-tier` feature
-    /// (without it, selecting this driver returns a clear build-feature error).
-    Wasm,
-}
-
-impl SandboxDriverKind {
-    pub fn parse(name: &str) -> anyhow::Result<Self> {
-        match name.to_ascii_lowercase().as_str() {
-            "bubblewrap" | "bwrap" => Ok(Self::Bubblewrap),
-            "docker" => Ok(Self::Docker),
-            "microvm" | "firecracker" => Ok(Self::MicroVm),
-            "wasm" | "wasi" => Ok(Self::Wasm),
-            other => anyhow::bail!("Unsupported sandbox driver '{}'", other),
-        }
-    }
-
-    /// Whether this driver guarantees the run has **no network access** under the
-    /// given isolation overrides. Single source of truth for "is this execution
-    /// physically offline" — used by the promotion gate to decide whether a
-    /// deterministic test suite can be trusted to run in isolation (P-3.10)
-    /// instead of being statically pre-denied on mere import detection.
-    ///
-    /// - **Bubblewrap**: offline iff `force_network_off` (the gate sets it via
-    ///   [`BwrapIsolationOverrides::promotion_gate_overrides`]); enforced by
-    ///   `--unshare-all` with no `--share-net`.
-    /// - **Docker**: always offline — `docker_command` hardcodes `--network none`.
-    /// - **Wasm**: always offline — the in-process WASI preview1 tier exposes no
-    ///   sockets (only a preopened workspace dir, args, env).
-    /// - **MicroVm**: NOT guaranteed — network is whatever the operator's
-    ///   firecracker `--config-file` declares; the gateway passes only that file
-    ///   and cannot assert the absence of a NIC. Conservative `false`.
-    pub fn guarantees_network_off(self, overrides: &BwrapIsolationOverrides) -> bool {
-        match self {
-            Self::Bubblewrap => overrides.force_network_off,
-            Self::Docker => true,
-            Self::Wasm => true,
-            Self::MicroVm => false,
-        }
-    }
-}
-
 /// Dependency runtime ecosystem used to install generated code dependencies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DependencyRuntime {
@@ -362,10 +276,10 @@ pub struct ExecOutput {
 
 impl SandboxRunner {
     /// Run a request to completion and capture its output, dispatching by tier:
-    /// the **process** drivers (bubblewrap/docker/microvm) spawn a child and
-    /// wait; the **wasm** tier runs in-process via the WASI backend. This is the
-    /// unified entry the agent execution path migrates onto (P4 inc 2c); the
-    /// `spawn_*` methods remain the process-only path used today.
+    /// **process** drivers spawn a child and wait; **in-process** drivers (the
+    /// wasm tier) run inside the gateway. This is the unified entry the agent
+    /// execution path migrates onto (P4 inc 2c); the `spawn_*` methods remain
+    /// the process-only path used today.
     pub fn run_to_output(
         driver: SandboxDriverKind,
         agent_dir: &str,
@@ -376,8 +290,14 @@ impl SandboxRunner {
         root_session_id: Option<&str>,
         stdin: Option<Vec<u8>>,
     ) -> anyhow::Result<ExecOutput> {
-        if driver == SandboxDriverKind::Wasm {
-            return run_wasm_request(agent_dir, request, extra_env, stdin);
+        let backend = driver.driver()?;
+        if backend.tier() == DriverTier::InProcess {
+            return backend.run_in_process(&InProcessRequest {
+                agent_dir,
+                request,
+                extra_env,
+                stdin,
+            });
         }
         let mut runner = Self::spawn_with_driver_and_dependencies_and_env(
             driver,
@@ -457,75 +377,16 @@ impl SandboxRunner {
         extra_env: &[(String, String)],
         root_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
-        // Process backend: render the intent request to a shell line.
-        let entrypoint = request.render_process_command()?;
-        anyhow::ensure!(
-            !entrypoint.trim().is_empty(),
-            "entrypoint must not be empty"
-        );
-        if dependencies.is_some() && driver == SandboxDriverKind::MicroVm {
-            anyhow::bail!("MicroVM dependency bootstrap is not implemented yet");
-        }
-
-        // Wire the SDK socket transport once; the helper produces driver-specific
-        // plumbing (bubblewrap bind mount vs docker `-v`/`-e`). Now wired for
-        // bubblewrap AND docker (P1) — previously bubblewrap-only.
-        let wiring = wire_sdk_bridge(driver, agent_dir, root_session_id)?;
-        let socket_path_sandbox = wiring.socket_path_sandbox.clone();
-        let mut socket_mounts: Vec<SandboxMount> = Vec::new();
-        if let Some(mount) = wiring.bwrap_mount {
-            socket_mounts.push(mount);
-        }
-
-        let composed_entrypoint = compose_entrypoint(&entrypoint, dependencies)?;
-        let (program, args) = match driver {
-            SandboxDriverKind::Bubblewrap => {
-                if dependencies.is_some() {
-                    bubblewrap_shell_command(
-                        agent_dir,
-                        &composed_entrypoint,
-                        &socket_mounts,
-                        overrides,
-                    )?
-                } else {
-                    bubblewrap_shell_command(agent_dir, &entrypoint, &socket_mounts, overrides)?
-                }
-            }
-            SandboxDriverKind::Docker => {
-                // Container env does NOT inherit the gateway process env, so the
-                // socket path / PYTHONPATH / extra_env must be passed as `-e`.
-                let mut docker_env = wiring.docker_env.clone();
-                merge_docker_env(&mut docker_env, extra_env);
-                docker_command(
-                    agent_dir,
-                    &composed_entrypoint,
-                    &wiring.docker_volumes,
-                    &docker_env,
-                )?
-            }
-            SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
-            // The WASM tier is in-process (not a host `(program, args)`); its
-            // wasmtime-backed execution lands in a later P4 increment.
-            SandboxDriverKind::Wasm => {
-                anyhow::bail!("wasm tier runs in-process via SandboxRunner::run_to_output, not the process spawn path")
-            }
-        };
-
-        let mut command = Command::new(&program);
-        command
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
-
-        let child = spawn_driver_process(&mut command, &program)?;
-        Ok(Self {
-            process: child,
+        Self::spawn_process(
             driver,
-            _sdk_bridge: wiring.guard,
-        })
+            agent_dir,
+            request,
+            dependencies,
+            Vec::new(),
+            overrides,
+            extra_env,
+            root_session_id,
+        )
     }
 
     /// Spawn sandbox with session content automatically mounted.
@@ -560,45 +421,64 @@ impl SandboxRunner {
         extra_env: &[(String, String)],
         root_session_id: Option<&str>,
     ) -> anyhow::Result<Self> {
+        Self::spawn_process(
+            driver,
+            agent_dir,
+            request,
+            dependencies,
+            session_content_mounts,
+            overrides,
+            extra_env,
+            root_session_id,
+        )
+    }
+
+    /// The single process-tier spawn path. Everything here is driver-agnostic:
+    /// render the request, compose dependencies, start the SDK bridge, then ask
+    /// the driver for its `(program, argv)` and its child env.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_process(
+        driver: SandboxDriverKind,
+        agent_dir: &str,
+        request: &ExecutionKind,
+        dependencies: Option<&DependencyPlan>,
+        session_content_mounts: Vec<SandboxMount>,
+        overrides: Option<&BwrapIsolationOverrides>,
+        extra_env: &[(String, String)],
+        root_session_id: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let backend = driver.driver()?;
+        anyhow::ensure!(
+            backend.tier() == DriverTier::Process,
+            "{} tier runs in-process via SandboxRunner::run_to_output, not the process spawn path",
+            backend.names()[0]
+        );
+
         // Process backend: render the intent request to a shell line.
         let entrypoint = request.render_process_command()?;
         anyhow::ensure!(
             !entrypoint.trim().is_empty(),
             "entrypoint must not be empty"
         );
-        if dependencies.is_some() && driver == SandboxDriverKind::MicroVm {
-            anyhow::bail!("MicroVM dependency bootstrap is not implemented yet");
+        if let Some(plan) = dependencies {
+            backend.check_dependency_support(plan)?;
         }
 
-        let mut all_mounts = session_content_mounts;
-
-        // SDK socket transport, wired for bubblewrap AND docker (P1).
-        let wiring = wire_sdk_bridge(driver, agent_dir, root_session_id)?;
-        let socket_path_sandbox = wiring.socket_path_sandbox.clone();
-        if let Some(mount) = wiring.bwrap_mount {
-            all_mounts.push(mount);
-        }
+        // Wire the SDK socket transport once; the driver contributes its own
+        // plumbing (bubblewrap bind mount vs docker `-v`/`-e`).
+        let wiring = wire_sdk_bridge(backend.as_ref(), agent_dir, root_session_id)?;
+        let mut mounts = session_content_mounts;
+        mounts.extend(wiring.mounts.iter().cloned());
 
         let composed_entrypoint = compose_entrypoint(&entrypoint, dependencies)?;
-        let (program, args) = match driver {
-            SandboxDriverKind::Bubblewrap => {
-                bubblewrap_shell_command(agent_dir, &composed_entrypoint, &all_mounts, overrides)?
-            }
-            SandboxDriverKind::Docker => {
-                let mut docker_env = wiring.docker_env.clone();
-                merge_docker_env(&mut docker_env, extra_env);
-                docker_command(
-                    agent_dir,
-                    &composed_entrypoint,
-                    &wiring.docker_volumes,
-                    &docker_env,
-                )?
-            }
-            SandboxDriverKind::MicroVm => microvm_command(&composed_entrypoint)?,
-            SandboxDriverKind::Wasm => {
-                anyhow::bail!("wasm tier runs in-process via SandboxRunner::run_to_output, not the process spawn path")
-            }
-        };
+        let (program, args) = backend.build_command(&SpawnSpec {
+            agent_dir,
+            entrypoint: &composed_entrypoint,
+            mounts: &mounts,
+            overrides,
+            extra_env,
+            bridge: &wiring,
+        })?;
 
         let mut command = Command::new(&program);
         command
@@ -607,7 +487,11 @@ impl SandboxRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        apply_child_env(&mut command, driver, socket_path_sandbox.as_deref(), extra_env);
+        backend.apply_child_env(
+            &mut command,
+            wiring.socket_path_sandbox.as_deref(),
+            extra_env,
+        );
 
         let child = spawn_driver_process(&mut command, &program)?;
         Ok(Self {
@@ -715,36 +599,23 @@ fn start_sdk_bridge(
     })
 }
 
-/// In-sandbox path where the SDK socket is exposed for a given driver.
-/// Bubblewrap binds it under the workspace dir; docker bind-mounts it to a
-/// fixed path. Returns `None` for drivers that don't run the bridge yet
-/// (microvm — deferred to P5).
-fn sdk_socket_sandbox_path(driver: SandboxDriverKind, socket_name: &str) -> Option<String> {
-    match driver {
-        SandboxDriverKind::Bubblewrap => Some(format!("{}/{}", BWRAP_WORKSPACE_DIR, socket_name)),
-        SandboxDriverKind::Docker => Some(DOCKER_SDK_SOCKET_PATH.to_string()),
-        // microvm deferred (P5); wasm uses host-function imports, not a socket bridge (P4).
-        SandboxDriverKind::MicroVm | SandboxDriverKind::Wasm => None,
-    }
-}
-
-/// Centralized SDK-bridge wiring shared by every spawn path. Starts the bridge
-/// (the socket transport) once and produces the driver-specific plumbing:
-/// bubblewrap takes a bind `SandboxMount` + host-inherited env; docker takes
-/// `docker run` `-v`/`-e` flags (its container env does **not** inherit the
-/// gateway process env, so socket path + PYTHONPATH must be passed explicitly).
-/// The bridge is not started for drivers without socket support yet (microvm).
+/// Driver-supplied plumbing that exposes the SDK bridge socket inside a
+/// sandbox. Each driver fills only what its backend needs — bubblewrap a bind
+/// mount plus host-inherited env, container drivers `-v`/`-e` flags — via
+/// [`SandboxDriver::wire_sdk_bridge`]. Left entirely empty for drivers that run
+/// no bridge.
 #[derive(Default)]
-struct SdkBridgeWiring {
-    guard: Option<SdkBridgeGuard>,
+pub struct SdkBridgeWiring {
+    pub(crate) guard: Option<SdkBridgeGuard>,
     /// In-sandbox socket path; `Some` whenever the bridge was started.
-    socket_path_sandbox: Option<String>,
-    /// Bubblewrap: bind mount to add to the mount list.
-    bwrap_mount: Option<SandboxMount>,
-    /// Docker: extra `(host, container, readonly)` volumes for `docker run -v`.
-    docker_volumes: Vec<(String, String, bool)>,
-    /// Docker: env vars for `docker run -e` (the container won't inherit them).
-    docker_env: Vec<(String, String)>,
+    pub socket_path_sandbox: Option<String>,
+    /// Extra bind mounts the driver needs inside the sandbox.
+    pub mounts: Vec<SandboxMount>,
+    /// Extra `(host, container, readonly)` volumes for container drivers.
+    pub volumes: Vec<(String, String, bool)>,
+    /// Env vars a container driver must bake into its argv (the container
+    /// won't inherit the gateway process env).
+    pub env: Vec<(String, String)>,
 }
 
 /// Spawn the sandbox driver process, mapping a missing-driver `ENOENT` to a
@@ -770,180 +641,28 @@ fn spawn_driver_process(command: &mut Command, program: &str) -> anyhow::Result<
     }
 }
 
+/// Start the SDK bridge once and let the driver wire it into its sandbox.
+/// Drivers that run no bridge (microvm; the wasm tier uses host-function
+/// imports) short-circuit before the socket is created.
 fn wire_sdk_bridge(
-    driver: SandboxDriverKind,
+    driver: &dyn SandboxDriver,
     agent_dir: &str,
     root_session_id: Option<&str>,
 ) -> anyhow::Result<SdkBridgeWiring> {
     let mut wiring = SdkBridgeWiring::default();
-    // Drivers without socket support yet (microvm) run no bridge.
-    if sdk_socket_sandbox_path(driver, "").is_none() {
+    if !driver.runs_sdk_bridge() {
         return Ok(wiring);
     }
 
     let bridge = start_sdk_bridge(agent_dir, root_session_id.map(|s| s.to_string()))?;
     let host_socket = bridge.guard.shared.socket_path_host.clone();
-    let sandbox_socket = sdk_socket_sandbox_path(driver, &bridge.socket_name)
-        .expect("driver supports the bridge (checked above)");
+    let sandbox_socket = driver
+        .sdk_socket_path(&bridge.socket_name)
+        .expect("driver runs the bridge (checked above)");
     wiring.socket_path_sandbox = Some(sandbox_socket.clone());
-
-    match driver {
-        SandboxDriverKind::Bubblewrap => {
-            wiring.bwrap_mount = Some(SandboxMount {
-                source: host_socket,
-                dest: sandbox_socket,
-                readonly: false,
-            });
-        }
-        SandboxDriverKind::Docker => {
-            wiring.docker_volumes.push((
-                host_socket.to_string_lossy().to_string(),
-                sandbox_socket.clone(),
-                false,
-            ));
-            wiring
-                .docker_env
-                .push((CCOS_SOCKET_ENV.to_string(), sandbox_socket));
-            // The Python SDK isn't in the docker image; mount it read-only and
-            // point PYTHONPATH at the mount so the in-container client resolves.
-            if let Some(sdk_path) = resolve_python_sdk_path() {
-                wiring.docker_volumes.push((
-                    sdk_path,
-                    DOCKER_SDK_PYTHONPATH.to_string(),
-                    true,
-                ));
-                wiring
-                    .docker_env
-                    .push((PYTHONPATH_ENV.to_string(), DOCKER_SDK_PYTHONPATH.to_string()));
-            }
-        }
-        // Not reached (the early guard returns for drivers without a socket
-        // bridge), but the match must stay exhaustive.
-        SandboxDriverKind::MicroVm | SandboxDriverKind::Wasm => {}
-    }
+    driver.wire_sdk_bridge(&host_socket, &sandbox_socket, &mut wiring);
     wiring.guard = Some(bridge.guard);
     Ok(wiring)
-}
-
-/// Merge `extra_env` into a docker env list, concatenating `PYTHONPATH` (the SDK
-/// path must stay on the path) rather than overwriting it.
-fn merge_docker_env(base: &mut Vec<(String, String)>, extra_env: &[(String, String)]) {
-    for (key, value) in extra_env {
-        if key == PYTHONPATH_ENV {
-            if let Some(existing) = base.iter_mut().find(|(k, _)| k == PYTHONPATH_ENV) {
-                existing.1 = format!("{}:{}", value, existing.1);
-                continue;
-            }
-        }
-        base.push((key.clone(), value.clone()));
-    }
-}
-
-/// Apply child-process env per driver. Bubblewrap inherits the gateway env, so
-/// the SDK PYTHONPATH, socket path, and `extra_env` go on the `Command`. Docker
-/// bakes its env into the `docker run` argv (`-e`, in `docker_command`) since the
-/// container doesn't inherit this process's env, so nothing is set here. MicroVm
-/// keeps prior behavior (`extra_env` on the `Command`).
-fn apply_child_env(
-    command: &mut Command,
-    driver: SandboxDriverKind,
-    socket_path_sandbox: Option<&str>,
-    extra_env: &[(String, String)],
-) {
-    match driver {
-        SandboxDriverKind::Bubblewrap => {
-            if let Some(sdk_path) = resolve_python_sdk_path() {
-                inject_pythonpath(command, &sdk_path);
-            }
-            if let Some(path) = socket_path_sandbox {
-                command.env(CCOS_SOCKET_ENV, path);
-            }
-            for (key, value) in extra_env {
-                if key == PYTHONPATH_ENV {
-                    inject_pythonpath_value(command, value);
-                } else {
-                    command.env(key, value);
-                }
-            }
-        }
-        SandboxDriverKind::Docker => {}
-        SandboxDriverKind::MicroVm => {
-            for (key, value) in extra_env {
-                command.env(key, value);
-            }
-        }
-        // Wasm runs in-process (no child `Command`); env is applied to the
-        // wasmtime store in the WASM backend, not here. Not reached today (the
-        // spawn match bails first), but the match must stay exhaustive.
-        SandboxDriverKind::Wasm => {}
-    }
-}
-
-/// Run a request on the WASM tier (`wasm-tier` feature): resolve the `Code`
-/// entry to a `.wasm` file under the agent dir and execute it via the WASI
-/// backend, preopening the agent dir. Free-form shell / inline source are
-/// rejected — the portable tier runs declared code, not arbitrary shell.
-#[cfg(feature = "wasm-tier")]
-fn run_wasm_request(
-    agent_dir: &str,
-    request: &ExecutionKind,
-    extra_env: &[(String, String)],
-    stdin: Option<Vec<u8>>,
-) -> anyhow::Result<ExecOutput> {
-    use crate::exec_request::CodeSource;
-    let (entry, args) = match request {
-        ExecutionKind::Code {
-            source: CodeSource::Entry(path),
-            args,
-            ..
-        } => (path.clone(), args.clone()),
-        ExecutionKind::Code {
-            source: CodeSource::Inline(_),
-            ..
-        } => anyhow::bail!("wasm tier: inline source is not supported yet (declare a .wasm entry)"),
-        ExecutionKind::Shell { .. } => {
-            anyhow::bail!("wasm tier does not support free-form shell execution")
-        }
-    };
-    // Keep the module strictly under the agent dir: reject absolute paths and any
-    // `..` traversal so a manifest entry can't read/execute outside the bundle.
-    let entry_path = Path::new(&entry);
-    anyhow::ensure!(
-        entry_path.is_relative()
-            && !entry_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir)),
-        "wasm entry must be a relative path within the agent dir (no `..`): {entry}"
-    );
-    let wasm_path = Path::new(agent_dir).join(&entry);
-    let wasm = std::fs::read(&wasm_path)
-        .map_err(|e| anyhow::anyhow!("reading wasm entry {}: {e}", wasm_path.display()))?;
-    let out = crate::wasm_backend::run_wasi_module(
-        &wasm,
-        Path::new(agent_dir),
-        // Same guest workspace path the process tiers use, so input-file env
-        // vars (built against BWRAP_WORKSPACE_DIR) resolve inside the module too.
-        BWRAP_WORKSPACE_DIR,
-        &args,
-        extra_env,
-        stdin.unwrap_or_default(),
-        &crate::wasm_backend::WasmLimits::default(),
-    )?;
-    Ok(ExecOutput {
-        exit_code: out.exit_code,
-        stdout: out.stdout,
-        stderr: out.stderr,
-    })
-}
-
-#[cfg(not(feature = "wasm-tier"))]
-fn run_wasm_request(
-    _agent_dir: &str,
-    _request: &ExecutionKind,
-    _extra_env: &[(String, String)],
-    _stdin: Option<Vec<u8>>,
-) -> anyhow::Result<ExecOutput> {
-    anyhow::bail!("wasm sandbox tier requires the `wasm-tier` build feature")
 }
 
 fn run_sdk_bridge_loop(
@@ -1417,7 +1136,7 @@ fn dispatch_sdk_method(
     }
 }
 
-fn resolve_python_sdk_path() -> Option<String> {
+pub(crate) fn resolve_python_sdk_path() -> Option<String> {
     // 1. Explicit env var override
     if let Ok(path) = std::env::var(PYTHON_SDK_PATH_ENV) {
         if !path.trim().is_empty() {
@@ -1444,7 +1163,7 @@ fn resolve_python_sdk_path() -> Option<String> {
     None
 }
 
-fn inject_pythonpath(command: &mut Command, sdk_path: &str) {
+pub(crate) fn inject_pythonpath(command: &mut Command, sdk_path: &str) {
     match std::env::var(PYTHONPATH_ENV) {
         Ok(existing) if !existing.trim().is_empty() => {
             command.env(PYTHONPATH_ENV, format!("{}:{}", sdk_path, existing));
@@ -1455,7 +1174,7 @@ fn inject_pythonpath(command: &mut Command, sdk_path: &str) {
     }
 }
 
-fn inject_pythonpath_value(command: &mut Command, extra_path: &str) {
+pub(crate) fn inject_pythonpath_value(command: &mut Command, extra_path: &str) {
     let current = command
         .get_envs()
         .find(|(k, _)| *k == PYTHONPATH_ENV)
@@ -1470,125 +1189,6 @@ fn inject_pythonpath_value(command: &mut Command, extra_path: &str) {
     }
 }
 
-fn split_entrypoint(entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let parts: Vec<&str> = entrypoint.split_whitespace().collect();
-    anyhow::ensure!(!parts.is_empty(), "entrypoint must not be empty");
-    let program = parts[0].to_string();
-    let args = parts[1..].iter().map(|s| s.to_string()).collect();
-    Ok((program, args))
-}
-
-/// Sensitive files inside the gateway directory that a sandboxed process must
-/// never read: the credential vault key + encrypted blob, the SQLite session
-/// DB (and its WAL/shm sidecars), and the Ed25519 attestation identity key.
-/// The public sidecar and `sdk/` / `wiki/` / `constitution/` are deliberately
-/// NOT listed — `sdk/` is the SDK PYTHONPATH source (needed in-sandbox), and
-/// the constitution is public agent-readable law.
-const BWRAP_GATEWAY_SENSITIVE_FILES: &[&str] = &[
-    "vault.key",
-    "vault.enc.json",
-    "gateway.db",
-    "gateway.db-shm",
-    "gateway.db-wal",
-    "state_attestation.ed25519",
-];
-
-/// Sensitive subdirectories inside the gateway directory that a sandboxed
-/// process has no legitimate reason to read directly — the agent reaches all
-/// of these through tools, not the filesystem. Masked with an empty tmpfs.
-const BWRAP_GATEWAY_SENSITIVE_DIRS: &[&str] = &[
-    "sessions",
-    "scheduler",
-    "checkpoints",
-    "history",
-    "logs",
-    "revisions",
-];
-
-/// Push a bubblewrap flag that shadows a single host FILE with `/dev/null`
-/// (reads return EOF), so the sandboxed process cannot read it. No-op when the
-/// path doesn't exist on the host — bwrap resolves sources against the host
-/// filesystem, so the dest must resolve against the ro-mounted `/` too.
-fn push_deny_file(flags: &mut Vec<String>, p: &std::path::Path) {
-    if p.exists() {
-        flags.push("--ro-bind".to_string());
-        flags.push("/dev/null".to_string());
-        flags.push(p.to_string_lossy().to_string());
-    }
-}
-
-/// Push a bubblewrap flag that shadows a host DIRECTORY with an empty tmpfs,
-/// so the sandboxed process cannot read or list it. No-op when the path
-/// doesn't exist on the host.
-fn push_deny_dir(flags: &mut Vec<String>, p: &std::path::Path) {
-    if p.exists() {
-        flags.push("--tmpfs".to_string());
-        flags.push(p.to_string_lossy().to_string());
-    }
-}
-
-/// Build the bubblewrap argv slice that masks gateway-internal secrets and any
-/// operator-registered deny paths, so a sandboxed process cannot read them
-/// through the ro-mounted host `/` (stopgap for #1002). The gateway directory
-/// is derived from the agent dir as its sibling `.gateway`; its `sdk/` subtree
-/// is intentionally left accessible (the sandbox reads its PYTHONPATH from that
-/// host path). Operator paths come from [`init_sandbox_host_deny_paths`].
-fn bwrap_deny_path_flags(agent_dir: &str) -> Vec<String> {
-    let mut flags = Vec::new();
-
-    if let Some(gateway_dir) = std::path::Path::new(agent_dir)
-        .parent()
-        .map(|agents_root| agents_root.join(".gateway"))
-    {
-        for name in BWRAP_GATEWAY_SENSITIVE_FILES {
-            push_deny_file(&mut flags, &gateway_dir.join(name));
-        }
-        for name in BWRAP_GATEWAY_SENSITIVE_DIRS {
-            push_deny_dir(&mut flags, &gateway_dir.join(name));
-        }
-    }
-
-    if let Some(extra) = SANDBOX_HOST_DENY_PATHS.get() {
-        for p in extra {
-            if p.is_dir() {
-                push_deny_dir(&mut flags, p);
-            } else {
-                push_deny_file(&mut flags, p);
-            }
-        }
-    }
-
-    flags
-}
-
-fn bubblewrap_command(
-    agent_dir: &str,
-    entrypoint: &str,
-    overrides: Option<&BwrapIsolationOverrides>,
-) -> anyhow::Result<(String, Vec<String>)> {
-    let (program, args) = split_entrypoint(entrypoint)?;
-    let mut argv = vec![
-        "--ro-bind".to_string(),
-        "/".to_string(),
-        "/".to_string(),
-        "--bind".to_string(),
-        agent_dir.to_string(),
-        BWRAP_WORKSPACE_DIR.to_string(),
-        "--chdir".to_string(),
-        BWRAP_WORKSPACE_DIR.to_string(),
-    ];
-    append_bwrap_isolation_flags(&mut argv, overrides);
-    // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
-    // the host `/` is ro-bind-mounted above). Must come after the ro-bind of
-    // `/` so the destinations resolve, and before any explicit re-expose
-    // mounts so they can layer back on top.
-    argv.extend(bwrap_deny_path_flags(agent_dir));
-    argv.push("--".to_string());
-    argv.push(program);
-    argv.extend(args);
-    Ok(("bwrap".to_string(), argv))
-}
-
 /// Extra bind mount for sandbox (source_path → dest_path).
 #[derive(Debug, Clone)]
 pub struct SandboxMount {
@@ -1597,149 +1197,7 @@ pub struct SandboxMount {
     pub readonly: bool,
 }
 
-fn bubblewrap_shell_command(
-    agent_dir: &str,
-    shell_command: &str,
-    extra_mounts: &[SandboxMount],
-    overrides: Option<&BwrapIsolationOverrides>,
-) -> anyhow::Result<(String, Vec<String>)> {
-    anyhow::ensure!(
-        !shell_command.trim().is_empty(),
-        "shell command must not be empty"
-    );
-    let mut argv = vec![
-        "--ro-bind".to_string(),
-        "/".to_string(),
-        "/".to_string(),
-        "--bind".to_string(),
-        agent_dir.to_string(),
-        BWRAP_WORKSPACE_DIR.to_string(),
-        "--chdir".to_string(),
-        BWRAP_WORKSPACE_DIR.to_string(),
-    ];
-    append_bwrap_isolation_flags(&mut argv, overrides);
-
-    // Mask gateway-internal secrets + operator deny paths (stopgap for #1002:
-    // the host `/` is ro-bind-mounted above) BEFORE explicit content/SDK
-    // mounts so those can layer back on top of the masked paths when needed.
-    argv.extend(bwrap_deny_path_flags(agent_dir));
-
-    // Add extra bind mounts for session content
-    for mount in extra_mounts {
-        // Create the source directory if needed
-        if let Some(parent) = mount.source.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Ensure the source file/directory exists (create empty if not)
-        if !mount.source.exists() {
-            if mount.source.extension().is_some() {
-                let _ = std::fs::write(&mount.source, "");
-            } else {
-                let _ = std::fs::create_dir_all(&mount.source);
-            }
-        }
-        let bind_flag = if mount.readonly {
-            "--ro-bind".to_string()
-        } else {
-            "--bind".to_string()
-        };
-        argv.push(bind_flag);
-        argv.push(mount.source.to_string_lossy().to_string());
-        argv.push(mount.dest.clone());
-    }
-
-    argv.extend(vec![
-        "--".to_string(),
-        "sh".to_string(),
-        "-c".to_string(),
-        shell_command.to_string(),
-    ]);
-    Ok(("bwrap".to_string(), argv))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BwrapDevMode {
-    /// Keep legacy behavior (no explicit /dev mount override).
-    Legacy,
-    /// Mount bubblewrap minimal writable /dev.
-    Minimal,
-    /// Bind host /dev into sandbox (least isolated, most compatible).
-    HostBind,
-}
-
-pub fn append_bwrap_isolation_flags(
-    argv: &mut Vec<String>,
-    overrides: Option<&BwrapIsolationOverrides>,
-) {
-    argv.push("--unshare-all".to_string());
-
-    let force_off = overrides.map(|o| o.force_network_off).unwrap_or(false);
-    let share_net = if force_off {
-        false
-    } else {
-        overrides
-            .map(|o| o.share_net)
-            .unwrap_or_else(bwrap_share_net_enabled)
-    };
-
-    if share_net {
-        argv.push("--share-net".to_string());
-    }
-
-    match bwrap_dev_mode() {
-        BwrapDevMode::Legacy => {}
-        BwrapDevMode::Minimal => {
-            argv.push("--dev".to_string());
-            argv.push("/dev".to_string());
-        }
-        BwrapDevMode::HostBind => {
-            argv.push("--dev-bind".to_string());
-            argv.push("/dev".to_string());
-            argv.push("/dev".to_string());
-        }
-    }
-}
-
-fn bwrap_share_net_enabled() -> bool {
-    // Env overrides are gated behind an explicit opt-in.
-    if sandbox_env_overrides_allowed() {
-        if let Some(val) = parse_env_bool(std::env::var(BWRAP_SHARE_NET_ENV).ok().as_deref()) {
-            return val;
-        }
-    } else if std::env::var(BWRAP_SHARE_NET_ENV).ok().is_some() {
-        tracing::warn!(
-            env = BWRAP_SHARE_NET_ENV,
-            gate = ALLOW_SANDBOX_ENV_OVERRIDES_ENV,
-            "Ignoring sandbox network env override in strict mode"
-        );
-    }
-    // Config value (if initialized)
-    SANDBOX_CONFIG.get().map(|c| c.share_net).unwrap_or(false)
-}
-
-fn bwrap_dev_mode() -> BwrapDevMode {
-    // Env overrides are gated behind an explicit opt-in.
-    if sandbox_env_overrides_allowed() {
-        if let Some(val) = std::env::var(BWRAP_DEV_MODE_ENV).ok() {
-            if !val.trim().is_empty() {
-                return parse_bwrap_dev_mode(Some(&val));
-            }
-        }
-    } else if std::env::var(BWRAP_DEV_MODE_ENV).ok().is_some() {
-        tracing::warn!(
-            env = BWRAP_DEV_MODE_ENV,
-            gate = ALLOW_SANDBOX_ENV_OVERRIDES_ENV,
-            "Ignoring sandbox dev-mode env override in strict mode"
-        );
-    }
-    // Config value (if initialized)
-    if let Some(config) = SANDBOX_CONFIG.get() {
-        return parse_bwrap_dev_mode(Some(&config.dev_mode));
-    }
-    BwrapDevMode::Legacy
-}
-
-fn sandbox_env_overrides_allowed() -> bool {
+pub(crate) fn sandbox_env_overrides_allowed() -> bool {
     parse_env_bool(
         std::env::var(ALLOW_SANDBOX_ENV_OVERRIDES_ENV)
             .ok()
@@ -1748,7 +1206,7 @@ fn sandbox_env_overrides_allowed() -> bool {
     .unwrap_or(false)
 }
 
-fn parse_env_bool(value: Option<&str>) -> Option<bool> {
+pub(crate) fn parse_env_bool(value: Option<&str>) -> Option<bool> {
     match value.map(|v| v.trim().to_ascii_lowercase()) {
         None => None,
         Some(v) if v.is_empty() => None,
@@ -1756,79 +1214,6 @@ fn parse_env_bool(value: Option<&str>) -> Option<bool> {
         Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => Some(false),
         _ => None,
     }
-}
-
-fn parse_bwrap_dev_mode(value: Option<&str>) -> BwrapDevMode {
-    match value.map(|v| v.trim().to_ascii_lowercase()) {
-        None => BwrapDevMode::Legacy,
-        Some(v) if v.is_empty() => BwrapDevMode::Legacy,
-        Some(v) if matches!(v.as_str(), "legacy" | "none") => BwrapDevMode::Legacy,
-        Some(v) if matches!(v.as_str(), "minimal" | "dev") => BwrapDevMode::Minimal,
-        Some(v) if matches!(v.as_str(), "host" | "host-bind" | "dev-bind") => {
-            BwrapDevMode::HostBind
-        }
-        Some(other) => {
-            tracing::warn!(
-                env = BWRAP_DEV_MODE_ENV,
-                value = %other,
-                "Unknown bwrap dev mode, falling back to legacy"
-            );
-            BwrapDevMode::Legacy
-        }
-    }
-}
-
-/// Build the `docker run` invocation. `volumes` are extra `(host, container,
-/// readonly)` bind mounts (e.g. the SDK socket + SDK source); `env` are vars
-/// passed via `-e` (the container does not inherit the gateway process env, so
-/// the SDK socket path / PYTHONPATH must be passed explicitly here).
-fn docker_command(
-    agent_dir: &str,
-    entrypoint: &str,
-    volumes: &[(String, String, bool)],
-    env: &[(String, String)],
-) -> anyhow::Result<(String, Vec<String>)> {
-    let image = std::env::var(DOCKER_IMAGE_ENV).map_err(|_| {
-        anyhow::anyhow!("Missing required environment variable {}", DOCKER_IMAGE_ENV)
-    })?;
-    let mut argv = vec![
-        "run".to_string(),
-        "--rm".to_string(),
-        "--network".to_string(),
-        "none".to_string(),
-        "--volume".to_string(),
-        format!("{}:/workspace", agent_dir),
-        "--workdir".to_string(),
-        "/workspace".to_string(),
-    ];
-    for (host, container, readonly) in volumes {
-        argv.push("--volume".to_string());
-        argv.push(if *readonly {
-            format!("{}:{}:ro", host, container)
-        } else {
-            format!("{}:{}", host, container)
-        });
-    }
-    for (key, value) in env {
-        argv.push("--env".to_string());
-        argv.push(format!("{}={}", key, value));
-    }
-    argv.push(image);
-    argv.push("sh".to_string());
-    argv.push("-c".to_string()); // Non-login shell - don't source /etc/profile.d/*
-    argv.push(entrypoint.to_string());
-    Ok(("docker".to_string(), argv))
-}
-
-fn microvm_command(_entrypoint: &str) -> anyhow::Result<(String, Vec<String>)> {
-    let cfg = std::env::var(FIRECRACKER_CONFIG_ENV).map_err(|_| {
-        anyhow::anyhow!(
-            "Missing required environment variable {}",
-            FIRECRACKER_CONFIG_ENV
-        )
-    })?;
-    let argv = vec!["--config-file".to_string(), cfg];
-    Ok(("firecracker".to_string(), argv))
 }
 
 fn compose_entrypoint(entrypoint: &str, deps: Option<&DependencyPlan>) -> anyhow::Result<String> {
@@ -1913,31 +1298,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_driver_kind() {
-        assert_eq!(
-            SandboxDriverKind::parse("bubblewrap").expect("bubblewrap should parse"),
-            SandboxDriverKind::Bubblewrap
-        );
-        assert_eq!(
-            SandboxDriverKind::parse("docker").expect("docker should parse"),
-            SandboxDriverKind::Docker
-        );
-        assert_eq!(
-            SandboxDriverKind::parse("microvm").expect("microvm should parse"),
-            SandboxDriverKind::MicroVm
-        );
-        assert_eq!(
-            SandboxDriverKind::parse("wasm").expect("wasm should parse"),
-            SandboxDriverKind::Wasm
-        );
-        assert_eq!(
-            SandboxDriverKind::parse("wasi").expect("wasi alias should parse"),
-            SandboxDriverKind::Wasm
-        );
-        assert!(SandboxDriverKind::parse("nope").is_err());
-    }
-
-    #[test]
     fn wasm_uses_run_to_output_not_the_process_spawn_path() {
         // The process spawn path is for bwrap/docker/microvm; wasm runs in-process
         // via run_to_output, so spawn_for_driver("wasm") bails with that guidance.
@@ -1945,133 +1305,6 @@ mod tests {
         assert!(result.is_err(), "wasm must not use the process spawn path");
         let err = result.err().unwrap().to_string();
         assert!(err.contains("run_to_output"), "got: {err}");
-    }
-
-    #[test]
-    fn test_bubblewrap_command_shape() {
-        // Use an isolated tempdir so the deny-path masking (derived from the
-        // agent dir's sibling `.gateway`) has nothing to mask — keeps the
-        // fixed argv positions stable regardless of the host's /tmp state.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
-        let (_bin, argv) = bubblewrap_command(&agent_dir_str, "python main.py", None)
-            .expect("bubblewrap command should build");
-        assert_eq!(argv[0], "--ro-bind");
-        assert_eq!(argv[3], "--bind");
-        assert_eq!(argv[4], agent_dir_str);
-        assert_eq!(argv[5], "/tmp");
-        assert_eq!(argv[6], "--chdir");
-        assert_eq!(argv[7], "/tmp");
-        assert_eq!(argv[8], "--unshare-all");
-        assert_eq!(argv[9], "--");
-        assert_eq!(argv[10], "python");
-        assert_eq!(argv[11], "main.py");
-    }
-
-    #[test]
-    #[serial] // mutates AUTONOETIC_DOCKER_IMAGE (process-global)
-    fn test_docker_command_requires_env() {
-        let old = std::env::var(DOCKER_IMAGE_ENV).ok();
-        std::env::remove_var(DOCKER_IMAGE_ENV);
-        let err = docker_command("/tmp/agent", "python main.py", &[], &[])
-            .expect_err("docker command should fail without env");
-        assert!(
-            err.to_string().contains(DOCKER_IMAGE_ENV),
-            "error should mention missing docker env"
-        );
-        if let Some(v) = old {
-            std::env::set_var(DOCKER_IMAGE_ENV, v);
-        }
-    }
-
-    #[test]
-    #[serial] // mutates AUTONOETIC_DOCKER_IMAGE (process-global)
-    fn test_docker_command_emits_socket_volume_and_env() {
-        // P1: the SDK socket + its env must reach the container via `-v`/`-e`
-        // (the container does not inherit the gateway process env).
-        let old = std::env::var(DOCKER_IMAGE_ENV).ok();
-        std::env::set_var(DOCKER_IMAGE_ENV, "test-image:latest");
-        let volumes = vec![
-            (
-                "/tmp/autonoetic-abc.sock".to_string(),
-                DOCKER_SDK_SOCKET_PATH.to_string(),
-                false,
-            ),
-            (
-                "/host/sdk".to_string(),
-                DOCKER_SDK_PYTHONPATH.to_string(),
-                true,
-            ),
-        ];
-        let env = vec![
-            (CCOS_SOCKET_ENV.to_string(), DOCKER_SDK_SOCKET_PATH.to_string()),
-            (PYTHONPATH_ENV.to_string(), DOCKER_SDK_PYTHONPATH.to_string()),
-        ];
-        let (program, argv) =
-            docker_command("/tmp/agent", "python main.py", &volumes, &env).expect("docker command");
-        assert_eq!(program, "docker");
-        let joined = argv.join(" ");
-        // socket mounted read-write, SDK source read-only
-        assert!(joined.contains(&format!("/tmp/autonoetic-abc.sock:{}", DOCKER_SDK_SOCKET_PATH)));
-        assert!(joined.contains(&format!("/host/sdk:{}:ro", DOCKER_SDK_PYTHONPATH)));
-        // env passed via -e, not inherited
-        assert!(joined.contains(&format!("{}={}", CCOS_SOCKET_ENV, DOCKER_SDK_SOCKET_PATH)));
-        assert!(joined.contains(&format!("{}={}", PYTHONPATH_ENV, DOCKER_SDK_PYTHONPATH)));
-        // image + shell entrypoint preserved, after the flags
-        assert!(argv.contains(&"test-image:latest".to_string()));
-        assert_eq!(argv.last().unwrap(), "python main.py");
-        match old {
-            Some(v) => std::env::set_var(DOCKER_IMAGE_ENV, v),
-            None => std::env::remove_var(DOCKER_IMAGE_ENV),
-        }
-    }
-
-    #[test]
-    fn test_merge_docker_env_concatenates_pythonpath() {
-        let mut base = vec![(PYTHONPATH_ENV.to_string(), "/opt/autonoetic-sdk".to_string())];
-        merge_docker_env(
-            &mut base,
-            &[
-                (PYTHONPATH_ENV.to_string(), "/extra".to_string()),
-                ("FOO".to_string(), "bar".to_string()),
-            ],
-        );
-        let pp = base.iter().find(|(k, _)| k == PYTHONPATH_ENV).unwrap();
-        assert_eq!(pp.1, "/extra:/opt/autonoetic-sdk");
-        assert!(base.iter().any(|(k, v)| k == "FOO" && v == "bar"));
-    }
-
-    #[test]
-    fn test_sdk_socket_sandbox_path_per_driver() {
-        let expected_bwrap = format!("{}/s.sock", BWRAP_WORKSPACE_DIR);
-        assert_eq!(
-            sdk_socket_sandbox_path(SandboxDriverKind::Bubblewrap, "s.sock"),
-            Some(expected_bwrap)
-        );
-        assert_eq!(
-            sdk_socket_sandbox_path(SandboxDriverKind::Docker, "s.sock"),
-            Some(DOCKER_SDK_SOCKET_PATH.to_string())
-        );
-        // microvm has no bridge yet (P5)
-        assert!(sdk_socket_sandbox_path(SandboxDriverKind::MicroVm, "s.sock").is_none());
-        // wasm uses host-function imports, not a socket bridge.
-        assert!(sdk_socket_sandbox_path(SandboxDriverKind::Wasm, "s.sock").is_none());
-    }
-
-    #[test]
-    fn test_microvm_command_requires_env() {
-        let old = std::env::var(FIRECRACKER_CONFIG_ENV).ok();
-        std::env::remove_var(FIRECRACKER_CONFIG_ENV);
-        let err = microvm_command("ignored").expect_err("microvm command should fail without env");
-        assert!(
-            err.to_string().contains(FIRECRACKER_CONFIG_ENV),
-            "error should mention missing firecracker env"
-        );
-        if let Some(v) = old {
-            std::env::set_var(FIRECRACKER_CONFIG_ENV, v);
-        }
     }
 
     #[test]
@@ -2136,183 +1369,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bubblewrap_shell_command_shape() {
-        // Isolated tempdir: no `.gateway` secrets to mask, so argv positions
-        // are stable.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let agent_dir_str = agent_dir.to_str().unwrap().to_string();
-        let (_bin, argv) = bubblewrap_shell_command(&agent_dir_str, "echo hi", &[], None)
-            .expect("shell command should build");
-        assert_eq!(argv[0], "--ro-bind");
-        assert_eq!(argv[3], "--bind");
-        assert_eq!(argv[4], agent_dir_str);
-        assert_eq!(argv[5], "/tmp");
-        assert_eq!(argv[6], "--chdir");
-        assert_eq!(argv[7], "/tmp");
-        assert_eq!(argv[8], "--unshare-all");
-        assert_eq!(argv[9], "--");
-        assert_eq!(argv[10], "sh");
-        assert_eq!(argv[11], "-c"); // Non-login shell
-        assert_eq!(argv[12], "echo hi");
-    }
-
-    /// Stopgap for #1002: the bubblewrap sandbox masks gateway-internal secrets
-    /// (vault key, session DB, identity key, sessions/, …) so a sandboxed
-    /// process cannot read them through the ro-mounted host `/`. The SDK
-    /// subtree (`sdk/`) must stay visible because PYTHONPATH points there.
-    #[test]
-    fn bwrap_deny_flags_mask_gateway_secrets_but_not_sdk() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agents_root = tmp.path();
-        let gateway_dir = agents_root.join(".gateway");
-        let agent_dir = agents_root.join("demo.agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::create_dir_all(gateway_dir.join("sdk")).unwrap();
-        std::fs::create_dir_all(gateway_dir.join("sessions")).unwrap();
-        std::fs::write(gateway_dir.join("vault.key"), "secret").unwrap();
-        std::fs::write(gateway_dir.join("gateway.db"), "db").unwrap();
-        std::fs::write(gateway_dir.join("state_attestation.ed25519"), "k").unwrap();
-
-        let flags = bwrap_deny_path_flags(agent_dir.to_str().unwrap());
-        let joined = flags.join(" ");
-
-        // Sensitive files are shadowed with /dev/null.
-        assert!(
-            joined.contains(&format!(
-                "--ro-bind /dev/null {}",
-                gateway_dir.join("vault.key").display()
-            )),
-            "vault.key must be masked, got: {joined}"
-        );
-        assert!(
-            joined.contains(&format!(
-                "--ro-bind /dev/null {}",
-                gateway_dir.join("gateway.db").display()
-            )),
-            "gateway.db must be masked, got: {joined}"
-        );
-        assert!(
-            joined.contains(&format!(
-                "--ro-bind /dev/null {}",
-                gateway_dir.join("state_attestation.ed25519").display()
-            )),
-            "identity key must be masked, got: {joined}"
-        );
-        // Sensitive dirs are shadowed with an empty tmpfs.
-        assert!(
-            joined.contains(&format!("--tmpfs {}", gateway_dir.join("sessions").display())),
-            "sessions/ must be masked, got: {joined}"
-        );
-        // The SDK subtree and constitution must NOT be masked — the sandbox
-        // reads its PYTHONPATH from `<gateway_dir>/sdk` and the constitution
-        // is public agent-readable law.
-        assert!(
-            !joined.contains(&format!("{}", gateway_dir.join("sdk").display())),
-            "sdk/ must stay accessible, got: {joined}"
-        );
-    }
-
-    /// Non-existent gateway paths produce no deny flags (no false mountpoints,
-    /// no perturbing the argv shape for fresh gateways).
-    #[test]
-    fn bwrap_deny_flags_skip_nonexistent_paths() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        // No .gateway at all → nothing to mask.
-        let flags = bwrap_deny_path_flags(agent_dir.to_str().unwrap());
-        assert!(flags.is_empty(), "expected no deny flags, got: {flags:?}");
-    }
-
-    /// The full shell-command builder inserts the deny slice between the
-    /// isolation flags and the `--` separator (and before explicit re-expose
-    /// mounts, so they can overlay masked paths).
-    #[test]
-    fn bubblewrap_shell_command_includes_deny_slice() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let gateway_dir = tmp.path().join(".gateway");
-        let agent_dir = tmp.path().join("agent");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::create_dir_all(&gateway_dir).unwrap();
-        std::fs::write(gateway_dir.join("vault.key"), "secret").unwrap();
-
-        let (_bin, argv) = bubblewrap_shell_command(agent_dir.to_str().unwrap(), "echo hi", &[], None)
-            .expect("shell command should build");
-        let unshare = argv.iter().position(|a| a == "--unshare-all").unwrap();
-        let sep = argv.iter().position(|a| a == "--").unwrap();
-        // The deny slice sits between isolation flags and the separator.
-        let deny_slice = &argv[unshare + 1..sep];
-        assert!(
-            deny_slice.iter().any(|a| a == "--ro-bind"),
-            "expected deny flags before the separator, argv: {argv:?}"
-        );
-    }
-
-    /// Relative deny paths are resolved to absolute form — bwrap destinations
-    /// are namespace-absolute, so a relative path would silently fail to mask.
-    #[test]
-    fn normalize_deny_paths_makes_relative_absolute() {
-        let cwd = std::env::current_dir().unwrap();
-        let out = normalize_deny_paths(&[PathBuf::from("config.yaml")]);
-        assert!(
-            out.contains(&cwd.join("config.yaml")),
-            "relative path must be made absolute, got: {out:?}"
-        );
-        // No relative entries survive.
-        assert!(out.iter().all(|p| p.is_absolute()));
-    }
-
-    /// A symlinked config is masked at BOTH the link path and its canonical
-    /// target, so the file can't be read via its real path around the link.
-    #[test]
-    fn normalize_deny_paths_adds_symlink_target() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let real = tmp.path().join("real_config.yaml");
-        std::fs::write(&real, "provider: x").unwrap();
-        let link = tmp.path().join("config.yaml");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink");
-
-        let out = normalize_deny_paths(&[link.clone()]);
-        let canon = std::fs::canonicalize(&real).unwrap();
-        assert!(out.contains(&link), "link path must be present, got: {out:?}");
-        assert!(
-            out.contains(&canon),
-            "canonical target must also be masked, got: {out:?}"
-        );
-    }
-
-    /// A non-existent path still contributes its absolute form (it may be
-    /// created later), and produces no canonical entry.
-    #[test]
-    fn normalize_deny_paths_missing_path_is_absolute_only() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let missing = tmp.path().join("does_not_exist.yaml");
-        let out = normalize_deny_paths(&[missing.clone()]);
-        assert_eq!(out, vec![missing], "missing path → absolute form only");
-    }
-
-    /// Duplicate absolute/canonical forms collapse to one entry.
-    #[test]
-    fn normalize_deny_paths_dedups() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let p = tmp.path().join("f.yaml");
-        std::fs::write(&p, "x").unwrap();
-        // Pass the same path twice: the result must hold no duplicate entries,
-        // whether or not abs and canonical forms differ on this platform
-        // (macOS tempdirs live under a /var symlink).
-        let out = normalize_deny_paths(&[p.clone(), p.clone()]);
-        let unique: std::collections::HashSet<&PathBuf> = out.iter().collect();
-        assert_eq!(
-            unique.len(),
-            out.len(),
-            "no duplicate entries, got: {out:?}"
-        );
-        assert!(out.contains(&p));
-    }
-
-    #[test]
     fn test_parse_env_bool() {
         assert_eq!(parse_env_bool(Some("1")), Some(true));
         assert_eq!(parse_env_bool(Some("true")), Some(true));
@@ -2324,25 +1380,6 @@ mod tests {
         assert_eq!(parse_env_bool(Some("off")), Some(false));
         assert_eq!(parse_env_bool(Some("wat")), None);
         assert_eq!(parse_env_bool(None), None);
-    }
-
-    #[test]
-    fn test_parse_bwrap_dev_mode() {
-        assert_eq!(parse_bwrap_dev_mode(None), BwrapDevMode::Legacy);
-        assert_eq!(parse_bwrap_dev_mode(Some("legacy")), BwrapDevMode::Legacy);
-        assert_eq!(parse_bwrap_dev_mode(Some("none")), BwrapDevMode::Legacy);
-        assert_eq!(parse_bwrap_dev_mode(Some("minimal")), BwrapDevMode::Minimal);
-        assert_eq!(parse_bwrap_dev_mode(Some("dev")), BwrapDevMode::Minimal);
-        assert_eq!(parse_bwrap_dev_mode(Some("host")), BwrapDevMode::HostBind);
-        assert_eq!(
-            parse_bwrap_dev_mode(Some("host-bind")),
-            BwrapDevMode::HostBind
-        );
-        assert_eq!(
-            parse_bwrap_dev_mode(Some("dev-bind")),
-            BwrapDevMode::HostBind
-        );
-        assert_eq!(parse_bwrap_dev_mode(Some("unknown")), BwrapDevMode::Legacy);
     }
 
     #[test]
