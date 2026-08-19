@@ -93,6 +93,22 @@ def active_tasks(conn: sqlite3.Connection, sid: str) -> list[sqlite3.Row]:
     return [r for r in rows if r["status"] in ("running", "queued")]
 
 
+def pending_approvals(conn: sqlite3.Connection, sid: str) -> list:
+    """Open operator gates for the root-session subtree. A task suspended at
+    an approval gate is not 'quiet' — the run is not done until every gate
+    is resolved (approved/rejected/expired/cancelled). Backported from the
+    credential-register verdict (#1109)."""
+    try:
+        return list(conn.execute(
+            "SELECT request_id FROM approvals "
+            "WHERE status = 'pending' AND "
+            "(root_session_id = ? OR root_session_id LIKE ? || '/%' "
+            " OR session_id = ? OR session_id LIKE ? || '/%')",
+            (sid, sid, sid, sid)))
+    except sqlite3.OperationalError:
+        return []
+
+
 def wait_done(db_path: str, sid: str, timeout: int) -> int:
     deadline = time.monotonic() + timeout
     last = -1
@@ -102,18 +118,20 @@ def wait_done(db_path: str, sid: str, timeout: int) -> int:
             with connect(db_path) as conn:
                 n = trace_count(conn, sid)
                 active = len(active_tasks(conn, sid))
+                gates = len(pending_approvals(conn, sid))
         except sqlite3.Error:
-            n, active = last, 1  # transient lock; keep waiting
-        if n > 0 and n == last and active == 0:
+            n, active, gates = last, 1, 1  # transient lock; keep waiting
+        if n > 0 and n == last and active == 0 and gates == 0:
             stable += 1
         else:
             stable = 0
         last = n
         if stable >= STABLE_POLLS:
             print(f"[wait-done] {sid}: {n} traces, no running/queued tasks, "
-                  f"quiet for {STABLE_POLLS} polls — done", flush=True)
+                  f"no open gates, quiet for {STABLE_POLLS} polls — done", flush=True)
             return 0
-        print(f"[wait-done] {sid}: traces={n} active_tasks={active} (waiting)", flush=True)
+        print(f"[wait-done] {sid}: traces={n} active_tasks={active} "
+              f"pending_gates={gates} (waiting)", flush=True)
         time.sleep(POLL_SECS)
     print(f"[wait-done] TIMEOUT waiting for session {sid}", flush=True)
     return 1

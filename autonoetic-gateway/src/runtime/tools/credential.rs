@@ -1292,6 +1292,40 @@ fn try_auto_refresh(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no refresh_token_secret_name"))?;
 
+    // Scope the refresh endpoint to the credential's operator-approved
+    // allowed_hosts — the gateway SENDS the refresh token there, so an
+    // unchecked refresh_url is the same exfiltration shape as an unchecked
+    // destination host (RFC credential-egress-host-authorization: egress
+    // scope == secret exposure). A refresh_url outside the credential's
+    // own scope is denied outright, exactly like an out-of-scope request
+    // host: no routing, no approval.
+    if let Ok(refresh_host) = extract_host(refresh_url) {
+        let refresh_covered = !cred.allowed_hosts.is_empty()
+            && cred
+                .allowed_hosts
+                .iter()
+                .any(|h| h == "*" || normalize_allowed_host(h) == refresh_host);
+        if !refresh_covered {
+            // The caller treats refresh failure as "surface the original
+            // 401", so this denial must be audible to operators — the
+            // agent only sees the 401, not why refresh never ran.
+            tracing::warn!(
+                target: "credential",
+                credential_id = %cred.credential_id,
+                refresh_host = %refresh_host,
+                allowed_hosts = ?cred.allowed_hosts,
+                "Refresh endpoint out of credential scope; refusing to send the refresh token"
+            );
+            anyhow::bail!(
+                "Refresh endpoint host '{}' is not covered by credential '{}' allowed_hosts: {:?}. \
+                 Refusing to send the refresh token out of the credential's scope.",
+                refresh_host,
+                cred.credential_id,
+                cred.allowed_hosts
+            );
+        }
+    }
+
     let mut vault = crate::Vault::load_from_file(vault_path)?;
     let refresh_token = vault
         .get_secret(rt_secret_name)
