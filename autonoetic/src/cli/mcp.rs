@@ -54,6 +54,7 @@ pub async fn handle_mcp_add(
     for t in tools {
         println!(" - {}", t.name);
     }
+    println!("Running gateways pick up the change automatically on the next turn — no restart needed.");
     Ok(())
 }
 

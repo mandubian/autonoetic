@@ -684,6 +684,15 @@ autonoetic mcp add my-server --sse-url http://localhost:3000
 | `--sse-url` | SSE endpoint URL |
 | `args` | Command arguments (last) |
 
+Registry edits (via `mcp add` or by editing `mcp_servers.json` directly) are
+picked up by a running gateway **without restart** (#1121): each agent run
+checks the registry file's mtime at every turn boundary and rebuilds its MCP
+tool surface when it changed. Added servers' tools appear on the next turn;
+removed servers' tools fail closed at dispatch; an invalid JSON edit keeps
+the previously loaded tools (a warning is logged once per change, not
+retried every turn). Servers that fail to connect are skipped individually —
+one dead server never disables the others.
+
 ### `autonoetic mcp expose`
 
 Runs the Gateway as an MCP Server on stdio.
