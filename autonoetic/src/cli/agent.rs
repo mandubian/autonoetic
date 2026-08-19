@@ -1677,7 +1677,7 @@ pub async fn run_agent_with_runtime_with_driver(
         instructions,
         driver,
         agent_dir,
-        autonoetic_gateway::runtime::tools::default_registry(),
+        autonoetic_gateway::runtime::tools::registry_for_config(gateway_config.as_deref()),
         None,
     );
     if let Some(cfg) = gateway_config.as_ref() {

@@ -1423,6 +1423,11 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub trajectory: TrajectoryConfig,
 
+    /// Fleet-wide native tool registration (#1120). Lets an operator remove
+    /// built-in tools from the registry without recompiling.
+    #[serde(default)]
+    pub tools: ToolsConfig,
+
     /// Optional LLM model routing configuration.
     /// When set, enables intelligent model selection based on budget pressure,
     /// task complexity, and cost constraints.
@@ -2496,6 +2501,23 @@ impl Default for SandboxConfig {
 
 fn default_sandbox_dev_mode() -> String {
     "legacy".to_string()
+}
+
+/// Fleet-wide native tool registration (#1120).
+///
+/// Enforcement never lives in tools — policy gating is in `PolicyEngine` —
+/// so disabling a tool can only *reduce* what agents can do, never weaken a
+/// safety invariant. Disabling a load-bearing tool (e.g. approval or
+/// user-interaction tools) will simply make agents fail loudly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    /// Built-in native tools to remove from the registry at startup.
+    /// Entries are exact tool names (`sandbox_exec`) or prefix patterns with a
+    /// trailing `*` (`workbench_*`) — the same pattern syntax as per-agent
+    /// `excluded_tools` in SKILL.md. A pattern matching no registered tool is
+    /// logged as a warning and ignored.
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3662,6 +3684,7 @@ impl Default for GatewayConfig {
             loop_guard: LoopGuardConfig::default(),
             prompt_budget: PromptBudgetConfig::default(),
             trajectory: TrajectoryConfig::default(),
+            tools: ToolsConfig::default(),
             llm_routing: None,
             chat: ChatConfig::default(),
             operator_activity: OperatorActivityConfig::default(),

@@ -563,6 +563,35 @@ ceiling and applies `min(declared, configured)` per field.
 
 ---
 
+## Native Tool Registration
+
+Fleet-wide removal of built-in native tools from the registry (#1120), applied
+wherever the registry is constructed (gateway executors, scheduler actions,
+egress source catalogs, CLI-embedded runs).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tools.disabled` | list of string | `[]` | Tool names to remove from the native registry. Entries are exact names (`sandbox_exec`) or trailing-`*` prefix patterns (`agent_revision_*`) — the same syntax as per-agent `excluded_tools` in SKILL.md, but fleet-wide. A pattern matching no registered tool is logged as a warning and ignored. |
+
+Example:
+
+```yaml
+tools:
+  disabled:
+    - github_issue_*     # no forge integration on this node
+    - federation_*       # standalone node, no OFP tooling
+```
+
+Disabling a tool can only *reduce* the agent tool surface: capability
+enforcement lives in the policy engine, not in the registry, so no safety
+invariant weakens. Disabling load-bearing tools (`approval_*`, `user_ask`,
+`tool_discover`) will make agents fail loudly — disable with care. This is
+orthogonal to `DEFAULT_EXCLUDED_TOOLS` (registry-level hiding of
+operator-only tools, no override) and per-agent `excluded_tools` (manifest
+hiding): `tools.disabled` removes the tool from the process entirely.
+
+---
+
 ## Max Session Turns
 
 Circuit breaker for runaway agent sessions.

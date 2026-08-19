@@ -658,6 +658,23 @@ max_session_turns: 25
 #  # no-progress counter). 0 disables. (#1092)
 #  annotation_repeat_floor: 3
 
+# ── Native Tool Registration (#1120) ────────────────────────────────────
+# Fleet-wide removal of built-in native tools, applied at registry
+# construction (gateway startup and every executor build). Entries are
+# exact tool names or trailing-* prefix patterns — the same syntax as
+# per-agent `excluded_tools` in SKILL.md, but for ALL agents and the
+# operator-facing catalogs. A pattern matching no registered tool is
+# logged as a warning and ignored.
+#
+# Disabling a tool can only *reduce* the agent tool surface: enforcement
+# lives in the policy engine, not in the registry, so no safety invariant
+# weakens. But disabling load-bearing tools (approval_*, user_ask,
+# tool_discover) will make agents fail loudly — disable with care.
+#tools:
+#  disabled:
+#    - github_issue_*       # no forge integration on this node
+#    - federation_*         # standalone node, no OFP tooling
+
 # ── Prompt Budget (Safe Defaults) ──────────────────────────────────────
 # Transparency and enforcement for context window usage.
 # Uncomment to customize.

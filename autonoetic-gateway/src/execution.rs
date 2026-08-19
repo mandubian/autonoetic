@@ -3705,7 +3705,7 @@ impl GatewayExecutionService {
                 loaded.instructions,
                 driver,
                 loaded.dir,
-                crate::runtime::tools::default_registry(),
+                crate::runtime::tools::registry_for_config(Some(self.config.as_ref())),
                 self.gateway_store.clone(),
             )
             .with_resolved_inference(inference)
@@ -4407,7 +4407,7 @@ impl GatewayExecutionService {
             loaded.instructions,
             driver,
             loaded.dir,
-            crate::runtime::tools::default_registry(),
+            crate::runtime::tools::registry_for_config(Some(self.config.as_ref())),
             self.gateway_store.clone(),
         )
         .with_resolved_inference(inference)
@@ -4573,7 +4573,7 @@ impl GatewayExecutionService {
             loaded.instructions,
             driver,
             loaded.dir,
-            crate::runtime::tools::default_registry(),
+            crate::runtime::tools::registry_for_config(Some(self.config.as_ref())),
             self.gateway_store.clone(),
         )
         .with_resolved_inference(inference)
@@ -4730,7 +4730,7 @@ impl GatewayExecutionService {
             loaded.instructions,
             driver,
             loaded.dir,
-            crate::runtime::tools::default_registry(),
+            crate::runtime::tools::registry_for_config(Some(self.config.as_ref())),
             self.gateway_store.clone(),
         )
         .with_resolved_inference(inference)
@@ -4802,7 +4802,7 @@ impl GatewayExecutionService {
                 &manifest,
                 agent_workspace_dir,
                 action,
-                &crate::runtime::tools::default_registry(),
+                &crate::runtime::tools::registry_for_config(Some(self.config.as_ref())),
                 Some(self.config.as_ref()),
                 self.gateway_store.clone(),
             )
