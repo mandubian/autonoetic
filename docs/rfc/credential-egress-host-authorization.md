@@ -1,12 +1,12 @@
 # RFC: Credential Egress — `allowed_hosts` as a Routing Input, Not a Bypass
 
-**Status:** Implemented (§3 core on
+**Status:** Implemented. §3 core on
 `feat/credential-egress-host-approval` — routing change in
 `credential.rs`, host-naming R++4 phrase in `approval_hardening.rs`,
-tests in `tests/credential/credential.rs`; §4.2 card surfacing completed
+tests in `tests/credential/credential.rs`. §4.2 card surfacing completed
 on `feat/credential-prompt-card-hosts` — scope on the prompt card, the
-TUI secret-entry panel, `gateway approvals list`, and the pending summary,
-#1105). §4.1 (tightening executor's
+TUI secret-entry panel, `gateway approvals list`, and the pending summary
+(see #1105). §4.1 (tightening executor's
 `targets: [any]`) and §4.3 (declaration-load discrepancy) remain open.
 Proposed out of the classic-harness validation study (credential-register
 case); the study run completed only because `executor.default` happens to

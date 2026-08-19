@@ -417,14 +417,16 @@ pub async fn handle_gateway_approvals(
                             .and_then(|v| v.as_array())
                             .map(|a| {
                                 a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()
-                            })
-                            .filter(|v| !v.is_empty());
+                            });
                         let hosts_display = match hosts {
+                            Some(h) if h.is_empty() => {
+                                "(explicitly unbound — requests will not be host-bound)".to_string()
+                            }
                             Some(h) if h.iter().any(|x| *x == "*") => {
                                 format!("{} [WILDCARD — any host]", h.join(", "))
                             }
                             Some(h) => h.join(", "),
-                            None => "(no host scope)".to_string(),
+                            None => "(no host scope declared)".to_string(),
                         };
                         format!(
                             "credential setup '{service}': asks [{}]; egress scope: {hosts_display}",

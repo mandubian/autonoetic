@@ -11497,15 +11497,22 @@ fn gate_modal_input_panel_lines(
         }
         // #1105: the operator is approving two things with one card — the
         // secret fields AND the credential's egress scope. Show the scope
-        // exactly where the typing happens, wildcard unmistakable.
-        if !gi.credential_allowed_hosts.is_empty() {
-            lines.push(Line::raw(""));
+        // exactly where the typing happens, wildcard unmistakable. An empty
+        // scope is equally load-bearing: it means the credential is NOT
+        // host-bound, and the operator must see that too.
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Egress scope this approval also grants:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if gi.credential_allowed_hosts.is_empty() {
             lines.push(Line::from(Span::styled(
-                "Egress scope this approval also grants:",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                "(none declared — requests will not be host-bound)",
+                Style::default().fg(Color::DarkGray),
             )));
+        } else {
             for host in &gi.credential_allowed_hosts {
                 let text = if host == "*" {
                     "· * — WILDCARD: the secret can be sent to ANY host".to_string()
