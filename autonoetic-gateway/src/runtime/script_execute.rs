@@ -244,7 +244,7 @@ pub(crate) async fn execute_script_in_sandbox(
     // the unified `run_to_output` entry. The entry must be the workspace-relative
     // path (the backend joins it onto `agent_dir`), not the `BWRAP_WORKSPACE_DIR`-
     // prefixed path the process backend renders into a shell line.
-    if driver == crate::sandbox::SandboxDriverKind::Wasm {
+    if driver.runs_in_process() {
         let entry_relative = script_path
             .strip_prefix(agent_dir)
             .map(|relative| relative.to_string_lossy().to_string())

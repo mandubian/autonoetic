@@ -302,7 +302,8 @@ gateway directory.
 
 As a **stopgap** (tracked by #1002, which will replace it with an explicit mount
 allow-set), the gateway masks gateway-internal secrets inside every bubblewrap
-sandbox (`sandbox.rs::bwrap_deny_path_flags`), layered over the ro-bind of `/`:
+sandbox (`sandbox/driver/bubblewrap.rs::bwrap_deny_path_flags`), layered over
+the ro-bind of `/`:
 
 | Masked path (under `<agents_dir>/.gateway`) | Mechanism | Why |
 |---|---|---|

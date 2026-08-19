@@ -91,7 +91,9 @@ autonoetic-gateway/      Core runtime — all logic lives here
     execution.rs           Session lifecycle, turn execution, tool dispatch, emergency stop
     router.rs              JSON-RPC method routing
     policy.rs              Capability validation before privileged operations
-    sandbox.rs             Sandbox drivers (bubblewrap, docker, microvm)
+    sandbox.rs             Sandbox orchestration: SDK bridge, dependency composition, spawn/wait
+    sandbox/driver/        SandboxDriver trait + registry; one file per backend
+                           (bubblewrap, docker, microvm, wasm) — see docs/sandbox-drivers.md
     scheduler/             Approval lifecycle, background reevaluation, gateway SQLite store
     runtime/
       lifecycle.rs         AgentExecutor — the main reasoning loop (the biggest file ~3800 lines)
@@ -126,7 +128,7 @@ agents/                  Agent bundles (SKILL.md manifests)
 
 **The GatewayStore** (`scheduler/gateway_store/`) owns the SQLite schema. Migrations are in `migrate.rs` — increment `SCHEMA_VERSION_LATEST` and add a new `apply_*_vN()` function. Each migration checks the current version before running.
 
-**Sandbox host-fs deny-list** (stopgap for #1002): the default bubblewrap driver ro-binds the whole host `/`, so gateway-internal secrets under `<agents_dir>/.gateway` are masked inside the sandbox by `BWRAP_GATEWAY_SENSITIVE_FILES`/`_DIRS` in `sandbox.rs` (`vault.key`, `gateway.db*`, `state_attestation.ed25519`, `sessions/`, …). **When you add a new secret-bearing file or subdir under `.gateway`, add it to one of those two const lists** or it stays readable from inside any sandboxed exec. The operator config file is masked separately via `sandbox::init_sandbox_host_deny_paths` at startup. The durable fix (explicit mount allow-set) is tracked by #1002.
+**Sandbox host-fs deny-list** (stopgap for #1002): the default bubblewrap driver ro-binds the whole host `/`, so gateway-internal secrets under `<agents_dir>/.gateway` are masked inside the sandbox by `BWRAP_GATEWAY_SENSITIVE_FILES`/`_DIRS` in `sandbox/driver/bubblewrap.rs` (`vault.key`, `gateway.db*`, `state_attestation.ed25519`, `sessions/`, …). **When you add a new secret-bearing file or subdir under `.gateway`, add it to one of those two const lists** or it stays readable from inside any sandboxed exec. The operator config file is masked separately via `sandbox::init_sandbox_host_deny_paths` at startup. The durable fix (explicit mount allow-set) is tracked by #1002.
 
 ## Key Patterns
 
