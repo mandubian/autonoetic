@@ -841,6 +841,18 @@ pub struct LlmRoutingConfig {
 /// Active constitution artifacts enforced by the gateway runtime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConstitutionConfig {
+    /// Ratified constitution version to enforce (e.g. "2026.07.30").
+    ///
+    /// Convenience selector (#1123): when set, `source_path`/`lock_path` are
+    /// derived from the standard layout
+    /// (`docs/constitution/versions/{version}/constitution.md` +
+    /// `gateway-constitution.lock.json`) during config load. Mutually
+    /// exclusive with explicit `source_path`/`lock_path` — setting both is a
+    /// config error. Digest + signature verification still gate whatever the
+    /// version resolves to; this key only chooses *which signed artifact* to
+    /// load. Absent → `ACTIVE_CONSTITUTION_VERSION` (the code-pinned default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// Markdown source file for the active constitution.
     #[serde(default = "default_constitution_source_path")]
     pub source_path: PathBuf,
@@ -858,6 +870,7 @@ pub struct ConstitutionConfig {
 impl Default for ConstitutionConfig {
     fn default() -> Self {
         Self {
+            version: None,
             source_path: default_constitution_source_path(),
             lock_path: default_constitution_lock_path(),
             require_signature: default_require_constitution_signature(),

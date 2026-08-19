@@ -24,9 +24,11 @@ node_name: "gateway"
 # The active version is centralized in code as `ACTIVE_CONSTITUTION_VERSION`
 # (autonoetic-types/src/config.rs); `source_path`/`lock_path` are intentionally
 # omitted here so a version bump needs no template edit — they default to the
-# active version. Override only to pin a different version, e.g.:
-#   source_path: "docs/constitution/versions/<VERSION>/constitution.md"
-#   lock_path:   "docs/constitution/versions/<VERSION>/gateway-constitution.lock.json"
+# active version. To pin a different signed version without recompiling (#1123):
+# constitution:
+#   version: "2026.07.19"   # resolves docs/constitution/versions/<VERSION>/…
+# `version` is mutually exclusive with explicit `source_path`/`lock_path`, and
+# digest + signature verification still gate whatever it resolves to.
 # Gateway startup and `agent bootstrap` also materialize a local snapshot under
 #   <agents_dir>/.gateway/constitution/
 # which you can point at for fully runtime-local enforcement:
