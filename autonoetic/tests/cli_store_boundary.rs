@@ -17,15 +17,16 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Files under `autonoetic/src/cli/` still allowed to reference GatewayStore.
-/// Every entry must be removed in the PR that migrates it.
+/// Every entry must be removed in the PR that migrates it — except
+/// `capsule.rs`, which is a permanent, by-design exception: capsule
+/// export/import/verify run OFFLINE (import targets a receiver gateway that
+/// has never booted, so there is no gateway to RPC; see #1119 tranche 3).
 const ALLOWED: &[&str] = &[
     "agent.rs",
+    "capsule.rs", // offline-by-design (see comment above)
     "chat.rs",
-    "capsule.rs",
-    "eval.rs",
     "gateway.rs",
     "improve.rs",
-    "recording.rs",
     "sentinel_experiment.rs",
     "trace.rs",
     "watchdog.rs",
