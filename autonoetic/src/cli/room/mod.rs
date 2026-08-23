@@ -4,7 +4,7 @@
 //! (Separation of Powers). Both the viewer and the interactive TUI read the
 //! canonical timeline over `session.timeline.list` and resolve gates over
 //! `approvals.approve`/`reject` + `interaction.resolve_and_answer` — no
-//! `GatewayStore` access.
+//! direct gateway-store access (enforced by `tests/cli_store_boundary.rs`).
 
 mod channel;
 pub(crate) mod client;

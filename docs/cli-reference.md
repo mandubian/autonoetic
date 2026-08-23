@@ -535,6 +535,11 @@ autonoetic trace history session-123 --json
 
 Inspect session outcomes and export session archives.
 
+> **Requires a running gateway (#1119):** these commands speak JSON-RPC to the
+> gateway (`session.outcome.get`, `session.rate`, `session.export`,
+> `session.egress_policy.*`) instead of reading `gateway.db` directly.
+> Start it with `autonoetic gateway start` first.
+
 ### `autonoetic session show`
 
 Print the `SessionOutcome` row for a session as JSON.

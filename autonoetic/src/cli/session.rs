@@ -3,27 +3,26 @@
 //! - `session rate <id> --thumbs-up|--thumbs-down [--note ...]` — attach
 //!   an operator rating to the SessionOutcome row.
 //! - `session show <id>` — print the SessionOutcome row as JSON.
+//!
+//! Since #1119 (tranche 1) every subcommand speaks JSON-RPC to the running
+//! gateway ([`crate::cli::rpc::GatewayRpc`]) instead of opening
+//! `gateway.db` directly — Separation of Powers applies to the first-party
+//! CLI too.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Context;
 
 use autonoetic_gateway::runtime::session_export::{
-    export_session, render_export, ExportFormat, ExportOptions,
+    render_export, ExportFormat, ExportOptions, SessionExport,
 };
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::session_outcome::OperatorThumb;
 
 use crate::cli::common::SessionCommands;
+use crate::cli::rpc::GatewayRpc;
 
 pub async fn handle_session(config_path: &Path, command: &SessionCommands) -> anyhow::Result<()> {
     let loaded_config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = loaded_config.agents_dir.join(".gateway");
-    let store = Arc::new(
-        GatewayStore::open(&gateway_dir)
-            .context("Failed to open GatewayStore — has the gateway run at this path?")?,
-    );
+    let rpc = GatewayRpc::from_config(&loaded_config)?;
 
     match command {
         SessionCommands::Rate {
@@ -31,9 +30,8 @@ pub async fn handle_session(config_path: &Path, command: &SessionCommands) -> an
             thumbs_up,
             thumbs_down,
             note,
-        } => handle_rate(&store, session_id, *thumbs_up, *thumbs_down, note.as_deref()
-        ),
-        SessionCommands::Show { session_id } => handle_show(&store, session_id),
+        } => handle_rate(&rpc, session_id, *thumbs_up, *thumbs_down, note.as_deref()),
+        SessionCommands::Show { session_id } => handle_show(&rpc, session_id),
         SessionCommands::Export {
             session_id,
             output,
@@ -42,7 +40,7 @@ pub async fn handle_session(config_path: &Path, command: &SessionCommands) -> an
             min_altitude,
             output_dir,
         } => handle_export(
-            &store,
+            &rpc,
             &loaded_config,
             session_id,
             output.as_deref(),
@@ -51,42 +49,42 @@ pub async fn handle_session(config_path: &Path, command: &SessionCommands) -> an
             min_altitude.as_deref(),
             output_dir.as_deref(),
         ),
-        SessionCommands::EgressPolicy { command } => handle_egress_policy(&store, command),
+        SessionCommands::EgressPolicy { command } => handle_egress_policy(&rpc, command),
     }
 }
 
 /// `autonoetic session egress-policy …` — the session-scoped half of the egress
 /// source rules (RFC data-envelopes §5.4).
 fn handle_egress_policy(
-    store: &Arc<GatewayStore>,
+    rpc: &GatewayRpc,
     command: &crate::cli::common::EgressPolicyCommands,
 ) -> anyhow::Result<()> {
     use crate::cli::common::EgressPolicyCommands;
-    use autonoetic_gateway::runtime::content_store::root_session_id;
 
     match command {
         EgressPolicyCommands::Show { session_id } => {
-            let root = root_session_id(session_id);
-            match store.get_egress_session_policy(root)? {
-                Some(stored) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "root_session_id": stored.root_session_id,
-                            "policy": stored.policy,
-                            "set_by": stored.set_by,
-                            "created_at": stored.created_at,
-                            "updated_at": stored.updated_at,
-                        }))?
-                    );
-                }
-                None => {
-                    println!(
-                        "No session egress policy for root session '{}'. \
-                         Operator-global `egress.rules` still apply.",
-                        root
-                    );
-                }
+            let result = rpc.call(
+                "session.egress_policy.get",
+                serde_json::json!({ "session_id": session_id }),
+            )?;
+            let policy = &result["policy"];
+            if policy.is_null() {
+                println!(
+                    "No session egress policy for root session '{}'. \
+                     Operator-global `egress.rules` still apply.",
+                    result["root_session_id"].as_str().unwrap_or(session_id)
+                );
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "root_session_id": result["root_session_id"],
+                        "policy": policy,
+                        "set_by": result["set_by"],
+                        "created_at": result["created_at"],
+                        "updated_at": result["updated_at"],
+                    }))?
+                );
             }
             Ok(())
         }
@@ -121,19 +119,32 @@ fn handle_egress_policy(
                 },
                 provider_constraint,
             };
-            let root = root_session_id(session_id).to_string();
-            let stored = store.set_egress_session_policy(&root, &policy, set_by)?;
+            let result = rpc.call(
+                "session.egress_policy.set",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "policy": policy,
+                    "set_by": set_by,
+                }),
+            )?;
+            let rule_count = result["policy"]["rules"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0);
             println!(
                 "Declared egress policy for root session '{}' ({} rule(s)).",
-                root,
-                stored.policy.rules.len()
+                result["root_session_id"].as_str().unwrap_or(session_id),
+                rule_count
             );
-            println!("{}", serde_json::to_string_pretty(&stored.policy)?);
+            println!("{}", serde_json::to_string_pretty(&result["policy"])?);
             Ok(())
         }
         EgressPolicyCommands::Clear { session_id, .. } => {
-            let root = root_session_id(session_id).to_string();
-            let cleared = store.delete_egress_session_policy(&root)?;
+            let result = rpc.call(
+                "session.egress_policy.clear",
+                serde_json::json!({ "session_id": session_id }),
+            )?;
+            let cleared = result["cleared"].as_bool().unwrap_or(false);
             println!(
                 "{} for root session '{}'.",
                 if cleared {
@@ -141,7 +152,7 @@ fn handle_egress_policy(
                 } else {
                     "No egress policy to clear"
                 },
-                root
+                result["root_session_id"].as_str().unwrap_or(session_id)
             );
             Ok(())
         }
@@ -184,15 +195,15 @@ pub(crate) fn parse_named_label(
 }
 
 fn handle_rate(
-    store: &Arc<GatewayStore>,
+    rpc: &GatewayRpc,
     session_id: &str,
     thumbs_up: bool,
     thumbs_down: bool,
     note: Option<&str>,
 ) -> anyhow::Result<()> {
     let thumb = match (thumbs_up, thumbs_down) {
-        (true, false) => OperatorThumb::Up,
-        (false, true) => OperatorThumb::Down,
+        (true, false) => "up",
+        (false, true) => "down",
         (false, false) => {
             anyhow::bail!("must specify --thumbs-up or --thumbs-down")
         }
@@ -211,40 +222,39 @@ fn handle_rate(
         }
     }
 
-    store
-        .set_session_outcome_operator_rating(session_id, thumb, note)
-        .with_context(|| format!("failed to record operator rating for {}", session_id))?;
+    rpc.call(
+        "session.rate",
+        serde_json::json!({
+            "session_id": session_id,
+            "thumb": thumb,
+            "note": note,
+        }),
+    )
+    .with_context(|| format!("failed to record operator rating for {}", session_id))?;
 
     println!(
         "Recorded {} rating for session `{}`",
-        thumb.as_str(),
+        thumb,
         session_id
     );
     Ok(())
 }
 
-fn handle_show(store: &Arc<GatewayStore>, session_id: &str) -> anyhow::Result<()> {
-    let outcome = store
-        .get_session_outcome(session_id)
+fn handle_show(rpc: &GatewayRpc, session_id: &str) -> anyhow::Result<()> {
+    let outcome = rpc
+        .call(
+            "session.outcome.get",
+            serde_json::json!({ "session_id": session_id }),
+        )
         .with_context(|| format!("failed to query session_outcomes for {}", session_id))?;
-    match outcome {
-        Some(o) => {
-            println!("{}", serde_json::to_string_pretty(&o)?);
-            Ok(())
-        }
-        None => {
-            anyhow::bail!(
-                "no SessionOutcome row found for session `{}`. \
-                 Rows are created automatically when a session closes; \
-                 historical sessions from before P0 will not have one yet.",
-                session_id
-            );
-        }
-    }
+    // The server's "no SessionOutcome row" error already explains row
+    // creation; any success prints the row as JSON.
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
+    Ok(())
 }
 
 fn handle_export(
-    store: &Arc<GatewayStore>,
+    rpc: &GatewayRpc,
     config: &autonoetic_types::config::GatewayConfig,
     session_id: &str,
     output: Option<&Path>,
@@ -265,17 +275,28 @@ fn handle_export(
         None => None,
     };
 
+    // Archive mode always collects checkpoints so we can emit both the
+    // with-checkpoints and without-checkpoints artifacts.
     let opts = ExportOptions {
         format,
         min_altitude,
-        // Archive mode always collects checkpoints so we can emit both the
-        // with-checkpoints and without-checkpoints artifacts.
         with_checkpoints: with_checkpoints || output_dir.is_some(),
         ..ExportOptions::default()
     };
 
-    let export = export_session(store, config, session_id, &opts)
-        .with_context(|| format!("failed to export session {}", session_id))?;
+    let export: SessionExport = serde_json::from_value(
+        rpc.call(
+            "session.export",
+            serde_json::json!({
+                "session_id": session_id,
+                "format": format!("{:?}", format).to_lowercase(),
+                "with_checkpoints": opts.with_checkpoints,
+                "min_altitude": min_altitude,
+            }),
+        )
+        .with_context(|| format!("failed to export session {}", session_id))?,
+    )
+    .with_context(|| format!("session.export response did not decode for {}", session_id))?;
 
     if let Some(base_dir) = output_dir {
         let archive_dir = build_archive_dir(config, base_dir, session_id)?;

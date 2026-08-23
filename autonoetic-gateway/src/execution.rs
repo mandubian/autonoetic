@@ -1382,6 +1382,60 @@ impl GatewayExecutionService {
         )
     }
 
+    /// Operator rating on a closed session's outcome row (#1119 RPC surface).
+    pub fn rate_session_outcome(
+        &self,
+        session_id: &str,
+        thumb: autonoetic_types::session_outcome::OperatorThumb,
+        note: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session rating"))?;
+        store.set_session_outcome_operator_rating(session_id, thumb, note)?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "thumb": thumb.as_str(),
+        }))
+    }
+
+    /// The SessionOutcome row for `session show` (#1119 RPC surface).
+    pub fn get_session_outcome_row(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session outcome"))?;
+        let outcome = store.get_session_outcome(session_id)?;
+        Ok(outcome.map(|o| serde_json::to_value(o)).transpose()?)
+    }
+
+    /// Full export payload for `session export` (#1119 RPC surface). The CLI
+    /// renders locally — only the store reads happen here, server-side.
+    pub fn export_full_session(
+        &self,
+        session_id: &str,
+        opts: &crate::runtime::session_export::ExportOptions,
+    ) -> anyhow::Result<serde_json::Value> {
+        let session_id = session_id.trim();
+        anyhow::ensure!(!session_id.is_empty(), "session_id must not be empty");
+        let store = self
+            .gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for session export"))?;
+        let export =
+            crate::runtime::session_export::export_session(store, &self.config, session_id, opts)?;
+        Ok(serde_json::to_value(&export)?)
+    }
+
     pub fn get_session_egress_policy(
         &self,
         session_id: &str,

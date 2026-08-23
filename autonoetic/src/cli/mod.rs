@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod model_discovery;
 pub mod recording;
 pub mod room;
+pub mod rpc;
 pub mod run;
 pub mod security;
 pub mod sentinel_experiment;
