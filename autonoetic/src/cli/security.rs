@@ -6,41 +6,57 @@
 //! `autonoetic security patterns`       — list red-team attack-pattern proposals.
 //! `autonoetic security pattern-accept` — operator accepts a proposed pattern.
 //! `autonoetic security pattern-reject` — operator rejects a proposed pattern.
+//!
+//! Since #1119 (tranche 2) every subcommand speaks JSON-RPC to the running
+//! gateway ([`crate::cli::rpc::GatewayRpc`]) via the `security.*` methods —
+//! the CLI never opens gateway.db directly.
 
 use anyhow::Result;
-use autonoetic_types::security::{AttackPatternStatus, TriageState};
+use autonoetic_types::security::TriageState;
 use std::path::Path;
 
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use crate::cli::rpc::GatewayRpc;
 
-fn open_store(config_path: &Path) -> Result<GatewayStore> {
+fn open_rpc(config_path: &Path) -> Result<GatewayRpc> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    Ok(GatewayStore::open(&gateway_dir)?)
+    GatewayRpc::from_config(&config)
 }
 
 // ── status ────────────────────────────────────────────────────────────────────
 
 pub fn handle_security_status(config_path: &Path, json: bool) -> Result<()> {
-    let store = open_store(config_path)?;
+    let rpc = open_rpc(config_path)?;
+    let out = rpc.call("security.status", serde_json::json!({}))?;
 
-    let by_severity = store.count_pending_security_findings_by_severity()?;
-    let by_triage = store.count_security_findings_by_triage_state()?;
-
-    // Most-recent sentinel sweep of any kind: take the max last_run_at across
-    // both full-sweep and incremental jobs owned by security_sentinel.
-    let last_sweep = store
-        .list_scheduled_jobs_for_owner("security_sentinel", None, None)?
-        .into_iter()
-        .filter_map(|j| j.last_run_at)
-        .max();
+    let by_severity: Vec<(String, i64)> = out["pending_by_severity"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| {
+                    (
+                        e["severity"].as_str().unwrap_or("?").to_string(),
+                        e["count"].as_i64().unwrap_or(0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let by_triage: Vec<(String, i64)> = out["by_triage_state"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| {
+                    (
+                        e["triage_state"].as_str().unwrap_or("?").to_string(),
+                        e["count"].as_i64().unwrap_or(0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let last_sweep = out["last_sweep_at"].as_str().map(String::from);
 
     if json {
-        let out = serde_json::json!({
-            "pending_by_severity": by_severity.iter().map(|(s, c)| serde_json::json!({"severity": s, "count": c})).collect::<Vec<_>>(),
-            "by_triage_state": by_triage.iter().map(|(s, c)| serde_json::json!({"triage_state": s, "count": c})).collect::<Vec<_>>(),
-            "last_sweep_at": last_sweep,
-        });
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -86,29 +102,20 @@ pub fn handle_security_findings(
     limit: u32,
     json: bool,
 ) -> Result<()> {
-    let store = open_store(config_path)?;
-    let rows = store.list_security_findings_filtered(severity, finding_type, triage, limit)?;
+    let rpc = open_rpc(config_path)?;
+    let rows = rpc.call(
+        "security.findings",
+        serde_json::json!({
+            "severity": severity,
+            "finding_type": finding_type,
+            "triage": triage,
+            "limit": limit,
+        }),
+    )?;
+    let rows = rows.as_array().cloned().unwrap_or_default();
 
     if json {
-        let out: Vec<_> = rows
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "finding_id": r.finding_id,
-                    "severity": r.severity,
-                    "confidence": r.confidence,
-                    "finding_type": r.finding_type,
-                    "reproducibility": r.reproducibility,
-                    "sentinel_revision_id": r.sentinel_revision_id,
-                    "baseline_agreed": r.baseline_agreed,
-                    "triage_state": r.triage_state,
-                    "triage_reason": r.triage_reason,
-                    "proposed_remediation": r.proposed_remediation,
-                    "created_at": r.created_at,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
 
@@ -125,12 +132,12 @@ pub fn handle_security_findings(
     for r in &rows {
         println!(
             "{:<22} {:<10} {:<12} {:<26} {:<14.2} {}",
-            truncate(&r.finding_id, 22),
-            r.severity,
-            r.triage_state,
-            r.finding_type,
-            r.confidence,
-            r.created_at,
+            truncate(r["finding_id"].as_str().unwrap_or("?"), 22),
+            r["severity"].as_str().unwrap_or("?"),
+            r["triage_state"].as_str().unwrap_or("?"),
+            r["finding_type"].as_str().unwrap_or("?"),
+            r["confidence"].as_f64().unwrap_or(0.0),
+            r["created_at"].as_str().unwrap_or("?"),
         );
     }
     println!("\n{} finding(s) shown.", rows.len());
@@ -147,12 +154,19 @@ pub fn handle_security_triage(
 ) -> Result<()> {
     let triage_state = parse_triage_state(state)?;
 
-    if triage_state != autonoetic_types::security::TriageState::Pending && reason.is_none() {
+    if triage_state != TriageState::Pending && reason.is_none() {
         anyhow::bail!("--reason is required when setting a non-pending triage state");
     }
 
-    let store = open_store(config_path)?;
-    store.update_security_finding_triage(finding_id, triage_state, reason)?;
+    let rpc = open_rpc(config_path)?;
+    rpc.call(
+        "security.triage",
+        serde_json::json!({
+            "finding_id": finding_id,
+            "state": state,
+            "reason": reason,
+        }),
+    )?;
     println!(
         "Finding {} → {} {}",
         finding_id,
@@ -172,52 +186,75 @@ pub fn handle_security_triage_bulk(
 ) -> Result<()> {
     let triage_state = parse_triage_state(state)?;
 
-    if triage_state == autonoetic_types::security::TriageState::Pending {
+    if triage_state == TriageState::Pending {
         anyhow::bail!(
             "Cannot bulk-triage to 'pending'. Valid states: true_positive, false_positive, benign, deferred"
         );
     }
 
-    let store = open_store(config_path)?;
+    let rpc = open_rpc(config_path)?;
 
-    // Fetch all pending findings matching the filter (large limit for bulk).
-    let rows = store.list_security_findings_filtered(
-        severity,
-        finding_type,
-        Some("pending"),
-        10_000,
+    if dry_run {
+        // Dry run lists what *would* be marked — same filter the bulk RPC uses
+        // server-side (pending + severity/type filters).
+        let rows = rpc.call(
+            "security.findings",
+            serde_json::json!({
+                "severity": severity,
+                "finding_type": finding_type,
+                "triage": "pending",
+                "limit": 10_000,
+            }),
+        )?;
+        let rows = rows.as_array().cloned().unwrap_or_default();
+        if rows.is_empty() {
+            println!("No pending findings match the given filters — nothing to triage.");
+            return Ok(());
+        }
+        println!(
+            "{} finding(s) will be marked '{}' with reason: {}",
+            rows.len(),
+            state,
+            reason
+        );
+        for r in &rows {
+            println!(
+                "  [dry-run] {} ({})",
+                r["finding_id"].as_str().unwrap_or("?"),
+                r["finding_type"].as_str().unwrap_or("?")
+            );
+        }
+        return Ok(());
+    }
+
+    let result = rpc.call(
+        "security.triage_bulk",
+        serde_json::json!({
+            "state": state,
+            "reason": reason,
+            "severity": severity,
+            "finding_type": finding_type,
+        }),
     )?;
-
-    if rows.is_empty() {
+    let matched = result["matched"].as_u64().unwrap_or(0);
+    if matched == 0 {
         println!("No pending findings match the given filters — nothing to triage.");
         return Ok(());
     }
-
     println!(
         "{} finding(s) will be marked '{}' with reason: {}",
-        rows.len(),
-        state,
-        reason
+        matched, state, reason
     );
 
-    if dry_run {
-        for r in &rows {
-            println!("  [dry-run] {} ({})", r.finding_id, r.finding_type);
-        }
-        return Ok(());
+    let ok = result["triaged"].as_u64().unwrap_or(0) as usize;
+    for f in result["failures"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        eprintln!(
+            "  Failed to triage {}: {}",
+            f["finding_id"].as_str().unwrap_or("?"),
+            f["error"].as_str().unwrap_or("?")
+        );
     }
-
-    let mut ok = 0usize;
-    let mut errors = 0usize;
-    for r in &rows {
-        match store.update_security_finding_triage(&r.finding_id, triage_state.clone(), Some(reason)) {
-            Ok(()) => ok += 1,
-            Err(e) => {
-                eprintln!("  Failed to triage {}: {}", r.finding_id, e);
-                errors += 1;
-            }
-        }
-    }
+    let errors = result["failures"].as_array().map(|a| a.len()).unwrap_or(0);
 
     println!("{} triaged, {} errors.", ok, errors);
     if errors > 0 {
@@ -256,27 +293,15 @@ pub fn handle_security_patterns(
     limit: u32,
     json: bool,
 ) -> Result<()> {
-    let store = open_store(config_path)?;
-    let patterns = store.list_attack_patterns(status, limit)?;
+    let rpc = open_rpc(config_path)?;
+    let patterns = rpc.call(
+        "security.patterns",
+        serde_json::json!({ "status": status, "limit": limit }),
+    )?;
+    let patterns = patterns.as_array().cloned().unwrap_or_default();
 
     if json {
-        let out: Vec<_> = patterns
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "pattern_id": p.pattern_id,
-                    "category": p.category,
-                    "status": p.status.to_string(),
-                    "proposed_by_agent_id": p.proposed_by_agent_id,
-                    "description": p.description,
-                    "accepted_check_type": p.accepted_check_type,
-                    "operator_notes": p.operator_notes,
-                    "created_at": p.created_at,
-                    "reviewed_at": p.reviewed_at,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&patterns)?);
         return Ok(());
     }
 
@@ -293,11 +318,11 @@ pub fn handle_security_patterns(
     for p in &patterns {
         println!(
             "{:<22} {:<30} {:<10} {:<14} {}",
-            truncate(&p.pattern_id, 22),
-            truncate(&p.category, 30),
-            p.status.to_string(),
-            truncate(&p.proposed_by_agent_id, 14),
-            p.created_at,
+            truncate(p["pattern_id"].as_str().unwrap_or("?"), 22),
+            truncate(p["category"].as_str().unwrap_or("?"), 30),
+            p["status"].as_str().unwrap_or("?"),
+            truncate(p["proposed_by_agent_id"].as_str().unwrap_or("?"), 14),
+            p["created_at"].as_str().unwrap_or("?"),
         );
     }
     println!("\n{} proposal(s) shown.", patterns.len());
@@ -313,12 +338,15 @@ pub fn handle_security_pattern_accept(
     if check_type != "phase1" && check_type != "phase2" {
         anyhow::bail!("--type must be 'phase1' (deterministic) or 'phase2' (llm-judgment)");
     }
-    let store = open_store(config_path)?;
-    store.review_attack_pattern(
-        pattern_id,
-        AttackPatternStatus::Accepted,
-        Some(check_type),
-        notes,
+    let rpc = open_rpc(config_path)?;
+    rpc.call(
+        "security.pattern_review",
+        serde_json::json!({
+            "pattern_id": pattern_id,
+            "decision": "accepted",
+            "check_type": check_type,
+            "notes": notes,
+        }),
     )?;
     println!(
         "Pattern {} → accepted ({}){}",
@@ -335,12 +363,14 @@ pub fn handle_security_pattern_reject(
     pattern_id: &str,
     notes: Option<&str>,
 ) -> Result<()> {
-    let store = open_store(config_path)?;
-    store.review_attack_pattern(
-        pattern_id,
-        AttackPatternStatus::Rejected,
-        None,
-        notes,
+    let rpc = open_rpc(config_path)?;
+    rpc.call(
+        "security.pattern_review",
+        serde_json::json!({
+            "pattern_id": pattern_id,
+            "decision": "rejected",
+            "notes": notes,
+        }),
     )?;
     println!(
         "Pattern {} → rejected{}",

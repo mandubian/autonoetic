@@ -26,7 +26,6 @@ const ALLOWED: &[&str] = &[
     "gateway.rs",
     "improve.rs",
     "recording.rs",
-    "security.rs",
     "sentinel_experiment.rs",
     "trace.rs",
     "watchdog.rs",

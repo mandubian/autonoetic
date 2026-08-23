@@ -3497,6 +3497,16 @@ impl JsonRpcRouter {
             "session.outcome.get" => handle_session_outcome_get(&self.execution, req),
             "session.export" => handle_session_export(&self.execution, req),
 
+            // `autonoetic security …` operator surface over RPC (#1119
+            // tranche 2) — same boundary rule: the CLI never opens
+            // gateway.db directly.
+            "security.status" => handle_security_status_rpc(&self.execution, req),
+            "security.findings" => handle_security_findings_rpc(&self.execution, req),
+            "security.triage" => handle_security_triage_rpc(&self.execution, req),
+            "security.triage_bulk" => handle_security_triage_bulk_rpc(&self.execution, req),
+            "security.patterns" => handle_security_patterns_rpc(&self.execution, req),
+            "security.pattern_review" => handle_security_pattern_review_rpc(&self.execution, req),
+
             // RFC §4.3 authoring aid (#978): "emails stay local" → a concrete
             // proposed rule set from known tool catalogs + the MCP server list.
             // Pure and deterministic — the proposal has no effect until the
@@ -6346,6 +6356,258 @@ fn handle_session_export(
     match execution.export_full_session(&params.session_id, &opts) {
         Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `security.status` — sentinel snapshot for `autonoetic security status` (#1119).
+#[inline(never)]
+fn handle_security_status_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    if let Some(resp) = reject_non_empty_params(&req, "security.status") {
+        return resp;
+    }
+    match execution.security_status() {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `security.findings` — filtered findings list (#1119).
+#[inline(never)]
+fn handle_security_findings_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        severity: Option<String>,
+        #[serde(default)]
+        finding_type: Option<String>,
+        #[serde(default)]
+        triage: Option<String>,
+        #[serde(default = "default_security_limit")]
+        limit: u32,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "security.findings", e),
+    };
+    match execution.security_findings(
+        params.severity.as_deref(),
+        params.finding_type.as_deref(),
+        params.triage.as_deref(),
+        params.limit,
+    ) {
+        Ok(rows) => JsonRpcResponse::success(req.id, serde_json::to_value(rows).unwrap_or_default()),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `security.triage` — set one finding's triage state (#1119).
+#[inline(never)]
+fn handle_security_triage_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        finding_id: String,
+        state: String,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "security.triage", e),
+    };
+    let state = match parse_triage_state_param(&params.state) {
+        Ok(s) => s,
+        Err(e) => return JsonRpcResponse::error(req.id, -32602, format!("{}", e)),
+    };
+    if state != autonoetic_types::security::TriageState::Pending && params.reason.is_none() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for security.triage: --reason is required when setting a \
+             non-pending triage state"
+                .to_string(),
+        );
+    }
+    match execution.security_triage_finding(&params.finding_id, state, params.reason.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `security.triage_bulk` — bulk-mark pending findings matching filters (#1119).
+#[inline(never)]
+fn handle_security_triage_bulk_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        state: String,
+        reason: String,
+        #[serde(default)]
+        severity: Option<String>,
+        #[serde(default)]
+        finding_type: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "security.triage_bulk", e),
+    };
+    let state = match parse_triage_state_param(&params.state) {
+        Ok(s) => s,
+        Err(e) => return JsonRpcResponse::error(req.id, -32602, format!("{}", e)),
+    };
+    if state == autonoetic_types::security::TriageState::Pending {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for security.triage_bulk: cannot bulk-triage to 'pending'. Valid \
+             states: true_positive, false_positive, benign, deferred"
+                .to_string(),
+        );
+    }
+    match execution.security_triage_bulk(
+        state,
+        &params.reason,
+        params.severity.as_deref(),
+        params.finding_type.as_deref(),
+    ) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `security.patterns` — attack-pattern proposal list (#1119).
+#[inline(never)]
+fn handle_security_patterns_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default = "default_security_limit")]
+        limit: u32,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "security.patterns", e),
+    };
+    match execution.security_patterns(params.status.as_deref(), params.limit) {
+        Ok(rows) => JsonRpcResponse::success(req.id, serde_json::to_value(rows).unwrap_or_default()),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `security.pattern_review` — operator accept/reject of a proposed pattern (#1119).
+#[inline(never)]
+fn handle_security_pattern_review_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        pattern_id: String,
+        /// "accepted" | "rejected"
+        decision: String,
+        #[serde(default)]
+        check_type: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "security.pattern_review", e),
+    };
+    use autonoetic_types::security::AttackPatternStatus;
+    let status = match params.decision.as_str() {
+        "accepted" => AttackPatternStatus::Accepted,
+        "rejected" => AttackPatternStatus::Rejected,
+        other => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32602,
+                format!(
+                    "Invalid params for security.pattern_review: unknown decision '{other}' \
+                     (expected accepted|rejected)"
+                ),
+            )
+        }
+    };
+    if status == AttackPatternStatus::Accepted {
+        let ct = params.check_type.as_deref();
+        if ct != Some("phase1") && ct != Some("phase2") {
+            return JsonRpcResponse::error(
+                req.id,
+                -32602,
+                "Invalid params for security.pattern_review: --type must be 'phase1' \
+                 (deterministic) or 'phase2' (llm-judgment)"
+                    .to_string(),
+            );
+        }
+    } else if params.check_type.is_some() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for security.pattern_review: --type only applies to accepted patterns"
+                .to_string(),
+        );
+    }
+    match execution.security_review_pattern(
+        &params.pattern_id,
+        status,
+        params.check_type.as_deref(),
+        params.notes.as_deref(),
+    ) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+fn default_security_limit() -> u32 {
+    100
+}
+
+fn parse_triage_state_param(s: &str) -> anyhow::Result<autonoetic_types::security::TriageState> {
+    use autonoetic_types::security::TriageState;
+    match s {
+        "pending" => Ok(TriageState::Pending),
+        "true_positive" => Ok(TriageState::TruePositive),
+        "false_positive" => Ok(TriageState::FalsePositive),
+        "benign" => Ok(TriageState::Benign),
+        "deferred" => Ok(TriageState::Deferred),
+        other => anyhow::bail!(
+            "Invalid triage state '{}'. Valid states: pending, true_positive, false_positive, \
+             benign, deferred",
+            other
+        ),
+    }
+}
+
+/// Reject requests that carry parameters where none are expected.
+fn reject_non_empty_params(req: &JsonRpcRequest, method: &str) -> Option<JsonRpcResponse> {
+    let empty = req
+        .params
+        .as_object()
+        .map(|o| o.is_empty())
+        .unwrap_or(req.params.is_null());
+    if empty {
+        None
+    } else {
+        Some(JsonRpcResponse::error(
+            req.id.clone(),
+            -32602,
+            format!("Invalid params for {method}: no parameters expected"),
+        ))
     }
 }
 
