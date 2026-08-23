@@ -284,12 +284,20 @@ fn handle_export(
         ..ExportOptions::default()
     };
 
+    // ExportFormat's Debug spelling ("RoomRaw") differs from the RPC's
+    // wire spelling ("room_raw") — map explicitly instead of stringifying.
+    let format_param = match format {
+        ExportFormat::Room => "room",
+        ExportFormat::RoomRaw => "room_raw",
+        ExportFormat::Json => "json",
+    };
+
     let export: SessionExport = serde_json::from_value(
         rpc.call(
             "session.export",
             serde_json::json!({
                 "session_id": session_id,
-                "format": format!("{:?}", format).to_lowercase(),
+                "format": format_param,
                 "with_checkpoints": opts.with_checkpoints,
                 "min_altitude": min_altitude,
             }),

@@ -43,10 +43,9 @@ impl GatewayRpc {
         })?;
         let _ = stream.set_nodelay(true);
         let mut stream = stream;
-        let id = format!("cli-{}", method);
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
-            id: id.clone(),
+            id: format!("cli-{}", method),
             method: method.to_string(),
             params,
             auth_token: self.token.clone(),
