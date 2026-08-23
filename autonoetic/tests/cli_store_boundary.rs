@@ -9,8 +9,8 @@
 //!   same PR that migrates it
 //! - a file in `BY_DESIGN_EMBEDDING` legitimately runs gateway machinery
 //!   in-process (agent executors, native tool execution, offline capsule
-//!   transfer) and structurally needs a store handle; each entry's entry
-//!   comment states why
+//!   transfer) and structurally needs a store handle; each entry carries
+//!   its rationale inline
 //! - stale entries in either list (no longer referencing GatewayStore)
 //!   fail the test so the lists cannot rot
 
