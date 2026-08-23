@@ -58,6 +58,19 @@ metadata:
       - "digest_*"
       - "anomaly_*"
     validation: "soft"
+    # #1106: `targets: [{kind: "any"}]` is deliberate, NOT a leftover.
+    # This role is general-purpose shell/script execution (curl/wget to
+    # whatever the task needs) — a static host enumeration would fail shut
+    # on the first undeclared host with `undeclared_remote_target`,
+    # recreating the "full factory pipeline for one GET" failure the
+    # credential-egress RFC criticizes. The safety comes from
+    # `approval_mode: "required"`: every networked exec goes through an
+    # operator approval with the host named on the card and in the R++4
+    # phrase (post-#1103, credential_request additionally routes through
+    # the credential's own operator-approved allowed_hosts). Do NOT flip
+    # to `preapproved` — with `any` that is a silent any-host
+    # auto-approval, rejected at runtime by
+    # `remote_any_preapproval_requires_wildcard_capability`.
     remote_access:
       approval_mode: "required"
       targets:

@@ -10,6 +10,7 @@ mod support;
 mod adapter_scripts;
 mod adapter_wrapper;
 mod executor_helpers;
+mod remote_access_any_preapproval;
 mod inspect;
 mod install_approval_e2e;
 mod install_smoke_test_gate;

@@ -53,6 +53,49 @@ fn normalize_host(host: &str) -> String {
     host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// #1106 — `targets: [any]` with `approval_mode: preapproved` is a silent
+/// any-host auto-approval: the declaration declares every host, and the
+/// preapproved branches (sandbox_exec / artifact_exec) auto-approve on mere
+/// NetworkAccess capability *presence*, without consulting the capability's
+/// host list. The only shape in which the combination adds nothing is a
+/// wildcard capability (`hosts: ["*"]`) **with `open_web: true`** — the
+/// capability is then already the live any-host authority (genuine open-web
+/// roles; a wildcard without `open_web` grants nothing at runtime and is
+/// rejected at install time, so it must not launder an any-declaration
+/// through here either). Anything else means the static declaration is
+/// doing the widening, and it must not. Like the preapproved-requires-
+/// capability check this is a manifest inconsistency: fail shut, never
+/// overridable by an operator approval.
+pub fn validate_any_preapproval_shape(
+    manifest: &AgentManifest,
+    decl: &RemoteAccessDeclaration,
+) -> Result<(), NetworkPolicyViolation> {
+    let declares_any = decl
+        .targets
+        .iter()
+        .any(|t| matches!(t, autonoetic_types::background::GrantTarget::Any));
+    if !matches!(decl.approval_mode, RemoteAccessApprovalMode::Preapproved) || !declares_any {
+        return Ok(());
+    }
+    let wildcard_capability = manifest.open_web
+        && manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::NetworkAccess { hosts } if hosts.iter().any(|h| h.trim() == "*"))
+        });
+    if wildcard_capability {
+        return Ok(());
+    }
+    Err(NetworkPolicyViolation::new(
+        "remote_any_preapproval_requires_wildcard_capability",
+        format!(
+            "Agent `{}` declared remote_access targets:[any] with approval_mode=preapproved, but its NetworkAccess capability hosts are not a wildcard — the static declaration is silently widening auto-approval to every host.",
+            manifest.agent.id
+        ),
+        Some(
+            "Set approval_mode to required (the operator approval is the control, host named on the card), or name concrete targets, or declare NetworkAccess hosts: [\"*\"] with open_web: true if the role is genuinely open-web.".to_string(),
+        ),
+    ))
+}
+
 /// Returns true when the declaration allows the provided host/URL target.
 pub fn declaration_allows_target(
     declaration: &RemoteAccessDeclaration,
@@ -148,6 +191,8 @@ pub fn enforce_remote_target_policy(
             ),
         ));
     }
+
+    validate_any_preapproval_shape(manifest, &decl)?;
 
     if !declaration_allows_target(&decl, host, request_url) {
         return Err(NetworkPolicyViolation::new(
@@ -299,6 +344,128 @@ mod tests {
             "api.example.com",
             Some("https://api.example.com/private/users")
         ));
+    }
+
+#[test]
+    fn any_preapproval_without_wildcard_capability_fails_shut() {
+        // #1106: any + preapproved + narrow capability = silent any-host
+        // auto-approval via the capability-presence preapproved branches.
+        let decl = RemoteAccessDeclaration {
+            approval_mode: RemoteAccessApprovalMode::Preapproved,
+            targets: vec![GrantTarget::Any],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let mut m = manifest(true);
+        m.capabilities = vec![Capability::NetworkAccess {
+            hosts: vec!["api.github.com".to_string()],
+        }];
+        let err = validate_any_preapproval_shape(&m, &decl).unwrap_err();
+        assert_eq!(
+            err.error_type, "remote_any_preapproval_requires_wildcard_capability",
+            "narrow capability must not launder an any-declaration: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn any_preapproval_with_wildcard_capability_is_redundant_not_forbidden() {
+        // Genuine open-web roles (open_web: true, hosts: ["*"]): the capability
+        // is already the any-host authority — the declaration adds nothing.
+        let decl = RemoteAccessDeclaration {
+            approval_mode: RemoteAccessApprovalMode::Preapproved,
+            targets: vec![GrantTarget::Any],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let mut m = manifest(true);
+        m.capabilities = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        m.open_web = true;
+        validate_any_preapproval_shape(&m, &decl).expect("wildcard capability");
+    }
+
+    #[test]
+    fn wildcard_without_open_web_does_not_launder_any_preapproval() {
+        // A wildcard capability without open_web grants nothing at runtime
+        // (network_access_allows_host returns false) and is rejected at
+        // install time — it must not satisfy the guard either, or a manifest
+        // that slipped past install validation would keep the silent
+        // any-host auto-approval.
+        let decl = RemoteAccessDeclaration {
+            approval_mode: RemoteAccessApprovalMode::Preapproved,
+            targets: vec![GrantTarget::Any],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let mut m = manifest(true);
+        m.capabilities = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        m.open_web = false;
+        assert!(validate_any_preapproval_shape(&m, &decl).is_err());
+    }
+
+    #[test]
+    fn any_targets_with_required_mode_is_the_endorsed_shape() {
+        // executor.default's documented shape (#1106): declaration-wide,
+        // approval-per-host. The operator approval is the control.
+        let decl = RemoteAccessDeclaration {
+            approval_mode: RemoteAccessApprovalMode::Required,
+            targets: vec![GrantTarget::Any],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let m = manifest(false);
+        validate_any_preapproval_shape(&m, &decl).expect("required mode");
+    }
+
+    #[test]
+    fn enumerated_targets_preapproved_narrow_capability_is_consistent() {
+        // Declaration and capability agree on the same host set — no
+        // declaration-side widening, guard stays out of the way.
+        let decl = RemoteAccessDeclaration {
+            approval_mode: RemoteAccessApprovalMode::Preapproved,
+            targets: vec![GrantTarget::ExactHost("api.github.com".to_string())],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let mut m = manifest(true);
+        m.capabilities = vec![Capability::NetworkAccess {
+            hosts: vec!["api.github.com".to_string()],
+        }];
+        validate_any_preapproval_shape(&m, &decl).expect("matching shapes");
     }
 
     #[test]

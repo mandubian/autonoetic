@@ -1407,6 +1407,24 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             .iter()
             .any(|c| matches!(c, Capability::NetworkAccess { .. }));
 
+        // #1106: any + preapproved + non-wildcard capability is a silent
+        // any-host auto-approval (the preapproved branch below checks mere
+        // capability presence). Fail shut as a manifest inconsistency before
+        // any of the preapproved branches can fire.
+        if let Some(decl) = declared_remote_access.as_ref() {
+            if let Err(violation) =
+                crate::runtime::network_policy::validate_any_preapproval_shape(manifest, decl)
+            {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": violation.error_type,
+                    "message": violation.message,
+                    "repair_hint": violation.repair_hint,
+                })
+                .to_string());
+            }
+        }
+
         let remote_approval_mode = declared_remote_access
             .as_ref()
             .map(|d| d.approval_mode)
