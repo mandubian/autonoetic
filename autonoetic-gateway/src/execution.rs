@@ -1382,6 +1382,151 @@ impl GatewayExecutionService {
         )
     }
 
+    // ── Security sentinel operator surface (#1119 tranche 2) ────────────
+
+    fn security_store(&self) -> anyhow::Result<&Arc<crate::scheduler::gateway_store::GatewayStore>> {
+        self.gateway_store
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("GatewayStore required for security commands"))
+    }
+
+    /// Snapshot for `security status`: pending counts by severity, all
+    /// findings by triage state, last completed sentinel sweep.
+    pub fn security_status(&self) -> anyhow::Result<serde_json::Value> {
+        let store = self.security_store()?;
+        let by_severity = store.count_pending_security_findings_by_severity()?;
+        let by_triage = store.count_security_findings_by_triage_state()?;
+        let last_sweep = store
+            .list_scheduled_jobs_for_owner("security_sentinel", None, None)?
+            .into_iter()
+            .filter_map(|j| j.last_run_at)
+            .max();
+        Ok(serde_json::json!({
+            "pending_by_severity": by_severity.iter()
+                .map(|(s, c)| serde_json::json!({"severity": s, "count": c}))
+                .collect::<Vec<_>>(),
+            "by_triage_state": by_triage.iter()
+                .map(|(s, c)| serde_json::json!({"triage_state": s, "count": c}))
+                .collect::<Vec<_>>(),
+            "last_sweep_at": last_sweep,
+        }))
+    }
+
+    fn finding_row_to_value(
+        r: &crate::scheduler::gateway_store::security_findings::SecurityFindingRow,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "finding_id": r.finding_id,
+            "severity": r.severity,
+            "confidence": r.confidence,
+            "finding_type": r.finding_type,
+            "reproducibility": r.reproducibility,
+            "sentinel_revision_id": r.sentinel_revision_id,
+            "baseline_agreed": r.baseline_agreed,
+            "triage_state": r.triage_state,
+            "triage_reason": r.triage_reason,
+            "proposed_remediation": r.proposed_remediation,
+            "created_at": r.created_at,
+        })
+    }
+
+    /// Filtered findings list for `security findings` / bulk-triage dry runs.
+    pub fn security_findings(
+        &self,
+        severity: Option<&str>,
+        finding_type: Option<&str>,
+        triage: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let store = self.security_store()?;
+        Ok(store
+            .list_security_findings_filtered(severity, finding_type, triage, limit)?
+            .iter()
+            .map(Self::finding_row_to_value)
+            .collect())
+    }
+
+    pub fn security_triage_finding(
+        &self,
+        finding_id: &str,
+        state: autonoetic_types::security::TriageState,
+        reason: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.security_store()?
+            .update_security_finding_triage(finding_id, state, reason)?;
+        Ok(serde_json::json!({ "ok": true, "finding_id": finding_id }))
+    }
+
+    /// Bulk-triage every *pending* finding matching the filters (#1119):
+    /// mirrors the CLI's previous client-side loop but in one RPC — per-finding
+    /// failures are reported individually, never aborting the batch.
+    pub fn security_triage_bulk(
+        &self,
+        state: autonoetic_types::security::TriageState,
+        reason: &str,
+        severity: Option<&str>,
+        finding_type: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.security_store()?;
+        let rows =
+            store.list_security_findings_filtered(severity, finding_type, Some("pending"), 10_000)?;
+        let mut triaged = 0usize;
+        let mut failures: Vec<serde_json::Value> = Vec::new();
+        for r in &rows {
+            match store.update_security_finding_triage(&r.finding_id, state.clone(), Some(reason)) {
+                Ok(()) => triaged += 1,
+                Err(e) => failures.push(serde_json::json!({
+                    "finding_id": r.finding_id,
+                    "error": e.to_string(),
+                })),
+            }
+        }
+        Ok(serde_json::json!({
+            "matched": rows.len(),
+            "triaged": triaged,
+            "failures": failures,
+        }))
+    }
+
+    fn pattern_to_value(p: &autonoetic_types::security::ProposedAttackPattern) -> serde_json::Value {
+        serde_json::json!({
+            "pattern_id": p.pattern_id,
+            "category": p.category,
+            "status": p.status.to_string(),
+            "proposed_by_agent_id": p.proposed_by_agent_id,
+            "description": p.description,
+            "accepted_check_type": p.accepted_check_type,
+            "operator_notes": p.operator_notes,
+            "created_at": p.created_at,
+            "reviewed_at": p.reviewed_at,
+        })
+    }
+
+    pub fn security_patterns(
+        &self,
+        status: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let store = self.security_store()?;
+        Ok(store
+            .list_attack_patterns(status, limit)?
+            .iter()
+            .map(Self::pattern_to_value)
+            .collect())
+    }
+
+    pub fn security_review_pattern(
+        &self,
+        pattern_id: &str,
+        status: autonoetic_types::security::AttackPatternStatus,
+        check_type: Option<&str>,
+        notes: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.security_store()?
+            .review_attack_pattern(pattern_id, status, check_type, notes)?;
+        Ok(serde_json::json!({ "ok": true, "pattern_id": pattern_id }))
+    }
+
     /// Operator rating on a closed session's outcome row (#1119 RPC surface).
     pub fn rate_session_outcome(
         &self,
