@@ -241,9 +241,13 @@ pub fn handle_security_triage_bulk(
         println!("No pending findings match the given filters — nothing to triage.");
         return Ok(());
     }
+    // The bulk ran server-side in one RPC; report what it did.
     println!(
-        "{} finding(s) will be marked '{}' with reason: {}",
-        matched, state, reason
+        "{} pending finding(s) matched filters '{}' — marking '{}' with reason: {}",
+        matched,
+        format_bulk_filter(severity, finding_type),
+        state,
+        reason
     );
 
     let ok = result["triaged"].as_u64().unwrap_or(0) as usize;
@@ -282,6 +286,15 @@ fn truncate(s: &str, max: usize) -> &str {
         s
     } else {
         &s[..max]
+    }
+}
+
+fn format_bulk_filter(severity: Option<&str>, finding_type: Option<&str>) -> String {
+    match (severity, finding_type) {
+        (Some(s), Some(t)) => format!("severity={s}, type={t}"),
+        (Some(s), None) => format!("severity={s}"),
+        (None, Some(t)) => format!("type={t}"),
+        (None, None) => "all severities and types".to_string(),
     }
 }
 

@@ -6574,7 +6574,9 @@ fn handle_security_pattern_review_rpc(
 }
 
 fn default_security_limit() -> u32 {
-    100
+    // Matches the CLI's clap default (`security findings --limit 50`) so raw
+    // RPC clients see the same default listing size operators do.
+    50
 }
 
 fn parse_triage_state_param(s: &str) -> anyhow::Result<autonoetic_types::security::TriageState> {
