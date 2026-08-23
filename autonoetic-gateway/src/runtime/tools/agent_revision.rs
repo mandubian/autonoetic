@@ -2223,8 +2223,8 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
         // declaration exists") while the source clearly had one.
         let remote_access_decl = file_map
             .get("SKILL.md")
-            .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
-            .and_then(|content| crate::runtime::parser::SkillParser::parse(&content).ok())
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|content| crate::runtime::parser::SkillParser::parse(content).ok())
             .and_then(|(m, _)| m.remote_access);
 
         let target_manifest = AgentManifest {
