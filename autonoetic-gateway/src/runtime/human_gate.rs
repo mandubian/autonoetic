@@ -1698,6 +1698,7 @@ mod tests {
 
     fn test_manifest() -> AgentManifest {
         AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

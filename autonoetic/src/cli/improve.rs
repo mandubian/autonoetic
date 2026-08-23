@@ -593,6 +593,7 @@ async fn handle_propose_code_fix(
 
     // Build shared manifest, policy, and tool once (constant across sessions)
     let manifest = AgentManifest {
+        remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             engine: "autonoetic".to_string(),
@@ -769,6 +770,7 @@ fn run_ab_replay(
     explicit_candidate: Option<&str>,
 ) -> anyhow::Result<serde_json::Value> {
     let manifest = AgentManifest {
+        remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             engine: "autonoetic".to_string(),
@@ -883,6 +885,7 @@ fn run_ab_replay(
 /// Manifest with AgentRevision capability, used for the promote step.
 fn promote_manifest() -> AgentManifest {
     AgentManifest {
+        remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             engine: "autonoetic".to_string(),

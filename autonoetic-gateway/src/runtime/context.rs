@@ -1206,6 +1206,7 @@ mod agentskills_bridging_tests {
 
     fn default_test_manifest() -> AgentManifest {
         AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

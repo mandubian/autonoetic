@@ -1729,6 +1729,7 @@ mod tests {
         use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1788,6 +1789,7 @@ mod tests {
         use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1852,6 +1854,7 @@ mod tests {
         use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1916,6 +1919,7 @@ mod tests {
         use autonoetic_types::agent::{AgentIdentity, AgentManifest, RuntimeDeclaration};
         let tool = ArtifactExecTool;
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

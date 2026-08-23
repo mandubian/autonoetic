@@ -1468,6 +1468,7 @@ mod tests {
         capabilities: Vec<Capability>,
     ) -> AgentManifest {
         AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1703,6 +1704,7 @@ mod tests {
     fn test_available_definitions_filtered_no_filter_equals_all() {
         let registry = default_registry();
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1798,6 +1800,7 @@ mod tests {
     fn test_available_definitions_filtered_core_only() {
         let registry = default_registry();
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1935,6 +1938,7 @@ mod tests {
     #[test]
     fn test_dependency_plan_from_args_or_lock_explicit_deps_override() {
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -1989,6 +1993,7 @@ mod tests {
     #[test]
     fn test_dependency_plan_from_args_or_lock_no_lock_file_returns_none() {
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

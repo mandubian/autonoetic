@@ -29,13 +29,53 @@ impl NetworkPolicyViolation {
 }
 
 /// Load `metadata.autonoetic.remote_access` (or top-level `remote_access`) from SKILL.md.
+///
+/// Every failure mode here collapses to `None`, which downstream renders as
+/// `missing_remote_access_declaration` ("no declaration exists"). That is a
+/// different repair path than "declaration exists but is malformed/empty"
+/// (#1110), so each swallow is logged: an unreadable SKILL.md points at
+/// agent_dir resolution; a frontmatter parse error at YAML syntax; a
+/// `remote_access` key that fails deserialization at the block's own fields
+/// (`deny_unknown_fields`: e.g. `hosts:` instead of `targets:`).
 pub fn load_manifest_remote_access_declaration(
     agent_dir: &Path,
 ) -> Option<RemoteAccessDeclaration> {
     let skill_path = agent_dir.join("SKILL.md");
-    let skill = std::fs::read_to_string(skill_path).ok()?;
-    let frontmatter = skill.split("---").nth(1)?;
-    let root = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+    let skill = match std::fs::read_to_string(&skill_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                target: "network_policy",
+                skill_path = %skill_path.display(),
+                error = %e,
+                "SKILL.md unreadable while loading remote_access declaration; \
+                 treating the declaration as absent"
+            );
+            return None;
+        }
+    };
+    let Some(frontmatter) = skill.split("---").nth(1) else {
+        tracing::warn!(
+            target: "network_policy",
+            skill_path = %skill_path.display(),
+            "SKILL.md has no frontmatter segment while loading remote_access \
+             declaration; treating the declaration as absent"
+        );
+        return None;
+    };
+    let root = match serde_yaml::from_str::<serde_yaml::Value>(frontmatter) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                target: "network_policy",
+                skill_path = %skill_path.display(),
+                error = %e,
+                "SKILL.md frontmatter failed to parse as YAML while loading \
+                 remote_access declaration; treating the declaration as absent"
+            );
+            return None;
+        }
+    };
 
     let direct = root.get("remote_access").cloned();
     let nested = root
@@ -44,9 +84,26 @@ pub fn load_manifest_remote_access_declaration(
         .and_then(|a| a.get("remote_access"))
         .cloned();
 
-    direct
-        .or(nested)
-        .and_then(|v| serde_yaml::from_value::<RemoteAccessDeclaration>(v).ok())
+    match direct.or(nested) {
+        None => None,
+        Some(raw) => match serde_yaml::from_value::<RemoteAccessDeclaration>(raw) {
+            Ok(decl) => Some(decl),
+            Err(e) => {
+                // The worst case (#1110): the operator shipped a declaration,
+                // but a field-name typo or bad casing silently erased it and
+                // every denial read as "no declaration exists".
+                tracing::warn!(
+                    target: "network_policy",
+                    skill_path = %skill_path.display(),
+                    error = %e,
+                    "remote_access declaration failed to deserialize; treating \
+                     it as absent (renders as missing_remote_access_declaration). \
+                     Fix the block's fields/nesting in SKILL.md."
+                );
+                None
+            }
+        },
+    }
 }
 
 fn normalize_host(host: &str) -> String {
@@ -162,7 +219,7 @@ pub fn enforce_remote_target_policy(
             DeclarationRequirement::Required => Err(NetworkPolicyViolation::new(
                 "missing_remote_access_declaration",
                 format!(
-                    "Agent `{}` attempted outbound network access to `{}` without metadata.autonoetic.remote_access declaration in SKILL.md.",
+                    "Agent `{}` attempted outbound network access to `{}` without a parsable metadata.autonoetic.remote_access declaration in SKILL.md (absent, unreadable, or failed to deserialize — see the gateway log).",
                     manifest.agent.id, host
                 ),
                 Some(
@@ -245,6 +302,7 @@ mod tests {
 
     fn manifest(network: bool) -> AgentManifest {
         AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -520,6 +578,86 @@ metadata:
         assert_eq!(
             err.error_type,
             "remote_preapproval_requires_network_capability"
+        );
+    }
+
+    #[test]
+    fn empty_targets_declaration_yields_undeclared_not_missing() {
+        // #1110 pin: a shipped remote_access block with targets: [] is a
+        // PRESENT declaration that covers nothing — the denial must be
+        // `undeclared_remote_target` (widen the declaration), never
+        // `missing_remote_access_declaration` ("no declaration exists" —
+        // a different repair path).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: required
+      targets: []
+---
+"#,
+        )
+        .expect("skill write");
+        assert!(
+            load_manifest_remote_access_declaration(tmp.path()).is_some(),
+            "an empty-targets block must deserialize, not silently vanish"
+        );
+        let err = enforce_remote_target_policy(
+            &manifest(true),
+            tmp.path(),
+            "127.0.0.1",
+            Some("http://127.0.0.1:8080/api"),
+            DeclarationRequirement::Required,
+            CapabilityHostCheck::DeferToCaller,
+        )
+        .expect_err("empty targets cover nothing");
+        assert_eq!(err.error_type, "undeclared_remote_target", "{}", err.message);
+    }
+
+    #[test]
+    fn malformed_declaration_block_is_logged_and_treated_as_missing() {
+        // #1110 worst case: `deny_unknown_fields` means one wrong field name
+        // (hosts: instead of targets:) silently erased the whole block and
+        // every denial read as "no declaration exists". The loader now warns
+        // (observability) and still fails as missing — pinned here so the
+        // collapse stays deliberate and the error message keeps pointing at
+        // the gateway log.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("SKILL.md"),
+            r#"---
+metadata:
+  autonoetic:
+    remote_access:
+      approval_mode: required
+      hosts:
+        - "api.example.com"
+---
+"#,
+        )
+        .expect("skill write");
+        assert!(load_manifest_remote_access_declaration(tmp.path()).is_none());
+        let err = enforce_remote_target_policy(
+            &manifest(true),
+            tmp.path(),
+            "api.example.com",
+            None,
+            DeclarationRequirement::Required,
+            CapabilityHostCheck::DeferToCaller,
+        )
+        .expect_err("malformed block collapses to missing");
+        assert_eq!(
+            err.error_type, "missing_remote_access_declaration",
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("failed to deserialize"),
+            "the message must name the parse possibility, not claim flat absence: {}",
+            err.message
         );
     }
 

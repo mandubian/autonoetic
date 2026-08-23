@@ -5558,6 +5558,7 @@ mod tests {
             .expect("session context should save");
 
         let manifest = autonoetic_types::agent::AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
@@ -6229,6 +6230,7 @@ mod tests {
         session_id: &str,
     ) -> AgentExecutor {
         let manifest = autonoetic_types::agent::AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: autonoetic_types::agent::RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

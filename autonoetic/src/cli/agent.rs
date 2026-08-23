@@ -673,6 +673,7 @@ fn list_alias_rows_from_registry(
 
 fn admin_revision_manifest() -> AgentManifest {
     AgentManifest {
+        remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
             engine: "autonoetic".to_string(),
@@ -2093,6 +2094,7 @@ pub fn handle_agent_import_skill(
     };
 
     let target_manifest = autonoetic_types::agent::AgentManifest {
+        remote_access: None,
         version: parsed_manifest.version.clone(),
         runtime: parsed_manifest.runtime.clone(),
         agent: autonoetic_types::agent::AgentIdentity {

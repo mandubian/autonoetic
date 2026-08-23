@@ -1197,6 +1197,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn render_skill_document_round_trips_remote_access_declaration() {
+        // #1110 root cause: AgentManifest had no remote_access field, so
+        // create_from_intent's canonical SKILL.md silently DROPPED the
+        // declaration — factory-built agents (the study run's
+        // credential_onboarding) were installed without the block their
+        // source shipped, and every denial read as
+        // missing_remote_access_declaration. The field now round-trips.
+        let skill = r#"---
+name: "declared.agent"
+description: "test"
+metadata:
+  autonoetic:
+    version: "1.0"
+    runtime:
+      engine: "autonoetic"
+      gateway_version: "0.1.0"
+      sdk_version: "0.1.0"
+      type: "stateful"
+      sandbox: "bubblewrap"
+      runtime_lock: "runtime.lock"
+    agent:
+      id: "declared.agent"
+      name: "Declared"
+      description: "test"
+    remote_access:
+      approval_mode: required
+      targets:
+        - kind: exact_host
+          value: "127.0.0.1"
+---
+# Body
+"#;
+        let (manifest, body) = crate::runtime::parser::SkillParser::parse(skill)
+            .expect("parse source skill");
+        let decl = manifest
+            .remote_access
+            .as_ref()
+            .expect("parser must capture remote_access into the struct");
+        assert_eq!(decl.targets.len(), 1);
+
+        let rendered = render_skill_document(&manifest, &body).expect("render");
+        let reloaded = crate::runtime::parser::SkillParser::parse(&rendered)
+            .expect("re-parse canonical skill");
+        let round_tripped = reloaded
+            .0
+            .remote_access
+            .expect("canonicalization must preserve remote_access (#1110)");
+        assert_eq!(round_tripped.targets.len(), 1);
+    }
+
+    #[test]
     fn test_default_runtime_declaration() {
         let rt = default_runtime_declaration();
         assert_eq!(rt.engine, "autonoetic");
@@ -1659,6 +1710,7 @@ agent:
     #[test]
     fn test_render_skill_document_round_trip() {
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: default_runtime_declaration(),
             agent: autonoetic_types::agent::AgentIdentity {
@@ -2047,6 +2099,7 @@ agent:
     #[test]
     fn test_render_skill_document_omits_null_optional_fields() {
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: default_runtime_declaration(),
             agent: autonoetic_types::agent::AgentIdentity {

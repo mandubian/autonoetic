@@ -689,6 +689,7 @@ mod tests {
     fn coder_manifest() -> AgentManifest {
         use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
         AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),

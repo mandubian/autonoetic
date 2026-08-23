@@ -1170,6 +1170,7 @@ mod tests {
         use autonoetic_types::capability::Capability;
 
         let manifest = AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".to_string(),
