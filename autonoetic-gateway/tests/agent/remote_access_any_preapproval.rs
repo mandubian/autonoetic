@@ -71,12 +71,13 @@ fn shipped_agents_any_preapproval_requires_wildcard_capability() {
         if matches!(decl.approval_mode, RemoteAccessApprovalMode::Required) {
             continue;
         }
-        let wildcard = manifest.capabilities.iter().any(|c| {
-            matches!(c, Capability::NetworkAccess { hosts } if hosts.iter().any(|h| h.trim() == "*"))
-        });
+        let wildcard = manifest.open_web
+            && manifest.capabilities.iter().any(|c| {
+                matches!(c, Capability::NetworkAccess { hosts } if hosts.iter().any(|h| h.trim() == "*"))
+            });
         if !wildcard {
             violations.push(format!(
-                "{}: targets:[any] + preapproved without wildcard NetworkAccess capability",
+                "{}: targets:[any] + preapproved without wildcard NetworkAccess capability + open_web",
                 path.display()
             ));
         }

@@ -58,11 +58,14 @@ fn normalize_host(host: &str) -> String {
 /// preapproved branches (sandbox_exec / artifact_exec) auto-approve on mere
 /// NetworkAccess capability *presence*, without consulting the capability's
 /// host list. The only shape in which the combination adds nothing is a
-/// wildcard capability (`hosts: ["*"]`) — the capability is then already the
-/// any-host authority (genuine open-web roles, `open_web: true`). Anything
-/// else means the static declaration is doing the widening, and it must not.
-/// Like the preapproved-requires-capability check this is a manifest
-/// inconsistency: fail shut, never overridable by an operator approval.
+/// wildcard capability (`hosts: ["*"]`) **with `open_web: true`** — the
+/// capability is then already the live any-host authority (genuine open-web
+/// roles; a wildcard without `open_web` grants nothing at runtime and is
+/// rejected at install time, so it must not launder an any-declaration
+/// through here either). Anything else means the static declaration is
+/// doing the widening, and it must not. Like the preapproved-requires-
+/// capability check this is a manifest inconsistency: fail shut, never
+/// overridable by an operator approval.
 pub fn validate_any_preapproval_shape(
     manifest: &AgentManifest,
     decl: &RemoteAccessDeclaration,
@@ -74,9 +77,10 @@ pub fn validate_any_preapproval_shape(
     if !matches!(decl.approval_mode, RemoteAccessApprovalMode::Preapproved) || !declares_any {
         return Ok(());
     }
-    let wildcard_capability = manifest.capabilities.iter().any(|c| {
-        matches!(c, Capability::NetworkAccess { hosts } if hosts.iter().any(|h| h.trim() == "*"))
-    });
+    let wildcard_capability = manifest.open_web
+        && manifest.capabilities.iter().any(|c| {
+            matches!(c, Capability::NetworkAccess { hosts } if hosts.iter().any(|h| h.trim() == "*"))
+        });
     if wildcard_capability {
         return Ok(());
     }
@@ -342,7 +346,7 @@ mod tests {
         ));
     }
 
-        #[test]
+#[test]
     fn any_preapproval_without_wildcard_capability_fails_shut() {
         // #1106: any + preapproved + narrow capability = silent any-host
         // auto-approval via the capability-presence preapproved branches.
@@ -395,6 +399,33 @@ mod tests {
     }
 
     #[test]
+    fn wildcard_without_open_web_does_not_launder_any_preapproval() {
+        // A wildcard capability without open_web grants nothing at runtime
+        // (network_access_allows_host returns false) and is rejected at
+        // install time — it must not satisfy the guard either, or a manifest
+        // that slipped past install validation would keep the silent
+        // any-host auto-approval.
+        let decl = RemoteAccessDeclaration {
+            approval_mode: RemoteAccessApprovalMode::Preapproved,
+            targets: vec![GrantTarget::Any],
+            enabled_languages: vec![],
+            python_imports: vec![],
+            js_imports: vec![],
+            rust_imports: vec![],
+            go_imports: vec![],
+            function_calls: vec![],
+            shell_commands: vec![],
+            package_manager_commands: vec![],
+        };
+        let mut m = manifest(true);
+        m.capabilities = vec![Capability::NetworkAccess {
+            hosts: vec!["*".to_string()],
+        }];
+        m.open_web = false;
+        assert!(validate_any_preapproval_shape(&m, &decl).is_err());
+    }
+
+    #[test]
     fn any_targets_with_required_mode_is_the_endorsed_shape() {
         // executor.default's documented shape (#1106): declaration-wide,
         // approval-per-host. The operator approval is the control.
@@ -438,7 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn declaration_target_any_matches_anything() {        let decl = RemoteAccessDeclaration {
+    fn declaration_target_any_matches_anything() {
+        let decl = RemoteAccessDeclaration {
             approval_mode: RemoteAccessApprovalMode::Required,
             targets: vec![GrantTarget::Any],
             enabled_languages: vec![],
