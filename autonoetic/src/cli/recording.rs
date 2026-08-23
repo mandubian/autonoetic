@@ -1,16 +1,18 @@
 //! CLI handlers for `autonoetic recording` commands.
+//!
+//! Since #1119 (tranche 3) every subcommand speaks JSON-RPC to the running
+//! gateway ([`crate::cli::rpc::GatewayRpc`]) via the `recording.*` methods —
+//! the CLI never opens gateway.db directly.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
-use autonoetic_types::recording::RecordingStatus;
+use autonoetic_types::recording::RecordingSession;
 
-fn open_store(config_path: &Path) -> anyhow::Result<Arc<GatewayStore>> {
+use crate::cli::rpc::GatewayRpc;
+
+fn open_rpc(config_path: &Path) -> anyhow::Result<GatewayRpc> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
-    std::fs::create_dir_all(&gateway_dir)?;
-    Ok(Arc::new(GatewayStore::open(&gateway_dir)?))
+    GatewayRpc::from_config(&config)
 }
 
 pub fn handle_recording_list(
@@ -19,8 +21,12 @@ pub fn handle_recording_list(
     limit: i64,
     json: bool,
 ) -> anyhow::Result<()> {
-    let store = open_store(config_path)?;
-    let sessions = store.list_recording_sessions(agent, limit)?;
+    let rpc = open_rpc(config_path)?;
+    let raw = rpc.call(
+        "recording.list",
+        serde_json::json!({ "agent": agent, "limit": limit }),
+    )?;
+    let sessions: Vec<RecordingSession> = serde_json::from_value(raw)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&sessions)?);
@@ -52,14 +58,18 @@ pub fn handle_recording_inspect(
     session_id: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    let store = open_store(config_path)?;
+    let rpc = open_rpc(config_path)?;
+    let raw = rpc.call(
+        "recording.get",
+        serde_json::json!({ "session_id": session_id }),
+    )?;
 
-    let session = store
-        .get_recording_session(session_id)?
-        .ok_or_else(|| anyhow::anyhow!("Recording session '{}' not found", session_id))?;
+    let session: RecordingSession = serde_json::from_value(raw["session"].clone())?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&session)?);
+        // Same shape as before the RPC migration: the session object only
+        // (the linked fixture set prints in the human-readable path).
+        println!("{}", serde_json::to_string_pretty(&raw["session"])?);
         return Ok(());
     }
 
@@ -75,16 +85,16 @@ pub fn handle_recording_inspect(
     println!("  Total bytes:      {}", session.total_bytes);
     println!("  Fixture set:      {}", session.fixture_set_id.as_deref().unwrap_or("none"));
 
-    if let Some(ref fs_id) = session.fixture_set_id {
-        if let Ok(Some(fs)) = store.get_fixture_set(fs_id) {
-            println!();
-            println!("  Fixture Set: {}", fs.fixture_set_id);
-            println!("    Files:     {}", fs.fixture_file_count);
-            println!("    Total:     {} bytes", fs.total_bytes);
-            println!("    Digest:    {}", fs.digest);
-            println!("    Hosts:     {:?}", fs.host_summary);
-            println!("    Status:    {}", fs.status.as_str());
-        }
+    if !raw["fixture_set"].is_null() {
+        let fs: autonoetic_types::recording::FixtureSet =
+            serde_json::from_value(raw["fixture_set"].clone())?;
+        println!();
+        println!("  Fixture Set: {}", fs.fixture_set_id);
+        println!("    Files:     {}", fs.fixture_file_count);
+        println!("    Total:     {} bytes", fs.total_bytes);
+        println!("    Digest:    {}", fs.digest);
+        println!("    Hosts:     {:?}", fs.host_summary);
+        println!("    Status:    {}", fs.status.as_str());
     }
 
     Ok(())
@@ -94,18 +104,11 @@ pub fn handle_recording_delete(
     config_path: &Path,
     session_id: &str,
 ) -> anyhow::Result<()> {
-    let store = open_store(config_path)?;
-
-    let session = store
-        .get_recording_session(session_id)?
-        .ok_or_else(|| anyhow::anyhow!("Recording session '{}' not found", session_id))?;
-
-    // Delete the fixture set if linked.
-    if let Some(ref fs_id) = session.fixture_set_id {
-        store.delete_fixture_set(fs_id)?;
-    }
-
-    store.delete_recording_session(session_id)?;
+    let rpc = open_rpc(config_path)?;
+    rpc.call(
+        "recording.delete",
+        serde_json::json!({ "session_id": session_id }),
+    )?;
     eprintln!("Recording session '{}' deleted.", session_id);
     Ok(())
 }
@@ -114,28 +117,11 @@ pub fn handle_recording_cancel(
     config_path: &Path,
     session_id: &str,
 ) -> anyhow::Result<()> {
-    let store = open_store(config_path)?;
-    store.stop_recording_session(session_id, RecordingStatus::Cancelled)?;
-
-    let causal_event = autonoetic_types::causal_chain::CausalEventRecord {
-        event_id: uuid::Uuid::new_v4().to_string(),
-        agent_id: String::new(),
-        session_id: session_id.to_string(),
-        turn_id: None,
-        event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-        category: "artifact".to_string(),
-        action: "artifact.fixture_recording_cancelled".to_string(),
-        status: "cancelled".to_string(),
-        enforced_rules: vec![],
-        target: Some(session_id.to_string()),
-        payload: None,
-        payload_ref: None,
-        evidence_ref: None,
-        reason: Some("Operator cancelled via CLI".to_string()),
-    };
-    let _ = store.create_causal_event(&causal_event);
-
+    let rpc = open_rpc(config_path)?;
+    rpc.call(
+        "recording.cancel",
+        serde_json::json!({ "session_id": session_id }),
+    )?;
     eprintln!("Recording session '{}' cancelled.", session_id);
     Ok(())
 }

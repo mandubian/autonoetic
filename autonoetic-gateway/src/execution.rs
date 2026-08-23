@@ -1384,7 +1384,7 @@ impl GatewayExecutionService {
 
     // ── Security sentinel operator surface (#1119 tranche 2) ────────────
 
-    fn security_store(&self) -> anyhow::Result<&Arc<crate::scheduler::gateway_store::GatewayStore>> {
+    fn require_store(&self) -> anyhow::Result<&Arc<crate::scheduler::gateway_store::GatewayStore>> {
         self.gateway_store
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("GatewayStore required for security commands"))
@@ -1393,7 +1393,7 @@ impl GatewayExecutionService {
     /// Snapshot for `security status`: pending counts by severity, all
     /// findings by triage state, last completed sentinel sweep.
     pub fn security_status(&self) -> anyhow::Result<serde_json::Value> {
-        let store = self.security_store()?;
+        let store = self.require_store()?;
         let by_severity = store.count_pending_security_findings_by_severity()?;
         let by_triage = store.count_security_findings_by_triage_state()?;
         let last_sweep = store
@@ -1438,7 +1438,7 @@ impl GatewayExecutionService {
         triage: Option<&str>,
         limit: u32,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let store = self.security_store()?;
+        let store = self.require_store()?;
         Ok(store
             .list_security_findings_filtered(severity, finding_type, triage, limit)?
             .iter()
@@ -1452,7 +1452,7 @@ impl GatewayExecutionService {
         state: autonoetic_types::security::TriageState,
         reason: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        self.security_store()?
+        self.require_store()?
             .update_security_finding_triage(finding_id, state, reason)?;
         Ok(serde_json::json!({ "ok": true, "finding_id": finding_id }))
     }
@@ -1467,7 +1467,7 @@ impl GatewayExecutionService {
         severity: Option<&str>,
         finding_type: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        let store = self.security_store()?;
+        let store = self.require_store()?;
         let rows =
             store.list_security_findings_filtered(severity, finding_type, Some("pending"), 10_000)?;
         let mut triaged = 0usize;
@@ -1507,7 +1507,7 @@ impl GatewayExecutionService {
         status: Option<&str>,
         limit: u32,
     ) -> anyhow::Result<Vec<serde_json::Value>> {
-        let store = self.security_store()?;
+        let store = self.require_store()?;
         Ok(store
             .list_attack_patterns(status, limit)?
             .iter()
@@ -1522,9 +1522,99 @@ impl GatewayExecutionService {
         check_type: Option<&str>,
         notes: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
-        self.security_store()?
+        self.require_store()?
             .review_attack_pattern(pattern_id, status, check_type, notes)?;
         Ok(serde_json::json!({ "ok": true, "pattern_id": pattern_id }))
+    }
+
+    // ── Recording / fixture-set operator surface (#1119 tranche 3) ──────
+
+    pub fn recording_sessions(
+        &self,
+        agent: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<autonoetic_types::recording::RecordingSession>> {
+        let store = self.require_store()?;
+        Ok(store.list_recording_sessions(agent, limit)?)
+    }
+
+    /// The recording session plus its linked fixture set (when present) —
+    /// what `recording inspect` renders.
+    pub fn recording_session_get(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let session = store
+            .get_recording_session(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("Recording session '{}' not found", session_id))?;
+        let fixture_set = match &session.fixture_set_id {
+            Some(fs_id) => store.get_fixture_set(fs_id)?,
+            None => None,
+        };
+        Ok(serde_json::json!({
+            "session": session,
+            "fixture_set": fixture_set,
+        }))
+    }
+
+    /// Fixture-set lookup for `eval sealed` (#1119 tranche 3): the CLI still
+    /// stages fixture files locally, but resolves the set + owning recording
+    /// session over RPC.
+    pub fn recording_fixture_set(
+        &self,
+        fixture_set_id: &str,
+    ) -> anyhow::Result<autonoetic_types::recording::FixtureSet> {
+        let store = self.require_store()?;
+        store
+            .get_fixture_set(fixture_set_id)?
+            .ok_or_else(|| anyhow::anyhow!("Fixture set '{}' not found", fixture_set_id))
+    }
+
+    /// Delete a recording session and its linked fixture set (#1119 tranche 3).
+    pub fn recording_session_delete(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let session = store
+            .get_recording_session(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("Recording session '{}' not found", session_id))?;
+        if let Some(fs_id) = &session.fixture_set_id {
+            store.delete_fixture_set(fs_id)?;
+        }
+        let deleted = store.delete_recording_session(session_id)?;
+        Ok(serde_json::json!({
+            "ok": deleted,
+            "session_id": session_id,
+            "deleted_fixture_set": session.fixture_set_id,
+        }))
+    }
+
+    /// Cancel a recording session and emit the operator-cancel causal event
+    /// (#1119 tranche 3) — previously emitted CLI-side.
+    pub fn recording_session_cancel(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        store.stop_recording_session(
+            session_id,
+            autonoetic_types::recording::RecordingStatus::Cancelled,
+        )?;
+        let causal_event = autonoetic_types::causal_chain::CausalEventRecord {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: String::new(),
+            session_id: session_id.to_string(),
+            turn_id: None,
+            event_seq: chrono::Utc::now().timestamp_millis().max(0) as u64,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "artifact".to_string(),
+            action: "artifact.fixture_recording_cancelled".to_string(),
+            status: "cancelled".to_string(),
+            enforced_rules: vec![],
+            target: Some(session_id.to_string()),
+            payload: None,
+            payload_ref: None,
+            evidence_ref: None,
+            reason: Some("Operator cancelled via CLI".to_string()),
+        };
+        let _ = store.create_causal_event(&causal_event);
+        Ok(serde_json::json!({ "ok": true, "session_id": session_id }))
     }
 
     /// Operator rating on a closed session's outcome row (#1119 RPC surface).

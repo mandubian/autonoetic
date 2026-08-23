@@ -4,6 +4,12 @@
 //! Each subcommand opens the gateway store from `config.yaml`, runs the
 //! requested operation, and prints either a human-readable summary or
 //! JSON when `--json` is set.
+//!
+//! #1119 note: export/import intentionally keep direct store access —
+//! capsules are an OFFLINE transfer format. Import targets a receiver
+//! gateway that may have never booted (no running gateway to RPC), and
+//! export must work on a stopped node. `verify`/`inspect` never touch the
+//! store at all. Exempted in `tests/cli_store_boundary.rs` by design.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

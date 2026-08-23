@@ -1,9 +1,14 @@
 //! CLI handlers for `autonoetic eval` commands.
+//!
+//! Since #1119 (tranche 3) the DB lookups (fixture set + owning recording
+//! session) go over JSON-RPC (`recording.fixture_set` / `recording.get`).
+//! Staging fixture files stays local: it is file I/O under the gateway dir,
+//! not database access, and the files can be large.
 
+use anyhow::Context;
 use std::path::Path;
-use std::sync::Arc;
 
-use autonoetic_gateway::scheduler::gateway_store::GatewayStore;
+use crate::cli::rpc::GatewayRpc;
 
 pub fn handle_eval_sealed(
     config_path: &Path,
@@ -15,23 +20,33 @@ pub fn handle_eval_sealed(
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let gateway_dir = config.agents_dir.join(".gateway");
-    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+    let rpc = GatewayRpc::from_config(&config)?;
 
     // 1. Look up the FixtureSet.
-    let fixture_set = store
-        .get_fixture_set(fixture_set_id)?
-        .ok_or_else(|| anyhow::anyhow!("Fixture set '{}' not found", fixture_set_id))?;
+    let fixture_set: autonoetic_types::recording::FixtureSet = serde_json::from_value(
+        rpc.call(
+            "recording.fixture_set",
+            serde_json::json!({ "fixture_set_id": fixture_set_id }),
+        )
+        .with_context(|| {
+            format!("Fixture set '{}' not found or gateway unreachable", fixture_set_id)
+        })?,
+    )?;
 
     // 2. Look up the RecordingSession to get the staging directory path.
-    let recording_session = store
-        .get_recording_session(&fixture_set.recording_session_id)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Recording session '{}' (for fixture set '{}') not found",
-                fixture_set.recording_session_id,
-                fixture_set_id
+    let session_raw = rpc
+        .call(
+            "recording.get",
+            serde_json::json!({ "session_id": fixture_set.recording_session_id }),
+        )
+        .with_context(|| {
+            format!(
+                "Recording session '{}' (for fixture set '{}') not found or gateway unreachable",
+                fixture_set.recording_session_id, fixture_set_id
             )
         })?;
+    let recording_session: autonoetic_types::recording::RecordingSession =
+        serde_json::from_value(session_raw["session"].clone())?;
 
     // 3. Compute the fixture staging directory.
     let fixture_staging_dir = gateway_dir

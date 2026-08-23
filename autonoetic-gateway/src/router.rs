@@ -3507,6 +3507,15 @@ impl JsonRpcRouter {
             "security.patterns" => handle_security_patterns_rpc(&self.execution, req),
             "security.pattern_review" => handle_security_pattern_review_rpc(&self.execution, req),
 
+            // `autonoetic recording` / `eval sealed` operator surface over
+            // RPC (#1119 tranche 3). Capsule export/import stay offline by
+            // design (import targets receivers with no running gateway).
+            "recording.list" => handle_recording_list_rpc(&self.execution, req),
+            "recording.get" => handle_recording_get_rpc(&self.execution, req),
+            "recording.delete" => handle_recording_delete_rpc(&self.execution, req),
+            "recording.cancel" => handle_recording_cancel_rpc(&self.execution, req),
+            "recording.fixture_set" => handle_recording_fixture_set_rpc(&self.execution, req),
+
             // RFC §4.3 authoring aid (#978): "emails stay local" → a concrete
             // proposed rule set from known tool catalogs + the MCP server list.
             // Pure and deterministic — the proposal has no effect until the
@@ -6401,7 +6410,10 @@ fn handle_security_findings_rpc(
         params.triage.as_deref(),
         params.limit,
     ) {
-        Ok(rows) => JsonRpcResponse::success(req.id, serde_json::to_value(rows).unwrap_or_default()),
+        Ok(rows) => match serde_json::to_value(rows) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
@@ -6503,7 +6515,10 @@ fn handle_security_patterns_rpc(
         Err(e) => return invalid_egress_params(req.id, "security.patterns", e),
     };
     match execution.security_patterns(params.status.as_deref(), params.limit) {
-        Ok(rows) => JsonRpcResponse::success(req.id, serde_json::to_value(rows).unwrap_or_default()),
+        Ok(rows) => match serde_json::to_value(rows) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
@@ -6577,6 +6592,158 @@ fn default_security_limit() -> u32 {
     // Matches the CLI's clap default (`security findings --limit 50`) so raw
     // RPC clients see the same default listing size operators do.
     50
+}
+
+/// `recording.list` — recording sessions, newest first (#1119 tranche 3).
+#[inline(never)]
+fn handle_recording_list_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default = "default_recording_limit")]
+        limit: i64,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "recording.list", e),
+    };
+    // Fail closed on negative limits: SQLite reads `LIMIT -1` as unbounded,
+    // which is never what an operator asked for (#1139 review).
+    if params.limit < 0 {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for recording.list: limit must be >= 0".to_string(),
+        );
+    }
+    match execution.recording_sessions(params.agent.as_deref(), params.limit) {
+        Ok(sessions) => match serde_json::to_value(sessions) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            // A serialization failure must surface as an error, not a
+            // silent success(null) (#1139 review).
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+fn default_recording_limit() -> i64 {
+    50
+}
+
+/// `recording.get` — one session with its linked fixture set (#1119 tranche 3).
+#[inline(never)]
+fn handle_recording_get_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "recording.get", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for recording.get: session_id must not be empty",
+        );
+    }
+    match execution.recording_session_get(&params.session_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `recording.delete` — remove a session + linked fixture set (#1119 tranche 3).
+#[inline(never)]
+fn handle_recording_delete_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "recording.delete", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for recording.delete: session_id must not be empty",
+        );
+    }
+    match execution.recording_session_delete(&params.session_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `recording.cancel` — stop a session as cancelled + causal event (#1119 tranche 3).
+#[inline(never)]
+fn handle_recording_cancel_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "recording.cancel", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for recording.cancel: session_id must not be empty",
+        );
+    }
+    match execution.recording_session_cancel(&params.session_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `recording.fixture_set` — fixture-set lookup for `eval sealed` (#1119 tranche 3).
+#[inline(never)]
+fn handle_recording_fixture_set_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        fixture_set_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "recording.fixture_set", e),
+    };
+    if params.fixture_set_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for recording.fixture_set: fixture_set_id must not be empty",
+        );
+    }
+    match execution.recording_fixture_set(&params.fixture_set_id) {
+        Ok(v) => match serde_json::to_value(v) {
+            Ok(encoded) => JsonRpcResponse::success(req.id, encoded),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
 }
 
 fn parse_triage_state_param(s: &str) -> anyhow::Result<autonoetic_types::security::TriageState> {

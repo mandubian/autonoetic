@@ -253,6 +253,11 @@ autonoetic agent credential rm cred_abc123
 
 Record real HTTP traffic during agent execution for sealed evaluation replay.
 
+> **Requires a running gateway (#1119):** `recording list/inspect/delete/cancel`
+> and `eval sealed` speak JSON-RPC (`recording.*`) instead of reading
+> `gateway.db` directly. (`recording start` runs an agent in-process, as
+> before. Capsule commands stay offline by design.)
+
 ### `autonoetic recording start`
 
 Start a recording session for an agent.
