@@ -17,6 +17,7 @@ mod fork;
 mod handoff;
 mod grant_close_preservation;
 mod inference;
+mod outcome_rpc;
 mod pause_cooperative;
 mod stream_fallback;
 mod report;

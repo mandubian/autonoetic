@@ -3489,6 +3489,14 @@ impl JsonRpcRouter {
             "session.egress_policy.set" => handle_egress_policy_set(&self.execution, req),
             "session.egress_policy.clear" => handle_egress_policy_clear(&self.execution, req),
 
+            // `autonoetic session rate|show|export` — operator surface over
+            // RPC (#1119 tranche 1): the CLI must not read gateway.db directly
+            // (Separation of Powers), same line protocol as every other
+            // operator read.
+            "session.rate" => handle_session_rate(&self.execution, req),
+            "session.outcome.get" => handle_session_outcome_get(&self.execution, req),
+            "session.export" => handle_session_export(&self.execution, req),
+
             // RFC §4.3 authoring aid (#978): "emails stay local" → a concrete
             // proposed rule set from known tool catalogs + the MCP server list.
             // Pure and deterministic — the proposal has no effect until the
@@ -6211,6 +6219,131 @@ fn handle_egress_policy_set(
         Err(e) => return invalid_egress_params(req.id, "session.egress_policy.set", e),
     };
     match execution.set_session_egress_policy(&params.session_id, params.policy, &params.set_by) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `session.rate` — operator thumb rating on a session outcome (#1119).
+#[inline(never)]
+fn handle_session_rate(execution: &GatewayExecutionService, req: JsonRpcRequest) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+        thumb: String,
+        #[serde(default)]
+        note: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.rate", e),
+    };
+    let thumb = match params.thumb.as_str() {
+        "up" => autonoetic_types::session_outcome::OperatorThumb::Up,
+        "down" => autonoetic_types::session_outcome::OperatorThumb::Down,
+        other => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32602,
+                format!("Invalid params for session.rate: unknown thumb '{other}' (expected up|down)"),
+            )
+        }
+    };
+    match execution.rate_session_outcome(&params.session_id, thumb, params.note.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `session.outcome.get` — the SessionOutcome row for `session show` (#1119).
+#[inline(never)]
+fn handle_session_outcome_get(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.outcome.get", e),
+    };
+    match execution.get_session_outcome_row(&params.session_id) {
+        Ok(Some(v)) => JsonRpcResponse::success(req.id, v),
+        Ok(None) => JsonRpcResponse::error(
+            req.id,
+            -32000,
+            format!(
+                "no SessionOutcome row found for session `{}`. Rows are created automatically \
+                 when a session closes; historical sessions from before P0 will not have one yet.",
+                params.session_id
+            ),
+        ),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `session.export` — full export payload for `session export` (#1119). The
+/// CLI deserializes and renders locally; only store reads happen here.
+#[inline(never)]
+fn handle_session_export(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+        #[serde(default)]
+        format: Option<String>,
+        #[serde(default)]
+        with_checkpoints: bool,
+        #[serde(default)]
+        min_altitude: Option<String>,
+        #[serde(default)]
+        row_limit: Option<i64>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "session.export", e),
+    };
+    let format = match params.format.as_deref() {
+        None => None,
+        Some("json") => Some(crate::runtime::session_export::ExportFormat::Json),
+        Some("room") => Some(crate::runtime::session_export::ExportFormat::Room),
+        Some("room_raw") => Some(crate::runtime::session_export::ExportFormat::RoomRaw),
+        Some(other) => {
+            return JsonRpcResponse::error(
+                req.id,
+                -32602,
+                format!(
+                    "Invalid params for session.export: unknown format '{other}' \
+                     (expected json|room|room_raw)"
+                ),
+            )
+        }
+    };
+    let min_altitude = match params.min_altitude.as_deref() {
+        None => None,
+        Some(s) => match autonoetic_types::session_timeline::Altitude::parse_str(s) {
+            Some(a) => Some(a),
+            None => {
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    format!("Invalid params for session.export: invalid min_altitude '{s}'"),
+                )
+            }
+        },
+    };
+    let opts = crate::runtime::session_export::ExportOptions {
+        format: format
+            .unwrap_or(crate::runtime::session_export::ExportFormat::Room),
+        min_altitude,
+        with_checkpoints: params.with_checkpoints,
+        row_limit: params.row_limit.unwrap_or(10_000),
+    };
+    match execution.export_full_session(&params.session_id, &opts) {
         Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }

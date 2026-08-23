@@ -14,7 +14,7 @@ use autonoetic_types::causal_chain::{CausalEventRecord, ExecutionTraceRecord};
 use autonoetic_types::config::GatewayConfig;
 use autonoetic_types::session_outcome::SessionOutcome;
 use autonoetic_types::session_timeline::{Altitude, SessionTimelineEntry, SessionTimelineListResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::checkpoint::{list_checkpoints, load_checkpoint, SessionCheckpoint};
 use crate::runtime::content_store::root_session_id;
@@ -68,7 +68,7 @@ impl Default for ExportOptions {
 }
 
 /// A single checkpoint bundled into the export.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct ExportedCheckpoint {
     pub turn_id: String,
     pub turn_counter: u64,
@@ -79,7 +79,7 @@ pub struct ExportedCheckpoint {
 }
 
 /// Serializable snapshot of a gateway-store emergency stop record.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct ExportedEmergencyStop {
     pub stop_id: String,
     pub scope_type: String,
@@ -119,7 +119,7 @@ impl From<&EmergencyStopRecord> for ExportedEmergencyStop {
 }
 
 /// Serializable snapshot of a session envelope record.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct ExportedEnvelope {
     pub id: i64,
     pub root_session_id: String,
@@ -153,7 +153,7 @@ impl From<&crate::scheduler::gateway_store::session_envelopes::SessionEnvelopeRe
 }
 
 /// Serializable snapshot of export options.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct ExportOptionsSnapshot {
     pub format: String,
     pub min_altitude: Option<String>,
@@ -173,7 +173,7 @@ impl From<&ExportOptions> for ExportOptionsSnapshot {
 }
 
 /// Complete session export payload.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Deserialize, Debug, Clone, Serialize)]
 pub struct SessionExport {
     pub session_id: String,
     pub root_session_id: String,
