@@ -851,7 +851,21 @@ impl NativeTool for CredentialRequestTool {
                     let request_url = match (query_param, svc.as_deref()) {
                         (Some(param), Some(secret)) if !param.is_empty() => {
                             let mut parsed = url::Url::parse(&url)?;
-                            parsed.query_pairs_mut().append_pair(param, secret);
+                            // Replace, don't append: an agent-provided
+                            // `?param=placeholder` plus an appended secret
+                            // would leave two values, and servers typically
+                            // read the first — auth would fail on the
+                            // placeholder with no visible cause.
+                            let kept: Vec<(String, String)> = parsed
+                                .query_pairs()
+                                .filter(|(k, _)| k != param)
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect();
+                            parsed
+                                .query_pairs_mut()
+                                .clear()
+                                .extend_pairs(kept.iter())
+                                .append_pair(param, secret);
                             parsed.to_string()
                         }
                         _ => url.clone(),

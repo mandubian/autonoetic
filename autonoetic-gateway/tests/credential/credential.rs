@@ -2566,9 +2566,10 @@ fn query_credential(host: String, inject_as: &str) -> CredentialRecord {
     }
 }
 
-/// One-shot server that CAPTURES the request line and answers with `body`
-/// (so a test can make the service echo the reflected URL back).
-fn spawn_capturing_server(body: String) -> (String, Arc<std::sync::Mutex<String>>, thread::JoinHandle<()>) {
+/// One-shot server that CAPTURES the request line and answers with `body`.
+fn spawn_capturing_server(
+    body: String,
+) -> (String, Arc<std::sync::Mutex<String>>, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
     let addr = listener
         .local_addr()
@@ -2582,6 +2583,36 @@ fn spawn_capturing_server(body: String) -> (String, Arc<std::sync::Mutex<String>
             let request = String::from_utf8_lossy(&request_buf).to_string();
             let request_line = request.lines().next().unwrap_or("").to_string();
             *captured_clone.lock().unwrap() = request_line;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://{}", addr), captured, handle)
+}
+
+/// One-shot server that CAPTURES the request line and answers with a JSON
+/// body echoing that request line back — the "service reflects your URL"
+/// shape that error payloads commonly take.
+fn spawn_echoing_server() -> (String, Arc<std::sync::Mutex<String>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should expose local addr");
+    let captured: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request_buf = [0_u8; 4096];
+            let _ = stream.read(&mut request_buf);
+            let request = String::from_utf8_lossy(&request_buf).to_string();
+            let request_line = request.lines().next().unwrap_or("").to_string();
+            *captured_clone.lock().unwrap() = request_line.clone();
+            let body = format!("{{\"echo\":\"{request_line}\"}}");
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -2615,8 +2646,7 @@ fn test_credential_request_query_param_injection_arrives_at_service() {
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
-    let (data_url, captured, data_h) =
-        spawn_capturing_server(r#"{"weather":"sunny"}"#.to_string());
+    let (data_url, captured, data_h) = spawn_capturing_server(r#"{"weather":"sunny"}"#.to_string());
     let host = url::Url::parse(&data_url)
         .unwrap()
         .host_str()
@@ -2626,6 +2656,8 @@ fn test_credential_request_query_param_injection_arrives_at_service() {
     let cred = query_credential(host, "query:appid");
     store.upsert_credential(&cred).unwrap();
 
+    // The agent's URL carries a placeholder appid — the gateway must REPLACE
+    // it, not append a second value (servers read the first occurrence).
     let result = registry
         .execute(
             "credential_request",
@@ -2635,7 +2667,7 @@ fn test_credential_request_query_param_injection_arrives_at_service() {
             None,
             &serde_json::json!({
                 "credential_id": "cred_query_001",
-                "url": format!("{}/data/2.5/weather?q=toulouse", data_url)
+                "url": format!("{}/data/2.5/weather?q=toulouse&appid=PLACEHOLDER", data_url)
             })
             .to_string(),
             None,
@@ -2656,12 +2688,17 @@ fn test_credential_request_query_param_injection_arrives_at_service() {
 
     let request_line = captured.lock().unwrap().clone();
     assert!(
-        request_line.contains("appid=owm-secret-123"),
-        "the secret must arrive as the query parameter: {request_line}"
+        !request_line.contains("appid=PLACEHOLDER"),
+        "the placeholder must be replaced, not kept: {request_line}"
     );
     assert!(
-        request_line.starts_with("GET /data/2.5/weather?q=toulouse&"),
-        "existing query params must be preserved, secret appended: {request_line}"
+        request_line.matches("appid=").count() == 1
+            && request_line.contains("appid=owm-secret-123"),
+        "exactly one appid param, carrying the secret: {request_line}"
+    );
+    assert!(
+        request_line.contains("q=toulouse"),
+        "unrelated params preserved: {request_line}"
     );
 
     let _ = data_h;
@@ -2688,12 +2725,7 @@ fn test_credential_request_query_param_secret_redacted_from_echo() {
     let temp = tempdir().unwrap();
     let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
 
-    // The echo body is built by the test AFTER the URL is known — but the
-    // server needs it up front. Use a placeholder the test replaces by
-    // echoing whatever the request carried: respond with the raw request
-    // target via a second connection is overkill; instead have the service
-    // return a body containing the canonical encoded pair form.
-    let (data_url, captured, data_h) = spawn_capturing_server(String::new());
+    let (data_url, captured, data_h) = spawn_echoing_server();
     let host = url::Url::parse(&data_url)
         .unwrap()
         .host_str()
@@ -2730,13 +2762,16 @@ fn test_credential_request_query_param_secret_redacted_from_echo() {
     let request_line = captured.lock().unwrap().clone();
     assert!(request_line.contains("appid=owm-secret-123"), "{request_line}");
 
-    // …and an echo of that URL shape must sanitize. Drive the sanitizer's
-    // contract directly: the encoded pair must never survive verbatim.
-    let echoed = format!("error: invalid request url {}", request_line);
-    let sanitized = autonoetic_gateway::log_redaction::redact_text_for_logs(&echoed);
+    // …and the service's echo of the request URL must come back sanitized:
+    // the tool's own response contract, not just the log redactor.
+    let body_str = parsed["body"]["echo"].as_str().unwrap_or_default();
     assert!(
-        !sanitized.contains("owm-secret-123"),
-        "gateway log redaction must mask the query-injected secret: {sanitized}"
+        !body_str.contains("owm-secret-123"),
+        "the raw secret must never survive in an echoed URL: {body_str}"
+    );
+    assert!(
+        body_str.contains("appid=[REDACTED]"),
+        "the param pair must be redacted by name: {body_str}"
     );
 
     let _ = data_h;
