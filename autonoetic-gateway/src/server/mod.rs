@@ -12,6 +12,7 @@ pub mod jsonrpc;
 pub mod ofp;
 pub mod registry;
 pub mod router;
+pub mod transport;
 
 pub struct GatewayServer {
     config: Arc<GatewayConfig>,

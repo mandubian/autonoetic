@@ -5,19 +5,22 @@
 //! delimited JSON-RPC-over-TCP transport the chat TUI uses.
 
 use autonoetic_gateway::router::{JsonRpcRequest, JsonRpcResponse};
+use autonoetic_gateway::server::transport::BoxedConnection;
 use autonoetic_types::config::GatewayConfig;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream as AsyncTcpStream;
 use tokio::sync::Mutex;
 
+/// The async path stores a type-erased transport connection (#1122): the
+/// RoomClient is transport-agnostic on the Tokio side, so a Unix-socket or
+/// in-process gateway transport drops in without touching call logic. The
+/// sync TUI path keeps a plain blocking `TcpStream` — no nested runtime.
 struct AsyncPersistedConn {
-    reader: AsyncBufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: AsyncBufReader<tokio::io::ReadHalf<BoxedConnection>>,
+    writer: tokio::io::WriteHalf<BoxedConnection>,
 }
 
 struct SyncPersistedConn {
@@ -280,11 +283,12 @@ impl RoomClient {
         if guard.is_some() {
             return Ok(());
         }
-        let stream = AsyncTcpStream::connect(&self.addr)
+        let stream = tokio::net::TcpStream::connect(&self.addr)
             .await
             .map_err(|e| anyhow::anyhow!("cannot reach gateway at {}: {}", self.addr, e))?;
         let _ = stream.set_nodelay(true);
-        let (read_half, write_half) = stream.into_split();
+        let conn: BoxedConnection = Box::new(stream);
+        let (read_half, write_half) = tokio::io::split(conn);
         *guard = Some(AsyncPersistedConn {
             reader: AsyncBufReader::new(read_half),
             writer: write_half,

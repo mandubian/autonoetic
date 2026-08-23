@@ -4,6 +4,7 @@
 //! and HMAC-SHA256 authenticated handshakes with optional extensions (msg_hmac).
 
 use crate::server::registry::{PeerEntry, PeerRegistry, PeerState};
+use crate::server::transport::TransportListener;
 use autonoetic_ofp::wire::{
     decode_length, decode_message, encode_message, ChainAttestation, ConstitutionProfile,
     PeerEventRef, WireMessage, WireMessageKind, WireRequest, WireResponse, PROTOCOL_VERSION,
@@ -478,7 +479,7 @@ pub async fn start_ofp_server(
             e
         )
     })?;
-    let listener = TcpListener::bind(listen_addr).await?;
+    let mut listener = crate::server::transport::TcpListenerAdapter::bind(listen_addr).await?;
     info!(
         "OFP Server listening on {} (node_id={})",
         listener.local_addr()?,
@@ -487,7 +488,7 @@ pub async fn start_ofp_server(
 
     loop {
         match listener.accept().await {
-            Ok((stream, peer_addr)) => {
+            Ok((conn, peer_addr)) => {
                 debug!("OFP: accepted connection from {}", peer_addr);
                 let node_id_clone = node_id.clone();
                 let node_name_clone = node_name.clone();
@@ -498,7 +499,7 @@ pub async fn start_ofp_server(
 
                 tokio::spawn(async move {
                     if let Err(e) = handle_inbound_connection(
-                        stream,
+                        conn,
                         peer_addr,
                         node_id_clone,
                         node_name_clone,
@@ -522,7 +523,7 @@ pub async fn start_ofp_server(
 }
 
 async fn handle_inbound_connection(
-    stream: TcpStream,
+    conn: crate::server::transport::BoxedConnection,
     peer_addr: SocketAddr,
     local_node_id: String,
     local_node_name: String,
@@ -531,7 +532,7 @@ async fn handle_inbound_connection(
     registry: PeerRegistry,
     router: std::sync::Arc<crate::router::JsonRpcRouter>,
 ) -> anyhow::Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(conn);
     let gateway_store = router.execution_service().gateway_store();
     let gateway_dir = crate::execution::gateway_root_dir(config.as_ref());
 
@@ -1026,8 +1027,8 @@ async fn handle_inbound_connection(
 }
 
 /// Read exactly 4 bytes length, then that many bytes of JSON payload.
-pub async fn read_framed_message(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+pub async fn read_framed_message<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
 ) -> anyhow::Result<WireMessage> {
     let mut header = [0u8; 4];
     reader.read_exact(&mut header).await?;
@@ -1048,15 +1049,15 @@ pub async fn read_framed_message(
 }
 
 /// Backward-compatible alias for older call sites.
-pub async fn parse_ofp_response(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+pub async fn parse_ofp_response<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
 ) -> anyhow::Result<WireMessage> {
     read_framed_message(reader).await
 }
 
 /// Encode JSON payload, prepend 4-byte length, and write to socket.
-pub async fn write_framed_message(
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+pub async fn write_framed_message<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
     msg: &WireMessage,
 ) -> anyhow::Result<()> {
     let bytes = encode_message(msg)?;

@@ -1,9 +1,15 @@
-//! JSON-RPC TCP listener for local event ingress.
+//! JSON-RPC ingress listener.
+//!
+//! Transport-agnostic since #1122: the accept loop runs on any
+//! [`TransportListener`](crate::server::transport::TransportListener) and the
+//! connection handler owns a type-erased
+//! [`Connection`](crate::server::transport::Connection) — TCP in production,
+//! in-memory in tests.
 
 use crate::router::{JsonRpcRequest, JsonRpcResponse, JsonRpcRouter};
+use crate::server::transport::{BoxedConnection, TcpListenerAdapter, TransportListener};
 use std::net::SocketAddr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
 
 /// Start a line-delimited JSON-RPC server over TCP.
 pub async fn start_jsonrpc_server(
@@ -11,23 +17,23 @@ pub async fn start_jsonrpc_server(
     router: JsonRpcRouter,
     required_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(listen_addr).await?;
+    let listener = TcpListenerAdapter::bind(listen_addr).await?;
     serve_jsonrpc_listener(listener, router, required_auth_token).await
 }
 
-pub(crate) async fn serve_jsonrpc_listener(
-    listener: TcpListener,
+pub(crate) async fn serve_jsonrpc_listener<L: TransportListener>(
+    mut listener: L,
     router: JsonRpcRouter,
     required_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
     tracing::info!("JSON-RPC server listening on {}", listener.local_addr()?);
 
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (conn, peer_addr) = listener.accept().await?;
         let router = router.clone();
         let required_auth_token = required_auth_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, router, required_auth_token).await {
+            if let Err(e) = handle_connection(conn, router, required_auth_token).await {
                 tracing::warn!(peer = %peer_addr, error = %e, "JSON-RPC client disconnected");
             }
         });
@@ -49,11 +55,11 @@ fn is_authorized_request(req: &JsonRpcRequest, required_auth_token: Option<&str>
 }
 
 async fn handle_connection(
-    stream: TcpStream,
+    conn: BoxedConnection,
     router: JsonRpcRouter,
     required_auth_token: Option<String>,
 ) -> anyhow::Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(conn);
     let mut lines = BufReader::new(read_half).lines();
 
     while let Some(line) = lines.next_line().await? {
@@ -88,8 +94,10 @@ async fn handle_connection(
 mod tests {
     use super::*;
     use autonoetic_types::config::GatewayConfig;
+    use crate::server::transport::{memory_transport, TcpListenerAdapter};
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
 
     fn test_router() -> (TempDir, JsonRpcRouter) {
         let temp = tempfile::tempdir().expect("tempdir should create");
@@ -113,7 +121,7 @@ mod tests {
             .local_addr()
             .expect("listener should expose local addr");
         let server = tokio::spawn(async move {
-            serve_jsonrpc_listener(listener, router, None)
+            serve_jsonrpc_listener(TcpListenerAdapter::new(listener), router, None)
                 .await
                 .expect("server should run");
         });
@@ -159,7 +167,7 @@ mod tests {
             .local_addr()
             .expect("listener should expose local addr");
         let server = tokio::spawn(async move {
-            serve_jsonrpc_listener(listener, router, None)
+            serve_jsonrpc_listener(TcpListenerAdapter::new(listener), router, None)
                 .await
                 .expect("server should run");
         });
@@ -212,7 +220,7 @@ mod tests {
             .local_addr()
             .expect("listener should expose local addr");
         let server = tokio::spawn(async move {
-            serve_jsonrpc_listener(listener, router, Some("test-secret".to_string()))
+            serve_jsonrpc_listener(TcpListenerAdapter::new(listener), router, Some("test-secret".to_string()))
                 .await
                 .expect("server should run");
         });
@@ -246,6 +254,50 @@ mod tests {
         let err = response.error.expect("error should exist");
         assert_eq!(err.code, -32001);
         assert!(err.message.contains("Unauthorized"));
+
+        server.abort();
+    }
+
+    /// #1122: the accept loop and handler are transport-agnostic — the same
+    /// `serve_jsonrpc_listener` that fronts TCP in production runs here over
+    /// an in-memory pair, with no sockets bound. This is the pluggability
+    /// proof for the transport seam (and the pattern future Unix-socket or
+    /// TLS listeners would use).
+    #[tokio::test]
+    async fn test_jsonrpc_serves_over_memory_transport() {
+        let (_temp, router) = test_router();
+        let (listener, connector) = memory_transport();
+        let server = tokio::spawn(async move {
+            serve_jsonrpc_listener(listener, router, Some("secret".to_string()))
+                .await
+                .expect("server should run");
+        });
+
+        let mut client = connector.connect().await.expect("client should connect");
+        let (read_half, mut write_half) = tokio::io::split(client);
+        let mut lines = BufReader::new(read_half).lines();
+
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "m1",
+            "method": "ping",
+            "params": {},
+            "auth_token": "secret"
+        });
+        write_half
+            .write_all(format!("{}\n", request).as_bytes())
+            .await
+            .expect("request should write");
+
+        let line = lines
+            .next_line()
+            .await
+            .expect("response should read")
+            .expect("response line should exist");
+        let response: JsonRpcResponse =
+            serde_json::from_str(&line).expect("response should decode");
+        assert_eq!(response.result, Some(serde_json::json!("pong")));
+        assert!(response.error.is_none());
 
         server.abort();
     }
