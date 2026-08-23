@@ -465,6 +465,31 @@ impl NativeTool for ArtifactExecTool {
         if !approval_validated_for_command && remote_analysis.requires_approval {
             let declared_remote_access =
                 crate::runtime::network_policy::load_manifest_remote_access_declaration(agent_dir);
+            // #1106: any + preapproved + non-wildcard capability is a silent
+            // any-host auto-approval — fail shut unless the sealed proxy is
+            // the network control anyway.
+            let sealed_or_recording = matches!(
+                manifest.sandbox_network,
+                autonoetic_types::agent::SandboxNetworkPolicy::Sealed
+                    | autonoetic_types::agent::SandboxNetworkPolicy::Recording
+            );
+            if !sealed_or_recording {
+                if let Some(decl) = declared_remote_access.as_ref() {
+                    if let Err(violation) =
+                        crate::runtime::network_policy::validate_any_preapproval_shape(
+                            manifest, decl,
+                        )
+                    {
+                        return Ok(serde_json::json!({
+                            "ok": false,
+                            "error_type": violation.error_type,
+                            "message": violation.message,
+                            "repair_hint": violation.repair_hint,
+                        })
+                        .to_string());
+                    }
+                }
+            }
             let remote_approval_mode = declared_remote_access
                 .as_ref()
                 .map(|d| d.approval_mode)

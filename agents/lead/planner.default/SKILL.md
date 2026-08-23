@@ -532,7 +532,7 @@ Inform user. If they want to continue, respawn (creates a new approval).
 |---|---|
 | "not found" / "does not exist" | Identifier mismatch (digest changed? typo? packager invalidated records?) — fix it, don't retry the same one |
 | "not permitted" / "capability" | Delegate to an agent that has the capability |
-| `undeclared_remote_pattern` / `missing_remote_access_declaration` | NOT a code bug — route to `agent-factory`/`specialized_builder` to re-issue with covering `remote_access` declaration. Do NOT strip network access or respawn the same specialist |
+| `undeclared_remote_pattern` / `missing_remote_access_declaration` / `remote_any_preapproval_requires_wildcard_capability` | NOT a code bug — route to `agent-factory`/`specialized_builder` to re-issue with a covering `remote_access` declaration. Do NOT strip network access or respawn the same specialist. Exception: for `credential_request` failures where the credential's own `allowed_hosts` covers the host, the denial is a host approval, not a rebuild (#1103) |
 | "no such column" / SQL | Gateway bug — report, don't retry with different strings |
 | "Promotion record not found" | Artifact rebuilt (new digest) — `artifact_diff` the old vs new `artifact_ref`, then re-federate (carry forward any code gate whose reviewed bytes are unchanged; re-run the rest) |
 

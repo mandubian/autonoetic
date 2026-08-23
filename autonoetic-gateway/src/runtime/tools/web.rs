@@ -117,7 +117,8 @@ fn network_policy_violation_to_anyhow(
     match violation.error_type {
         "missing_remote_access_declaration"
         | "undeclared_remote_target"
-        | "remote_preapproval_requires_network_capability" => {
+        | "remote_preapproval_requires_network_capability"
+        | "remote_any_preapproval_requires_wildcard_capability" => {
             anyhow::Error::from(tagged::Tagged::validation(err))
         }
         _ => anyhow::Error::from(tagged::Tagged::permission(err)),

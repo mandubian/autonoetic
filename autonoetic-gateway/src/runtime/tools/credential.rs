@@ -514,8 +514,12 @@ impl NativeTool for CredentialRequestTool {
                         .allowed_hosts
                         .iter()
                         .any(|h| h == "*" || normalize_allowed_host(h) == url_host);
-                let fail_shut = violation.error_type
-                    == "remote_preapproval_requires_network_capability"
+                let manifest_inconsistency = matches!(
+                    violation.error_type,
+                    "remote_preapproval_requires_network_capability"
+                        | "remote_any_preapproval_requires_wildcard_capability"
+                );
+                let fail_shut = manifest_inconsistency
                     || (!credential_covers_host
                         && matches!(
                             violation.error_type,
@@ -531,10 +535,7 @@ impl NativeTool for CredentialRequestTool {
                     // permission denial even if the declaration passed —
                     // surface the same shape here so callers (and tests)
                     // see one failure mode for out-of-scope hosts.
-                    if !credential_covers_host
-                        && violation.error_type
-                            != "remote_preapproval_requires_network_capability"
-                    {
+                    if !credential_covers_host && !manifest_inconsistency {
                         return Ok(autonoetic_types::tool_error::ToolError::permission(
                             format!(
                                 "Credential '{}' for service '{}' is not authorized for host '{}'. Allowed hosts: {:?}",

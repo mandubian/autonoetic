@@ -6,8 +6,9 @@
 tests in `tests/credential/credential.rs`. §4.2 card surfacing completed
 on `feat/credential-prompt-card-hosts` — scope on the prompt card, the
 TUI secret-entry panel, `gateway approvals list`, and the pending summary
-(see #1105). §4.1 (tightening executor's
-`targets: [any]`) and §4.3 (declaration-load discrepancy) remain open.
+(see #1105). §4.1 resolved in #1106 (documented `any` + fail-shut guard
+for the dangerous combination). §4.3 (declaration-load discrepancy)
+remains open.
 Proposed out of the classic-harness validation study (credential-register
 case); the study run completed only because `executor.default` happens to
 declare `remote_access.targets: [{kind: "any"}]`; every other installed
@@ -117,11 +118,17 @@ name that exact host.
 
 ## 4. Follow-ups (out of scope here, recorded so they are not lost)
 
-1. **Tighten `executor.default`'s `targets: [{kind: "any"}]`** once this
-   RFC lands — under the new model the runtime approval carries the
-   security, and `any` stops being the only way to make the tool usable.
-   Other agents' `targets: []` stay as-is (they become meaningful again:
-   pre-committed scope).
+1. **`executor.default`'s `targets: [{kind: "any"}]`** — resolved in #1106:
+   kept `any` with a documented rationale (general-purpose role; an
+   enumeration would fail shut on the first undeclared host and recreate
+   the "pipeline for one GET" failure this RFC criticizes), and hardened
+   the shape that made `any` dangerous: `any` + `preapproved` without a
+   wildcard NetworkAccess capability is now a fail-shut manifest
+   inconsistency (`remote_any_preapproval_requires_wildcard_capability`)
+   across sandbox_exec / artifact_exec / web / credential paths, with a
+   shipped-roster contract test and a pin that executor keeps
+   `approval_mode: required`. Other agents' `targets: []` stay as-is
+   (they become meaningful again: pre-committed scope).
 2. **Surface `allowed_hosts` on the CredentialPrompt card summary** (not
    buried in payload) so secret entry and egress scope are approved
    *knowingly*, even though scope alone never authorizes egress.
