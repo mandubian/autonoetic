@@ -7,8 +7,8 @@ tests in `tests/credential/credential.rs`. §4.2 card surfacing completed
 on `feat/credential-prompt-card-hosts` — scope on the prompt card, the
 TUI secret-entry panel, `gateway approvals list`, and the pending summary
 (see #1105). §4.1 resolved in #1106 (documented `any` + fail-shut guard
-for the dangerous combination). §4.3 (declaration-load discrepancy)
-remains open.
+for the dangerous combination). §4.3 resolved in #1110 (manifest field
+round-trip + diagnosability).
 Proposed out of the classic-harness validation study (credential-register
 case); the study run completed only because `executor.default` happens to
 declare `remote_access.targets: [{kind: "any"}]`; every other installed
@@ -132,12 +132,18 @@ name that exact host.
 2. **Surface `allowed_hosts` on the CredentialPrompt card summary** (not
    buried in payload) so secret entry and egress scope are approved
    *knowingly*, even though scope alone never authorizes egress.
-3. **Investigate the declaration-load discrepancy** from the study run:
-   `credential_onboarding.default` failed with
-   `missing_remote_access_declaration` despite shipping a (empty-targets)
-   `remote_access` block — the block either failed to deserialize or was
-   read from a different directory. Expected shape would be
-   `undeclared_remote_target`.
+3. **Declaration-load discrepancy** — root-caused and fixed (#1110):
+   `AgentManifest` had no `remote_access` field, so `create_from_intent`'s
+   canonical SKILL.md (rendered from the struct) silently DROPPED the
+   block — factory-built agents like the study's credential_onboarding
+   were installed without the declaration their source shipped, and the
+   denial correctly read "missing" because the INSTALLED copy had none.
+   The field now round-trips parse → render; create_from_intent inherits
+   it from the artifact SKILL.md, skill_install keeps the fetched one.
+   The loader additionally warns (instead of silently swallowing) on
+   unreadable SKILL.md / unparsable frontmatter / deserialize failure,
+   and pins distinguish empty-targets (`undeclared_remote_target`) from
+   missing/malformed.
 
 ## 5. Alternatives considered
 

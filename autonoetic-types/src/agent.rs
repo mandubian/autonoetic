@@ -318,6 +318,16 @@ pub struct AgentManifest {
     /// into every label resolution in this session, alongside operator rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<AgentEgressManifest>,
+    /// Declarative network targets for outbound access (#1110). Parsed from
+    /// the frontmatter and re-emitted by canonicalization so an installed
+    /// revision KEEPS its declaration: previously this block existed only as
+    /// raw YAML re-read from disk by the runtime, so `create_from_intent`'s
+    /// `render_skill_document` — which renders from this struct — silently
+    /// dropped it, and every factory-built agent's declaration vanished
+    /// (denials rendered as `missing_remote_access_declaration` while the
+    /// source manifest clearly shipped a block).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_access: Option<std::boxed::Box<RemoteAccessDeclaration>>,
 }
 
 fn is_default_sandbox_network_policy(p: &SandboxNetworkPolicy) -> bool {

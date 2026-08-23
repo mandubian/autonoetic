@@ -274,6 +274,10 @@ impl NativeTool for SkillInstallTool {
         });
 
         let target_manifest = AgentManifest {
+            // #1110: keep the fetched skill's remote_access declaration —
+            // the parsed manifest now carries it, and canonicalization
+            // re-emits it into the installed SKILL.md.
+            remote_access: parsed_manifest.remote_access.clone(),
             version: parsed_manifest.version.clone(),
             runtime: parsed_manifest.runtime.clone(),
             agent: AgentIdentity {

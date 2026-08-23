@@ -2215,7 +2215,20 @@ impl NativeTool for AgentRevisionCreateFromIntentTool {
             .map(|b| artifact_layers_from_bundle(b))
             .unwrap_or_default();
 
+        // #1110: inherit the artifact SKILL.md's remote_access declaration.
+        // Canonicalization renders from intent args, which never carried the
+        // block, so factory-built agents used to be installed WITHOUT the
+        // declaration their designed manifest shipped — every later network
+        // denial then read as missing_remote_access_declaration ("no
+        // declaration exists") while the source clearly had one.
+        let remote_access_decl = file_map
+            .get("SKILL.md")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|content| crate::runtime::parser::SkillParser::parse(content).ok())
+            .and_then(|(m, _)| m.remote_access);
+
         let target_manifest = AgentManifest {
+            remote_access: remote_access_decl,
             version: "1.0".to_string(),
             runtime: crate::runtime::install_contract::default_runtime_declaration(),
             agent: AgentIdentity {
@@ -6064,6 +6077,7 @@ mod capability_lenient_deser_tests {
 
     fn test_manifest() -> AgentManifest {
         AgentManifest {
+            remote_access: None,
             version: "1.0".to_string(),
             runtime: crate::runtime::install_contract::default_runtime_declaration(),
             agent: AgentIdentity {

@@ -74,6 +74,9 @@ struct AutonoeticMetadata {
     sandbox_network: Option<autonoetic_types::agent::SandboxNetworkPolicy>,
     #[serde(default)]
     egress: Option<AgentEgressManifest>,
+    #[serde(default)]
+    remote_access:
+        Option<std::boxed::Box<autonoetic_types::agent::RemoteAccessDeclaration>>,
 }
 
 /// Parser for `SKILL.md` files.
@@ -260,6 +263,7 @@ fn map_standard_frontmatter_to_manifest(standard: StandardSkillFrontmatter) -> A
     }
 
     AgentManifest {
+        remote_access: meta.remote_access,
         version: meta.version.unwrap_or_else(|| "1.0".to_string()),
         runtime,
         agent,

@@ -810,6 +810,7 @@ mod surface_drift_tests {
 
     fn base_manifest() -> AgentManifest {
         AgentManifest {
+            remote_access: None,
             version: "1.0".into(),
             runtime: RuntimeDeclaration {
                 engine: "autonoetic".into(),
