@@ -165,16 +165,32 @@ pub fn preflight_plan<L: CapabilityLookup>(
     }
 }
 
-/// Production `CapabilityLookup` backed by the on-disk agent registry.
+/// Production `CapabilityLookup` backed by the **promoted revision** of each
+/// agent (#1136).
 ///
-/// Each lookup triggers a fresh directory scan via
-/// [`AgentRepository::get_sync`] — the same pattern
-/// `materialize_plan_grants` uses for the capability-envelope fallback.
-/// Plans are small (a handful of steps), so this is fine; a future
-/// optimization could memoize within a single preflight pass.
-impl CapabilityLookup for crate::AgentRepository {
+/// Capability coverage is a policy question, so it is answered from the
+/// promotion-gated revision store rather than the ungated `agents_dir` copy —
+/// otherwise an unvetted on-disk manifest could declare a capability it was
+/// never granted and turn an `uncovered_capability` finding into a `Covered`
+/// one. An agent with no promoted revision reports `None`
+/// (`agent_not_installed`), which is the correct answer here: nothing is
+/// installed that the plan can rely on.
+///
+/// Each lookup hits the revision store and reads one `SKILL.md`. Plans are
+/// small (a handful of steps), so this is fine; a future optimization could
+/// memoize within a single preflight pass.
+pub struct RevisionCapabilityLookup<'a> {
+    pub repo: &'a crate::AgentRepository,
+    pub gateway_dir: &'a std::path::Path,
+    pub store: &'a crate::scheduler::gateway_store::GatewayStore,
+}
+
+impl CapabilityLookup for RevisionCapabilityLookup<'_> {
     fn declared_capabilities(&self, agent_id: &str) -> Option<Vec<String>> {
-        match self.get_sync(agent_id) {
+        match self
+            .repo
+            .get_sync_from_store(agent_id, self.gateway_dir, Some(self.store))
+        {
             Ok(loaded) => Some(
                 loaded
                     .manifest

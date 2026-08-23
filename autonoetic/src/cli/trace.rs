@@ -761,10 +761,10 @@ pub fn load_agent_traces(
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
 
     let filtered: Vec<_> = if let Some(agent_id) = requested_agent {
-        let loaded = repo.get_sync(agent_id)?;
+        let loaded = repo.load_unvetted_from_ingest_dir(agent_id)?;
         vec![loaded]
     } else {
-        repo.list_loaded_sync()?
+        repo.list_loaded_unvetted_from_ingest_dir()?
     };
 
     let mut traces = Vec::new();

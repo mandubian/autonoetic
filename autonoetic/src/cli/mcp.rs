@@ -61,7 +61,7 @@ pub async fn handle_mcp_add(
 pub async fn handle_mcp_expose(agent_id: &str, config_path: &Path) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
-    let loaded = repo.get(agent_id).await?;
+    let loaded = repo.get_unvetted_from_ingest_dir(agent_id).await?;
 
     let mut server = AgentMcpServer::new(CliAgentExecutor {
         agents_dir: config.agents_dir,

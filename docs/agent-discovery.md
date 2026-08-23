@@ -33,7 +33,9 @@ The gateway's job is enumeration. The agent's job is understanding. Neither does
 
 ## `agent_list` — Gateway Tool
 
-`agent_list` is a read-only directory query. It scans the installed agent filesystem and returns structured metadata.
+`agent_list` is a read-only query over the **promoted-alias registry**. It enumerates every agent that has a promoted revision and returns structured metadata from it.
+
+It does not scan `agents_dir`. Until #1136 it did, as a second phase appending "legacy agents not in SQLite" — which by construction meant agents with *no* promoted revision. That told a spawner it could delegate to something that had never passed a promotion gate, and described it using capabilities from a file that governs no run. Reference bundles under `agents/**` are auto-promoted at startup by `bootstrap_agents`, so a legitimately installed agent always has an alias and is always enumerated.
 
 **Capability required:** `SandboxFunctions` (lower privilege than `AgentSpawn` — any agent that can call knowledge tools can enumerate agents)
 
@@ -63,7 +65,7 @@ The gateway's job is enumeration. The agent's job is understanding. Neither does
 ```
 
 **Design constraints:**
-- Returns only installed agents (those with a `SKILL.md` in the agents directory)
+- Returns only agents with a promoted revision — what is listed is what would actually run
 - No semantic scoring — that belongs in the agent layer
 - All three filter args are independent and combinable
 - Empty filter set returns all agents

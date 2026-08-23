@@ -118,9 +118,10 @@ pub fn inject_auto_learning_jobs(
                 });
             }
             Ok(false) => {
-                let loaded = repo
-                    .get_sync_from_store(MEMORY_CURATOR_ID, &gateway_dir, Some(store.as_ref()))
-                    .or_else(|_| repo.get_sync(MEMORY_CURATOR_ID));
+                // Promoted revision only (#1136) — an ungated `agents_dir`
+                // copy does not count as installed for cron reconciliation.
+                let loaded =
+                    repo.get_sync_from_store(MEMORY_CURATOR_ID, &gateway_dir, Some(store.as_ref()));
                 if loaded.is_err() {
                     results.push(ReconcileResult {
                         agent_id: MEMORY_CURATOR_ID.to_string(),
@@ -189,13 +190,12 @@ pub fn inject_auto_learning_jobs(
                 });
             }
             Ok(false) => {
-                let loaded = repo
-                    .get_sync_from_store(
-                        EVOLUTION_ORCHESTRATOR_ID,
-                        &gateway_dir,
-                        Some(store.as_ref()),
-                    )
-                    .or_else(|_| repo.get_sync(EVOLUTION_ORCHESTRATOR_ID));
+                // Promoted revision only (#1136) — see the curator branch above.
+                let loaded = repo.get_sync_from_store(
+                    EVOLUTION_ORCHESTRATOR_ID,
+                    &gateway_dir,
+                    Some(store.as_ref()),
+                );
                 if loaded.is_err() {
                     results.push(ReconcileResult {
                         agent_id: EVOLUTION_ORCHESTRATOR_ID.to_string(),

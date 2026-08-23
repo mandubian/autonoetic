@@ -388,18 +388,23 @@ fn finish_tick(stats: &FastSchedulerStats, tick_started: Instant) {
 /// Resolve a target agent's `execution_mode` via the repository alias.
 /// Returns `false` (i.e. "not script mode") whenever the target cannot be
 /// resolved — this is the fail-closed direction for the sub-10s guardrail.
+///
+/// Reads the promoted revision and nothing else (#1136). An unresolvable target
+/// means *not promoted*, and the safe answer to "is this promoted agent
+/// script-mode?" when nothing is promoted is `false`. This previously fell back
+/// to `agents_dir`, which let an ungated on-disk manifest declare
+/// `execution_mode: script` and unlock sub-10s dispatch for a target whose
+/// promoted revision is a reasoning agent — the guardrail's own input coming
+/// from outside the gate.
 fn target_is_script_mode(
     config: &autonoetic_types::config::GatewayConfig,
     store: &crate::scheduler::gateway_store::GatewayStore,
     target_agent_id: &str,
 ) -> bool {
     let repo = crate::agent::repository::AgentRepository::from_config(config);
-    let gateway_dir = config.agents_dir.join(".gateway");
+    let gateway_dir = crate::execution::gateway_root_dir(config);
     match repo.get_sync_from_store(target_agent_id, &gateway_dir, Some(store)) {
         Ok(loaded) => matches!(loaded.manifest.execution_mode, ExecutionMode::Script),
-        Err(_) => match repo.get_sync(target_agent_id) {
-            Ok(loaded) => matches!(loaded.manifest.execution_mode, ExecutionMode::Script),
-            Err(_) => false,
-        },
+        Err(_) => false,
     }
 }

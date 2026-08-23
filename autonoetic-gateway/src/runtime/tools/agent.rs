@@ -1077,12 +1077,12 @@ impl NativeTool for AgentDiscoverTool {
         _manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
         config: Option<&autonoetic_types::config::GatewayConfig>,
-        _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+        gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
         _run_context: Option<&NativeToolRunContext>,
     ) -> anyhow::Result<String> {
         let args: AgentDiscoverArgs = serde_json::from_str(arguments_json)
@@ -1090,12 +1090,22 @@ impl NativeTool for AgentDiscoverTool {
 
         anyhow::ensure!(!args.intent.trim().is_empty(), "intent must not be empty");
 
-        let agents_dir = config
-            .map(|c| &c.agents_dir)
+        let config = config
             .ok_or_else(|| anyhow::anyhow!("config is required for agent.discover"))?;
+        let store = gateway_store
+            .ok_or_else(|| anyhow::anyhow!("gateway store is required for agent.discover"))?;
 
-        let repo = crate::agent::AgentRepository::new(agents_dir.clone());
-        let loaded_agents = repo.list_loaded_sync()?;
+        // Discovery advertises agents to a spawner that will delegate to them,
+        // so it must describe what would actually run: the promoted revision,
+        // not the ungated `agents_dir` copy (#1136). Otherwise a delegate can
+        // be chosen on capabilities its executed revision does not have.
+        // Prefer the gateway_dir the engine passed in; re-deriving it from
+        // config can disagree with where the store actually lives.
+        let repo = crate::agent::AgentRepository::new(config.agents_dir.clone());
+        let gw_dir = gateway_dir
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| crate::execution::gateway_root_dir(config));
+        let loaded_agents = repo.list_loaded_from_store(&gw_dir, store.as_ref())?;
 
         let mut results: Vec<AgentDiscoveryResult> = loaded_agents
             .into_iter()
@@ -1286,8 +1296,8 @@ impl NativeTool for AgentListTool {
 
         let mut agents: Vec<serde_json::Value> = Vec::new();
 
-        // Phase 1: query SQLite aliases for revision-based agents
-        let mut sqlite_agent_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Enumerate promoted aliases — the complete set of agents a caller can
+        // actually spawn or delegate to (#1136).
         if let (Some(ref store), Some(gd)) = (&gateway_store, gateway_dir) {
             if let Ok(aliases) = store.list_agent_aliases(None) {
                 for alias in aliases {
@@ -1297,7 +1307,6 @@ impl NativeTool for AgentListTool {
                             continue;
                         }
                     }
-                    sqlite_agent_ids.insert(alias.agent_id.clone());
 
                     // Read manifest metadata from the revision record
                     if let Ok(Some(rev)) = store.get_agent_revision(&alias.revision_id) {
@@ -1393,64 +1402,16 @@ impl NativeTool for AgentListTool {
             }
         }
 
-        // Phase 2: fall back to filesystem for legacy agents not in SQLite
-        let agents_dir = config
-            .map(|c| &c.agents_dir)
-            .ok_or_else(|| anyhow::anyhow!("config is required for agent.list"))?;
-
-        let repo = crate::agent::AgentRepository::new(agents_dir.clone());
-        if let Ok(loaded_agents) = repo.list_loaded_sync() {
-            for agent in loaded_agents {
-                let agent_id = agent.id().to_string();
-                // Skip agents already listed via SQLite
-                if sqlite_agent_ids.contains(&agent_id) {
-                    continue;
-                }
-                // Apply prefix filter
-                if let Some(ref prefix) = args.filter_prefix {
-                    if !agent_id.starts_with(prefix.as_str()) {
-                        continue;
-                    }
-                }
-                // Apply capability filter
-                if let Some(ref req_cap) = args.requires_capability {
-                    let has_cap = agent.manifest.capabilities.iter().any(|c| capability_type_name(c).eq_ignore_ascii_case(req_cap));
-                    if !has_cap { continue; }
-                }
-                // Apply execution_mode filter
-                if let Some(ref mode) = args.execution_mode {
-                    let agent_mode = match &agent.manifest.execution_mode {
-                        autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
-                        autonoetic_types::agent::ExecutionMode::Script => "script",
-                    };
-                    if !agent_mode.eq_ignore_ascii_case(mode) { continue; }
-                }
-
-                let cap_types: Vec<String> = agent.manifest.capabilities.iter().map(|c| capability_type_name(c)).collect();
-                let mode = match &agent.manifest.execution_mode {
-                    autonoetic_types::agent::ExecutionMode::Reasoning => "reasoning",
-                    autonoetic_types::agent::ExecutionMode::Script => "script",
-                };
-                let io_accepts = agent.manifest.io.as_ref().and_then(|io| io.accepts.clone());
-                let io_returns = agent.manifest.io.as_ref().and_then(|io| io.returns.clone());
-                let script_input_mode = matches!(agent.manifest.execution_mode, autonoetic_types::agent::ExecutionMode::Script)
-                    .then(|| match agent.manifest.script_input_mode {
-                        autonoetic_types::agent::ScriptInputMode::Stdin => "stdin",
-                        autonoetic_types::agent::ScriptInputMode::Args => "args",
-                    });
-
-                agents.push(serde_json::json!({
-                    "agent_id": agent_id,
-                    "description": agent.manifest.agent.description,
-                    "capabilities": cap_types,
-                    "execution_mode": mode,
-                    "script_input_mode": script_input_mode,
-                    "io_accepts": io_accepts,
-                    "io_returns": io_returns,
-                    "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
-                }));
-            }
-        }
+        // There used to be a second phase here that scanned `agents_dir` for
+        // "legacy agents not in SQLite" and appended them to the listing.
+        // Removed in #1136: by construction those are exactly the agents with
+        // *no* promoted revision — ungated on-disk manifests, or bundles
+        // mid-ingest. Listing them told a spawner it could delegate to an agent
+        // that has never passed a promotion gate, and advertised capabilities
+        // from a file that does not govern any run. Reference bundles under
+        // `agents/**` are auto-promoted at startup by `bootstrap_agents`, so a
+        // legitimately installed agent always has an alias and is always
+        // enumerated above.
 
         Ok(serde_json::json!({
             "ok": true,
@@ -1680,24 +1641,27 @@ important signals (progress reports, divergence findings, status updates from sp
                     a_id
                 );
 
-                // Existence must be decided the same way `agent_list` /
-                // `agent_inspect` decide it, or the status contradicts what the
-                // agent can plainly see. An alias-installed agent lives in
-                // `.gateway/revisions/<rev>` with NO directory under
-                // `agents_dir`, so a filesystem-only `get_sync` reports it
-                // missing — which is how a fully installed, inspectable agent
-                // came back as `target_agent_not_found`.
-                let alias_known = store
-                    .get_agent_alias(a_id)
-                    .ok()
-                    .flatten()
-                    .is_some();
+                // An alias-installed agent lives in `.gateway/revisions/<rev>`
+                // with NO directory under `agents_dir`, so an ingest-dir-only
+                // check reports it missing — which is how a fully installed,
+                // inspectable agent once came back as `target_agent_not_found`.
+                // Hence: alias first, ingest dir second.
+                //
+                // The ingest-dir read is deliberately retained here (#1136),
+                // unlike the guardrail and grant paths. This branch decides
+                // nothing — it only chooses which diagnostic an operator sees
+                // after a message failed to route. Reading the on-disk bundle
+                // makes that diagnostic strictly more informative: it can tell
+                // "no such agent" from "there is a bundle but it is broken",
+                // which is a distinction an operator needs and which no
+                // promotion gate is protecting.
+                let alias_known = store.get_agent_alias(a_id).ok().flatten().is_some();
 
                 if alias_known {
                     exists = Some(true);
                 } else if let Some(cfg) = config {
                     let repo = crate::agent::AgentRepository::new(cfg.agents_dir.clone());
-                    match repo.get_sync(a_id) {
+                    match repo.load_unvetted_from_ingest_dir(a_id) {
                         Ok(_) => {
                             exists = Some(true);
                         }

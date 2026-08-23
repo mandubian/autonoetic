@@ -1707,6 +1707,27 @@ fn write_test_skill(agents_dir: &std::path::Path, agent_id: &str, capabilities_y
     std::fs::write(dir.join("runtime.lock"), "dependencies: []\n").unwrap();
 }
 
+/// Promote an already-written bundle so the capability preflight can see it.
+///
+/// The preflight resolves declared capabilities through the promoted revision
+/// (#1136), not the ingest directory, so a test that only calls
+/// [`write_test_skill`] gets `agent_not_installed` — correctly, since nothing
+/// is promoted. A test that means "this agent is installed and declares X"
+/// must promote it.
+fn promote_test_skill(
+    agents_dir: &std::path::Path,
+    gateway_dir: &std::path::Path,
+    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    agent_id: &str,
+) {
+    // `seed_agent_revision` derives the revision root as `agents_dir/.gateway`,
+    // so hand it the parent of the gateway dir these tests actually opened.
+    let mut config = GatewayConfig::default();
+    config.agents_dir = gateway_dir.parent().unwrap().to_path_buf();
+    crate::support::seed_agent_revision(store, &config, agent_id, &agents_dir.join(agent_id))
+        .unwrap();
+}
+
 #[test]
 fn planframe_propose_omits_capability_preflight_when_no_step_declares_required_caps() {
     let dir = tempdir().unwrap();
@@ -1777,6 +1798,9 @@ fn planframe_propose_surfaces_capability_preflight_warnings_for_uncovered_steps(
     let store = std::sync::Arc::new(
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
     );
+    // coder.default is installed (promoted); researcher.default is not — the
+    // test wants one of each.
+    promote_test_skill(&agents_dir, &gateway_dir, store.as_ref(), "coder.default");
 
     let args = json!({
         "title": "Preflight surface",
@@ -1877,6 +1901,7 @@ fn planframe_propose_preflight_clean_when_all_capabilities_covered() {
     let store = std::sync::Arc::new(
         autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
     );
+    promote_test_skill(&agents_dir, &gateway_dir, store.as_ref(), "coder.default");
 
     let args = json!({
         "title": "Clean preflight",

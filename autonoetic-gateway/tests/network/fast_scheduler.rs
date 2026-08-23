@@ -290,6 +290,111 @@ async fn fast_path_cancels_sub10s_job_when_target_not_script_mode() -> anyhow::R
     Ok(())
 }
 
+/// Regression for #1136: the sub-10s guardrail must resolve `execution_mode`
+/// through the promoted alias only, and answer "not script mode" when there
+/// isn't one.
+///
+/// The trigger is an agent with **no promoted alias** but a live scheduled job —
+/// reachable whenever a job outlives its agent's promotion, or is seeded
+/// directly. In that state `get_sync_from_store` fails, and before the fix
+/// `target_is_script_mode` fell back to `agents_dir`. That directory is a plain
+/// path the gateway itself rewrites at startup, so authoring a manifest there is
+/// not a privileged act — yet a `execution_mode: script` line in it would
+/// satisfy a guardrail whose whole purpose is to keep reasoning agents out of
+/// sub-10s dispatch. The guardrail's input came from outside the gate.
+///
+/// Fail-closed means the job is cancelled, exactly as if the ingest-dir manifest
+/// did not exist.
+#[tokio::test]
+async fn sub10s_guardrail_ignores_script_mode_claim_in_ingest_dir() -> anyhow::Result<()> {
+    use autonoetic_types::agent_revision::{AgentRevisionRecord, AgentRevisionStatus};
+
+    let workspace = TestWorkspace::new()?;
+    let config = fast_config(&workspace);
+
+    let gateway_dir = config.agents_dir.join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let agent_id = "divergent-mode-agent";
+    let agent_dir = config.agents_dir.join(agent_id);
+
+    // The ungated ingest copy claims script mode.
+    install_script_agent(&agent_dir, agent_id)?;
+    let ingest_skill = std::fs::read_to_string(agent_dir.join("SKILL.md"))?;
+    assert!(
+        ingest_skill.contains("execution_mode: script"),
+        "ingest-dir manifest must claim script mode for this test to mean anything"
+    );
+
+    // A revision record exists so the job can pin one, but there is NO alias:
+    // nothing is promoted, so the revision read path has no answer to give.
+    let revision_id = "rev_no_alias_1136";
+    store.insert_agent_revision(&AgentRevisionRecord {
+        revision_id: revision_id.to_string(),
+        agent_id: agent_id.to_string(),
+        base_revision_id: None,
+        artifact_id: None,
+        content_digest: "sha256:seed-1136".to_string(),
+        runtime_lock_hash: "sha256:seed-lock".to_string(),
+        manifest_hash: "sha256:seed-manifest".to_string(),
+        created_at: Utc::now().to_rfc3339(),
+        created_by_type: "human".to_string(),
+        created_by_id: "support".to_string(),
+        requested_by_type: None,
+        requested_by_id: None,
+        source_kind: "test".to_string(),
+        source_ref: None,
+        origin_node_id: "gateway".to_string(),
+        trust_domain: "local".to_string(),
+        status: AgentRevisionStatus::Ready,
+        metadata_json: serde_json::json!({}),
+        short_id: String::new(),
+        detected_network_hosts: None,
+        signature: None,
+        signer_id: None,
+    })?;
+    assert!(
+        store.get_agent_alias(agent_id)?.is_none(),
+        "no alias must exist — that is the condition that reached the fallback"
+    );
+
+    let job = make_job(
+        "divergent-3s",
+        "planner.default",
+        agent_id,
+        revision_id,
+        "every 3 seconds",
+        -1,
+    );
+    store.create_scheduled_job(&job)?;
+
+    let execution = Arc::new(GatewayExecutionService::new(
+        config.clone(),
+        Some(store.clone()),
+    ));
+    let stats = Arc::new(FastSchedulerStats::default());
+
+    run_fast_scheduler_tick_at(execution, Utc::now(), stats.clone()).await?;
+
+    let snap = stats.snapshot();
+    assert_eq!(snap.fast_due_loaded, 1);
+    assert_eq!(
+        snap.fast_claimed, 0,
+        "ingest-dir script-mode claim must not unlock sub-10s dispatch"
+    );
+    assert_eq!(snap.fast_enqueued, 0);
+
+    let after = store.get_scheduled_job("divergent-3s")?.unwrap();
+    assert_eq!(
+        after.status,
+        ScheduledJobStatus::Cancelled,
+        "guardrail cancels the job on the revision's mode, not the ingest dir's"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn fast_path_concurrent_ticks_do_not_double_enqueue() -> anyhow::Result<()> {
     let workspace = TestWorkspace::new()?;

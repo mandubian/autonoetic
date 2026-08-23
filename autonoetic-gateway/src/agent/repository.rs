@@ -39,6 +39,30 @@ impl LoadedAgent {
 
 /// Repository for discovering and loading agents.
 /// Provides unified agent loading across gateway, scheduler, router, and CLI.
+///
+/// # Two read paths of unequal trust (#1136)
+///
+/// This type exposes both of the gateway's agent-manifest read paths, and they
+/// are **not** interchangeable:
+///
+/// - **The revision store** — [`Self::get_sync_from_store`],
+///   [`Self::load_from_revision_dir`]. Immutable, content-addressed, and
+///   reachable only through a promoted alias. This is the vetted path: whatever
+///   it returns passed the promotion gates. Every runtime decision reads here.
+///
+/// - **The ingest directory** (`agents_dir`) — the `*_unvetted_from_ingest_dir`
+///   methods. A plain directory that bootstrap scans at startup and *rewrites in
+///   place* (see `bootstrap::bootstrap_agent_inner`, which materializes
+///   `runtime.lock`). Nothing about its contents passed a gate; anything that can
+///   write there authors what these methods return.
+///
+/// The ingest methods carry `unvetted` in their names deliberately. They have
+/// exactly two legitimate callers — `bootstrap` (which is *ingesting*, so the
+/// ingest dir is its subject) and CLI surfaces that report on the on-disk bundle
+/// as such. A `*_unvetted_*` call anywhere in execution, scheduling, capability,
+/// or grant code is a bug: it lets an ungated file answer a question the
+/// promotion gates own. P-9.15 states this for the write side ("single door");
+/// these names are the read-side reminder.
 pub struct AgentRepository {
     agents_dir: PathBuf,
     cache: RwLock<Vec<AgentMeta>>,
@@ -58,28 +82,37 @@ impl AgentRepository {
         Self::new(config.agents_dir.clone())
     }
 
-    /// Refresh the agent cache by scanning the directory.
-    pub async fn refresh(&self) -> anyhow::Result<Vec<AgentMeta>> {
+    /// Refresh the ingest-directory cache by scanning `agents_dir`.
+    ///
+    /// **Unvetted** — see the type-level note. Ingest/CLI callers only.
+    pub async fn refresh_unvetted_from_ingest_dir(&self) -> anyhow::Result<Vec<AgentMeta>> {
         let agents = scan_agents(&self.agents_dir)?;
         *self.cache.write().await = agents.clone();
         Ok(agents)
     }
 
-    /// Get cached agents (or scan if empty).
-    pub async fn list(&self) -> anyhow::Result<Vec<AgentMeta>> {
+    /// List the ingest directory's agent metadata (cached, or scan if empty).
+    ///
+    /// **Unvetted** — see the type-level note. Ingest/CLI callers only.
+    pub async fn list_unvetted_from_ingest_dir(&self) -> anyhow::Result<Vec<AgentMeta>> {
         let cache = self.cache.read().await;
         if !cache.is_empty() {
             return Ok(cache.clone());
         }
         drop(cache);
-        self.refresh().await
+        self.refresh_unvetted_from_ingest_dir().await
     }
 
-    /// Load a specific agent by ID.
+    /// Load one agent from the ingest directory by ID.
     /// Returns an error if the agent doesn't exist or identity mismatch.
-    pub async fn get(&self, agent_id: &str) -> anyhow::Result<LoadedAgent> {
+    ///
+    /// **Unvetted** — see the type-level note. Ingest/CLI callers only.
+    pub async fn get_unvetted_from_ingest_dir(
+        &self,
+        agent_id: &str,
+    ) -> anyhow::Result<LoadedAgent> {
         let meta = self
-            .list()
+            .list_unvetted_from_ingest_dir()
             .await?
             .into_iter()
             .find(|a| a.id == agent_id)
@@ -88,9 +121,12 @@ impl AgentRepository {
         self.load_from_meta(&meta)
     }
 
-    /// Load a specific agent by ID synchronously (scans directory directly).
+    /// Load one agent from the ingest directory by ID, synchronously
+    /// (scans the directory directly).
     /// Returns an error if the agent doesn't exist or identity mismatch.
-    pub fn get_sync(&self, agent_id: &str) -> anyhow::Result<LoadedAgent> {
+    ///
+    /// **Unvetted** — see the type-level note. Ingest/CLI callers only.
+    pub fn load_unvetted_from_ingest_dir(&self, agent_id: &str) -> anyhow::Result<LoadedAgent> {
         let agents = scan_agents(&self.agents_dir)?;
         let meta = agents
             .into_iter()
@@ -100,9 +136,11 @@ impl AgentRepository {
         self.load_from_meta(&meta)
     }
 
-    /// Load all agents synchronously in a single directory scan.
+    /// Load every agent in the ingest directory in a single scan.
     /// Returns a vector of LoadedAgent, or an error if any agent fails to load.
-    pub fn list_loaded_sync(&self) -> anyhow::Result<Vec<LoadedAgent>> {
+    ///
+    /// **Unvetted** — see the type-level note. Ingest/CLI callers only.
+    pub fn list_loaded_unvetted_from_ingest_dir(&self) -> anyhow::Result<Vec<LoadedAgent>> {
         let agents = scan_agents(&self.agents_dir)?;
         let mut loaded = Vec::new();
         let mut errors = Vec::new();
@@ -172,11 +210,16 @@ impl AgentRepository {
         })
     }
 
-    /// Try to load an agent, returning None if not found.
+    /// Try to load an agent from the ingest directory, returning None if not found.
     /// Returns an error only for identity mismatch or other actual errors.
     /// Useful for scenarios where missing agents are acceptable.
-    pub async fn try_get(&self, agent_id: &str) -> anyhow::Result<Option<LoadedAgent>> {
-        let agents = self.list().await?;
+    ///
+    /// **Unvetted** — see the type-level note. Ingest/CLI callers only.
+    pub async fn try_get_unvetted_from_ingest_dir(
+        &self,
+        agent_id: &str,
+    ) -> anyhow::Result<Option<LoadedAgent>> {
+        let agents = self.list_unvetted_from_ingest_dir().await?;
 
         // First check if agent exists in directory
         let exists = agents.iter().any(|a| a.id == agent_id);
@@ -185,7 +228,7 @@ impl AgentRepository {
         }
 
         // Agent exists, try to load it (this will enforce identity)
-        match self.get(agent_id).await {
+        match self.get_unvetted_from_ingest_dir(agent_id).await {
             Ok(loaded) => Ok(Some(loaded)),
             Err(e) => {
                 // If it's a "not found" error (shouldn't happen given we checked exists), return None
@@ -252,6 +295,41 @@ impl AgentRepository {
             );
         };
         self.load_from_revision_dir(gateway_dir, &alias.agent_id, &alias.revision_id)
+    }
+
+    /// Load every agent that has a promoted alias, from the revision store.
+    ///
+    /// The vetted counterpart to [`Self::list_loaded_unvetted_from_ingest_dir`]:
+    /// the returned manifests are the ones sessions actually execute, so
+    /// anything that advertises capabilities (discovery, `agent.list`) reads
+    /// here (#1136). Agents whose revision directory is missing or unparseable
+    /// are skipped rather than failing the whole listing — one broken revision
+    /// must not blind discovery to every other agent.
+    pub fn list_loaded_from_store(
+        &self,
+        gateway_dir: &Path,
+        gateway_store: &GatewayStore,
+    ) -> anyhow::Result<Vec<LoadedAgent>> {
+        let aliases = gateway_store.list_agent_aliases(None)?;
+        let mut loaded = Vec::new();
+        for alias in aliases {
+            if alias.suspended_at.is_some() {
+                continue;
+            }
+            match self.load_from_revision_dir(gateway_dir, &alias.agent_id, &alias.revision_id) {
+                Ok(agent) => loaded.push(agent),
+                Err(e) => {
+                    tracing::debug!(
+                        target: "agent_repository",
+                        agent_id = %alias.agent_id,
+                        revision_id = %alias.revision_id,
+                        error = %e,
+                        "Skipping agent with unreadable promoted revision"
+                    );
+                }
+            }
+        }
+        Ok(loaded)
     }
 
     /// Resolve an agent target string to a concrete revision.
@@ -618,7 +696,7 @@ Test instructions.
         create_test_agent(&agents_dir, "test-agent").expect("agent should create");
 
         let repo = AgentRepository::new(agents_dir);
-        let loaded = repo.get_sync("test-agent").expect("should load agent");
+        let loaded = repo.load_unvetted_from_ingest_dir("test-agent").expect("should load agent");
 
         assert_eq!(loaded.id(), "test-agent");
         assert!(loaded.instructions.contains("Test instructions"));
@@ -659,7 +737,7 @@ Test instructions.
         std::fs::write(agent_dir.join("SKILL.md"), skill_md).expect("skill.md should write");
 
         let repo = AgentRepository::new(agents_dir);
-        let result = repo.get_sync("dir-agent");
+        let result = repo.load_unvetted_from_ingest_dir("dir-agent");
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -697,7 +775,7 @@ capabilities: []
         std::fs::write(agent_dir.join("SKILL.md"), skill_md).expect("skill.md should write");
 
         let repo = AgentRepository::new(agents_dir);
-        let result = repo.get_sync("script-agent");
+        let result = repo.load_unvetted_from_ingest_dir("script-agent");
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -716,7 +794,7 @@ capabilities: []
         create_test_agent(&agents_dir, "agent-b").expect("agent-b should create");
 
         let repo = AgentRepository::new(agents_dir);
-        let agents = repo.list().await.expect("should list agents");
+        let agents = repo.list_unvetted_from_ingest_dir().await.expect("should list agents");
 
         assert_eq!(agents.len(), 2);
         let ids: Vec<_> = agents.iter().map(|a| a.id.clone()).collect();
@@ -761,7 +839,7 @@ Test instructions.
         std::fs::write(bad_agent_dir.join("SKILL.md"), skill_md).expect("skill.md should write");
 
         let repo = AgentRepository::new(agents_dir);
-        let result = repo.list_loaded_sync();
+        let result = repo.list_loaded_unvetted_from_ingest_dir();
 
         assert!(
             result.is_err(),
