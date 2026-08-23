@@ -6410,7 +6410,10 @@ fn handle_security_findings_rpc(
         params.triage.as_deref(),
         params.limit,
     ) {
-        Ok(rows) => JsonRpcResponse::success(req.id, serde_json::to_value(rows).unwrap_or_default()),
+        Ok(rows) => match serde_json::to_value(rows) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
@@ -6512,7 +6515,10 @@ fn handle_security_patterns_rpc(
         Err(e) => return invalid_egress_params(req.id, "security.patterns", e),
     };
     match execution.security_patterns(params.status.as_deref(), params.limit) {
-        Ok(rows) => JsonRpcResponse::success(req.id, serde_json::to_value(rows).unwrap_or_default()),
+        Ok(rows) => match serde_json::to_value(rows) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
@@ -6605,10 +6611,22 @@ fn handle_recording_list_rpc(
         Ok(p) => p,
         Err(e) => return invalid_egress_params(req.id, "recording.list", e),
     };
+    // Fail closed on negative limits: SQLite reads `LIMIT -1` as unbounded,
+    // which is never what an operator asked for (#1139 review).
+    if params.limit < 0 {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for recording.list: limit must be >= 0".to_string(),
+        );
+    }
     match execution.recording_sessions(params.agent.as_deref(), params.limit) {
-        Ok(sessions) => {
-            JsonRpcResponse::success(req.id, serde_json::to_value(sessions).unwrap_or_default())
-        }
+        Ok(sessions) => match serde_json::to_value(sessions) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            // A serialization failure must surface as an error, not a
+            // silent success(null) (#1139 review).
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
@@ -6720,7 +6738,10 @@ fn handle_recording_fixture_set_rpc(
         );
     }
     match execution.recording_fixture_set(&params.fixture_set_id) {
-        Ok(v) => JsonRpcResponse::success(req.id, serde_json::to_value(v).unwrap_or_default()),
+        Ok(v) => match serde_json::to_value(v) {
+            Ok(encoded) => JsonRpcResponse::success(req.id, encoded),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
