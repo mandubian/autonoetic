@@ -142,6 +142,16 @@ The gateway:
 3. Injects it into the HTTP request (header, query param, or body)
 4. Redacts the response to prevent secret leakage back to the agent
 
+**Injection shapes** (`inject_secret_as`, or the credential's stored `inject_as`):
+`bearer` (default), `header:X-Custom-Header`, and `query:param` (#1107) — appends
+(or overwrites) `?param=<secret>` on the request URL, for services that
+authenticate via query parameter (the OpenWeatherMap `?appid=<key>` shape).
+Existing query parameters are preserved. The sanitizer redacts both the raw
+secret and its percent-encoded `param=secret` form from the response body and
+from reqwest error messages (which echo the request URL). **Security note:**
+query params land in server access logs — prefer `header:`/`bearer` where the
+service allows both.
+
 ### 6. Inject — Use the credential in sandbox executions
 
 For scripts that need API keys or tokens at runtime, the `credential_env` parameter on `sandbox_exec` and `artifact_exec` injects secrets as environment variables into the sandbox. The gateway resolves the secret from the vault server-side — it never appears in the LLM context.

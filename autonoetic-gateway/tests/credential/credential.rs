@@ -2543,3 +2543,236 @@ fn test_credential_refresh_endpoint_out_of_scope_is_denied() {
     // listener going out of scope at test end).
     let _ = (data_handle, refresh_handle);
 }
+
+/// A credential whose secret injects as `inject_as` on `host`.
+fn query_credential(host: String, inject_as: &str) -> CredentialRecord {
+    CredentialRecord {
+        credential_id: "cred_query_001".to_string(),
+        service: "openweathermap".to_string(),
+        secret_name: "OWM_APPID".to_string(),
+        inject_as: Some(inject_as.to_string()),
+        created_by_agent: None,
+        expires_at: None,
+        shared_with: vec![],
+        allowed_hosts: vec![host],
+        refresh_token_secret_name: None,
+        refresh_url: None,
+        refresh_method: None,
+        refresh_headers: None,
+        refresh_extract_access_token: None,
+        refresh_extract_refresh_token: None,
+        refresh_extract_expires_in: None,
+        label: None,
+    }
+}
+
+/// One-shot server that CAPTURES the request line and answers with `body`.
+fn spawn_capturing_server(
+    body: String,
+) -> (String, Arc<std::sync::Mutex<String>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should expose local addr");
+    let captured: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request_buf = [0_u8; 4096];
+            let _ = stream.read(&mut request_buf);
+            let request = String::from_utf8_lossy(&request_buf).to_string();
+            let request_line = request.lines().next().unwrap_or("").to_string();
+            *captured_clone.lock().unwrap() = request_line;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://{}", addr), captured, handle)
+}
+
+/// One-shot server that CAPTURES the request line and answers with a JSON
+/// body echoing that request line back — the "service reflects your URL"
+/// shape that error payloads commonly take.
+fn spawn_echoing_server() -> (String, Arc<std::sync::Mutex<String>>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let addr = listener
+        .local_addr()
+        .expect("listener should expose local addr");
+    let captured: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_clone = captured.clone();
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request_buf = [0_u8; 4096];
+            let _ = stream.read(&mut request_buf);
+            let request = String::from_utf8_lossy(&request_buf).to_string();
+            let request_line = request.lines().next().unwrap_or("").to_string();
+            *captured_clone.lock().unwrap() = request_line.clone();
+            let body = format!("{{\"echo\":\"{request_line}\"}}");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    (format!("http://{}", addr), captured, handle)
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_query_param_injection_arrives_at_service() {
+    // #1107: OpenWeatherMap-style services authenticate via query parameter.
+    // The gateway must append ?appid=<secret> itself — the agent never sees
+    // or handles the secret — and the response must redact it.
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["openweathermap".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("OWM_APPID", "owm-secret-123");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let (data_url, captured, data_h) = spawn_capturing_server(r#"{"weather":"sunny"}"#.to_string());
+    let host = url::Url::parse(&data_url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_string();
+
+    let cred = query_credential(host, "query:appid");
+    store.upsert_credential(&cred).unwrap();
+
+    // The agent's URL carries a placeholder appid — the gateway must REPLACE
+    // it, not append a second value (servers read the first occurrence).
+    let result = registry
+        .execute(
+            "credential_request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_query_001",
+                "url": format!("{}/data/2.5/weather?q=toulouse&appid=PLACEHOLDER", data_url)
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential_request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], true, "{parsed}");
+    assert_eq!(parsed["status"], 200, "{parsed}");
+    assert_eq!(
+        parsed["body"]["weather"], "sunny",
+        "service response must pass through: {parsed}"
+    );
+
+    let request_line = captured.lock().unwrap().clone();
+    assert!(
+        !request_line.contains("appid=PLACEHOLDER"),
+        "the placeholder must be replaced, not kept: {request_line}"
+    );
+    assert!(
+        request_line.matches("appid=").count() == 1
+            && request_line.contains("appid=owm-secret-123"),
+        "exactly one appid param, carrying the secret: {request_line}"
+    );
+    assert!(
+        request_line.contains("q=toulouse"),
+        "unrelated params preserved: {request_line}"
+    );
+
+    let _ = data_h;
+}
+
+#[test]
+#[serial_test::serial]
+fn test_credential_request_query_param_secret_redacted_from_echo() {
+    // Services (and their error payloads) echo the full request URL back.
+    // The sanitizer must cover the percent-encoded param=secret pair, not
+    // just the raw secret value (#1107).
+    let manifest = test_manifest(vec![
+        Capability::CredentialAccess {
+            services: vec!["openweathermap".to_string()],
+        },
+        Capability::NetworkAccess {
+            hosts: vec!["127.0.0.1".to_string()],
+        },
+    ]);
+    let policy = PolicyEngine::new(manifest.clone());
+    let registry = default_registry();
+
+    let _vault_temp = setup_vault("OWM_APPID", "owm-secret-123");
+    let temp = tempdir().unwrap();
+    let store = Arc::new(GatewayStore::open(temp.path()).unwrap());
+
+    let (data_url, captured, data_h) = spawn_echoing_server();
+    let host = url::Url::parse(&data_url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_string();
+
+    let cred = query_credential(host, "query:appid");
+    store.upsert_credential(&cred).unwrap();
+
+    let result = registry
+        .execute(
+            "credential_request",
+            &manifest,
+            &policy,
+            temp.path(),
+            None,
+            &serde_json::json!({
+                "credential_id": "cred_query_001",
+                "url": format!("{}/echo", data_url)
+            })
+            .to_string(),
+            None,
+            None,
+            None,
+            Some(store),
+            None,
+        )
+        .expect("credential_request should succeed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+    assert_eq!(parsed["ok"], true, "{parsed}");
+
+    // The request DID carry the secret…
+    let request_line = captured.lock().unwrap().clone();
+    assert!(request_line.contains("appid=owm-secret-123"), "{request_line}");
+
+    // …and the service's echo of the request URL must come back sanitized:
+    // the tool's own response contract, not just the log redactor.
+    let body_str = parsed["body"]["echo"].as_str().unwrap_or_default();
+    assert!(
+        !body_str.contains("owm-secret-123"),
+        "the raw secret must never survive in an echoed URL: {body_str}"
+    );
+    assert!(
+        body_str.contains("appid=[REDACTED]"),
+        "the param pair must be redacted by name: {body_str}"
+    );
+
+    let _ = data_h;
+}

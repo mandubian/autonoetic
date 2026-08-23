@@ -326,7 +326,7 @@ impl NativeTool for CredentialRequestTool {
                     },
                     "inject_secret_as": {
                         "type": "string",
-                        "description": "How to inject the secret: 'bearer', 'header:X-Custom-Header', or env var name"
+                        "description": "How to inject the secret: 'bearer', 'header:X-Custom-Header', 'query:param' (appends ?param=<secret>; e.g. OpenWeatherMap-style appid), or env var name"
                     },
                     "approval_ref": {
                         "type": "string",
@@ -840,8 +840,41 @@ impl NativeTool for CredentialRequestTool {
                         .timeout(std::time::Duration::from_secs(30))
                         .build()?;
 
-                    let mut req =
-                        client.request(reqwest::Method::from_bytes(method.as_bytes())?, &url);
+                    let inject = eff.as_ref().map(String::as_str).unwrap_or("bearer");
+
+                    // #1107: `query:<param>` appends (or overwrites) the secret
+                    // as a URL query parameter — the OpenWeatherMap
+                    // `?appid=<key>` shape. Query params land in server access
+                    // logs; header:/bearer remain the preferred injection where
+                    // the service allows both.
+                    let query_param = inject.strip_prefix("query:");
+                    let request_url = match (query_param, svc.as_deref()) {
+                        (Some(param), Some(secret)) if !param.is_empty() => {
+                            let mut parsed = url::Url::parse(&url)?;
+                            // Replace, don't append: an agent-provided
+                            // `?param=placeholder` plus an appended secret
+                            // would leave two values, and servers typically
+                            // read the first — auth would fail on the
+                            // placeholder with no visible cause.
+                            let kept: Vec<(String, String)> = parsed
+                                .query_pairs()
+                                .filter(|(k, _)| k != param)
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect();
+                            parsed
+                                .query_pairs_mut()
+                                .clear()
+                                .extend_pairs(kept.iter())
+                                .append_pair(param, secret);
+                            parsed.to_string()
+                        }
+                        _ => url.clone(),
+                    };
+
+                    let mut req = client.request(
+                        reqwest::Method::from_bytes(method.as_bytes())?,
+                        &request_url,
+                    );
 
                     if let Some(headers) = &headers {
                         for (k, v) in headers {
@@ -850,11 +883,12 @@ impl NativeTool for CredentialRequestTool {
                     }
 
                     if let Some(ref secret) = svc {
-                        let inject = eff.as_ref().map(String::as_str).unwrap_or("bearer");
                         if inject == "bearer" || inject == "Authorization" {
                             req = req.header("Authorization", format!("Bearer {}", secret));
                         } else if inject.starts_with("header:") {
                             req = req.header(&inject["header:".len()..], secret);
+                        } else if query_param.is_some() {
+                            // already appended to the URL above
                         } else {
                             req = req.header("Authorization", format!("Bearer {}", secret));
                         }
@@ -864,9 +898,19 @@ impl NativeTool for CredentialRequestTool {
                         req = req.json(b);
                     }
 
-                    let resp = req.send()?;
+                    // Error messages from reqwest echo the request URL — which,
+                    // for query: injection, carries the secret. Redact before
+                    // the error surfaces anywhere.
+                    let redact_err = |e: reqwest::Error| {
+                        anyhow::anyhow!(redact_injected_secret(
+                            &e.to_string(),
+                            svc.as_deref(),
+                            query_param
+                        ))
+                    };
+                    let resp = req.send().map_err(redact_err)?;
                     let status = resp.status().as_u16();
-                    let body = resp.text()?;
+                    let body = resp.text().map_err(redact_err)?;
                     Ok((status, body))
                 })?;
 
@@ -890,9 +934,15 @@ impl NativeTool for CredentialRequestTool {
             break 'request (status, body);
         };
 
-        // Sanitize response: redact secret value to prevent leakage into LLM context
+        // Sanitize response: redact secret value to prevent leakage into LLM
+        // context. For query: injection the service may echo the full request
+        // URL (error payloads commonly do), so the percent-encoded
+        // `param=secret` pair is redacted alongside the raw secret.
+        let query_param = effective_inject
+            .as_ref()
+            .and_then(|i| i.strip_prefix("query:"));
         let sanitized_body = if let Some(ref secret) = secret_value {
-            body.replace(secret.as_str(), "[REDACTED]")
+            redact_injected_secret(&body, Some(secret), query_param)
         } else {
             body
         };
@@ -913,6 +963,25 @@ impl NativeTool for CredentialRequestTool {
 fn extract_host(url: &str) -> anyhow::Result<String> {
     let parsed = url::Url::parse(url)?;
     Ok(parsed.host_str().unwrap_or("").to_string())
+}
+
+/// Redact an injected secret from free text: the raw value, plus — for
+/// `query:<param>` injection — the percent-encoded `param=secret` pair
+/// services commonly echo back in error payloads and URL reflections (#1107).
+fn redact_injected_secret(text: &str, secret: Option<&str>, query_param: Option<&str>) -> String {
+    let Some(s) = secret.filter(|s| !s.is_empty()) else {
+        return text.to_string();
+    };
+    let mut out = text.replace(s, "[REDACTED]");
+    if let Some(param) = query_param {
+        if !param.is_empty() {
+            let pair = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair(param, s)
+                .finish();
+            out = out.replace(&pair, &format!("{param}=[REDACTED]"));
+        }
+    }
+    out
 }
 
 /// Normalize an `allowed_hosts` entry for host-only comparison against
