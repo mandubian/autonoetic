@@ -24,7 +24,7 @@ The gateway is the **high-privilege execution boundary** between LLM-powered age
 | **Sentinel sweeps** — security auditing of gateway state | `sentinel/` |
 | **Constitution enforcement** — digest verification, lock integrity | `constitution_digest.rs` |
 | **Federation** — cross-gateway message routing via OFP | `server/ofp.rs` |
-| **Ingress transports** — pluggable listener/connection seam for JSON-RPC + OFP (TCP today, in-memory for tests; Unix-socket/TLS drop-in) | `server/transport.rs` |
+| **Ingress transports** — pluggable listener/connection seam for JSON-RPC + OFP (TCP today, in-memory for tests; non-TCP listeners implement `TransportListener` — note OFP federation additionally requires inet peer addresses for its dial-back registry) | `server/transport.rs` |
 | **Fast scheduler sidecar** — sub-second tick for time-sensitive work | `scheduler/fast_scheduler.rs` |
 
 ---

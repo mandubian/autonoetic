@@ -488,7 +488,16 @@ pub async fn start_ofp_server(
 
     loop {
         match listener.accept().await {
-            Ok((conn, peer_addr)) => {
+            Ok((conn, addr)) => {
+                // OFP federation structurally needs inet peer addresses: the
+                // peer registry stores them for dial-back. A non-TCP
+                // TransportListener therefore cannot serve federation without
+                // deeper registry changes — fail loudly rather than fake one.
+                let peer_addr = addr.as_tcp().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "OFP server requires an inet peer address (TCP transport), got {addr}"
+                    )
+                })?;
                 debug!("OFP: accepted connection from {}", peer_addr);
                 let node_id_clone = node_id.clone();
                 let node_name_clone = node_name.clone();

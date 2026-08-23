@@ -273,7 +273,7 @@ mod tests {
                 .expect("server should run");
         });
 
-        let mut client = connector.connect().await.expect("client should connect");
+        let client = connector.connect().await.expect("client should connect");
         let (read_half, mut write_half) = tokio::io::split(client);
         let mut lines = BufReader::new(read_half).lines();
 
