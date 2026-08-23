@@ -174,8 +174,11 @@ async fn run_outcome_grader_inner(
     let loaded = repo
         .get_sync_from_store(grader_agent_id, gateway_dir, Some(store.as_ref()))
         .with_context(|| {
+            // Deliberately does not name a cause: this lookup fails for a
+            // missing alias, a missing revision directory, or an unparseable
+            // SKILL.md alike. The wrapped error carries the specific reason.
             format!(
-                "grader agent '{}' has no promoted revision",
+                "could not load grader agent '{}' from the revision store",
                 grader_agent_id
             )
         })?;

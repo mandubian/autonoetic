@@ -56,13 +56,21 @@ impl LoadedAgent {
 ///   `runtime.lock`). Nothing about its contents passed a gate; anything that can
 ///   write there authors what these methods return.
 ///
-/// The ingest methods carry `unvetted` in their names deliberately. They have
-/// exactly two legitimate callers — `bootstrap` (which is *ingesting*, so the
-/// ingest dir is its subject) and CLI surfaces that report on the on-disk bundle
-/// as such. A `*_unvetted_*` call anywhere in execution, scheduling, capability,
-/// or grant code is a bug: it lets an ungated file answer a question the
-/// promotion gates own. P-9.15 states this for the write side ("single door");
-/// these names are the read-side reminder.
+/// The ingest methods carry `unvetted` in their names deliberately. Their
+/// legitimate callers are:
+///
+/// 1. `bootstrap` — it is *ingesting*, so the ingest dir is its subject.
+/// 2. CLI surfaces that report on, or directly run, the on-disk bundle as such.
+/// 3. Pure diagnostics that decide nothing — currently only the `agent_message`
+///    existence check, which reads the ingest dir solely to tell "no such agent"
+///    from "a bundle is present but broken". If a `*_unvetted_*` call's result
+///    can change what the gateway *does* rather than what it *says*, it does not
+///    belong in this category.
+///
+/// A `*_unvetted_*` call anywhere in execution, scheduling, capability, or grant
+/// code is a bug: it lets an ungated file answer a question the promotion gates
+/// own. P-9.15 states this for the write side ("single door"); these names are
+/// the read-side reminder.
 pub struct AgentRepository {
     agents_dir: PathBuf,
     cache: RwLock<Vec<AgentMeta>>,

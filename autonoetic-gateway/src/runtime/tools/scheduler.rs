@@ -156,7 +156,13 @@ impl NativeTool for SchedulerCronCreateTool {
                 Some(matches!(manifest.execution_mode, ExecutionMode::Script))
             } else {
                 let repo = AgentRepository::from_config(&cfg);
-                let gateway_dir = gateway_dir.map(|p| p.to_path_buf()).unwrap_or_default();
+                // Derive from config when the engine passed no gateway_dir.
+                // `unwrap_or_default()` would yield an empty path, and since this
+                // check is now fail-closed (#1136) that would reject a legitimately
+                // promoted script agent rather than merely losing a fallback.
+                let gateway_dir = gateway_dir
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| crate::execution::gateway_root_dir(&cfg));
                 // Promoted revision only (#1136). `None` here means "can't
                 // tell yet" and defers to the definitive check below after
                 // alias resolution; it must never mean "ask the ungated
@@ -193,7 +199,13 @@ impl NativeTool for SchedulerCronCreateTool {
                 matches!(manifest.execution_mode, ExecutionMode::Script)
             } else {
                 let repo = AgentRepository::from_config(&cfg);
-                let gateway_dir = gateway_dir.map(|p| p.to_path_buf()).unwrap_or_default();
+                // Derive from config when the engine passed no gateway_dir.
+                // `unwrap_or_default()` would yield an empty path, and since this
+                // check is now fail-closed (#1136) that would reject a legitimately
+                // promoted script agent rather than merely losing a fallback.
+                let gateway_dir = gateway_dir
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| crate::execution::gateway_root_dir(&cfg));
                 // Promoted revision only — a failed lookup means "not
                 // promoted", which fails closed into the `not_found` branch
                 // below rather than consulting the ungated ingest dir (#1136).

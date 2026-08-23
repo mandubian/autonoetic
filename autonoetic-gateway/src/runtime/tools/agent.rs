@@ -1298,7 +1298,15 @@ impl NativeTool for AgentListTool {
 
         // Enumerate promoted aliases — the complete set of agents a caller can
         // actually spawn or delegate to (#1136).
-        if let (Some(ref store), Some(gd)) = (&gateway_store, gateway_dir) {
+        //
+        // Derive the gateway dir from config when the engine passed none. This
+        // used to be gated on `gateway_dir` being present, which was harmless
+        // while a filesystem phase followed it; with that phase gone, a missing
+        // `gateway_dir` would silently return an empty listing.
+        let resolved_gateway_dir = gateway_dir
+            .map(|p| p.to_path_buf())
+            .or_else(|| config.map(crate::execution::gateway_root_dir));
+        if let (Some(ref store), Some(gd)) = (&gateway_store, resolved_gateway_dir.as_deref()) {
             if let Ok(aliases) = store.list_agent_aliases(None) {
                 for alias in aliases {
                     // Apply prefix filter early
@@ -1355,11 +1363,23 @@ impl NativeTool for AgentListTool {
                                 "message_format": crate::runtime::tools::message_format_hint(io_accepts.as_ref()),
                             }));
                         } else {
-                            // Fallback: no manifest metadata in SQLite — try reading from
-                            // gateway_dir/revisions/agents/<id>/latest/SKILL.md
-                            let latest_path = gd.join("revisions").join("agents")
-                                .join(&alias.agent_id).join("latest").join("SKILL.md");
-                            if let Ok(skill_text) = std::fs::read_to_string(&latest_path) {
+                            // Fallback: no manifest metadata in SQLite — read the
+                            // SKILL.md of the revision this alias actually points at.
+                            //
+                            // This used to read `<id>/latest/SKILL.md`. `latest` is a
+                            // separate, best-effort symlink (`update_latest_symlink`
+                            // ignores its own errors) maintained by different code paths
+                            // than the alias, so it can point at a revision the alias
+                            // does not — reintroducing the advertised-vs-executed
+                            // divergence this change exists to close (#1136). The alias
+                            // is the authoritative pointer, so read through it.
+                            let rev_path = gd
+                                .join("revisions")
+                                .join("agents")
+                                .join(&alias.agent_id)
+                                .join(&alias.revision_id)
+                                .join("SKILL.md");
+                            if let Ok(skill_text) = std::fs::read_to_string(&rev_path) {
                                 if let Ok((manifest, _)) = crate::runtime::parser::SkillParser::parse(&skill_text) {
                                     let cap_types: Vec<String> = manifest.capabilities.iter().map(|c| capability_type_name(c)).collect();
                                     let mode = match manifest.execution_mode {
