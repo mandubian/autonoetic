@@ -266,7 +266,7 @@ fn missing_declaration_fails_shut_across_outbound_tools() -> anyhow::Result<()> 
     let web = run_web_fetch(&web_manifest("parity.web.missing"), None, url)?;
     let web_err = web.expect_err("web_fetch should fail shut");
     assert!(
-        web_err.contains("without metadata.autonoetic.remote_access declaration"),
+        web_err.contains("without a parsable metadata.autonoetic.remote_access declaration"),
         "unexpected web error: {web_err}"
     );
 
@@ -275,10 +275,19 @@ fn missing_declaration_fails_shut_across_outbound_tools() -> anyhow::Result<()> 
         None,
         url,
     )?;
+    // Post-#1103 contract: with an empty allowed_hosts scope, credential_request
+    // surfaces out-of-scope hosts as a credential-scope permission denial —
+    // never a declaration-layer type — so the error taxonomy doesn't depend on
+    // which layer tripped first. The constitutional property (fail shut, no
+    // secret sent) is preserved; the shape is deliberately different from the
+    // sandbox/web declaration types.
     assert_eq!(credential_request["ok"], false);
-    assert_eq!(
-        credential_request["error_type"],
-        "missing_remote_access_declaration"
+    assert_eq!(credential_request["error_type"], "permission");
+    assert!(
+        credential_request["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not authorized for host")),
+        "credential_request missing-declaration denial: {credential_request}"
     );
 
     let credential_setup =
@@ -321,8 +330,17 @@ fn undeclared_target_fails_shut_across_outbound_tools() -> anyhow::Result<()> {
         Some(skill.as_str()),
         url,
     )?;
+    // Same post-#1103 shape as the missing-declaration case: empty
+    // allowed_hosts ⇒ every host is out of the credential's scope ⇒
+    // credential-scope permission denial, not a declaration-layer type.
     assert_eq!(credential_request["ok"], false);
-    assert_eq!(credential_request["error_type"], "undeclared_remote_target");
+    assert_eq!(credential_request["error_type"], "permission");
+    assert!(
+        credential_request["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("not authorized for host")),
+        "credential_request undeclared-target denial: {credential_request}"
+    );
 
     let credential_setup = run_credential_setup(
         &credential_manifest("parity.cred.setup.target"),
