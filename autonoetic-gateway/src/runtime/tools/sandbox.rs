@@ -2506,6 +2506,33 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             all_mounts.extend(runtime_lock_mounts);
         }
 
+        // #1002 slice 1: record what this execution can see, as asserted here
+        // (the SDK bridge socket mount is added later, inside spawn, and is
+        // intentionally not listed — it is a gateway-internal socket, not host
+        // filesystem reach). Bubblewrap ro-binds the whole host `/` today
+        // (legacy mode); docker/microvm/wasm do not.
+        let mount_set: Vec<String> = {
+            const MOUNT_SET_CAP: usize = 64;
+            let mut entries: Vec<String> = Vec::with_capacity(2 + all_mounts.len());
+            if driver == crate::sandbox::driver::SandboxDriverKind::Bubblewrap {
+                entries.push("ro:host_root".to_string());
+            }
+            entries.push(format!("rw:{agent_dir_str}"));
+            for mount in &all_mounts {
+                entries.push(format!(
+                    "{}:{}",
+                    if mount.readonly { "ro" } else { "rw" },
+                    mount.source.display()
+                ));
+            }
+            if entries.len() > MOUNT_SET_CAP {
+                let overflow = entries.len() - MOUNT_SET_CAP;
+                entries.truncate(MOUNT_SET_CAP);
+                entries.push(format!("truncated:+{overflow}"));
+            }
+            entries
+        };
+
         // sandbox.exec is free-form shell on the native tier.
         let exec_kind = crate::exec_request::ExecutionKind::shell(effective_command.clone());
         let runner = if all_mounts.is_empty() {
@@ -2563,7 +2590,8 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             "command_succeeded": command_succeeded,
             "exit_code": exit_code,
             "stdout": stdout,
-            "stderr": stderr
+            "stderr": stderr,
+            "mount_set": mount_set
         });
 
         // § 3.6 — Network error detection for agents running without network access.

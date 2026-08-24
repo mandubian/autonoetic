@@ -340,6 +340,7 @@ mod tests {
             arguments: Some(format!(r#"{{"command":"{command}"}}"#)),
             result: None,
             egress_label: None,
+            mount_set: None,
         }
     }
 

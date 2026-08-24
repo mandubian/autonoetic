@@ -466,6 +466,7 @@ mod tests {
             arguments: None,
             result: None,
             egress_label: None,
+            mount_set: None,
         }
     }
 

@@ -31,7 +31,21 @@ fn execution_trace_from_row(
         arguments: row.get(17)?,
         result: row.get(18)?,
         egress_label: decode_egress_label_json(egress_raw)?,
+        mount_set: decode_mount_set_json(row.get(20).ok().flatten())?,
     })
+}
+
+fn decode_mount_set_json(raw: Option<String>) -> rusqlite::Result<Option<Vec<String>>> {
+    match raw {
+        None => Ok(None),
+        Some(json) => serde_json::from_str(&json)
+            .map(Some)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+                20,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )),
+    }
 }
 
 fn looks_like_fts_syntax(query: &str) -> bool {
@@ -814,7 +828,7 @@ impl GatewayStore {
             "SELECT trace_id, event_id, agent_id, session_id, turn_id, timestamp,
                 tool_name, command, exit_code, stdout, stderr, duration_ms,
                 success, error_type, error_summary, approval_required,
-                approval_request_id, arguments, result, egress_label_json
+                approval_request_id, arguments, result, egress_label_json, mount_set_json
              FROM execution_traces WHERE trace_id = ?1",
         )?;
         let mut rows = stmt.query(params![trace_id])?;
@@ -833,14 +847,18 @@ impl GatewayStore {
             Some(label) => Some(serde_json::to_string(label)?),
             None => None,
         };
+        let mount_set_json = match &trace.mount_set {
+            Some(set) => Some(serde_json::to_string(set)?),
+            None => None,
+        };
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO execution_traces (
                 trace_id, event_id, agent_id, session_id, turn_id, timestamp,
                 tool_name, command, exit_code, stdout, stderr, duration_ms,
                 success, error_type, error_summary, approval_required, approval_request_id,
-                arguments, result, egress_label_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                arguments, result, egress_label_json, mount_set_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 &trace.trace_id,
                 trace.event_id.as_deref(),
@@ -862,6 +880,7 @@ impl GatewayStore {
                 trace.arguments.as_deref(),
                 trace.result.as_deref(),
                 egress_label_json,
+                mount_set_json,
             ],
         )?;
         Ok(())

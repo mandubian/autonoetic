@@ -654,6 +654,20 @@ impl<'a> ToolCallProcessor<'a> {
             .map(str::to_string)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+        // #1002 slice 1: sandbox tools report the gateway-asserted set of host
+        // paths the execution could see; the durable trace makes "what could
+        // this exec see?" answerable after the fact.
+        let mount_set = parsed_result.as_ref().and_then(|v| {
+            v.get("mount_set")
+                .and_then(|v| v.as_array())
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .map(|e| e.as_str().map(str::to_string))
+                        .collect::<Option<Vec<String>>>()
+                })
+        });
+
         let trace = ExecutionTraceRecord {
             trace_id,
             event_id,
@@ -680,6 +694,7 @@ impl<'a> ToolCallProcessor<'a> {
                 .egress_results
                 .get(&tc.id)
                 .map(|r| r.label.clone()),
+            mount_set,
         };
         store.create_execution_trace(&trace)?;
         Ok(Some(trace.trace_id))
@@ -1712,6 +1727,58 @@ mod tests {
 
     struct TraceFailureTool;
 
+    /// Returns a sandbox-style payload carrying a mount set (#1002 slice 1):
+    /// sandbox tools report the host paths the gateway asserted as visible,
+    /// and the processor must lift that key into the durable trace.
+    struct TraceMountSetTool;
+
+    impl NativeTool for TraceMountSetTool {
+        fn name(&self) -> &'static str {
+            "test.trace.mount_set"
+        }
+
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name().to_string(),
+                description: "Returns sandbox payload with mount_set".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" }
+                    },
+                    "required": ["command"]
+                }),
+            }
+        }
+
+        fn is_available(&self, _manifest: &AgentManifest) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _manifest: &AgentManifest,
+            _policy: &PolicyEngine,
+            _agent_dir: &Path,
+            _gateway_dir: Option<&Path>,
+            _arguments_json: &str,
+            _session_id: Option<&str>,
+            _turn_id: Option<&str>,
+            _config: Option<&autonoetic_types::config::GatewayConfig>,
+            _gateway_store: Option<std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>>,
+            _run_context: Option<&crate::runtime::active_execution_registry::NativeToolRunContext>,
+        ) -> anyhow::Result<String> {
+            Ok(serde_json::json!({
+                "ok": true,
+                "exit_code": 0,
+                "stdout": "ran",
+                "stderr": "",
+                "mount_set": ["ro:host_root", "rw:/tmp/agent", "ro:/tmp/agent/.gateway/sessions/x/notes.md"],
+            })
+            .to_string())
+        }
+    }
+
     impl NativeTool for TraceFailureTool {
         fn name(&self) -> &'static str {
             "test.trace.failure"
@@ -2000,6 +2067,81 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("echo hi"));
+    }
+
+    /// #1002 slice 1: a tool result carrying `mount_set` must land in the
+    /// durable execution trace — "what could this exec see?" is answerable
+    /// after the fact, from the store, not by re-deriving the mount list.
+    #[tokio::test]
+    async fn test_process_tool_calls_lifts_mount_set_into_trace() {
+        let temp = tempdir().unwrap();
+        let gateway_dir = temp.path().join(".gateway");
+        std::fs::create_dir_all(&gateway_dir).unwrap();
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&gateway_dir).unwrap(),
+        );
+
+        let manifest = test_manifest();
+        let mut mcp_runtime = crate::runtime::mcp::McpToolRuntime::empty();
+        let mut registry = NativeToolRegistry::new();
+        registry.register(Box::new(TraceMountSetTool));
+        let mut disclosure_state = DisclosureState::default();
+
+        let mut processor = ToolCallProcessor::new(
+            &mut mcp_runtime,
+            &registry,
+            &manifest,
+            &mut disclosure_state,
+            None,
+            None,
+            Some(store.clone()),
+            None,
+        )
+        .with_session_context(
+            Some("trace-mount-set-session".to_string()),
+            Some("turn-000001".to_string()),
+        );
+
+        let tool_calls = vec![ToolCall {
+            id: "tc1".to_string(),
+            name: "test.trace.mount_set".to_string(),
+            arguments: r#"{"command":"cat notes.md"}"#.to_string(),
+        }];
+
+        let _ = processor
+            .process_tool_calls(
+                &tool_calls,
+                temp.path(),
+                Some(gateway_dir.as_path()),
+                &mut SessionTracer::test_tracer(),
+            )
+            .await
+            .unwrap();
+
+        let traces = store
+            .search_execution_traces(
+                None,
+                None,
+                None,
+                None,
+                Some("test-agent"),
+                Some("trace-mount-set-session"),
+                10,
+            )
+            .unwrap();
+        let trace = traces
+            .iter()
+            .find(|t| t.tool_name == "test.trace.mount_set")
+            .expect("mount_set trace should exist");
+        assert_eq!(
+            trace.mount_set,
+            Some(vec![
+                "ro:host_root".to_string(),
+                "rw:/tmp/agent".to_string(),
+                "ro:/tmp/agent/.gateway/sessions/x/notes.md".to_string(),
+            ]),
+            "the gateway-asserted mount set must persist verbatim"
+        );
     }
 
     #[tokio::test]

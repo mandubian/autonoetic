@@ -32,6 +32,7 @@ fn curl_trace(session_id: &str, command: &str) -> ExecutionTraceRecord {
         arguments: Some(format!(r#"{{"command":"{command}"}}"#)),
         result: None,
         egress_label: None,
+        mount_set: None,
     }
 }
 

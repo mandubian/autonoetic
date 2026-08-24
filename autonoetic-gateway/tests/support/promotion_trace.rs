@@ -33,6 +33,7 @@ pub fn execution_trace(
         arguments: None,
         result: None,
         egress_label: None,
+        mount_set: None,
     }
 }
 

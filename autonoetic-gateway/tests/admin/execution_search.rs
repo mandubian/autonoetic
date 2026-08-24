@@ -77,6 +77,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         arguments: Some(r#"{"command": "rustc src/main.rs"}"#.to_string()),
         result: Some(r#"{"ok": false, "exit_code": 1, "stderr": "error[E0308]: ..."}"#.to_string()),
         egress_label: None,
+        mount_set: None,
     };
     store.create_execution_trace(&fail_trace)?;
 
@@ -102,6 +103,7 @@ fn test_execution_search_finds_past_errors() -> anyhow::Result<()> {
         arguments: Some(r#"{"command": "cargo test"}"#.to_string()),
         result: Some(r#"{"ok": true, "exit_code": 0}"#.to_string()),
         egress_label: None,
+        mount_set: None,
     };
     store.create_execution_trace(&success_trace)?;
 
@@ -223,6 +225,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         arguments: None,
         result: None,
         egress_label: None,
+        mount_set: None,
     })?;
 
     store.create_execution_trace(&ExecutionTraceRecord {
@@ -246,6 +249,7 @@ fn test_execution_search_with_command_pattern() -> anyhow::Result<()> {
         arguments: None,
         result: None,
         egress_label: None,
+        mount_set: None,
     })?;
 
     let registry = autonoetic_gateway::runtime::tools::default_registry();
@@ -309,6 +313,7 @@ fn trace_in(session_id: &str, trace_id: &str, stdout: &str) -> ExecutionTraceRec
         arguments: None,
         result: None,
         egress_label: None,
+        mount_set: None,
     }
 }
 
@@ -515,6 +520,60 @@ fn execution_search_refuses_without_a_session_context() -> anyhow::Result<()> {
         !parsed.to_string().contains("OTHER-OPERATOR-SECRET")
             && !parsed.to_string().contains("MINE"),
         "an unscoped call must return no trace content: {parsed}"
+    );
+    Ok(())
+}
+
+/// #1002 slice 1: the gateway-asserted mount set persists and round-trips
+/// through the store — the after-the-fact answer to "what could this exec
+/// see?". A `None` mount set (pre-v81 rows, non-sandbox tools) stays `None`.
+#[test]
+fn test_execution_trace_mount_set_roundtrip() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let gateway_dir = temp.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir)?;
+    let store = Arc::new(GatewayStore::open(&gateway_dir)?);
+
+    let with_mounts = ExecutionTraceRecord {
+        trace_id: "trace-mounts-001".to_string(),
+        event_id: None,
+        agent_id: "coder.default".to_string(),
+        session_id: "sess-mounts".to_string(),
+        turn_id: None,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        tool_name: "sandbox_exec".to_string(),
+        command: Some("cat notes.md".to_string()),
+        exit_code: Some(0),
+        stdout: None,
+        stderr: None,
+        duration_ms: 12,
+        success: 1,
+        error_type: None,
+        error_summary: None,
+        approval_required: Some(0),
+        approval_request_id: None,
+        arguments: None,
+        result: None,
+        egress_label: None,
+        mount_set: Some(vec![
+            "ro:host_root".to_string(),
+            "rw:/agents/coder".to_string(),
+            "ro:/mail/inbox.mbox".to_string(),
+        ]),
+    };
+    store.create_execution_trace(&with_mounts)?;
+
+    let read = store
+        .get_execution_trace("trace-mounts-001")?
+        .expect("trace row must exist");
+    assert_eq!(
+        read.mount_set,
+        Some(vec![
+            "ro:host_root".to_string(),
+            "rw:/agents/coder".to_string(),
+            "ro:/mail/inbox.mbox".to_string(),
+        ]),
+        "mount_set must survive the store roundtrip verbatim"
     );
     Ok(())
 }
