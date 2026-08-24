@@ -1590,6 +1590,138 @@ impl GatewayExecutionService {
 
     /// Cancel a recording session and emit the operator-cancel causal event
     /// (#1119 tranche 3) — previously emitted CLI-side.
+    // ── Trace / observability operator surface (#1119 tranche 6) ────────
+
+    /// Contract-health snapshot — the CLI's `trace contract-health` JSON body
+    /// is computed server-side (store + enforcement register) and returned
+    /// whole, so the CLI only renders.
+    pub fn contract_health(&self, since: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let health = store.contract_health(since)?;
+        let dead = crate::enforcement_register::dead_clauses(&health);
+        let registered_count = crate::enforcement_register::principles().len()
+            + crate::enforcement_register::rights().len()
+            + crate::enforcement_register::obligations().len();
+        let leak_summary = store.discretion_leak_summary(since)?;
+        Ok(serde_json::json!({
+            "since": since,
+            "by_clause": health.by_clause.iter().map(|(clause, count)| {
+                serde_json::json!({
+                    "clause": clause,
+                    "count": count,
+                    "title": crate::enforcement_register::clause_title(clause),
+                    "binds": crate::enforcement_register::binds(clause)
+                        .map(|b| b.label()),
+                })
+            }).collect::<Vec<_>>(),
+            "unattributed": health.unattributed,
+            "dead_clauses": dead,
+            "registered_clause_count": registered_count,
+            "discretion_leaks": leak_summary.iter().map(|t| {
+                serde_json::json!({
+                    "rule_id": t.rule_id,
+                    "kind": t.kind,
+                    "count": t.count,
+                })
+            }).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Civic-health snapshot — same server-side aggregation rule as
+    /// [`Self::contract_health`].
+    pub fn civic_health(&self, since: Option<&str>) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let health = store.civic_health(since)?;
+        Ok(serde_json::json!({
+            "since": since,
+            "by_agent": health.by_agent.iter().map(|e| {
+                serde_json::json!({
+                    "agent_id": e.agent_id.as_str(),
+                    "proposals_filed": e.proposals_filed,
+                    "proposals_pending": e.proposals_pending,
+                    "flags_filed": e.flags_filed,
+                    "flags_pending": e.flags_pending,
+                    "invitations_issued": e.invitations_issued,
+                    "invitations_open": e.invitations_open,
+                    "invitations_answered": e.invitations_answered,
+                })
+            }).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// Causal-event search for `trace session`/`trace event` display.
+    pub fn causal_search(
+        &self,
+        session_id: Option<&str>,
+        agent_id: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let events = store.search_causal_events(session_id, agent_id, limit)?;
+        Ok(serde_json::to_value(&events).map_err(|e| anyhow::anyhow!("encode failure: {}", e))?)
+    }
+
+    /// User-interaction listing scoped to a session or workflow.
+    pub fn user_interactions(
+        &self,
+        session_id: Option<&str>,
+        workflow_id: Option<&str>,
+    ) -> anyhow::Result<Vec<autonoetic_types::background::UserInteraction>> {
+        let store = self.require_store()?;
+        match (session_id, workflow_id) {
+            (Some(sid), None) => Ok(store.list_user_interactions_for_session_trace(sid)?),
+            (None, Some(wfid)) => Ok(store.list_user_interactions_for_workflow(wfid)?),
+            _ => anyhow::bail!("specify exactly one of session_id or workflow_id"),
+        }
+    }
+
+    /// Fork lineage for `trace fork-tree`: ancestor chain (nearest-first,
+    /// capped depth 16 with a visited set) + the descendant tree.
+    pub fn fork_tree(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let root_id = crate::runtime::content_store::root_session_id(session_id).to_string();
+        // Ancestor walk mirroring `fork_ancestor_roots`: start at the session's
+        // ROOT (lineage is recorded under root ids), advance by the SOURCE's
+        // root — a legacy row whose source was recorded as a nested id
+        // ("root/T5") would otherwise dead-end the walk one hop early.
+        let ancestors = {
+            let mut out = Vec::new();
+            let mut visited = std::collections::HashSet::new();
+            let mut cursor = root_id.clone();
+            for _ in 0..16 {
+                let Some(record) = store.get_fork_lineage(&cursor)? else {
+                    break;
+                };
+                let source_root =
+                    crate::runtime::content_store::root_session_id(&record.source_session_id)
+                        .to_string();
+                if !visited.insert(source_root.clone()) {
+                    break; // cycle guard
+                }
+                out.push(fork_lineage_value(&record));
+                cursor = source_root;
+            }
+            out
+        };
+        // Seed the visited set with the target root so a cyclical lineage
+        // (child → root) cannot re-introduce the root inside its own
+        // descendant tree.
+        let mut descendant_visited = std::collections::HashSet::new();
+        descendant_visited.insert(root_id.clone());
+        let descendants = collect_fork_descendants_value(
+            store,
+            &root_id,
+            0,
+            &mut descendant_visited,
+        )?;
+        Ok(serde_json::json!({
+            "session_id": session_id,
+            "root_session_id": root_id,
+            "ancestors": ancestors,
+            "descendants": descendants,
+        }))
+    }
+
     // ── Interactions / constitution / egress operators (#1119 tranche 5) ─
 
     /// Pending user interactions, scoped to a root session or explicit
@@ -5275,6 +5407,46 @@ impl GatewayExecutionService {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
+}
+
+fn fork_lineage_value(r: &crate::scheduler::gateway_store::ForkLineageRecord) -> serde_json::Value {
+    serde_json::json!({
+        "forked_session_id": r.forked_session_id,
+        "source_session_id": r.source_session_id,
+        "fork_turn": r.fork_turn,
+        "branch_message_sha256": r.branch_message_sha256,
+        "agent_id": r.agent_id,
+        "created_at": r.created_at,
+    })
+}
+
+/// Recursive descendant-collection for the fork tree, mirroring the CLI's
+/// guards: max depth 16 + visited set so a cyclical lineage can't hang.
+fn collect_fork_descendants_value(
+    store: &Arc<crate::scheduler::gateway_store::GatewayStore>,
+    session_id: &str,
+    depth: usize,
+    visited: &mut std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    if depth >= 16 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for record in store.list_fork_children(session_id)? {
+        if !visited.insert(record.forked_session_id.clone()) {
+            continue;
+        }
+        let children = collect_fork_descendants_value(
+            store,
+            &record.forked_session_id,
+            depth + 1,
+            visited,
+        )?;
+        let mut v = fork_lineage_value(&record);
+        v["children"] = serde_json::Value::Array(children);
+        out.push(v);
+    }
+    Ok(out)
 }
 
 /// Process-lifetime cache for the resolved gateway node id (#586). Populated

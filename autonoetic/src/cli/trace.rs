@@ -494,38 +494,47 @@ pub fn handle_trace_contract_health(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
-    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
-    let health = store.contract_health(since)?;
-    let dead = autonoetic_gateway::enforcement_register::dead_clauses(&health);
-    let registered_count = autonoetic_gateway::enforcement_register::principles().len()
-        + autonoetic_gateway::enforcement_register::rights().len()
-        + autonoetic_gateway::enforcement_register::obligations().len();
-    let leak_summary = store.discretion_leak_summary(since)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+    // The full snapshot is computed server-side (store + enforcement
+    // register) — the CLI only renders (#1119 tranche 6).
+    let body = rpc.call(
+        "trace.contract_health",
+        serde_json::json!({ "since": since }),
+    )?;
+
+    let dead: Vec<&str> = body["dead_clauses"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|c| c.as_str()).collect())
+        .unwrap_or_default();
+    let registered_count = body["registered_clause_count"].as_u64().unwrap_or(0);
+    let by_clause: Vec<(String, u64)> = body["by_clause"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|e| {
+                    (
+                        e["clause"].as_str().unwrap_or("?").to_string(),
+                        e["count"].as_u64().unwrap_or(0),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let unattributed = body["unattributed"].as_u64().unwrap_or(0);
+    let by_clause_index: std::collections::HashMap<String, serde_json::Value> = body["by_clause"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            e["clause"]
+                .as_str()
+                .map(|c| (c.to_string(), e.clone()))
+        })
+        .collect();
+    let leak_summary = body["discretion_leaks"].as_array().cloned().unwrap_or_default();
 
     if json_output {
-        let body = serde_json::json!({
-            "since": since,
-            "by_clause": health.by_clause.iter().map(|(clause, count)| {
-                serde_json::json!({
-                    "clause": clause,
-                    "count": count,
-                    "title": autonoetic_gateway::enforcement_register::clause_title(clause),
-                    "binds": autonoetic_gateway::enforcement_register::binds(clause)
-                        .map(|b| b.label()),
-                })
-            }).collect::<Vec<_>>(),
-            "unattributed": health.unattributed,
-            "dead_clauses": dead,
-            "registered_clause_count": registered_count,
-            "discretion_leaks": leak_summary.iter().map(|t| {
-                serde_json::json!({
-                    "rule_id": t.rule_id,
-                    "kind": t.kind,
-                    "count": t.count,
-                })
-            }).collect::<Vec<_>>(),
-        });
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
@@ -541,7 +550,7 @@ pub fn handle_trace_contract_health(
     );
     println!();
 
-    if health.by_clause.is_empty() {
+    if by_clause.is_empty() {
         println!(
             "{}No clause enforcements recorded.{}",
             color::DIM,
@@ -559,12 +568,9 @@ pub fn handle_trace_contract_health(
             color::RESET
         );
         println!("{}", color::separator(72));
-        for (clause, count) in &health.by_clause {
-            let title = autonoetic_gateway::enforcement_register::clause_title(clause)
-                .unwrap_or("<unknown>");
-            let binds = autonoetic_gateway::enforcement_register::binds(clause)
-                .map(|b| b.label())
-                .unwrap_or("-");
+        for (clause, count) in &by_clause {
+            let title = clause_title_from(&by_clause_index, clause);
+            let binds = clause_binds_from(&by_clause_index, clause);
             println!(
                 "{}{:<10}{} {}{:<8}{} {:<8} {}",
                 color::BRIGHT_CYAN,
@@ -579,12 +585,12 @@ pub fn handle_trace_contract_health(
         }
     }
 
-    if health.unattributed > 0 {
+    if unattributed > 0 {
         println!();
         println!(
             "{}{} unattributed enforcement(s){} — rule/right IDs not yet in the register (migration gap).",
             color::YELLOW,
-            health.unattributed,
+            unattributed,
             color::RESET
         );
     }
@@ -606,8 +612,7 @@ pub fn handle_trace_contract_health(
             registered_count
         );
         for clause in &dead {
-            let title = autonoetic_gateway::enforcement_register::clause_title(clause)
-                .unwrap_or("<unknown>");
+            let title = clause_title_from(&by_clause_index, clause);
             println!("  {}{:<10}{} {}", color::BRIGHT_CYAN, clause, color::RESET, title);
         }
         println!(
@@ -650,16 +655,38 @@ pub fn handle_trace_contract_health(
             println!(
                 "{}{:<10}{} {:<30} {}{:<8}{}",
                 color::BRIGHT_YELLOW,
-                t.rule_id,
+                t["rule_id"].as_str().unwrap_or("?"),
                 color::RESET,
-                t.kind,
+                t["kind"].as_str().unwrap_or("?"),
                 color::BRIGHT_YELLOW,
-                t.count,
+                t["count"].as_u64().unwrap_or(0),
                 color::RESET,
             );
         }
     }
     Ok(())
+}
+
+/// Look up a clause's registered title from the contract-health payload.
+fn clause_title_from(
+    rows: &std::collections::HashMap<String, serde_json::Value>,
+    clause: &str,
+) -> String {
+    rows.get(clause)
+        .and_then(|e| e["title"].as_str())
+        .unwrap_or("<unknown>")
+        .to_string()
+}
+
+/// Look up a clause's binds label from the contract-health payload.
+fn clause_binds_from(
+    rows: &std::collections::HashMap<String, serde_json::Value>,
+    clause: &str,
+) -> String {
+    rows.get(clause)
+        .and_then(|e| e["binds"].as_str())
+        .unwrap_or("-")
+        .to_string()
 }
 
 /// `autonoetic trace civic-health` — the standing civic-health view (#772
@@ -674,26 +701,15 @@ pub fn handle_trace_civic_health(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
-    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
-    let health = store.civic_health(since)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+    // Aggregated server-side; the CLI only renders (#1119 tranche 6).
+    let body = rpc.call(
+        "trace.civic_health",
+        serde_json::json!({ "since": since }),
+    )?;
+    let by_agent = body["by_agent"].as_array().cloned().unwrap_or_default();
 
     if json_output {
-        let body = serde_json::json!({
-            "since": since,
-            "by_agent": health.by_agent.iter().map(|e| {
-                serde_json::json!({
-                    "agent_id": e.agent_id.as_str(),
-                    "proposals_filed": e.proposals_filed,
-                    "proposals_pending": e.proposals_pending,
-                    "flags_filed": e.flags_filed,
-                    "flags_pending": e.flags_pending,
-                    "invitations_issued": e.invitations_issued,
-                    "invitations_open": e.invitations_open,
-                    "invitations_answered": e.invitations_answered,
-                })
-            }).collect::<Vec<_>>(),
-        });
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
@@ -709,7 +725,7 @@ pub fn handle_trace_civic_health(
     );
     println!();
 
-    if health.by_agent.is_empty() {
+    if by_agent.is_empty() {
         println!(
             "{}No civic activity recorded (no constitutional proposals or anomaly flags filed).{}",
             color::DIM,
@@ -727,19 +743,19 @@ pub fn handle_trace_civic_health(
             color::RESET
         );
         println!("{}", color::separator(72));
-        for e in &health.by_agent {
+        for e in &by_agent {
             println!(
                 "{}{:<28}{} {} ({} pending)   {} ({} pending)   {} ({} / {} answered)",
                 color::BRIGHT_CYAN,
-                e.agent_id,
+                e["agent_id"].as_str().unwrap_or("?"),
                 color::RESET,
-                e.proposals_filed,
-                e.proposals_pending,
-                e.flags_filed,
-                e.flags_pending,
-                e.invitations_issued,
-                e.invitations_open,
-                e.invitations_answered,
+                e["proposals_filed"].as_u64().unwrap_or(0),
+                e["proposals_pending"].as_u64().unwrap_or(0),
+                e["flags_filed"].as_u64().unwrap_or(0),
+                e["flags_pending"].as_u64().unwrap_or(0),
+                e["invitations_issued"].as_u64().unwrap_or(0),
+                e["invitations_open"].as_u64().unwrap_or(0),
+                e["invitations_answered"].as_u64().unwrap_or(0),
             );
         }
     }
@@ -782,7 +798,7 @@ pub fn load_agent_traces(
     Ok(traces)
 }
 
-/// Load traces from the gateway database (causal_events table).
+/// Load traces from the gateway database (causal_events table) over RPC.
 /// This is the preferred method as it provides queryable access to events.
 pub fn load_traces_from_db(
     config_path: &Path,
@@ -791,10 +807,16 @@ pub fn load_traces_from_db(
     limit: i64,
 ) -> anyhow::Result<Vec<CausalEventRecord>> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
-    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
-
-    store.search_causal_events(session_id, agent_id, limit)
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+    let result = rpc.call(
+        "trace.causal_search",
+        serde_json::json!({
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "limit": limit,
+        }),
+    )?;
+    serde_json::from_value(result).map_err(|e| anyhow::anyhow!("causal search decode failed: {}", e))
 }
 
 fn load_trace_user_interactions(
@@ -802,9 +824,13 @@ fn load_trace_user_interactions(
     session_id: &str,
 ) -> anyhow::Result<Vec<UserInteraction>> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
-    store.list_user_interactions_for_session_trace(session_id)
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+    let result = rpc.call(
+        "trace.user_interactions",
+        serde_json::json!({ "session_id": session_id }),
+    )?;
+    serde_json::from_value(result)
+        .map_err(|e| anyhow::anyhow!("user interactions decode failed: {}", e))
 }
 
 fn user_interaction_status_snake(
@@ -1708,76 +1734,45 @@ pub async fn handle_trace_fork(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
 
-    // Fork from the latest checkpoint of the source session
-    let fork = if let Some(turn) = at_turn {
-        // Fork from a specific turn's checkpoint
-        let checkpoint = autonoetic_gateway::runtime::checkpoint::load_checkpoint(
-            &config,
-            source_session_id,
-            &autonoetic_gateway::runtime::checkpoint::turn_id_for(turn as u64),
-        )?
-        .ok_or_else(|| {
-            // Checkpoints exist only at yield points (hibernation, approval,
-            // budget, escalation…), not at every turn — so list the turns that
-            // can actually be forked from.
-            let available = autonoetic_gateway::runtime::checkpoint::list_checkpoints(
-                &config,
-                source_session_id,
-            )
-            .unwrap_or_default();
-            let hint = if available.is_empty() {
-                " (no checkpoints exist for this session)".to_string()
-            } else {
-                format!(" — forkable turns: {}", available.join(", "))
-            };
-            anyhow::anyhow!(
-                "No checkpoint found for session '{}' at turn {}{}",
-                source_session_id,
-                turn,
-                hint
-            )
-        })?;
-        autonoetic_gateway::runtime::checkpoint::SessionFork::fork_from_checkpoint(
-            &config,
-            &checkpoint,
-            new_session_id,
-            branch_message,
-        )?
-    } else {
-        autonoetic_gateway::runtime::checkpoint::SessionFork::fork(
-            &config,
-            source_session_id,
-            new_session_id,
-            branch_message,
-        )?
-    };
-
-    // Record every fork side effect (timeline mirror, lineage row, both
-    // causal events) through the same choke point `session.fork` (RPC) uses,
-    // so a CLI fork is indistinguishable from an RPC fork: its parent
-    // artifact refs resolve and it shows up in `trace fork-tree` (#814). Best
-    // effort — the fork itself already succeeded (checkpoint written).
-    let gateway_dir = config.agents_dir.join(".gateway");
-    if let Ok(store) = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir) {
-        // Attribution fallback: the agent the source checkpoint was running
-        // (a session id is not an agent, so never fall back to that).
-        let fork_agent_id = agent_id.unwrap_or(&fork.agent_id);
-        if let Err(e) = store.record_session_fork(&fork, branch_message, fork_agent_id) {
-            eprintln!("warning: could not record session fork lineage: {e}");
-        }
+    // The `session.fork` RPC is the single choke point for forking: it
+    // performs the checkpoint fork server-side AND records every side effect
+    // (timeline mirror, lineage row, both causal events) — a CLI fork is
+    // therefore indistinguishable from an RPC fork (#814, #1119 tranche 6).
+    let fork = rpc.call(
+        "session.fork",
+        serde_json::json!({
+            "source_session_id": source_session_id,
+            "branch_message": branch_message,
+            "new_session_id": new_session_id,
+            "at_turn": at_turn.map(|t| t as u64),
+            "target_agent_id": agent_id,
+        }),
+    )?;
+    let new_session_id = fork["new_session_id"].as_str().unwrap_or("?").to_string();
+    let source_session_id = fork["source_session_id"].as_str().unwrap_or("?").to_string();
+    let fork_turn = fork["fork_turn"].as_u64();
+    let history_handle = fork["history_handle"].as_str().unwrap_or("?").to_string();
+    let message_count = fork["message_count"].as_u64().unwrap_or(0);
+    // mirrored_events is logged server-side; surface a warning if the
+    // lineage mirror failed (the fork itself still succeeded on disk).
+    if fork["mirrored_events"].as_u64().unwrap_or(0) == 0 {
+        eprintln!(
+            "warning: fork lineage mirror reported 0 events — `trace fork-tree` may not show this fork"
+        );
     }
 
     if !json_output {
         println!("Session forked successfully!");
-        println!("  Source session:    {}", fork.source_session_id);
-        println!("  New session:       {}", fork.new_session_id);
-        println!("  Fork turn:         {}", fork.fork_turn);
+        println!("  Source session:    {}", source_session_id);
+        println!("  New session:       {}", new_session_id);
+        println!("  Fork turn:         {}", fork_turn.map(|t| t.to_string()).unwrap_or_default());
         if let Some(turn) = at_turn {
             println!("  Forked at turn:    {}", turn);
         }
-        println!("  History messages:  {}", fork.initial_history.len());
-        println!("  History handle:    {}", fork.history_handle);
+        println!("  History messages:  {}", message_count as usize);
+        println!("  History handle:    {}", history_handle);
         if let Some(msg) = branch_message {
             println!("  Branch message:    {}", msg);
         }
@@ -1790,11 +1785,11 @@ pub async fn handle_trace_fork(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "new_session_id": fork.new_session_id,
-                    "source_session_id": fork.source_session_id,
-                    "fork_turn": fork.fork_turn,
-                    "history_handle": fork.history_handle,
-                    "message_count": fork.initial_history.len(),
+                    "new_session_id": new_session_id,
+                    "source_session_id": source_session_id,
+                    "fork_turn": fork_turn,
+                    "history_handle": history_handle,
+                    "message_count": message_count as usize,
                     "at_turn": at_turn,
                 }))?
             );
@@ -1808,7 +1803,7 @@ pub async fn handle_trace_fork(
         // Use the existing chat functionality to continue the session
         let chat_args = super::common::ChatArgs {
             agent_id: agent_id.map(|a| a.to_string()),
-            session_id: Some(fork.new_session_id.clone()),
+            session_id: Some(new_session_id.clone()),
             sender_id: None,
             channel_id: None,
             resume: false,
@@ -1819,11 +1814,11 @@ pub async fn handle_trace_fork(
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "new_session_id": fork.new_session_id,
-                "source_session_id": fork.source_session_id,
-                "fork_turn": fork.fork_turn,
-                "history_handle": fork.history_handle,
-                "message_count": fork.initial_history.len(),
+                "new_session_id": new_session_id,
+                "source_session_id": source_session_id,
+                "fork_turn": fork_turn,
+                "history_handle": history_handle,
+                "message_count": message_count as usize,
                 "at_turn": at_turn,
             }))?
         );
@@ -1832,72 +1827,25 @@ pub async fn handle_trace_fork(
     Ok(())
 }
 
-/// A descendant fork, together with the sessions forked FROM it, recursively.
-struct ForkTreeNode {
-    record: autonoetic_gateway::scheduler::gateway_store::ForkLineageRecord,
-    children: Vec<ForkTreeNode>,
-}
-
-/// Recursively collect the sessions forked FROM `session_id`. Mirrors the
-/// guards `fork_ancestor_roots` uses internally for the ancestor walk: a
-/// max depth of 16 and a visited set, so a cyclical or malformed lineage
-/// table can't hang the CLI.
-fn collect_fork_descendants(
-    store: &autonoetic_gateway::scheduler::GatewayStore,
-    session_id: &str,
-    depth: usize,
-    visited: &mut std::collections::HashSet<String>,
-) -> anyhow::Result<Vec<ForkTreeNode>> {
-    if depth >= 16 {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for record in store.list_fork_children(session_id)? {
-        if !visited.insert(record.forked_session_id.clone()) {
-            continue; // cycle guard
-        }
-        let children = collect_fork_descendants(store, &record.forked_session_id, depth + 1, visited)?;
-        out.push(ForkTreeNode { record, children });
-    }
-    Ok(out)
-}
-
-fn fork_lineage_record_json(
-    r: &autonoetic_gateway::scheduler::gateway_store::ForkLineageRecord,
-) -> serde_json::Value {
-    serde_json::json!({
-        "forked_session_id": r.forked_session_id,
-        "source_session_id": r.source_session_id,
-        "fork_turn": r.fork_turn,
-        "branch_message_sha256": r.branch_message_sha256,
-        "agent_id": r.agent_id,
-        "created_at": r.created_at,
-    })
-}
-
-fn fork_tree_node_json(n: &ForkTreeNode) -> serde_json::Value {
-    let mut v = fork_lineage_record_json(&n.record);
-    v["children"] = serde_json::Value::Array(n.children.iter().map(fork_tree_node_json).collect());
-    v
-}
-
-fn print_fork_tree(nodes: &[ForkTreeNode], depth: usize) {
+/// Render the descendant tree from the `trace.fork_tree` RPC payload
+/// (records are JSON with `children` arrays — the server owns the walk).
+fn print_fork_tree_json(nodes: &[serde_json::Value], depth: usize) {
     for n in nodes {
-        let turn = n
-            .record
-            .fork_turn
+        let turn = n["fork_turn"]
+            .as_u64()
             .map(|t| format!(" @turn {t}"))
             .unwrap_or_default();
         println!(
             "  {}{}{}{}{}  (created {})",
             "  ".repeat(depth),
             color::DIM,
-            n.record.forked_session_id,
+            n["forked_session_id"].as_str().unwrap_or("?"),
             color::RESET,
             turn,
-            n.record.created_at
+            n["created_at"].as_str().unwrap_or("?")
         );
-        print_fork_tree(&n.children, depth + 1);
+        let children = n["children"].as_array().cloned().unwrap_or_default();
+        print_fork_tree_json(&children, depth + 1);
     }
 }
 
@@ -1909,44 +1857,19 @@ pub fn handle_trace_fork_tree(
     json_output: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = config.agents_dir.join(".gateway");
-    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
-
-    let root_id =
-        autonoetic_gateway::runtime::content_store::root_session_id(session_id).to_string();
-
-    // Ancestor walk, nearest-first: immediate parent, grandparent, ... capped
-    // at depth 16 with a visited set (same guards as `fork_ancestor_roots`).
-    let mut ancestors = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-    let mut cursor = root_id.clone();
-    for _ in 0..16 {
-        let Some(record) = store.get_fork_lineage(&cursor)? else {
-            break;
-        };
-        if !visited.insert(record.forked_session_id.clone()) {
-            break; // cycle guard
-        }
-        // Advance by the source's ROOT: the lineage table is keyed by root
-        // ids, and legacy rows may have recorded a nested source id.
-        let next = autonoetic_gateway::runtime::content_store::root_session_id(
-            &record.source_session_id,
-        )
-        .to_string();
-        ancestors.push(record);
-        cursor = next;
-    }
-
-    let mut descendant_visited = std::collections::HashSet::new();
-    descendant_visited.insert(root_id.clone());
-    let descendants = collect_fork_descendants(&store, &root_id, 0, &mut descendant_visited)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+    // Ancestor chain + descendant tree are computed server-side (lineage
+    // table walk with the same depth/visited guards) — the CLI renders
+    // (#1119 tranche 6).
+    let body = rpc.call(
+        "trace.fork_tree",
+        serde_json::json!({ "session_id": session_id }),
+    )?;
+    let root_id = body["root_session_id"].as_str().unwrap_or(session_id).to_string();
+    let ancestors = body["ancestors"].as_array().cloned().unwrap_or_default();
+    let descendants = body["descendants"].as_array().cloned().unwrap_or_default();
 
     if json_output {
-        let body = serde_json::json!({
-            "session_id": root_id,
-            "ancestors": ancestors.iter().map(fork_lineage_record_json).collect::<Vec<_>>(),
-            "descendants": descendants.iter().map(fork_tree_node_json).collect::<Vec<_>>(),
-        });
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
@@ -1965,23 +1888,26 @@ pub fn handle_trace_fork_tree(
         // Print oldest-first: the topmost ancestor, then each descendant of
         // it down to `root_id` (the target, which is `ancestors[0]`'s
         // forked_session_id).
-        let apex = &ancestors.last().unwrap().source_session_id;
+        let apex = ancestors
+            .last()
+            .and_then(|a| a["source_session_id"].as_str())
+            .unwrap_or("?");
         println!("  {}", apex);
         for a in ancestors.iter().rev() {
-            let turn = a
-                .fork_turn
+            let turn = a["fork_turn"]
+                .as_u64()
                 .map(|t| format!(" @turn {t}"))
                 .unwrap_or_default();
             println!(
                 "    -> {}{}{}  (created {})",
-                color::agent(&a.forked_session_id),
+                color::agent(a["forked_session_id"].as_str().unwrap_or("?")),
                 turn,
-                if a.branch_message_sha256.is_some() {
+                if a["branch_message_sha256"].is_string() {
                     " (branch message)"
                 } else {
                     ""
                 },
-                a.created_at
+                a["created_at"].as_str().unwrap_or("?")
             );
         }
     }
@@ -1991,7 +1917,7 @@ pub fn handle_trace_fork_tree(
         println!("  No sessions have been forked from this one.");
     } else {
         println!("  Descendants:");
-        print_fork_tree(&descendants, 0);
+        print_fork_tree_json(&descendants, 0);
     }
 
     Ok(())
@@ -2204,9 +2130,12 @@ pub async fn handle_trace_workflow(
     } else {
         let events =
             autonoetic_gateway::scheduler::load_workflow_events(&config, None, &workflow_id)?;
-        let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-        let wf_interactions = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?
-            .list_user_interactions_for_workflow(&workflow_id)?;
+        let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+        let wf_interactions: Vec<UserInteraction> = serde_json::from_value(rpc.call(
+            "trace.user_interactions",
+            serde_json::json!({ "workflow_id": workflow_id }),
+        )?)
+        .map_err(|e| anyhow::anyhow!("user interactions decode failed: {}", e))?;
         print_workflow_events_table(
             &workflow_id,
             run.as_ref(),
@@ -2229,8 +2158,7 @@ async fn trace_workflow_follow(
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut seen_interactions: HashSet<String> = HashSet::new();
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(config);
-    let store = autonoetic_gateway::scheduler::GatewayStore::open(&gateway_dir)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(config)?;
     let mut poll_interval = interval(Duration::from_secs(1));
 
     println!(
@@ -2274,7 +2202,25 @@ async fn trace_workflow_follow(
             }
         }
 
-        let interactions = store.list_user_interactions_for_workflow(workflow_id)?;
+        let interactions: Vec<UserInteraction> = match rpc.call(
+            "trace.user_interactions",
+            serde_json::json!({ "workflow_id": workflow_id }),
+        ) {
+            Ok(raw) => match serde_json::from_value(raw) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    // A decode failure means the RPC contract changed or the
+                    // server misbehaved — surface it rather than silently
+                    // showing "no new interactions".
+                    eprintln!("  [warn] trace.user_interactions decode failed: {e}");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                eprintln!("  [warn] trace.user_interactions failed: {e}");
+                Vec::new()
+            }
+        };
         let mut new_interactions: Vec<UserInteraction> = Vec::new();
         for interaction in interactions {
             if seen_interactions.insert(interaction.interaction_id.clone()) {
