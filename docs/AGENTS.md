@@ -136,6 +136,9 @@ metadata:
       type: "stateful"
       sandbox: "bubblewrap"
       runtime_lock: "runtime.lock"
+      mounts:                        # Optional (#1002): request host paths; granted only
+        - host_path: ~/mail          # against the operator's sandbox.allowed_mount_roots
+          readonly: true             # allowlist — read-only unless readonly: false
     agent:
       id: "agent.id"
       name: "Human Name"
