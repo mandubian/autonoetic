@@ -43,7 +43,7 @@
 
 use anyhow::Result;
 use autonoetic_types::causal_chain::CausalEventRecord;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::scheduler::gateway_store::GatewayStore;
 

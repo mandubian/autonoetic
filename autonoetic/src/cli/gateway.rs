@@ -548,23 +548,10 @@ pub async fn handle_gateway_approvals(
             run_interactive_approvals(&rpc, &config, *approval_level).await?;
         }
         super::common::GatewayApprovalCommands::Show { request_id } => {
-            let full: autonoetic_types::background::ApprovalRequest = match rpc.call(
-                "approvals.inspect",
-                serde_json::json!({ "request_id": request_id }),
-            ) {
-                Ok(body) => {
-                    if body["full"].is_null() {
-                        println!("Approval '{}' not found.", request_id);
-                        return Ok(());
-                    }
-                    match serde_json::from_value(body["full"].clone()) {
-                        Ok(a) => a,
-                        Err(e) => anyhow::bail!("approvals.inspect decode failed: {}", e),
-                    }
-                }
-                Err(e) => {
+            let full: autonoetic_types::background::ApprovalRequest = match inspect_approval(&rpc, request_id)? {
+                Some(a) => a,
+                None => {
                     println!("Approval '{}' not found.", request_id);
-                    let _ = e;
                     return Ok(());
                 }
             };
@@ -702,7 +689,7 @@ pub async fn handle_gateway_approvals(
                         if let Some(ref v) = risk.auditor_verdict {
                             println!("  Auditor verdict: {}", v);
                         }
-if let Some(ref link) = risk.auditor_findings_link {
+                        if let Some(ref link) = risk.auditor_findings_link {
                             println!("  Auditor findings: {}", link);
                         }
                     }
@@ -712,15 +699,8 @@ if let Some(ref link) = risk.auditor_findings_link {
             request_id,
             question,
         } => {
-            let approval: Option<autonoetic_types::background::ApprovalRequest> = match rpc.call(
-                "approvals.inspect",
-                serde_json::json!({ "request_id": request_id }),
-            ) {
-                Ok(body) if !body["full"].is_null() => {
-                    serde_json::from_value(body["full"].clone()).ok()
-                }
-                _ => None,
-            };
+            let approval: Option<autonoetic_types::background::ApprovalRequest> =
+                inspect_approval(&rpc, request_id)?;
             match approval {
                 None => println!("Approval '{}' not found.", request_id),
                 Some(a) => {
@@ -741,11 +721,7 @@ if let Some(ref link) = risk.auditor_findings_link {
                 eprintln!("Error: message must not be empty");
                 return Ok(());
             }
-            let inspected = rpc.call(
-                "approvals.inspect",
-                serde_json::json!({ "request_id": request_id }),
-            )?;
-            if inspected["full"].is_null() {
+            if inspect_approval(&rpc, request_id)?.is_none() {
                 eprintln!("Approval '{}' not found.", request_id);
                 return Ok(());
             }
@@ -772,11 +748,7 @@ if let Some(ref link) = risk.auditor_findings_link {
                 eprintln!("Error: question must not be empty");
                 return Ok(());
             }
-            let inspected = rpc.call(
-                "approvals.inspect",
-                serde_json::json!({ "request_id": request_id }),
-            )?;
-            if inspected["full"].is_null() {
+            if inspect_approval(&rpc, request_id)?.is_none() {
                 eprintln!("Approval '{}' not found.", request_id);
                 return Ok(());
             }
@@ -1122,6 +1094,29 @@ fn approvals_list(
 ) -> anyhow::Result<Vec<autonoetic_types::background::ApprovalRequest>> {
     let raw = rpc.call("approvals.list", serde_json::json!({}))?;
     serde_json::from_value(raw).map_err(|e| anyhow::anyhow!("approvals.list decode failed: {}", e))
+}
+
+/// Fetch one approval over RPC. `Ok(None)` means the server answered
+/// "Approval not found"; any other RPC failure (connectivity, auth, server
+/// error) propagates so the operator isn't misled into thinking the request
+/// just doesn't exist.
+fn inspect_approval(
+    rpc: &crate::cli::rpc::GatewayRpc,
+    request_id: &str,
+) -> anyhow::Result<Option<autonoetic_types::background::ApprovalRequest>> {
+    match rpc.call(
+        "approvals.inspect",
+        serde_json::json!({ "request_id": request_id }),
+    ) {
+        Ok(body) if !body["full"].is_null() => {
+            let approval = serde_json::from_value(body["full"].clone())
+                .map_err(|e| anyhow::anyhow!("approvals.inspect decode failed: {}", e))?;
+            Ok(Some(approval))
+        }
+        Ok(_) => Ok(None),
+        Err(e) if e.to_string().contains("Approval not found") => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Fetch a gate's enrichment thread over RPC, typed for rendering.
