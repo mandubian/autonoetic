@@ -43,8 +43,8 @@ drifted from the code and must be updated.
 | `runtime_dir` | string (path) | `"./runtime"` | Everything the gateway owns: the promoted revision store (`revisions/agents/<id>/<rev>/` — the manifests that actually execute), `gateway.db`, the credential vault, `sessions/`, `artifacts/`, `logs/`. A **sibling** of `agents_dir`, never derived from it: `gateway_root_dir(config)` returns this field verbatim, and no code reconstructs it by walking up from an agent directory. Relative values resolve against the config file's directory, not the process CWD. |
 | `port` | u16 | `4000` | Port for the local JSON-RPC IPC listener (Unix socket on Linux, TCP fallback). |
 | `http_port` | u16 | `4100` | HTTP ingress bind (`0.0.0.0:http_port`) for `/api/*` routes (`event.ingest`, SSE, content API). Set `0` to disable HTTP while keeping localhost JSON-RPC on `port`. |
-| `ofp_port` | u16 | `4200` | Open Fang Protocol federation port for gateway-to-gateway communication. |
-| `tls` | bool | `false` | Enable TLS on the OFP port. |
+| `ofp_port` | u16 | `0` | Open Fang Protocol federation port for gateway-to-gateway communication. `0` (default) disables the federation listener — federation is receive-only with no outbound sender wired, so it is opt-in until federation ships. |
+| `tls` | bool | `false` | Enable TLS on the OFP port. **Not yet implemented** — `tls` is currently not read by the gateway; the OFP transport is plaintext TCP with HMAC auth only. |
 | ~~`default_lead_agent_id`~~ | — | — | **Removed.** `event.ingest` requires an explicit `target_agent_id`; the gateway no longer has a fallback lead. Omit this field. |
 | `node_id` | string | `"gateway"` | Node identity for OFP federation and causal chain authorship. Overridable by `AUTONOETIC_NODE_ID` env var. |
 | `node_name` | string | `"gateway"` | Human-readable node name for OFP federation. Overridable by `AUTONOETIC_NODE_NAME` env var. |

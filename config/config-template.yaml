@@ -18,7 +18,10 @@
 # agents_dir is set to absolute path based on config location
 # runtime_dir is set to absolute path based on config location
 port: 4000
-ofp_port: 4200
+# OFP federation listener port. 0 (default) disables the listener —
+# federation is receive-only with no outbound sender wired, so it is
+# opt-in until federation ships. Set a port (e.g. 4200) to enable.
+ofp_port: 0
 tls: false
 max_concurrent_spawns: 8
 max_pending_spawns_per_agent: 4

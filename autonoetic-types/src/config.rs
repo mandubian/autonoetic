@@ -1069,7 +1069,9 @@ pub struct GatewayConfig {
     #[serde(default = "default_http_port")]
     pub http_port: u16,
 
-    /// OFP federation port.
+    /// OFP federation port. `0` (the default) disables the federation
+    /// listener: federation is receive-only with no wired outbound sender,
+    /// so the listener ships off until federation lands.
     #[serde(default = "default_ofp_port")]
     pub ofp_port: u16,
 
@@ -2961,7 +2963,7 @@ fn default_http_port() -> u16 {
 }
 
 fn default_ofp_port() -> u16 {
-    4200
+    0
 }
 
 fn default_node_id() -> String {

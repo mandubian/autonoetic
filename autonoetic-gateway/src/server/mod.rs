@@ -312,6 +312,32 @@ impl GatewayServer {
         // Phase 5/7: start OFP, JSON-RPC, and HTTP listeners concurrently.
         // Missing federation identity is a hard failure by design.
         //
+        // `ofp_port: 0` disables the federation listener (same convention as
+        // `http_port`): outbound federation is unwired and there are no peers
+        // to receive from, so the listener is opt-in until federation ships.
+        let ofp_port = self.config.ofp_port;
+        let ofp_config = self.config.clone();
+        let ofp_registry = self.registry.clone();
+        let ofp_router = jsonrpc_router.clone();
+        let ofp_shared_secret = shared_secret.clone();
+        let ofp_server = async move {
+            if ofp_port == 0 {
+                tracing::info!("OFP federation listener disabled (ofp_port=0)");
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+            ofp::start_ofp_server(
+                ofp_addr,
+                node_id,
+                node_name,
+                ofp_config,
+                ofp_shared_secret,
+                ofp_registry,
+                ofp_router,
+            )
+            .await
+        };
+        //
         // Each member is `Box::pin`ned so it lives on the heap rather than
         // inside `run`'s future. These are the six largest futures in the
         // process — every request handler, scheduler tick and background loop
@@ -323,15 +349,7 @@ impl GatewayServer {
         // six one-time allocations and removes a whole class of
         // "unrelated change elsewhere aborts startup" failures.
         tokio::try_join!(
-            Box::pin(ofp::start_ofp_server(
-                ofp_addr,
-                node_id,
-                node_name,
-                self.config.clone(),
-                shared_secret.clone(),
-                self.registry.clone(),
-                jsonrpc_router.clone(),
-            )),
+            Box::pin(ofp_server),
             Box::pin(jsonrpc::start_jsonrpc_server(
                 jsonrpc_addr,
                 (*jsonrpc_router).clone(),
