@@ -2202,11 +2202,25 @@ async fn trace_workflow_follow(
             }
         }
 
-        let interactions: Vec<UserInteraction> = serde_json::from_value(rpc.call(
+        let interactions: Vec<UserInteraction> = match rpc.call(
             "trace.user_interactions",
             serde_json::json!({ "workflow_id": workflow_id }),
-        )?)
-        .unwrap_or_default();
+        ) {
+            Ok(raw) => match serde_json::from_value(raw) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    // A decode failure means the RPC contract changed or the
+                    // server misbehaved — surface it rather than silently
+                    // showing "no new interactions".
+                    eprintln!("  [warn] trace.user_interactions decode failed: {e}");
+                    Vec::new()
+                }
+            },
+            Err(e) => {
+                eprintln!("  [warn] trace.user_interactions failed: {e}");
+                Vec::new()
+            }
+        };
         let mut new_interactions: Vec<UserInteraction> = Vec::new();
         for interaction in interactions {
             if seen_interactions.insert(interaction.interaction_id.clone()) {

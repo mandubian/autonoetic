@@ -1680,6 +1680,10 @@ impl GatewayExecutionService {
     pub fn fork_tree(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
         let store = self.require_store()?;
         let root_id = crate::runtime::content_store::root_session_id(session_id).to_string();
+        // Ancestor walk mirroring `fork_ancestor_roots`: start at the session's
+        // ROOT (lineage is recorded under root ids), advance by the SOURCE's
+        // root — a legacy row whose source was recorded as a nested id
+        // ("root/T5") would otherwise dead-end the walk one hop early.
         let ancestors = {
             let mut out = Vec::new();
             let mut visited = std::collections::HashSet::new();
@@ -1688,19 +1692,28 @@ impl GatewayExecutionService {
                 let Some(record) = store.get_fork_lineage(&cursor)? else {
                     break;
                 };
-                if !visited.insert(record.forked_session_id.clone()) {
-                    break;
+                let source_root =
+                    crate::runtime::content_store::root_session_id(&record.source_session_id)
+                        .to_string();
+                if !visited.insert(source_root.clone()) {
+                    break; // cycle guard
                 }
-                let forked = record.forked_session_id.clone();
                 out.push(fork_lineage_value(&record));
-                let Some(src) = store.get_fork_lineage(&forked)? else {
-                    break;
-                };
-                cursor = src.source_session_id;
+                cursor = source_root;
             }
             out
         };
-        let descendants = collect_fork_descendants_value(store, &root_id, 0, &mut std::collections::HashSet::new())?;
+        // Seed the visited set with the target root so a cyclical lineage
+        // (child → root) cannot re-introduce the root inside its own
+        // descendant tree.
+        let mut descendant_visited = std::collections::HashSet::new();
+        descendant_visited.insert(root_id.clone());
+        let descendants = collect_fork_descendants_value(
+            store,
+            &root_id,
+            0,
+            &mut descendant_visited,
+        )?;
         Ok(serde_json::json!({
             "session_id": session_id,
             "root_session_id": root_id,

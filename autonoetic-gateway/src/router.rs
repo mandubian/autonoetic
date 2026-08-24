@@ -6709,6 +6709,16 @@ fn handle_trace_causal_search_rpc(
         Ok(p) => p,
         Err(e) => return invalid_egress_params(req.id, "trace.causal_search", e),
     };
+    // Fail closed on negative limits: SQLite reads `LIMIT -1` as unbounded —
+    // an unbounded causal-event dump from an RPC client is a DoS footgun
+    // (mirrors the recording.list guard).
+    if params.limit < 0 {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for trace.causal_search: limit must be >= 0".to_string(),
+        );
+    }
     match execution.causal_search(params.session_id.as_deref(), params.agent_id.as_deref(), params.limit) {
         Ok(v) => JsonRpcResponse::success(req.id, v),
         Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),

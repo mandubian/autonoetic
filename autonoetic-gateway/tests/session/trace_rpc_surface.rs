@@ -64,7 +64,7 @@ async fn causal_search_filters_by_session_and_obeys_limit() {
 async fn contract_health_tallies_attributed_events() {
     let svc = service();
     let store = svc.gateway_store().expect("store");
-    // One event attributed to a registered clause (P-7.17 approval flood)
+    // One event attributed to a registered rule id (P-5.2 → clause P-5)
     // and one unattributed (a synthetic rule id not in the register).
     let mut attributed = causal_event("tr-health", "approval.flood", "DENIED");
     attributed.enforced_rules = vec!["P-5.2".to_string()];
@@ -126,4 +126,40 @@ async fn fork_tree_roundtrips_seeded_lineage() {
     let ancestors = tree["ancestors"].as_array().expect("ancestors");
     assert_eq!(ancestors.len(), 1, "{tree}");
     assert_eq!(ancestors[0]["source_session_id"].as_str(), Some("tr-fork-root"));
+}
+
+#[tokio::test]
+async fn fork_tree_cycle_does_not_reintroduce_the_root() {
+    let svc = service();
+    let store = svc.gateway_store().expect("store");
+    // A self-referencing lineage row (child -> root) must not re-introduce
+    // the root inside its own descendant tree (visited set is seeded with
+    // the target root).
+    let fork = autonoetic_gateway::runtime::checkpoint::SessionFork {
+        source_session_id: "tr-cycle-root".to_string(),
+        new_session_id: "tr-cycle-root".to_string(),
+        fork_turn: 1,
+        initial_history: vec![],
+        history_handle: "hh".to_string(),
+        agent_id: "coder.default".to_string(),
+    };
+    let _ = store.record_session_fork(&fork, None, "coder.default");
+
+    let tree = svc.fork_tree("tr-cycle-root").expect("fork tree");
+    // Descendants must not contain the root itself despite the cycle.
+    fn collect_ids(nodes: &[serde_json::Value], out: &mut Vec<String>) {
+        for n in nodes {
+            out.push(n["forked_session_id"].as_str().unwrap_or("?").to_string());
+            collect_ids(
+                n["children"].as_array().map(|a| a.as_slice()).unwrap_or(&[]),
+                out,
+            );
+        }
+    }
+    let mut ids = Vec::new();
+    collect_ids(tree["descendants"].as_array().expect("descendants"), &mut ids);
+    assert!(
+        !ids.contains(&"tr-cycle-root".to_string()),
+        "root re-introduced as its own descendant: {ids:?}"
+    );
 }
