@@ -130,6 +130,13 @@ pub struct ExecutionTraceRecord {
     /// legacy unlabeled row; the gateway applies `egress.legacy_unlabeled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_label: Option<crate::egress::EgressLabel>,
+    /// Host paths this execution could see, as asserted by the gateway when it
+    /// built the sandbox (#1002 slice 1): `"ro:"`/`"rw:"`-prefixed entries for
+    /// the workspace, session-content, artifact, layer and SDK mounts, plus the
+    /// blanket `"ro:host_root"` marker while the legacy whole-host bind is in
+    /// effect. `None` for pre-v81 rows and tools that run no sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_set: Option<Vec<String>>,
 }
 
 impl CausalEventRecord {

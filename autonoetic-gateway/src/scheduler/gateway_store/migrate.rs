@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::WorkflowIndexFile;
 
-const SCHEMA_VERSION_LATEST: i64 = 80;
+const SCHEMA_VERSION_LATEST: i64 = 81;
 
 pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
@@ -565,6 +565,7 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
     apply_artifact_egress_labels_v78(conn)?;
     apply_workspace_egress_labels_v79(conn)?;
     apply_carry_forward_lineage_v80(conn)?;
+    apply_execution_trace_mount_set_v81(conn)?;
 
     Ok(())
 }
@@ -580,6 +581,34 @@ pub(super) fn migrate(conn: &mut Connection) -> Result<()> {
 /// backwards to the root of the lineage. One row per (artifact, carried role);
 /// a row is inserted only after `verify_carry_claim` accepted the carry, so it
 /// never records claims that were rejected.
+/// v81 — `execution_traces.mount_set_json`: the gateway-asserted set of host
+/// paths a sandboxed execution could see (#1002 slice 1). Nullable; `NULL`
+/// covers pre-existing rows and non-sandbox tools.
+fn apply_execution_trace_mount_set_v81(conn: &mut Connection) -> Result<()> {
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?;
+    if current >= 81 {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "ALTER TABLE execution_traces ADD COLUMN mount_set_json TEXT;",
+    )?;
+
+    conn.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![
+            81_i64,
+            "execution_trace_mount_set",
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
+
 fn apply_carry_forward_lineage_v80(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

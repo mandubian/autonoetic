@@ -281,6 +281,7 @@ fn execution_search_filters_stdout_for_remote() -> anyhow::Result<()> {
         arguments: None,
         result: Some(format!(r#"{{"ok":true,"stdout":"{CANARY}"}}"#)),
         egress_label: Some(EgressLabel::local_only()),
+        mount_set: None,
     })?;
 
     let registry = default_registry();
@@ -342,6 +343,7 @@ fn execution_search_filters_error_summary_for_remote() -> anyhow::Result<()> {
         arguments: None,
         result: None,
         egress_label: Some(EgressLabel::local_only()),
+        mount_set: None,
     })?;
 
     let registry = default_registry();

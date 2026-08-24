@@ -1210,6 +1210,7 @@ mod tests {
             arguments: Some(r#"{"command": "pytest tests/"}"#.to_string()),
             result: Some(r#"{"ok": true, "exit_code": 0}"#.to_string()),
             egress_label: None,
+            mount_set: None,
         };
         store.create_execution_trace(&success_trace)?;
 
@@ -1234,6 +1235,7 @@ mod tests {
             arguments: Some(r#"{"command": "python script.py"}"#.to_string()),
             result: Some(r#"{"ok": false, "exit_code": 1}"#.to_string()),
             egress_label: None,
+            mount_set: None,
         };
         store.create_execution_trace(&fail_trace)?;
 

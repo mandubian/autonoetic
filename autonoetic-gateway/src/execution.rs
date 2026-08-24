@@ -4110,6 +4110,7 @@ impl GatewayExecutionService {
                                 arguments: Some(format!("run {}", script_entry)),
                                 result: Some(output.clone()),
                                 egress_label: script_egress_label.clone(),
+                                mount_set: None,
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }
@@ -4170,6 +4171,7 @@ impl GatewayExecutionService {
                                 arguments: Some(format!("run {}", script_entry)),
                                 result: None,
                                 egress_label: script_egress_label.clone(),
+                                mount_set: None,
                             };
                             let _ = gs.create_execution_trace(&trace);
                         }

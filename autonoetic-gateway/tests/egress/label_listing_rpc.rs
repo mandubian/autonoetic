@@ -132,6 +132,7 @@ fn seed_labeled_trace(store: &GatewayStore, session_id: &str, trace_id: &str) {
         arguments: None,
         result: None,
         egress_label: Some(EgressLabel::local_only()),
+        mount_set: None,
     };
     store.create_execution_trace(&trace).expect("exec trace");
 }

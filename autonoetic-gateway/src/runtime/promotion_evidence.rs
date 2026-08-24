@@ -150,6 +150,7 @@ mod tests {
             arguments: None,
             result: None,
             egress_label: None,
+            mount_set: None,
         };
         assert!(trace_indicates_pass(&pass));
 
@@ -190,6 +191,7 @@ mod tests {
             arguments: None,
             result: None,
             egress_label: None,
+            mount_set: None,
         };
         assert!(!trace_indicates_pass(&trace));
     }
