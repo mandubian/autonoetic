@@ -70,6 +70,7 @@ mod right_ri_0_14;
 mod right_ri_0_5;
 mod right_ri_0_6;
 mod right_ri_0_9;
+mod proposal_rpc_surface;
 mod rights_amendment_proposal;
 mod rights_early_bucket;
 mod rights_late_bucket;

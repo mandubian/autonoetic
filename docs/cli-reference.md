@@ -41,6 +41,13 @@ On first run, interactively prompts for:
 
 Manage the Gateway lifecycle and configuration.
 
+> **Most subcommands require a running gateway (#1119):** `pending`, `grants`,
+> `cron list`, `interactions`, and `constitution proposals` speak JSON-RPC to
+> the gateway instead of reading `gateway.db` directly. Start it with
+> `autonoetic gateway start` first. (`gateway start`/`stop`/`preflight`, the
+> interactive `approvals` TUI, `egress-declassify`, and `constitution release`
+> keep working in-process as before.)
+
 ### `autonoetic gateway start`
 
 Starts the Gateway daemon.
@@ -385,6 +392,12 @@ autonoetic chat researcher.default --session-id my-session
 ## Trace
 
 Inspect causal chain traces for debugging and audit.
+
+> **Requires a running gateway (#1119):** `trace contract-health`, `trace
+> civic-health`, the DB-backed `trace show` path, `trace fork`, `trace
+> fork-tree`, and workflow interaction polls speak JSON-RPC
+> (`trace.*` / `session.fork`). Checkpoint-file reads (`trace event`,
+> `trace history`, `trace sessions`) stay local.
 
 ### `autonoetic trace sessions`
 

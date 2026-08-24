@@ -815,14 +815,24 @@ pub async fn handle_gateway_grants(
     command: &super::common::GatewayGrantCommands,
 ) -> anyhow::Result<()> {
     use super::common::GatewayGrantCommands;
+    use crate::cli::rpc::GatewayRpc;
 
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store = autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = GatewayRpc::from_config(&config)?;
 
     match command {
         GatewayGrantCommands::List { root_session, json } => {
-            let grants = gateway_store.get_session_grants_structured(root_session)?;
+            // grants.list returns session-approval grants (rendered here),
+            // egress declassification grants, and the current taint; the CLI
+            // shows the session-approval half, matching its historical view.
+            let result = rpc.call(
+                "grants.list",
+                serde_json::json!({ "root_session_id": root_session }),
+            )?;
+            let grants = result["session_approval_grants"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             if *json {
                 println!("{}", serde_json::to_string_pretty(&grants)?);
             } else if grants.is_empty() {
@@ -831,36 +841,51 @@ pub async fn handle_gateway_grants(
                 println!("{:<6} {:<36} {:<14} {:<12} {:<12} {}",
                     "ID", "SESSION", "AGENT", "SCOPE", "EXPIRES", "TARGETS");
                 for g in &grants {
-                    let targets_str: Vec<String> = g.targets.iter().map(|t| match t {
-                        autonoetic_types::background::GrantTarget::Any => "*".to_string(),
-                        autonoetic_types::background::GrantTarget::ExactHost(h) => h.clone(),
-                        autonoetic_types::background::GrantTarget::HostSuffix(s) => format!("*.{}", s),
-                        autonoetic_types::background::GrantTarget::HostAndPort { host, port } => format!("{}:{}", host, port),
-                        autonoetic_types::background::GrantTarget::UrlPrefix(u) => u.clone(),
-                    }).collect();
-                    let expires = g.expires_at.as_deref().unwrap_or("never");
-                    let short_session = if g.session_id.len() > 34 {
-                        format!("{}...", &g.session_id[..34])
+                    // GrantTarget serializes tagged: {"kind":"exact_host","value":"..."} —
+                    // render the same display strings the old typed rendering did.
+                    let targets_str: Vec<String> = g["targets"].as_array()
+                        .map(|a| a.iter().map(|t| {
+                            let kind = t["kind"].as_str().unwrap_or("?");
+                            match kind {
+                                "any" => "*".to_string(),
+                                "exact_host" => t["value"].as_str().unwrap_or("?").to_string(),
+                                "host_suffix" => format!("*.{}", t["value"].as_str().unwrap_or("?")),
+                                "host_and_port" => format!(
+                                    "{}:{}",
+                                    t["value"]["host"].as_str().unwrap_or("?"),
+                                    t["value"]["port"].as_u64().unwrap_or(0)
+                                ),
+                                "url_prefix" => t["value"].as_str().unwrap_or("?").to_string(),
+                                _ => format!("{t}"),
+                            }
+                        }).collect())
+                        .unwrap_or_default();
+                    let expires = g["expires_at"].as_str().unwrap_or("never");
+                    let sid = g["session_id"].as_str().unwrap_or("?");
+                    let short_session = if sid.len() > 34 {
+                        format!("{}...", &sid[..34])
                     } else {
-                        g.session_id.clone()
+                        sid.to_string()
                     };
                     // The root-wide sentinel is not an agent id — spell it out
                     // so the column never reads as a scoping that isn't there.
-                    let agent = if g.agent_id
+                    let agent = if g["agent_id"].as_str().unwrap_or("?")
                         == autonoetic_types::background::ROOT_WIDE_GRANT_AGENT
                     {
                         "* (all agents)".to_string()
                     } else {
-                        g.agent_id.clone()
+                        g["agent_id"].as_str().unwrap_or("?").to_string()
+                    };
+                    let scope = match g["scope"].as_str().unwrap_or("") {
+                        "root_session" => "root",
+                        "session" => "session",
+                        other => other,
                     };
                     println!("{:<6} {:<36} {:<14} {:<12} {:<12} {}",
-                        g.id,
+                        g["id"].as_str().unwrap_or("?"),
                         short_session,
                         agent,
-                        match g.scope {
-                            autonoetic_types::background::GrantScope::RootSession => "root",
-                            autonoetic_types::background::GrantScope::Session => "session",
-                        },
+                        scope,
                         expires,
                         targets_str.join(", ")
                     );
@@ -872,19 +897,28 @@ pub async fn handle_gateway_grants(
                 anyhow::bail!("Specify --host <host> or --all to revoke grants");
             }
             let reason_text = reason.as_deref().unwrap_or("Revoked by operator");
-            let count = gateway_store.revoke_session_grants(
-                root_session,
-                host.as_deref(),
-                reason_text,
-            )?;
-            // Egress declassification grants ride the same revocation surface:
-            // `--host X` revokes the host-scoped grant, `--all` every active
-            // declassification grant under the root (incl. session-wide).
-            let declass_count = gateway_store.revoke_egress_declassification_grants(
-                root_session,
-                host.as_deref(),
-                reason_text,
-            )?;
+            // grants.revoke is per-grant-kind; the CLI's historical command
+            // covers both kinds in one shot, so issue both calls and sum.
+            // Each call emits its own `grant_revocation` causal event
+            // server-side (the CLI previously wrote one locally).
+            let mut count: u64 = 0;
+            let mut declass_count: u64 = 0;
+            for (kind, sink) in [
+                ("session_approval", &mut count),
+                ("egress_declassification", &mut declass_count),
+            ] {
+                let result = rpc.call(
+                    "grants.revoke",
+                    serde_json::json!({
+                        "root_session_id": root_session,
+                        "grant_kind": kind,
+                        "host": host,
+                        "all": *all,
+                        "reason": reason_text,
+                    }),
+                )?;
+                *sink = result["revoked"].as_u64().unwrap_or(0);
+            }
             if count == 0 && declass_count == 0 {
                 println!("No matching grants found for session {}", root_session);
             } else {
@@ -896,28 +930,6 @@ pub async fn handle_gateway_grants(
                     println!("  Host filter: {}", host_val);
                 }
             }
-
-            gateway_store.create_causal_event(&autonoetic_types::causal_chain::CausalEventRecord {
-                event_id: format!("grant-revoke-{}", uuid::Uuid::new_v4()),
-                agent_id: "gateway".to_string(),
-                session_id: root_session.clone(),
-                turn_id: None,
-                event_seq: 0,
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                category: "grant_revocation".to_string(),
-                action: "revoke_grants".to_string(),
-                status: "completed".to_string(),
-                enforced_rules: autonoetic_types::causal_chain::default_enforced_rules(),
-                target: host.clone(),
-                payload: Some(serde_json::json!({
-                    "reason": reason_text,
-                    "count": count,
-                    "egress_declassification_revoked": declass_count,
-                }).to_string()),
-                payload_ref: None,
-                evidence_ref: None,
-                reason: reason.clone(),
-            })?;
         }
     }
     Ok(())
@@ -2180,17 +2192,16 @@ pub async fn handle_gateway_pending(
     root_session: &str,
     json: bool,
 ) -> anyhow::Result<()> {
+    use crate::cli::rpc::GatewayRpc;
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
-
-    let now = chrono::Utc::now();
-    let pending = autonoetic_gateway::runtime::operator_pending::collect_pending_for_root(
-        &gateway_store,
-        root_session,
-        now,
+    let rpc = GatewayRpc::from_config(&config)?;
+    // This is literally the CLI form of the `operator.pending` RPC — read it
+    // over the wire instead of collecting it from gateway.db (#1119 tranche 5).
+    let result = rpc.call(
+        "operator.pending",
+        serde_json::json!({ "root_session_id": root_session }),
     )?;
+    let pending = result["pending"].as_array().cloned().unwrap_or_default();
 
     if json {
         println!("{}", serde_json::to_string_pretty(&pending)?);
@@ -2207,21 +2218,20 @@ pub async fn handle_gateway_pending(
         "KIND", "ID", "AGE", "RESOLVE WITH", "SUMMARY"
     );
     for p in &pending {
-        // PendingKind serializes snake_case; render the tag for the column.
-        let kind = serde_json::to_value(p.kind)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "decision".to_string());
-        let age = match p.age_secs {
-            Some(s) if s >= 3600 => format!("{}h", s / 3600),
-            Some(s) if s >= 60 => format!("{}m", s / 60),
-            Some(s) => format!("{s}s"),
-            None => "-".to_string(),
+        let kind = p["kind"].as_str().unwrap_or("decision").to_string();
+        let age_secs = p["age_secs"].as_i64().unwrap_or(-1);
+        let age = match age_secs {
+            s if s >= 3600 => format!("{}h", s / 3600),
+            s if s >= 60 => format!("{}m", s / 60),
+            s if s >= 0 => format!("{s}s"),
+            _ => "-".to_string(),
         };
-        // Collapse control whitespace (a free-form summary such as an
-        // escalation's planner_synthesis may contain newlines/tabs) so each
-        // decision stays on one row, and mark truncation with an ellipsis.
-        let flat = p.summary.split_whitespace().collect::<Vec<_>>().join(" ");
+        let flat = p["summary"]
+            .as_str()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let summary = if flat.chars().count() > 60 {
             let head: String = flat.chars().take(59).collect();
             format!("{head}\u{2026}")
@@ -2230,7 +2240,11 @@ pub async fn handle_gateway_pending(
         };
         println!(
             "{:<12} {:<40} {:>8}  {:<28} {}",
-            kind, p.id, age, p.answer.method, summary
+            kind,
+            p["id"].as_str().unwrap_or("?"),
+            age,
+            p["answer"]["method"].as_str().unwrap_or("?"),
+            summary
         );
     }
     println!(
@@ -2244,10 +2258,9 @@ pub async fn handle_gateway_interactions(
     config_path: &Path,
     command: &super::common::GatewayInteractionCommands,
 ) -> anyhow::Result<()> {
+    use crate::cli::rpc::GatewayRpc;
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = GatewayRpc::from_config(&config)?;
 
     match command {
         super::common::GatewayInteractionCommands::List {
@@ -2255,16 +2268,16 @@ pub async fn handle_gateway_interactions(
             session,
             json,
         } => {
-            let interactions = if let Some(rsid) = root_session {
-                gateway_store.get_pending_interactions_for_root_session(rsid)?
-            } else if let Some(sid) = session {
-                gateway_store.get_pending_interactions_for_session(sid)?
-            } else {
-                // List all pending - use empty string to get all (or we'd need a new method)
-                // For now, just show a help message
-                println!("Please specify --root-session or --session to list interactions.");
-                return Ok(());
+            let params = match (root_session, session) {
+                (Some(rsid), None) => serde_json::json!({ "root_session_id": rsid }),
+                (None, Some(sid)) => serde_json::json!({ "session_id": sid }),
+                _ => {
+                    println!("Please specify --root-session or --session to list interactions.");
+                    return Ok(());
+                }
             };
+            let interactions = rpc.call("interaction.list_pending", params)?;
+            let interactions = interactions.as_array().cloned().unwrap_or_default();
 
             if *json {
                 println!("{}", serde_json::to_string_pretty(&interactions)?);
@@ -2280,18 +2293,20 @@ pub async fn handle_gateway_interactions(
                 "{:<14} {:<14} {:<15} {:<24} QUESTION",
                 "INTERACTION ID", "AGENT", "KIND", "CREATED AT"
             );
-            for i in interactions {
-                let truncated_q = if i.question.len() > 60 {
-                    format!("{}...", &i.question[..57])
+            for i in &interactions {
+                let q = i["question"].as_str().unwrap_or("");
+                let truncated_q = if q.chars().count() > 60 {
+                    let head: String = q.chars().take(57).collect();
+                    format!("{}...", head)
                 } else {
-                    i.question.clone()
+                    q.to_string()
                 };
                 println!(
                     "{:<14} {:<14} {:<15} {:<24} {}",
-                    i.interaction_id,
-                    i.agent_id,
-                    i.kind.as_str(),
-                    i.created_at,
+                    i["interaction_id"].as_str().unwrap_or("?"),
+                    i["agent_id"].as_str().unwrap_or("?"),
+                    i["kind"].as_str().unwrap_or("?"),
+                    i["created_at"].as_str().unwrap_or("?"),
                     truncated_q,
                 );
             }
@@ -2301,8 +2316,6 @@ pub async fn handle_gateway_interactions(
             text,
             option,
         } => {
-            use autonoetic_types::background::{UserInteractionAnswer, UserInteractionStatus};
-
             if text.is_none() && option.is_none() {
                 anyhow::bail!("Must provide either --text or --option to answer an interaction");
             }
@@ -2310,27 +2323,20 @@ pub async fn handle_gateway_interactions(
                 anyhow::bail!("Provide exactly one of --text or --option");
             }
 
-            let store = std::sync::Arc::new(gateway_store);
-
-            // Validate the interaction exists and is pending
-            let interaction = store
-                .get_user_interaction(interaction_id)?
-                .ok_or_else(|| anyhow::anyhow!("Unknown interaction '{}'", interaction_id))?;
-            anyhow::ensure!(
-                interaction.status == UserInteractionStatus::Pending,
-                "Interaction '{}' is {:?}; only pending interactions can be answered",
-                interaction_id,
-                interaction.status
-            );
-
-            let answer = UserInteractionAnswer {
-                interaction_id: interaction_id.clone(),
-                answer_text: text.clone(),
-                answer_option_id: option.clone(),
-                answered_by: "cli".to_string(),
-            };
-
-            store.answer_user_interaction(&answer)?;
+            // `interaction.answer` is the canonical operator answer path: it
+            // validates pending status server-side, records the answer, and
+            // orchestrates session/workflow resume (previously the CLI only
+            // wrote the row and deferred resume to the daemon's next tick —
+            // a behavior upgrade, matching what the Session Room does).
+            let out = rpc.call(
+                "interaction.answer",
+                serde_json::json!({
+                    "interaction_id": interaction_id,
+                    "answer_text": text,
+                    "answer_option_id": option,
+                    "answered_by": "cli",
+                }),
+            )?;
 
             println!("Answered interaction {}", interaction_id);
             if let Some(opt) = option {
@@ -2339,43 +2345,22 @@ pub async fn handle_gateway_interactions(
             if let Some(txt) = text {
                 println!("  Answer text: {}", txt);
             }
-
-            // Workflow-bound: update task status to Runnable so the durable queue picks it up
-            if let (Some(wf_id), Some(t_id)) = (
-                interaction.workflow_id.as_deref(),
-                interaction.task_id.as_deref(),
-            ) {
-                use autonoetic_types::workflow::TaskRunStatus;
-                if let Some(task) =
-                    autonoetic_gateway::scheduler::workflow_store::load_task_run(&config, Some(store.as_ref()), wf_id, t_id)?
-                {
-                    if task.status == TaskRunStatus::Paused {
-                        autonoetic_gateway::scheduler::workflow_store::update_task_run_status(
-                            &config,
-                            Some(store.as_ref()),
-                            wf_id,
-                            t_id,
-                            TaskRunStatus::Runnable,
-                            Some("user interaction answered; task queued for execution".to_string()),
-                            None,
-                            None,
-                        )?;
-                        println!("  Workflow task {} queued for execution", t_id);
-                    }
-                }
+            if out["error"].as_str().is_some_and(|e| !e.is_empty()) {
+                println!("  Server note: {}", out["error"].as_str().unwrap_or(""));
             }
-
             println!();
-            if interaction.workflow_id.is_some() {
-                println!("The gateway daemon will resume the session automatically on its next tick.");
+            if out["workflow_task_unblocked"].as_bool().unwrap_or(false) {
+                println!("  Workflow task unblocked and queued for execution.");
+            }
+            if out["resumed"].as_bool().unwrap_or(false) {
+                println!(
+                    "  Session `{}` resumed on the gateway.",
+                    out["session_id"].as_str().unwrap_or("(unknown)")
+                );
             } else {
-                println!("Restart the session to apply the answer. For example:");
-                println!("  autonoetic gateway start   (daemon will resume on next tick)");
-                println!("  autonoetic chat --session {}   (interactive resume)", interaction.session_id);
+                println!("  Session resume: the gateway will resume on its next tick.");
             }
-            if !interaction.workflow_id.is_some() {
-                println!("If the gateway is not running, start it with: autonoetic gateway start");
-            }
+            println!("Follow progress with: autonoetic room {}", out["root_session_id"].as_str().unwrap_or("(unknown)"));
         }
         super::common::GatewayInteractionCommands::Cancel {
             interaction_id,
@@ -2385,7 +2370,10 @@ pub async fn handle_gateway_interactions(
                 .clone()
                 .unwrap_or_else(|| "Cancelled by operator".to_string());
 
-            gateway_store.cancel_user_interaction(interaction_id, &reason)?;
+            rpc.call(
+                "interaction.cancel",
+                serde_json::json!({ "interaction_id": interaction_id, "reason": reason }),
+            )?;
 
             println!("Cancelled interaction {}", interaction_id);
             println!("  Reason: {}", reason);
@@ -2399,11 +2387,9 @@ pub async fn handle_gateway_system_agents(
     config_path: &Path,
     command: &super::common::SystemAgentCommands,
 ) -> anyhow::Result<()> {
+    use crate::cli::rpc::GatewayRpc;
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let store = std::sync::Arc::new(
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-    );
+    let rpc = GatewayRpc::from_config(&config)?;
 
     match command {
         super::common::SystemAgentCommands::List { ref json } => {
@@ -2416,8 +2402,15 @@ pub async fn handle_gateway_system_agents(
                 return Ok(());
             }
 
-            let scheduled = store.list_scheduled_jobs_for_owner("system", None, None)
-                .unwrap_or_default();
+            // Active system-owner cron jobs come from scheduled_jobs.list
+            // (owner="system") over RPC, not a direct store read (#1119 tranche 5).
+            let jobs_reply = rpc.call(
+                "scheduled_jobs.list",
+                serde_json::json!({ "owner_agent_id": "system", "limit": 500 }),
+            )?;
+            let scheduled: Vec<autonoetic_types::scheduled_job::ScheduledJob> =
+                serde_json::from_value(jobs_reply["jobs"].clone())
+                    .unwrap_or_default();
 
             if *json {
                 let entries: Vec<serde_json::Value> = config.system_agents.iter().map(|e| {
@@ -2445,6 +2438,13 @@ pub async fn handle_gateway_system_agents(
         }
 
         super::common::SystemAgentCommands::Bootstrap => {
+            // Scheduler-machinery write (creates/updates cron rows from the
+            // config's system_agents table) — no RPC surface; runs in-process
+            // like capsule export/import (#1119 tranche 5).
+            let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
+            let store = std::sync::Arc::new(
+                autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
+            );
             let results = autonoetic_gateway::scheduler::system_agents::reconcile_system_agents(
                 &config, &store,
             );
@@ -2484,7 +2484,13 @@ pub async fn handle_gateway_system_agents(
             // If more than one active job targets this agent (different root
             // sessions / owners / custom cron rows), refuse to guess: require
             // the operator to specify the job_id via `gateway cron trigger`.
-            let jobs = store.list_scheduled_jobs(None, None, None, 500)?;
+            let jobs_reply = rpc.call(
+                "scheduled_jobs.list",
+                serde_json::json!({ "limit": 500 }),
+            )?;
+            let jobs: Vec<autonoetic_types::scheduled_job::ScheduledJob> =
+                serde_json::from_value(jobs_reply["jobs"].clone())
+                    .map_err(|e| anyhow::anyhow!("scheduled_jobs.list decode failed: {}", e))?;
             let matching: Vec<_> = jobs
                 .iter()
                 .filter(|j| {
@@ -2524,10 +2530,9 @@ pub async fn handle_gateway_cron(
     config_path: &Path,
     command: &super::common::GatewayCronCommands,
 ) -> anyhow::Result<()> {
+    use crate::cli::rpc::GatewayRpc;
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = GatewayRpc::from_config(&config)?;
 
     match command {
         super::common::GatewayCronCommands::List {
@@ -2539,15 +2544,9 @@ pub async fn handle_gateway_cron(
         } => {
             let status_filter = match status.as_deref() {
                 None => None,
-                Some("active") => {
-                    Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Active)
-                }
-                Some("paused") => {
-                    Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Paused)
-                }
-                Some("cancelled") => {
-                    Some(autonoetic_types::scheduled_job::ScheduledJobStatus::Cancelled)
-                }
+                Some("active") => Some("active"),
+                Some("paused") => Some("paused"),
+                Some("cancelled") => Some("cancelled"),
                 Some(other) => {
                     anyhow::bail!(
                         "invalid --status '{}': expected active | paused | cancelled",
@@ -2555,12 +2554,18 @@ pub async fn handle_gateway_cron(
                     );
                 }
             };
-            let jobs = store.list_scheduled_jobs(
-                owner.as_deref(),
-                root_session.as_deref(),
-                status_filter,
-                *limit,
+            let reply = rpc.call(
+                "scheduled_jobs.list",
+                serde_json::json!({
+                    "owner_agent_id": owner,
+                    "root_session_id": root_session,
+                    "status": status_filter,
+                    "limit": limit,
+                }),
             )?;
+            let jobs: Vec<autonoetic_types::scheduled_job::ScheduledJob> =
+                serde_json::from_value(reply["jobs"].clone())
+                    .map_err(|e| anyhow::anyhow!("scheduled_jobs.list decode failed: {}", e))?;
 
             if *json {
                 println!("{}", serde_json::to_string_pretty(&jobs)?);
@@ -2746,7 +2751,12 @@ pub async fn handle_gateway_constitution(
             Ok(())
         }
         super::common::GatewayConstitutionCommands::Proposals { command } => {
-            handle_constitution_proposals(&open_store()?, command)
+            // The proposals subcommands read/write gateway.db — they now go
+            // over `constitution.*` RPCs (#1119 tranche 5). `Release` below
+            // still materializes releases from approved proposals in-process
+            // (scheduler machinery, no RPC surface — like capsule).
+            let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
+            handle_constitution_proposals(&rpc, command)
         }
         super::common::GatewayConstitutionCommands::Release { tag, json } => {
             let ids = open_store()?.publish_approved_proposals(tag)?;
@@ -2778,7 +2788,7 @@ pub async fn handle_gateway_constitution(
 }
 
 fn handle_constitution_proposals(
-    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    rpc: &crate::cli::rpc::GatewayRpc,
     command: &super::common::GatewayConstitutionProposalCommands,
 ) -> anyhow::Result<()> {
     use super::common::GatewayConstitutionProposalCommands;
@@ -2790,11 +2800,15 @@ fn handle_constitution_proposals(
             limit,
             json,
         } => {
-            let rows = store.list_constitutional_proposals(
-                status.as_deref(),
-                proposer.as_deref(),
-                *limit,
+            let reply = rpc.call(
+                "constitution.list_proposals",
+                serde_json::json!({
+                    "status": status,
+                    "proposer": proposer,
+                    "limit": limit,
+                }),
             )?;
+            let rows = reply.as_array().cloned().unwrap_or_default();
             if *json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
                 return Ok(());
@@ -2810,87 +2824,87 @@ fn handle_constitution_proposals(
             for p in &rows {
                 println!(
                     "{:<24} {:<14} {:<14} {:<24} {}",
-                    p.proposal_id,
-                    p.status,
-                    p.kind,
-                    p.proposer_agent_id,
-                    p.target_id.as_deref().unwrap_or("-"),
+                    p["proposal_id"].as_str().unwrap_or("?"),
+                    p["status"].as_str().unwrap_or("?"),
+                    p["kind"].as_str().unwrap_or("?"),
+                    p["proposer_agent_id"].as_str().unwrap_or("?"),
+                    p["target_id"].as_str().unwrap_or("-"),
                 );
             }
             Ok(())
         }
         GatewayConstitutionProposalCommands::Show { proposal_id, json } => {
-            let proposal = store.get_constitutional_proposal(proposal_id)?;
-            match proposal {
-                None => {
-                    anyhow::bail!("No proposal with id '{}'", proposal_id);
+            let p = rpc.call(
+                "constitution.proposal_get",
+                serde_json::json!({ "proposal_id": proposal_id }),
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&p)?);
+            } else {
+                println!("Proposal: {}", p["proposal_id"].as_str().unwrap_or("?"));
+                println!("  Status:        {}", p["status"].as_str().unwrap_or("?"));
+                println!("  Kind:          {}", p["kind"].as_str().unwrap_or("?"));
+                println!("  Target ID:     {}", p["target_id"].as_str().unwrap_or("-"));
+                println!("  Proposer:      {}", p["proposer_agent_id"].as_str().unwrap_or("?"));
+                if let Some(s) = p["proposer_session_id"].as_str() {
+                    println!("  From session:  {}", s);
                 }
-                Some(p) => {
-                    if *json {
-                        println!("{}", serde_json::to_string_pretty(&p)?);
-                    } else {
-                        println!("Proposal: {}", p.proposal_id);
-                        println!("  Status:        {}", p.status);
-                        println!("  Kind:          {}", p.kind);
-                        println!("  Target ID:     {}", p.target_id.as_deref().unwrap_or("-"));
-                        println!("  Proposer:      {}", p.proposer_agent_id);
-                        if let Some(s) = &p.proposer_session_id {
-                            println!("  From session:  {}", s);
-                        }
-                        println!("  Created at:    {}", p.created_at);
-                        if let Some(d) = &p.decided_at {
-                            println!("  Decided at:    {}", d);
-                        }
-                        if let Some(b) = &p.decided_by {
-                            println!("  Decided by:    {}", b);
-                        }
-                        if let Some(reason) = &p.decision_reason {
-                            println!("  Reason:        {}", reason);
-                        }
-                        if let Some(rel) = &p.published_in_release {
-                            println!("  Released in:   {}", rel);
-                        }
-                        println!("  Justification: {}", p.justification);
-                        if let Some(t) = &p.proposed_text {
-                            println!("\n--- proposed text ---\n{}", t);
-                        }
-                        if !matches!(p.evidence_json, serde_json::Value::Null) {
-                            println!(
-                                "\n--- evidence ---\n{}",
-                                serde_json::to_string_pretty(&p.evidence_json)?
-                            );
-                        }
-                    }
-                    Ok(())
+                println!("  Created at:    {}", p["created_at"].as_str().unwrap_or("?"));
+                if let Some(d) = p["decided_at"].as_str() {
+                    println!("  Decided at:    {}", d);
+                }
+                if let Some(b) = p["decided_by"].as_str() {
+                    println!("  Decided by:    {}", b);
+                }
+                if let Some(reason) = p["decision_reason"].as_str() {
+                    println!("  Reason:        {}", reason);
+                }
+                if let Some(rel) = p["published_in_release"].as_str() {
+                    println!("  Released in:   {}", rel);
+                }
+                println!("  Justification: {}", p["justification"].as_str().unwrap_or("?"));
+                if let Some(t) = p["proposed_text"].as_str() {
+                    println!("\n--- proposed text ---\n{}", t);
+                }
+                if !p["evidence_json"].is_null() {
+                    println!(
+                        "\n--- evidence ---\n{}",
+                        serde_json::to_string_pretty(&p["evidence_json"])?
+                    );
                 }
             }
+            Ok(())
         }
         GatewayConstitutionProposalCommands::Approve {
             proposal_id,
             reason,
-        } => decide_proposal(store, proposal_id, "approved", reason.as_deref()),
+        } => decide_proposal(rpc, proposal_id, "approved", reason.as_deref()),
         GatewayConstitutionProposalCommands::Reject {
             proposal_id,
             reason,
-        } => decide_proposal(store, proposal_id, "rejected", reason.as_deref()),
+        } => decide_proposal(rpc, proposal_id, "rejected", reason.as_deref()),
         GatewayConstitutionProposalCommands::Defer {
             proposal_id,
             reason,
-        } => decide_proposal(store, proposal_id, "deferred", reason.as_deref()),
+        } => decide_proposal(rpc, proposal_id, "deferred", reason.as_deref()),
     }
 }
 
 fn decide_proposal(
-    store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
+    rpc: &crate::cli::rpc::GatewayRpc,
     proposal_id: &str,
     new_status: &str,
     reason: Option<&str>,
 ) -> anyhow::Result<()> {
     debug_assert!(PROPOSAL_DECISION_STATES.contains(&new_status));
-    let updated = store.decide_constitutional_proposal(proposal_id, new_status, "operator", reason)?;
-    if !updated {
-        anyhow::bail!("No proposal with id '{}'", proposal_id);
-    }
+    rpc.call(
+        "constitution.proposal_decide",
+        serde_json::json!({
+            "proposal_id": proposal_id,
+            "status": new_status,
+            "reason": reason,
+        }),
+    )?;
     println!("Proposal {} → {}", proposal_id, new_status);
     if let Some(r) = reason {
         println!("  Reason: {}", r);

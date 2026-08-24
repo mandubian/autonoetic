@@ -10,12 +10,13 @@ use autonoetic_types::background::ScheduledAction;
 use autonoetic_types::capability::Capability;
 use autonoetic_types::config::GatewayConfig;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
 use std::thread;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 use crate::support::manifest_builder::TestManifest;
 
@@ -37,6 +38,58 @@ fn test_manifest_with_id(agent_id: &str, capabilities: Vec<Capability>) -> Agent
     }
 }
 
+/// How long a stub server waits for the code under test to connect.
+const STUB_ACCEPT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Accept one connection on a listener that will be reused, or give up after
+/// [`STUB_ACCEPT_TIMEOUT`].
+fn accept_one_borrowed(listener: &TcpListener, label: &str) -> Option<TcpStream> {
+    listener
+        .set_nonblocking(true)
+        .expect("stub listener should switch to non-blocking");
+    let deadline = Instant::now() + STUB_ACCEPT_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("accepted stub stream should switch back to blocking");
+                return Some(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    eprintln!(
+                        "stub server '{label}' timed out after {STUB_ACCEPT_TIMEOUT:?} with no \
+                         connection — the code under test never called it"
+                    );
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                eprintln!("stub server '{label}' accept failed: {e}");
+                return None;
+            }
+        }
+    }
+}
+
+/// Accept one connection, or give up after [`STUB_ACCEPT_TIMEOUT`].
+///
+/// The stub servers below hand back a `JoinHandle` that their tests `join()`.
+/// With a plain blocking `accept()`, a run where the code under test never
+/// connects — which happens whenever routing or fallback behaviour shifts — the
+/// server thread never returns, the `join()` never returns, and the **entire
+/// test binary hangs** with no output. `cargo test` then has to be killed from
+/// outside, and the test process is orphaned still holding its listeners; one
+/// such orphan was found alive 17 hours after the run that spawned it.
+///
+/// Bounded, the thread exits, the `join()` returns, and the test fails on its
+/// own assertion — which says what actually went wrong.
+fn accept_one(listener: TcpListener, label: &str) -> Option<TcpStream> {
+    accept_one_borrowed(&listener, label)
+}
+
 fn spawn_redirect_http_server(
     location: &str,
     final_status: &str,
@@ -51,7 +104,7 @@ fn spawn_redirect_http_server(
         .local_addr()
         .expect("listener should expose local addr");
     let handle = thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
+        if let Some(mut stream) = accept_one(listener, "redirect") {
             let mut request_buf = [0_u8; 2048];
             let _ = stream.read(&mut request_buf);
             let request = String::from_utf8_lossy(&request_buf);
@@ -84,7 +137,7 @@ fn spawn_one_shot_http_server(
         .local_addr()
         .expect("listener should expose local addr");
     let handle = thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
+        if let Some(mut stream) = accept_one(listener, "one_shot") {
             let mut request_buf = [0_u8; 2048];
             let _ = stream.read(&mut request_buf);
             let response = format!(
@@ -114,8 +167,14 @@ fn spawn_counting_http_server(
         .local_addr()
         .expect("listener should expose local addr");
     let handle = thread::spawn(move || {
+        // Each iteration gets its own bounded wait: a run that makes fewer
+        // requests than expected stops after one timeout instead of blocking
+        // the join forever.
         for _ in 0..expected_requests {
-            if let Ok((mut stream, _)) = listener.accept() {
+            let Some(mut stream) = accept_one_borrowed(&listener, "counting") else {
+                break;
+            };
+            {
                 hits_clone.fetch_add(1, Ordering::SeqCst);
                 let mut request_buf = [0_u8; 2048];
                 let _ = stream.read(&mut request_buf);
@@ -245,6 +304,19 @@ fn test_workflow_wait_missing_task_returns_immediately_in_blocking_mode() {
         "poll_interval_secs": 30
     });
 
+    // `workflow_wait` requires the config: it resolves the workflow through
+    // `gateway_root_dir(config)`. It used to fabricate one from
+    // `agent_dir.parent()` when none was passed, which resolved to the revision
+    // store rather than the agents root — so this test was exercising a lookup
+    // against the wrong gateway dir and getting "not found" for that reason.
+    let gateway_dir = temp.path().join("runtime");
+    std::fs::create_dir_all(&gateway_dir).expect("gateway dir should create");
+    let config = GatewayConfig {
+        agents_dir: agents_dir.clone(),
+        runtime_dir: gateway_dir.clone(),
+        ..GatewayConfig::default()
+    };
+
     let started = std::time::Instant::now();
     let result = registry
         .execute(
@@ -252,11 +324,11 @@ fn test_workflow_wait_missing_task_returns_immediately_in_blocking_mode() {
             &manifest,
             &policy,
             &caller_dir,
-            None,
+            Some(&gateway_dir),
             &args.to_string(),
             None,
             None,
-            None,
+            Some(&config),
             None,
             None,
         )

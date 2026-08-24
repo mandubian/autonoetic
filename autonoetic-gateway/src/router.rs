@@ -1284,6 +1284,9 @@ impl JsonRpcRouter {
                     ),
                 }
             }
+            "constitution.list_proposals" => handle_constitution_list_proposals(&self.execution, req),
+            "constitution.proposal_get" => handle_constitution_proposal_get(&self.execution, req),
+            "constitution.proposal_decide" => handle_constitution_proposal_decide(&self.execution, req),
             "anomaly.resolve" => {
                 // O-7 (future obligation, issue #770 part C.1): every
                 // anomaly flag is owed a recorded decision. Mirrors
@@ -1505,6 +1508,10 @@ impl JsonRpcRouter {
                     Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
                 }
             }
+            // #1119 tranche 5: pending-interaction listing + cancel for the
+            // `autonoetic gateway interactions` CLI surface.
+            "interaction.list_pending" => handle_interaction_list_pending(&self.execution, req),
+            "interaction.cancel" => handle_interaction_cancel(&self.execution, req),
             "interaction.resolve_and_answer" => {
                 let params: crate::interaction_answer::InteractionResolveAndAnswerParams =
                     match serde_json::from_value(req.params) {
@@ -3515,6 +3522,13 @@ impl JsonRpcRouter {
             "recording.delete" => handle_recording_delete_rpc(&self.execution, req),
             "recording.cancel" => handle_recording_cancel_rpc(&self.execution, req),
             "recording.fixture_set" => handle_recording_fixture_set_rpc(&self.execution, req),
+
+            // `autonoetic trace …` operator surface over RPC (#1119 tranche 6).
+            "trace.contract_health" => handle_trace_contract_health_rpc(&self.execution, req),
+            "trace.civic_health" => handle_trace_civic_health_rpc(&self.execution, req),
+            "trace.causal_search" => handle_trace_causal_search_rpc(&self.execution, req),
+            "trace.user_interactions" => handle_trace_user_interactions_rpc(&self.execution, req),
+            "trace.fork_tree" => handle_trace_fork_tree_rpc(&self.execution, req),
 
             // RFC §4.3 authoring aid (#978): "emails stay local" → a concrete
             // proposed rule set from known tool catalogs + the MCP server list.
@@ -6631,6 +6645,140 @@ fn handle_recording_list_rpc(
     }
 }
 
+/// `trace.contract_health` — constitution enforcement tallies (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_contract_health_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        since: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.contract_health", e),
+    };
+    match execution.contract_health(params.since.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.civic_health` — per-agent governance tallies (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_civic_health_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        since: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.civic_health", e),
+    };
+    match execution.civic_health(params.since.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.causal_search` — causal-event search (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_causal_search_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default = "default_trace_causal_limit")]
+        limit: i64,
+    }
+    fn default_trace_causal_limit() -> i64 {
+        200
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.causal_search", e),
+    };
+    // Fail closed on negative limits: SQLite reads `LIMIT -1` as unbounded —
+    // an unbounded causal-event dump from an RPC client is a DoS footgun
+    // (mirrors the recording.list guard).
+    if params.limit < 0 {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for trace.causal_search: limit must be >= 0".to_string(),
+        );
+    }
+    match execution.causal_search(params.session_id.as_deref(), params.agent_id.as_deref(), params.limit) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.user_interactions` — interaction listing (session- or workflow-scoped)
+/// (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_user_interactions_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        workflow_id: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.user_interactions", e),
+    };
+    match execution.user_interactions(params.session_id.as_deref(), params.workflow_id.as_deref()) {
+        Ok(list) => match serde_json::to_value(list) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `trace.fork_tree` — ancestor chain + descendant tree (#1119 tranche 6).
+#[inline(never)]
+fn handle_trace_fork_tree_rpc(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        session_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "trace.fork_tree", e),
+    };
+    if params.session_id.trim().is_empty() {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for trace.fork_tree: session_id must not be empty",
+        );
+    }
+    match execution.fork_tree(&params.session_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
 fn default_recording_limit() -> i64 {
     50
 }
@@ -6759,6 +6907,149 @@ fn parse_triage_state_param(s: &str) -> anyhow::Result<autonoetic_types::securit
              benign, deferred",
             other
         ),
+    }
+}
+
+/// `interaction.list_pending` — pending user interactions for the
+/// `autonoetic gateway interactions` CLI (#1119 tranche 5).
+#[inline(never)]
+fn handle_interaction_list_pending(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        root_session_id: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "interaction.list_pending", e),
+    };
+    match execution.pending_user_interactions(
+        params.root_session_id.as_deref(),
+        params.session_id.as_deref(),
+    ) {
+        Ok(list) => match serde_json::to_value(list) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `interaction.cancel` — operator abort of a pending interaction (#1119 tranche 5).
+#[inline(never)]
+fn handle_interaction_cancel(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        interaction_id: String,
+        #[serde(default = "default_interaction_cancel_reason")]
+        reason: String,
+    }
+    fn default_interaction_cancel_reason() -> String {
+        "Cancelled by operator".to_string()
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "interaction.cancel", e),
+    };
+    match execution.cancel_user_interaction(&params.interaction_id, &params.reason) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `constitution.list_proposals` — all proposals with status/proposer filters
+/// (#1119 tranche 5; `...list_pending_proposals` covers only pending).
+#[inline(never)]
+fn handle_constitution_list_proposals(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        proposer: Option<String>,
+        #[serde(default = "default_proposal_limit")]
+        limit: usize,
+    }
+    fn default_proposal_limit() -> usize {
+        50
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "constitution.list_proposals", e),
+    };
+    match execution.constitutional_proposals(
+        params.status.as_deref(),
+        params.proposer.as_deref(),
+        params.limit,
+    ) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `constitution.proposal_get` — single proposal for `show` (#1119 tranche 5).
+#[inline(never)]
+fn handle_constitution_proposal_get(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        proposal_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "constitution.proposal_get", e),
+    };
+    match execution.constitutional_proposal(&params.proposal_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `constitution.proposal_decide` — resolve a proposal to a decision state
+/// (#1119 tranche 5; the operator channel for `gateway constitution decide`).
+#[inline(never)]
+fn handle_constitution_proposal_decide(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        proposal_id: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        decision: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "constitution.proposal_decide", e),
+    };
+    let status = params.status.as_deref().or(params.decision.as_deref());
+    let Some(status) = status else {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for constitution.proposal_decide: status (or decision) is required",
+        );
+    };
+    match execution.decide_constitutional_proposal(&params.proposal_id, status, params.reason.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
 

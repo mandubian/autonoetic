@@ -65,16 +65,19 @@ fn sub_trip_warning_clears_after_trip() {
 
 #[test]
 fn sub_trip_warning_on_tool_failures() {
+    // LoopGuard::new sets max_tool_failures = 8; the sub-trip threshold is
+    // ceil(80%) = 7. Six failures stay quiet, the seventh warns, the eighth
+    // is past the sub-trip window (that's a trip, not a warning).
     let mut guard = LoopGuard::new(100);
-    for _ in 0..3 {
+    for _ in 0..6 {
         guard.register_failure("failing_tool", "{}", None);
     }
-    assert!(!guard.is_sub_trip_warning(), "3/5 failures — below 80%");
+    assert!(!guard.is_sub_trip_warning(), "6/8 failures — below 80%");
 
     guard.register_failure("failing_tool", "{}", None);
     assert!(
         guard.is_sub_trip_warning(),
-        "4/5 failures — at 80% threshold"
+        "7/8 failures — at 80% threshold"
     );
 }
 
