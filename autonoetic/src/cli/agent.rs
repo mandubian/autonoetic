@@ -3376,11 +3376,8 @@ Use tools when needed.
         // output floor — the exact path load_from_revision_dir reads. A
         // local-only bundle is precisely the case the issue calls out as
         // invisible today.
-        let rev_dir = gateway_dir
-            .join("revisions")
-            .join("agents")
-            .join(agent_id)
-            .join(revision_id);
+        let rev_dir =
+            autonoetic_gateway::agent::agent_revision_dir(&gateway_dir, agent_id, revision_id);
         std::fs::create_dir_all(&rev_dir).expect("revision dir creates");
         std::fs::write(
             rev_dir.join("SKILL.md"),

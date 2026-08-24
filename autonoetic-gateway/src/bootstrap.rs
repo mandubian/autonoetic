@@ -422,11 +422,7 @@ fn bootstrap_agent_inner(
         });
     }
 
-    let revision_dir = gateway_dir
-        .join("revisions")
-        .join("agents")
-        .join(agent_id)
-        .join(&revision_id);
+    let revision_dir = crate::agent::agent_revision_dir(gateway_dir, agent_id, &revision_id);
 
     if !revision_dir.exists() {
         for (rel_path, bytes) in &file_map {
@@ -519,7 +515,7 @@ fn bootstrap_agent_inner(
 }
 
 pub fn update_latest_symlink(gateway_dir: &Path, agent_id: &str, revision_id: &str) {
-    let agent_rev_dir = gateway_dir.join("revisions").join("agents").join(agent_id);
+    let agent_rev_dir = crate::agent::agent_revisions_dir(gateway_dir, agent_id);
     let latest_link = agent_rev_dir.join("latest");
     let _ = std::fs::remove_file(&latest_link);
     let _ = std::os::unix::fs::symlink(revision_id, &latest_link);

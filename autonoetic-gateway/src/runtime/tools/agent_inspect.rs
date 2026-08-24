@@ -170,11 +170,7 @@ impl NativeTool for AgentInspectTool {
 
         let is_local = rev.trust_domain == "local";
 
-        let revision_dir = gateway_dir
-            .join("revisions")
-            .join("agents")
-            .join(agent_id)
-            .join(&rev.revision_id);
+        let revision_dir = crate::agent::agent_revision_dir(gateway_dir, agent_id, &rev.revision_id);
 
         if !revision_dir.exists() {
             return Err(anyhow::anyhow!(

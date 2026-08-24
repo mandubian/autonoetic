@@ -343,11 +343,7 @@ fn resolve_revision(
 }
 
 fn revision_dir(gateway_dir: &Path, agent_id: &str, revision_id: &str) -> PathBuf {
-    gateway_dir
-        .join("revisions")
-        .join("agents")
-        .join(agent_id)
-        .join(revision_id)
+    crate::agent::agent_revision_dir(gateway_dir, agent_id, revision_id)
 }
 
 fn stage_revision_files(revision_dir: &Path, staging: &Path) -> Result<Vec<String>> {
