@@ -113,8 +113,8 @@ fn validation_waive_records_persists_and_lists() {
 
     let args = json!({
         "artifact_id": artifact_id,
-        "validation_id": "unit_tests",
-        "validation_class": "correctness_check",
+        "validation_id": "lint",
+        "validation_class": "quality_check",
         "reason": "Small prompt-only SKILL.md edit; no executable code changed"
     });
     let out = registry
@@ -139,8 +139,8 @@ fn validation_waive_records_persists_and_lists() {
 
     let waivers = store.list_waivers_for_artifact(&artifact_id).unwrap();
     assert_eq!(waivers.len(), 1);
-    assert_eq!(waivers[0].validation_id, "unit_tests");
-    assert_eq!(waivers[0].validation_class, autonoetic_types::plan_frame::ValidationClass::CorrectnessCheck);
+    assert_eq!(waivers[0].validation_id, "lint");
+    assert_eq!(waivers[0].validation_class, autonoetic_types::plan_frame::ValidationClass::QualityCheck);
     assert_eq!(waivers[0].waived_by, manifest.agent.id);
     assert!(waivers[0].reason.contains("prompt-only"));
 
@@ -161,7 +161,7 @@ fn validation_waive_records_persists_and_lists() {
         .unwrap();
     let list_v: serde_json::Value = serde_json::from_str(&list_out).unwrap();
     assert_eq!(list_v["count"], 1);
-    assert_eq!(list_v["waivers"][0]["validation_id"], "unit_tests");
+    assert_eq!(list_v["waivers"][0]["validation_id"], "lint");
 }
 
 #[test]
@@ -278,8 +278,8 @@ fn validation_waive_rejects_empty_reason() {
 
     let args = json!({
         "artifact_id": artifact_id,
-        "validation_id": "unit_tests",
-        "validation_class": "correctness_check",
+        "validation_id": "lint",
+        "validation_class": "quality_check",
         "reason": "   "
     });
     let out = registry
@@ -512,8 +512,8 @@ fn promotion_query_returns_waived_validations() {
     // Record a waiver.
     let waive_args = json!({
         "artifact_id": artifact_id,
-        "validation_id": "unit_tests",
-        "validation_class": "correctness_check",
+        "validation_id": "lint",
+        "validation_class": "quality_check",
         "reason": "doc-only change"
     });
     let waive_out = registry
@@ -539,12 +539,18 @@ fn promotion_query_returns_waived_validations() {
     let mut unit_test_manifest = manifest.clone();
     unit_test_manifest.agent.id = "unit_test_runner.default".to_string();
     let unit_test_policy = PolicyEngine::new(unit_test_manifest.clone());
+    crate::support::promotion_trace::seed_success_trace(
+        store.as_ref(),
+        session_id,
+        "trace-waiver-promo-001",
+    );
     let record_args = json!({
         "artifact_id": artifact_id,
         "role": "unit_test_runner",
         "pass": true,
         "findings": [],
-        "summary": "tests waived"
+        "summary": "tests waived",
+        "execution_trace_id": "trace-waiver-promo-001"
     });
     let record_out = registry
         .execute(
@@ -588,8 +594,8 @@ fn promotion_query_returns_waived_validations() {
     );
     let waived = query_v["waived_validations"].as_array().unwrap();
     assert_eq!(waived.len(), 1, "expected one waived validation: {:?}", waived);
-    assert_eq!(waived[0]["validation_id"], "unit_tests");
-    assert_eq!(waived[0]["validation_class"], "correctness_check");
+    assert_eq!(waived[0]["validation_id"], "lint");
+    assert_eq!(waived[0]["validation_class"], "quality_check");
     assert_eq!(waived[0]["reason"], "doc-only change");
 }
 
@@ -704,5 +710,66 @@ fn workbench_reconcile_propose_waivers_true_when_config_enabled() {
         provenance["propose_waivers"], true,
         "provenance should record propose_waivers=true: {:?}",
         provenance
+    );
+}
+
+#[test]
+fn correctness_check_waiver_from_agent_requires_operator() {
+    // #1144 pin: agents can never self-waive a correctness gate — the denial
+    // must be the precise `correctness_waiver_requires_operator` (naming the
+    // operator path), never the generic non_waivable_validation that the
+    // is_waivable inversion used to produce.
+    let dir = tempdir().unwrap();
+    let config = make_config(dir.path());
+    let gateway_dir = dir.path().join(".gateway");
+    std::fs::create_dir_all(&gateway_dir).unwrap();
+    let store = Arc::new(GatewayStore::open(&gateway_dir).unwrap());
+    let registry = default_registry();
+    let manifest = planner_manifest();
+    let policy = PolicyEngine::new(manifest.clone());
+    let agent_dir = dir.path().join("planner.collaborative");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let session_id = "root-session-waiver-correctness";
+    let artifact_id = make_artifact(
+        &registry, &manifest, &policy, &agent_dir,
+        &gateway_dir, &config, &store, session_id,
+    );
+
+    let args = json!({
+        "artifact_id": artifact_id,
+        "validation_id": "unit_tests",
+        "validation_class": "correctness_check",
+        "reason": "tests are flaky on this runner"
+    });
+    let out = registry
+        .execute(
+            "validation_waive",
+            &manifest,
+            &policy,
+            &agent_dir,
+            Some(&gateway_dir),
+            &args.to_string(),
+            Some(session_id),
+            None,
+            Some(&config),
+            Some(store.clone()),
+            None,
+        )
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["ok"], false, "agents must not self-waive correctness: {v}");
+    assert_eq!(
+        v["error"].as_str().unwrap(),
+        "correctness_waiver_requires_operator",
+        "the precise operator-path denial, not non_waivable_validation: {v}"
+    );
+    assert!(
+        v["repair_hint"].as_str().unwrap_or("").contains("operator"),
+        "the hint must route to the operator: {v}"
+    );
+    assert!(
+        store.list_waivers_for_artifact(&artifact_id).unwrap().is_empty(),
+        "no waiver row may be written"
     );
 }

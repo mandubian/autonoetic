@@ -42,12 +42,16 @@ fn parse_class(s: &str) -> Option<ValidationClass> {
 }
 
 fn is_waivable(class: ValidationClass) -> bool {
-    // correctness_check (unit tests, lint, typecheck) requires operator approval
-    // because skipping a correctness gate is a high-trust decision. Quality and
-    // packaging checks remain agent-waivable.
-    matches!(
+    // correctness_check (unit tests, lint, typecheck) requires operator
+    // approval because skipping a correctness gate is a high-trust decision.
+    // It stays "waivable" here so the more precise
+    // `correctness_waiver_requires_operator` denial fires with its actionable
+    // hint — rejecting it in this predicate would dead-code that branch and
+    // give agents the generic non_waivable_validation instead (#1144).
+    // Quality and packaging checks remain agent-waivable outright.
+    !matches!(
         class,
-        ValidationClass::QualityCheck | ValidationClass::PackagingCheck
+        ValidationClass::MechanicalSafety | ValidationClass::SecurityReview
     )
 }
 
@@ -315,8 +319,10 @@ mod tests {
     }
 
     #[test]
-    fn correctness_safety_and_security_are_not_agent_waivable() {
-        assert!(!is_waivable(ValidationClass::CorrectnessCheck));
+    fn mechanical_safety_and_security_review_are_not_agent_waivable() {
+        // CorrectnessCheck stays in the waivable set so the precise
+        // `correctness_waiver_requires_operator` denial (with its operator
+        // hint) fires instead of the generic non_waivable_validation (#1144).
         assert!(!is_waivable(ValidationClass::MechanicalSafety));
         assert!(!is_waivable(ValidationClass::SecurityReview));
     }

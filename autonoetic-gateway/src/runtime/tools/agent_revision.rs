@@ -1060,6 +1060,9 @@ fn create_revision_from_files(
         "agent_ref": format!("{}@{}", common.agent_id, revision_id),
         "short_ref": short_ref,
         "agent_id": common.agent_id,
+        // The store-side artifact identity: promotion_record and R++2 key on
+        // it (the #1144 regression — dropped in c7383a55, restored).
+        "artifact_id": rev.artifact_id,
         "artifact_ref": common.source_ref,
         "next_step": "Use agent.revision.promote to activate this revision"
     });
