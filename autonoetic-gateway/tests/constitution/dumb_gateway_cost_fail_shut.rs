@@ -68,6 +68,9 @@ fn setup_store_and_seed(
 #[serial_test::serial]
 #[tokio::test]
 async fn catalog_unavailable_with_price_cap_refuses_session_start() -> anyhow::Result<()> {
+    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    );
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.session_budget.max_session_price_usd = Some(0.01);
@@ -133,6 +136,9 @@ async fn catalog_unavailable_with_price_cap_refuses_session_start() -> anyhow::R
 #[serial_test::serial]
 #[tokio::test]
 async fn catalog_unavailable_without_price_cap_starts_normally() -> anyhow::Result<()> {
+    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    );
     let workspace = TestWorkspace::new()?;
     let config = workspace.gateway_config();
 
@@ -190,6 +196,9 @@ async fn catalog_unavailable_without_price_cap_starts_normally() -> anyhow::Resu
 #[serial_test::serial]
 #[tokio::test]
 async fn override_capability_allows_unpriced_price_capped_session() -> anyhow::Result<()> {
+    let _ = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    );
     let workspace = TestWorkspace::new()?;
     let mut config = workspace.gateway_config();
     config.session_budget.max_session_price_usd = Some(0.01);
