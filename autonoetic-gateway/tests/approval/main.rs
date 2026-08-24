@@ -5,6 +5,7 @@ mod support;
 
 mod approvals_rpc_surface;
 mod approve_resume_detached;
+mod escalation_rpc_surface;
 mod grant_revocation;
 mod host_constant_resolution;
 mod interaction_rpc_surface;

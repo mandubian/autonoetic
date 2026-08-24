@@ -1,36 +1,27 @@
 //! CLI ↔ gateway.db boundary guard (#1119).
 //!
 //! The CLI is a client of the gateway API, not a direct reader of
-//! `gateway.db` (Separation of Powers). Migration to JSON-RPC happens in
-//! tranches; this test pins the boundary so both lists only ever shrink:
+//! `gateway.db` (Separation of Powers). Migration to JSON-RPC happened in
+//! tranches (#1135 → #1152); this test pins the boundary:
 //!
 //! - a file in NEITHER list may not mention `GatewayStore` at all
-//! - a file in `PENDING_MIGRATION` still owes migration — remove it in the
-//!   same PR that migrates it
+//! - `PENDING_MIGRATION` is empty by design — #1119 is closed. If a new
+//!   surface needs migration, the list must be re-populated and the test
+//!   comment here updated; the assertion below makes reopening explicit.
 //! - a file in `BY_DESIGN_EMBEDDING` legitimately runs gateway machinery
 //!   in-process (agent executors, native tool execution, offline capsule
 //!   transfer) and structurally needs a store handle; each entry carries
 //!   its rationale inline
-//! - stale entries in either list (no longer referencing GatewayStore)
-//!   fail the test so the lists cannot rot
+//! - stale entries (no longer referencing GatewayStore) fail the test so
+//!   the list cannot rot
 
 use std::fs;
 use std::path::PathBuf;
 
 /// Files that still read/write gateway.db where an RPC should exist.
-/// Every entry must be removed in the PR that migrates it.
-const PENDING_MIGRATION: &[&str] = &[
-    // Residual gateway.rs surfaces after #1119 tranche 7 (approvals +
-    // egress-audit migrated). Remaining store uses:
-    // - escalations (admin.escalation_* RPCs exist — migrate next)
-    // - workflow commands (scheduler pieces; check RPC fit)
-    // - egress-declassify intake (writes approvals — approval machinery)
-    // - memory relabel/trace relabel (no RPC surface yet)
-    // - exec-cache revoke audit event (file cache + one audit write)
-    // - system-agent bootstrap + constitution release (scheduler machinery)
-    // The `gateway start` embedding stays regardless.
-    "gateway.rs",
-];
+/// EMPTY by design — #1119 (CLI → JSON-RPC migration) is closed.
+/// Re-populate deliberately if a new read/act surface appears.
+const PENDING_MIGRATION: &[&str] = &[];
 
 /// Files that run gateway machinery in-process and therefore hold a store
 /// handle by design — NOT pending migration. Each comment is the rationale;
@@ -52,6 +43,14 @@ const BY_DESIGN_EMBEDDING: &[&str] = &[
     "sentinel_experiment.rs",
     // watchdog: embeds the watchdog agent's AgentExecutor.
     "watchdog.rs",
+    // gateway.rs after the #1119 tranches (approvals, escalations,
+    // interactions, grants, cron, constitution proposals, egress-audit all
+    // migrated to RPC): the residue is machinery/offline surfaces —
+    // `gateway start` embedding, exec-cache (file cache + one audit write),
+    // system-agent bootstrap, constitution release, workflow commands,
+    // egress-declassify intake, memory relabel — all without RPC surfaces
+    // or offline-by-design, like capsule.
+    "gateway.rs",
 ];
 
 #[test]
@@ -60,6 +59,14 @@ fn cli_files_do_not_touch_gateway_store_outside_the_guard_lists() {
     let mut offenders: Vec<String> = Vec::new();
     let mut stale: Vec<&str> = Vec::new();
     let mut checked = 0usize;
+
+    // #1119 is closed: no surfaces may be re-added to the pending list
+    // without an explicit decision (any new read/act path must go over RPC).
+    assert!(
+        PENDING_MIGRATION.is_empty(),
+        "#1119 is closed — PENDING_MIGRATION must stay empty. A new surface needs \
+         deliberate re-opening of the issue, not an allowlist entry."
+    );
 
     let mut stack: Vec<PathBuf> = fs::read_dir(&cli_dir)
         .expect("src/cli should be readable")

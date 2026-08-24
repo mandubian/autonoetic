@@ -1590,6 +1590,24 @@ impl GatewayExecutionService {
 
     /// Cancel a recording session and emit the operator-cancel causal event
     /// (#1119 tranche 3) — previously emitted CLI-side.
+    // ── Escalations operator surface (#1119 close-out) ───────────────────
+
+    /// Pending + per-root stale escalations, mirrors the CLI's historical
+    /// aggregation (the RPC form of `gateway escalations list`).
+    pub fn escalations_with_stale(
+        &self,
+    ) -> anyhow::Result<Vec<autonoetic_types::escalation::EscalationMessage>> {
+        let store = self.require_store()?;
+        let pending = store.list_pending_escalations()?;
+        let mut all = pending.clone();
+        let root_ids: std::collections::HashSet<String> =
+            pending.iter().map(|e| e.root_session_id.clone()).collect();
+        for rid in &root_ids {
+            all.extend(store.get_stale_escalations_for_root(rid)?);
+        }
+        Ok(all)
+    }
+
     // ── Approvals operator surface (#1119 tranche 7) ─────────────────────
 
     /// The global pending-approval list (all roots) — the RPC form of
