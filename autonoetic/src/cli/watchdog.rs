@@ -48,7 +48,7 @@ pub async fn run_watchdog(
 
     let repo = AgentRepository::from_config(&gateway_config);
     let loaded = repo
-        .get_sync("watchdog.default")
+        .load_unvetted_from_ingest_dir("watchdog.default")
         .context("Watchdog agent 'watchdog.default' not found — run with a config that points to the agents directory containing agents/specialists/watchdog.default/")?;
     let manifest = loaded.manifest;
     let instructions = loaded.instructions;

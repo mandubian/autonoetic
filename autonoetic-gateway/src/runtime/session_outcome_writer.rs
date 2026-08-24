@@ -165,10 +165,23 @@ async fn run_outcome_grader_inner(
     source_agent_id: &str,
     grader_agent_id: &str,
 ) -> anyhow::Result<()> {
+    // The grader is *executed* — its instructions become the judgment prompt and
+    // its `llm_config` picks the provider/model this call egresses to. Both must
+    // come from the promoted revision, never from the ungated `agents_dir` copy
+    // (#1136): an unvetted file must not be able to author a verdict that lands
+    // in session outcomes, nor redirect the completion that produces it.
     let repo = AgentRepository::from_config(config);
     let loaded = repo
-        .get_sync(grader_agent_id)
-        .with_context(|| format!("grader agent '{}' not found", grader_agent_id))?;
+        .get_sync_from_store(grader_agent_id, gateway_dir, Some(store.as_ref()))
+        .with_context(|| {
+            // Deliberately does not name a cause: this lookup fails for a
+            // missing alias, a missing revision directory, or an unparseable
+            // SKILL.md alike. The wrapped error carries the specific reason.
+            format!(
+                "could not load grader agent '{}' from the revision store",
+                grader_agent_id
+            )
+        })?;
 
     let llm_config = loaded
         .manifest

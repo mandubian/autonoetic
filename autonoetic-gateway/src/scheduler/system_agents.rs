@@ -33,9 +33,10 @@ pub fn reconcile_system_agents(
 
         let gateway_dir = crate::execution::gateway_root_dir(config);
 
-        let loaded = repo
-            .get_sync_from_store(&entry.agent_id, &gateway_dir, Some(store.as_ref()))
-            .or_else(|_| repo.get_sync(&entry.agent_id));
+        // Presence check against the promoted revision only (#1136). An agent
+        // that exists solely as an ungated `agents_dir` copy is not installed
+        // as far as scheduling is concerned.
+        let loaded = repo.get_sync_from_store(&entry.agent_id, &gateway_dir, Some(store.as_ref()));
 
         if let Err(e) = loaded {
             results.push(ReconcileResult {

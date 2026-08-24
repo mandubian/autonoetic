@@ -1798,7 +1798,7 @@ pub struct CliAgentExecutor {
 impl McpAgentExecutor for CliAgentExecutor {
     async fn call_agent(&self, agent_id: &str, message: &str) -> anyhow::Result<String> {
         let repo = autonoetic_gateway::AgentRepository::new(self.agents_dir.clone());
-        let loaded = repo.get(agent_id).await?;
+        let loaded = repo.get_unvetted_from_ingest_dir(agent_id).await?;
         let llm_config = loaded
             .manifest
             .llm_config

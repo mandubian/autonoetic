@@ -48,9 +48,28 @@ pub fn register_tools(registry: &mut NativeToolRegistry) {
 /// (Symmetric with `revoke_session_grants_by_source` which returns a
 /// grant-row count.) The host count itself is internal; the response
 /// surfaces `grants_materialized` as this 0/1 value.
+/// Resolve the gateway directory for revision-store reads.
+///
+/// Prefers the `gateway_dir` the engine passed into the tool — that is the
+/// authoritative value, and re-deriving it from `config` can disagree with it
+/// (notably in tests, which open the store outside `agents_dir`). Falls back to
+/// the canonical derivation when the tool was invoked without one.
+fn resolve_gateway_dir(
+    gateway_dir: Option<&Path>,
+    config: Option<&autonoetic_types::config::GatewayConfig>,
+) -> std::path::PathBuf {
+    match gateway_dir {
+        Some(p) => p.to_path_buf(),
+        None => config
+            .map(crate::execution::gateway_root_dir)
+            .unwrap_or_default(),
+    }
+}
+
 fn materialize_plan_grants(
     store: &crate::scheduler::gateway_store::GatewayStore,
     config: Option<&autonoetic_types::config::GatewayConfig>,
+    gateway_dir: &Path,
     plan: &PlanFrame,
     approver: &str,
     _now: &str,
@@ -80,6 +99,11 @@ fn materialize_plan_grants(
         );
     }
 
+    // Hosts inferred from step agents' declared `NetworkAccess` become a real
+    // network grant, so they must be read from the promoted revision, not the
+    // ungated `agents_dir` copy (#1136): an unvetted manifest must not be able
+    // to widen the grant this materializes. An unpromoted step agent
+    // contributes no hosts.
     let repo = crate::AgentRepository::from_config(config);
     let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for step in &plan.steps {
@@ -87,7 +111,7 @@ fn materialize_plan_grants(
         if raw.is_empty() {
             continue;
         }
-        let loaded = match repo.get_sync(raw) {
+        let loaded = match repo.get_sync_from_store(raw, gateway_dir, Some(store)) {
             Ok(l) => l,
             Err(_) => continue,
         };
@@ -134,20 +158,25 @@ fn has_plan_frame_access(manifest: &AgentManifest) -> bool {
 /// surfaced with `warnings: []` so the caller can tell opt-in from
 /// opt-out).
 ///
-/// Repository/scan failures are not special-cased: a missing agent or
-/// unreadable SKILL.md simply surfaces as an `agent_not_installed`
-/// finding for that step, which is exactly the contract the planner
-/// branches on. The preflight itself is purely static
+/// Repository/lookup failures are not special-cased: an agent with no
+/// promoted revision or an unreadable SKILL.md simply surfaces as an
+/// `agent_not_installed` finding for that step, which is exactly the
+/// contract the planner branches on. The preflight itself is purely static
 /// (`required_capabilities` vs. declared capabilities) — no LLM, no
 /// network, no judgment.
+///
+/// Declared capabilities are read from the promoted revision (#1136) — see
+/// [`crate::runtime::plan_preflight::RevisionCapabilityLookup`].
 fn compute_preflight_view(
     config: &GatewayConfig,
+    gateway_dir: &Path,
+    store: &crate::scheduler::gateway_store::GatewayStore,
     plan: &PlanFrame,
 ) -> Option<crate::runtime::plan_preflight::PreflightView> {
-    use crate::runtime::plan_preflight::{preflight_plan, PreflightView};
+    use crate::runtime::plan_preflight::{preflight_plan, PreflightView, RevisionCapabilityLookup};
 
-    // Skip the directory scan entirely when no step opted into preflight
-    // (the common case). Avoids touching the filesystem on every propose.
+    // Skip the lookup entirely when no step opted into preflight (the common
+    // case). Avoids touching the revision store on every propose.
     let any_caps = plan
         .steps
         .iter()
@@ -157,7 +186,12 @@ fn compute_preflight_view(
     }
 
     let repo = crate::AgentRepository::from_config(config);
-    let result = preflight_plan(plan, &repo);
+    let lookup = RevisionCapabilityLookup {
+        repo: &repo,
+        gateway_dir,
+        store,
+    };
+    let result = preflight_plan(plan, &lookup);
     let view = PreflightView::from_result(&result);
     if view.is_empty() {
         None
@@ -468,7 +502,7 @@ impl NativeTool for PlanFrameProposeTool {
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -771,6 +805,7 @@ impl NativeTool for PlanFrameProposeTool {
                         let grants = materialize_plan_grants(
                             &store,
                             Some(config),
+                            &resolve_gateway_dir(gateway_dir, Some(config)),
                             &plan,
                             &decision.decided_by,
                             &now2,
@@ -825,7 +860,8 @@ impl NativeTool for PlanFrameProposeTool {
         // warnings are part of the tool response the LLM saw, so "on the
         // record" is satisfied. Empty when no step declares
         // `required_capabilities` — fully opt-in per the RFC.
-        let preflight_view = compute_preflight_view(config, &plan);
+        let gw_dir = resolve_gateway_dir(gateway_dir, Some(config));
+        let preflight_view = compute_preflight_view(config, &gw_dir, store.as_ref(), &plan);
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,
@@ -1074,7 +1110,7 @@ impl NativeTool for PlanFrameApproveTool {
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -1164,7 +1200,14 @@ impl NativeTool for PlanFrameApproveTool {
         // count path to surface `grants_materialized` in the tool response.
         // The grant insertion is idempotent, so this is safe.
         let grants_materialized =
-            materialize_plan_grants(&store, Some(config), &plan, &decision.decided_by, &now);
+            materialize_plan_grants(
+                &store,
+                Some(config),
+                &resolve_gateway_dir(gateway_dir, Some(config)),
+                &plan,
+                &decision.decided_by,
+                &now,
+            );
 
         if let Err(e) = crate::scheduler::workflow_store::append_workflow_event(
             config,
@@ -1305,7 +1348,7 @@ impl NativeTool for PlanFrameAmendTool {
         manifest: &AgentManifest,
         _policy: &PolicyEngine,
         _agent_dir: &Path,
-        _gateway_dir: Option<&Path>,
+        gateway_dir: Option<&Path>,
         arguments_json: &str,
         _session_id: Option<&str>,
         _turn_id: Option<&str>,
@@ -1901,7 +1944,8 @@ impl NativeTool for PlanFrameAmendTool {
         // surface to the planner, never block. Re-runs on every amend so a
         // step that newly declares `required_capabilities`, or a step whose
         // `agent_id` was changed, gets fresh findings.
-        let preflight_view = compute_preflight_view(config, &new_revision);
+        let gw_dir = resolve_gateway_dir(gateway_dir, Some(config));
+        let preflight_view = compute_preflight_view(config, &gw_dir, store.as_ref(), &new_revision);
 
         Ok(serde_json::to_string(&serde_json::json!({
             "ok": true,

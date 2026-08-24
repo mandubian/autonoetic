@@ -1590,7 +1590,7 @@ pub async fn run_agent_with_runtime(
 
     let gateway_config = Arc::new(loaded_config);
     let repo = autonoetic_gateway::AgentRepository::from_config(&gateway_config);
-    let loaded = repo.get_sync(agent_id)?;
+    let loaded = repo.load_unvetted_from_ingest_dir(agent_id)?;
     let manifest = loaded.manifest;
     let instructions = loaded.instructions;
     let agent_dir = loaded.dir;
@@ -1638,7 +1638,7 @@ pub fn load_agent_runtime_context(
 )> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
-    let loaded = repo.get_sync(agent_id)?;
+    let loaded = repo.load_unvetted_from_ingest_dir(agent_id)?;
     Ok((loaded.manifest, loaded.instructions, loaded.dir))
 }
 

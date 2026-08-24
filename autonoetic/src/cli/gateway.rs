@@ -142,7 +142,7 @@ pub async fn handle_gateway_start(
     let mut config = autonoetic_gateway::config::load_config(config_path)?;
     super::common::apply_response_validation_override(&mut config, response_validation);
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
-    let agents = repo.list().await?;
+    let agents = repo.list_unvetted_from_ingest_dir().await?;
     let mcp_runtime = activate_registered_mcp_servers(config_path).await?;
 
     info!(
@@ -212,7 +212,7 @@ pub fn handle_gateway_preflight(json: bool) -> anyhow::Result<()> {
 pub async fn handle_gateway_status(config_path: &Path, json_output: bool) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
     let repo = autonoetic_gateway::AgentRepository::from_config(&config);
-    let agents = repo.list().await?;
+    let agents = repo.list_unvetted_from_ingest_dir().await?;
     let registry_path = mcp_registry_path(config_path);
     let servers = load_mcp_servers(&registry_path)?;
 
@@ -2469,7 +2469,7 @@ pub async fn handle_gateway_system_agents(
             // Validate the agent is declared (config or installed bundle).
             let entry = config.system_agents.iter().find(|e| e.agent_id == *agent_id);
             let repo = autonoetic_gateway::agent::repository::AgentRepository::from_config(&config);
-            let _loaded = repo.get_sync(agent_id)
+            let _loaded = repo.load_unvetted_from_ingest_dir(agent_id)
                 .map_err(|e| anyhow::anyhow!("Could not load agent '{}': {}", agent_id, e))?;
             if entry.is_none() {
                 tracing::debug!(
