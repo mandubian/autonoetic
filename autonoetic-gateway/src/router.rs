@@ -5758,15 +5758,10 @@ impl JsonRpcRouter {
             }
 
             "admin.escalation_list" => {
-                let store = self.execution.gateway_store();
-                let Some(store) = store else {
-                    return JsonRpcResponse::error(
-                        req.id,
-                        -32000,
-                        "GatewayStore not available for admin.escalation_list",
-                    );
-                };
-                match store.list_pending_escalations() {
+                // #1119 close-out: pending + per-root stale, matching the
+                // CLI's historical aggregation (previously computed
+                // client-side over direct store access).
+                match self.execution.escalations_with_stale() {
                     Ok(escalations) => JsonRpcResponse::success(
                         req.id,
                         serde_json::json!({

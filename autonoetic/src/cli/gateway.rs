@@ -3046,26 +3046,17 @@ pub async fn handle_gateway_escalations(
     command: &super::common::GatewayEscalationCommands,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
 
     match command {
         super::common::GatewayEscalationCommands::List { json } => {
-            let pending = gateway_store.list_pending_escalations()?;
-            let stale = {
-                let mut all_stale = Vec::new();
-                let root_ids: std::collections::HashSet<String> = pending
-                    .iter()
-                    .map(|e| e.root_session_id.clone())
-                    .collect();
-                for rid in &root_ids {
-                    all_stale.extend(gateway_store.get_stale_escalations_for_root(rid)?);
-                }
-                all_stale
-            };
-            let mut all = pending;
-            all.extend(stale);
+            // Pending + per-root stale: aggregated server-side, matching the
+            // historical CLI computation (#1119 close-out).
+            let all: Vec<autonoetic_types::escalation::EscalationMessage> =
+                serde_json::from_value(
+                    rpc.call("admin.escalation_list", serde_json::json!({}))?,
+                )
+                .map_err(|e| anyhow::anyhow!("admin.escalation_list decode failed: {}", e))?;
 
             if *json {
                 println!("{}", serde_json::to_string_pretty(&all)?);
@@ -3118,9 +3109,14 @@ pub async fn handle_gateway_escalations(
             println!("\n{} escalation(s)", all.len());
         }
         super::common::GatewayEscalationCommands::Show { escalation_id } => {
-            let escalation = gateway_store
-                .get_escalation(escalation_id)?
-                .ok_or_else(|| anyhow::anyhow!("Escalation '{}' not found", escalation_id))?;
+            let escalation: autonoetic_types::escalation::EscalationMessage =
+                serde_json::from_value(
+                    rpc.call(
+                        "admin.escalation_inspect",
+                        serde_json::json!({ "escalation_id": escalation_id }),
+                    )?,
+                )
+                .map_err(|e| anyhow::anyhow!("admin.escalation_inspect decode failed: {}", e))?;
             println!("{}", serde_json::to_string_pretty(&escalation)?);
         }
         super::common::GatewayEscalationCommands::Resolve {
@@ -3132,70 +3128,22 @@ pub async fn handle_gateway_escalations(
             if !approve && !reject {
                 anyhow::bail!("Specify --approve or --reject");
             }
-            let escalation = gateway_store
-                .get_escalation(escalation_id)?
-                .ok_or_else(|| anyhow::anyhow!("Escalation '{}' not found", escalation_id))?;
-
-            // #739 Part C item 2: when an escalation is a *projection* of an
-            // approval row (post-#735 federation promotion reviews carry
-            // `approval_request_id`), resolve the **approval** as the source of
-            // truth — resolving only the escalation row would orphan the
-            // linked approval (the bidirectional hazard #735/#744 removed).
-            // The approval path fans out to the escalation projection itself.
-            // `hook_executor = None`: a CLI invocation has no live gateway to
-            // fire hooks; the running gateway re-derives state on its own ticks.
-            if let Some(request_id) = escalation.approval_request_id.as_deref() {
-                let approved = *approve;
-                let result = if approved {
-                    autonoetic_gateway::scheduler::approval::approve_request(
-                        &config,
-                        Some(&gateway_store),
-                        request_id,
-                        "cli",
-                        reason.clone(),
-                        None,
-                        None,
-                        None,
-                    )
-                } else {
-                    autonoetic_gateway::scheduler::approval::reject_request(
-                        &config,
-                        Some(&gateway_store),
-                        request_id,
-                        "cli",
-                        reason.clone(),
-                        None,
-                    )
-                };
-                result?;
-                println!(
-                    "Escalation {} resolved as {} via linked approval {} \
-                     (escalation projection resolved by the approval path)",
-                    escalation_id,
-                    if approved { "approved" } else { "rejected" },
-                    request_id,
-                );
-                return Ok(());
-            }
-
-            // Standalone escalation (e.g. guidance request without an approval
-            // link): resolve the escalation row directly.
-            let status = if *approve {
-                autonoetic_types::escalation::EscalationStatus::Approved
-            } else {
-                autonoetic_types::escalation::EscalationStatus::Rejected
-            };
-            gateway_store.resolve_escalation(
-                escalation_id,
-                status,
-                "cli",
-                reason.as_deref(),
+            // admin.escalation_resolve replicates the #739 bidirectional
+            // resolution server-side: an escalation that is a projection of an
+            // approval row resolves the approval (which fans out to the
+            // projection), a standalone one resolves the row — with hooks on
+            // the live gateway (#1119 close-out).
+            let status = if *approve { "approved" } else { "rejected" };
+            rpc.call(
+                "admin.escalation_resolve",
+                serde_json::json!({
+                    "escalation_id": escalation_id,
+                    "decided_by": "cli",
+                    "status": status,
+                    "reason": reason,
+                }),
             )?;
-            println!(
-                "Escalation {} resolved as {}",
-                escalation_id,
-                status.as_str(),
-            );
+            println!("Escalation {} resolved as {}", escalation_id, status);
         }
     }
     Ok(())
