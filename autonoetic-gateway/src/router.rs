@@ -5186,6 +5186,10 @@ impl JsonRpcRouter {
                 }
             }
 
+            // `autonoetic gateway approvals` headless list + stats over RPC
+            // (#1119 tranche 7).
+            "approvals.list" => handle_approvals_list(&self.execution, req),
+            "approvals.stats" => handle_approvals_stats(&self.execution, req),
             "approvals.approve" => {
                 #[derive(Deserialize)]
                 struct ApproveParams {
@@ -5206,6 +5210,14 @@ impl JsonRpcRouter {
                     /// a one-shot: only this invocation is authorized.
                     #[serde(default)]
                     create_grant: Option<bool>,
+                    /// #1119 tranche 7 (CLI headless approve): optional grant
+                    /// scoping carried over the wire.
+                    #[serde(default)]
+                    grant_scope: Option<autonoetic_types::background::GrantScope>,
+                    #[serde(default)]
+                    grant_targets: Vec<autonoetic_types::background::GrantTarget>,
+                    #[serde(default)]
+                    grant_expires_at: Option<String>,
                 }
 
                 let params: ApproveParams = match serde_json::from_value(req.params) {
@@ -5254,6 +5266,12 @@ impl JsonRpcRouter {
                         confirm_phrase: params.confirm_phrase,
                         decider_session_id: params.decider_session_id,
                         create_grant: params.create_grant,
+                        // #1119 tranche 7: the CLI's headless approve carries
+                        // grant scoping (scope/targets/ttl) — pass those
+                        // through when present.
+                        grant_scope: params.grant_scope,
+                        grant_targets: params.grant_targets,
+                        grant_expires_at: params.grant_expires_at,
                         ..Default::default()
                     },
                 ) {
@@ -5265,6 +5283,8 @@ impl JsonRpcRouter {
 
                         let response_request_id = decision.request_id.clone();
                         let response_status = format!("{:?}", decision.status);
+                        let response_agent_id = decision.agent_id.clone();
+                        let response_action_kind = decision.action.kind();
 
                         // Directly trigger session resume for non-workflow-bound
                         // approvals.  Without this, sessions that ended their
@@ -5322,6 +5342,10 @@ impl JsonRpcRouter {
                             serde_json::json!({
                                 "request_id": response_request_id,
                                 "status": response_status,
+                                // #1119 tranche 7: surface the decision's
+                                // agent + action kind for CLI rendering.
+                                "agent_id": response_agent_id,
+                                "action_kind": response_action_kind,
                             }),
                         )
                     }
@@ -5441,6 +5465,10 @@ impl JsonRpcRouter {
                             _ => {}
                         }
                         let mut body = serde_json::json!({
+                            // #1119 tranche 7: the full record for CLI `show`
+                            // rendering (additive; room consumers read the
+                            // summary fields above).
+                            "full": approval,
                             "request_id": approval.request_id,
                             "status": approval.status.as_ref().map(|s| s.as_str()),
                             "action": approval.action.kind(),
@@ -5531,6 +5559,10 @@ impl JsonRpcRouter {
                             serde_json::json!({
                                 "request_id": decision.request_id,
                                 "status": format!("{:?}", decision.status),
+                                // #1119 tranche 7: surface agent + action kind
+                                // for CLI rendering.
+                                "agent_id": decision.agent_id,
+                                "action_kind": decision.action.kind(),
                             }),
                         )
                     }
@@ -6907,6 +6939,49 @@ fn parse_triage_state_param(s: &str) -> anyhow::Result<autonoetic_types::securit
              benign, deferred",
             other
         ),
+    }
+}
+
+/// `approvals.list` — the global pending-approval list for the CLI
+/// approvals surface (#1119 tranche 7).
+#[inline(never)]
+fn handle_approvals_list(execution: &GatewayExecutionService, req: JsonRpcRequest) -> JsonRpcResponse {
+    if let Some(resp) = reject_non_empty_params(&req, "approvals.list") {
+        return resp;
+    }
+    match execution.pending_approvals() {
+        Ok(list) => match serde_json::to_value(list) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `approvals.stats` — approval statistics for `gateway approvals stats`
+/// (#1119 tranche 7).
+#[inline(never)]
+fn handle_approvals_stats(execution: &GatewayExecutionService, req: JsonRpcRequest) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        root_session_id: Option<String>,
+        #[serde(default)]
+        since: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "approvals.stats", e),
+    };
+    match execution.approval_stats(
+        params.agent_id.as_deref(),
+        params.root_session_id.as_deref(),
+        params.since.as_deref(),
+    ) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
 

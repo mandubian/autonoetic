@@ -332,16 +332,17 @@ pub async fn handle_gateway_approvals(
     config_path: &Path,
     command: &super::common::GatewayApprovalCommands,
 ) -> anyhow::Result<()> {
+    use crate::cli::rpc::GatewayRpc;
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = GatewayRpc::from_config(&config)?;
     match command {
         super::common::GatewayApprovalCommands::List { json } => {
-            let approvals = autonoetic_gateway::scheduler::load_approval_requests(
-                &config,
-                Some(&gateway_store),
-            )?;
+            // Global pending list comes from approvals.list over RPC (#1119
+            // tranche 7); the CLI renders in the typed ApprovalRequest shape.
+            let approvals: Vec<autonoetic_types::background::ApprovalRequest> = serde_json::from_value(
+                rpc.call("approvals.list", serde_json::json!({}))?,
+            )
+            .map_err(|e| anyhow::anyhow!("approvals.list decode failed: {}", e))?;
             if *json {
                 println!("{}", serde_json::to_string_pretty(&approvals)?);
                 return Ok(());
@@ -498,33 +499,26 @@ pub async fn handle_gateway_approvals(
                 None
             };
 
-            let decision = autonoetic_gateway::scheduler::approve_request_with_options(
-                &config,
-                Some(&gateway_store),
-                request_id,
-                "cli",
-                reason.clone(),
-                if secrets.is_empty() {
-                    None
-                } else {
-                    Some(secrets.clone())
-                },
-                Some(&approval_level),
-                None,
-                autonoetic_gateway::scheduler::ApproveOptions {
-                    grant_scope: Some(grant_scope),
-                    grant_targets: parsed_targets,
-                    grant_expires_at: expires_at,
-                    acknowledged_capabilities: acknowledge_capabilities.clone(),
-                    confirm_phrase: confirm_phrase.clone(),
-                    ..Default::default()
-                },
+            let decision = rpc.call(
+                "approvals.approve",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "decided_by": "cli",
+                    "reason": reason,
+                    "secrets": (!secrets.is_empty()).then_some(secrets),
+                    "approver_level": approval_level,
+                    "grant_scope": grant_scope,
+                    "grant_targets": parsed_targets,
+                    "grant_expires_at": expires_at,
+                    "acknowledged_capabilities": acknowledge_capabilities,
+                    "confirm_phrase": confirm_phrase,
+                }),
             )?;
             println!(
                 "Approved {} for agent {} ({})",
-                decision.request_id,
-                decision.agent_id,
-                decision.action.kind()
+                decision["request_id"].as_str().unwrap_or(request_id),
+                decision["agent_id"].as_str().unwrap_or("?"),
+                decision["action_kind"].as_str().unwrap_or("?")
             );
             println!();
             println!("The approval has been processed and a notification was queued for");
@@ -535,29 +529,34 @@ pub async fn handle_gateway_approvals(
             println!("until a consumer acknowledges it.");
         }
         super::common::GatewayApprovalCommands::Reject { request_id, reason } => {
-            let decision = autonoetic_gateway::scheduler::reject_request(
-                &config,
-                Some(&gateway_store),
-                request_id,
-                "cli",
-                reason.clone(),
-                None,
+            let decision = rpc.call(
+                "approvals.reject",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "decided_by": "cli",
+                    "reason": reason,
+                }),
             )?;
             println!(
                 "Rejected {} for agent {} ({})",
-                decision.request_id,
-                decision.agent_id,
-                decision.action.kind()
+                decision["request_id"].as_str().unwrap_or(request_id),
+                decision["agent_id"].as_str().unwrap_or("?"),
+                decision["action_kind"].as_str().unwrap_or("?")
             );
         }
         super::common::GatewayApprovalCommands::Interactive { approval_level } => {
-            run_interactive_approvals(&config, &gateway_store, *approval_level).await?;
+            run_interactive_approvals(&rpc, &config, *approval_level).await?;
         }
         super::common::GatewayApprovalCommands::Show { request_id } => {
-            let approval = gateway_store.get_approval(request_id)?;
-            match approval {
-                None => println!("Approval '{}' not found.", request_id),
-                Some(a) => {
+            let full: autonoetic_types::background::ApprovalRequest = match inspect_approval(&rpc, request_id)? {
+                Some(a) => a,
+                None => {
+                    println!("Approval '{}' not found.", request_id);
+                    return Ok(());
+                }
+            };
+            {
+                let a = &full;
                     println!("Request ID:    {}", a.request_id);
                     println!("Agent:         {}", a.agent_id);
                     println!("Session:       {}", a.session_id);
@@ -629,7 +628,12 @@ pub async fn handle_gateway_approvals(
                         println!("R++4 confirm:   --confirm-phrase '{}'", phrase);
                     }
 
-                    if let Ok(msgs) = gateway_store.get_gate_messages(request_id) {
+                    if let Ok(raw_msgs) = rpc.call(
+                        "gate.get_messages",
+                        serde_json::json!({ "gate_id": request_id }),
+                    ) {
+                        let msgs: Vec<autonoetic_gateway::runtime::human_gate::GateMessage> =
+                            serde_json::from_value(raw_msgs).unwrap_or_default();
                         if !msgs.is_empty() {
                             println!("\nEnrichment:");
                             for msg in &msgs {
@@ -691,12 +695,12 @@ pub async fn handle_gateway_approvals(
                     }
                 }
             }
-        }
         super::common::GatewayApprovalCommands::Ask {
             request_id,
             question,
         } => {
-            let approval = gateway_store.get_approval(request_id)?;
+            let approval: Option<autonoetic_types::background::ApprovalRequest> =
+                inspect_approval(&rpc, request_id)?;
             match approval {
                 None => println!("Approval '{}' not found.", request_id),
                 Some(a) => {
@@ -717,16 +721,24 @@ pub async fn handle_gateway_approvals(
                 eprintln!("Error: message must not be empty");
                 return Ok(());
             }
-            if gateway_store.get_approval(request_id)?.is_none() {
+            if inspect_approval(&rpc, request_id)?.is_none() {
                 eprintln!("Approval '{}' not found.", request_id);
                 return Ok(());
             }
             let redacted = autonoetic_gateway::log_redaction::redact_text_for_logs(message);
-            let id = gateway_store.add_gate_message(request_id, "operator", &redacted)?;
+            let id = rpc.call(
+                "gate.add_message",
+                serde_json::json!({
+                    "gate_id": request_id,
+                    "sender": "operator",
+                    "content": redacted,
+                }),
+            )?;
             println!(
-                "Posted comment #{} on approval {}. Visible to the agent via approval.status.",
-                id, request_id
+                "Posted comment on approval {}. Visible to the agent via approval.status.",
+                request_id
             );
+            let _ = id;
         }
         super::common::GatewayApprovalCommands::AskAgent {
             request_id,
@@ -736,27 +748,27 @@ pub async fn handle_gateway_approvals(
                 eprintln!("Error: question must not be empty");
                 return Ok(());
             }
-            if gateway_store.get_approval(request_id)?.is_none() {
+            if inspect_approval(&rpc, request_id)?.is_none() {
                 eprintln!("Approval '{}' not found.", request_id);
                 return Ok(());
             }
             println!("Q: {}", question);
             println!();
-            let gateway_store_arc = std::sync::Arc::new(
-                autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?,
-            );
-            let service = autonoetic_gateway::execution::GatewayExecutionService::new(
-                config.clone(),
-                Some(gateway_store_arc),
-            );
-            match service
-                .spawn_clarification_for_approval(request_id.trim(), question.trim())
-                .await
-            {
+            // approvals.ask_agent spawns the read-only clarification child
+            // server-side (same choke point as the TUI).
+            match rpc.call(
+                "approvals.ask_agent",
+                serde_json::json!({
+                    "request_id": request_id.trim(),
+                    "question": question.trim(),
+                }),
+            ) {
                 Ok(outcome) => {
-                    println!("{}", outcome.answer);
+                    println!("{}", outcome["answer"].as_str().unwrap_or(""));
                     println!();
-                    println!("(child session: {})", outcome.child_session_id);
+                    if let Some(cs) = outcome["child_session_id"].as_str() {
+                        println!("(child session: {})", cs);
+                    }
                 }
                 Err(e) => eprintln!("Error: {}", e),
             }
@@ -774,10 +786,13 @@ pub async fn handle_gateway_approvals(
                 };
                 (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
             });
-            let stats = gateway_store.get_approval_stats(
-                agent.as_deref(),
-                session.as_deref(),
-                since_ts.as_deref(),
+            let stats = rpc.call(
+                "approvals.stats",
+                serde_json::json!({
+                    "agent_id": agent,
+                    "root_session_id": session,
+                    "since": since_ts,
+                }),
             )?;
             println!("Approval Statistics");
             if agent.is_some() || session.is_some() || since.is_some() {
@@ -1073,9 +1088,54 @@ pub async fn handle_gateway_exec_cache(
     Ok(())
 }
 
+/// The global pending-approval list over RPC, typed for rendering.
+fn approvals_list(
+    rpc: &crate::cli::rpc::GatewayRpc,
+) -> anyhow::Result<Vec<autonoetic_types::background::ApprovalRequest>> {
+    let raw = rpc.call("approvals.list", serde_json::json!({}))?;
+    serde_json::from_value(raw).map_err(|e| anyhow::anyhow!("approvals.list decode failed: {}", e))
+}
+
+/// Fetch one approval over RPC. `Ok(None)` means the server answered
+/// "Approval not found"; any other RPC failure (connectivity, auth, server
+/// error) propagates so the operator isn't misled into thinking the request
+/// just doesn't exist.
+fn inspect_approval(
+    rpc: &crate::cli::rpc::GatewayRpc,
+    request_id: &str,
+) -> anyhow::Result<Option<autonoetic_types::background::ApprovalRequest>> {
+    match rpc.call(
+        "approvals.inspect",
+        serde_json::json!({ "request_id": request_id }),
+    ) {
+        Ok(body) if !body["full"].is_null() => {
+            let approval = serde_json::from_value(body["full"].clone())
+                .map_err(|e| anyhow::anyhow!("approvals.inspect decode failed: {}", e))?;
+            Ok(Some(approval))
+        }
+        Ok(_) => Ok(None),
+        Err(e) if e.to_string().contains("Approval not found") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Fetch a gate's enrichment thread over RPC, typed for rendering.
+fn load_gate_messages(
+    rpc: &crate::cli::rpc::GatewayRpc,
+    gate_id: &str,
+) -> Vec<autonoetic_gateway::runtime::human_gate::GateMessage> {
+    rpc.call(
+        "gate.get_messages",
+        serde_json::json!({ "gate_id": gate_id }),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_value(raw).ok())
+    .unwrap_or_default()
+}
+
 async fn run_interactive_approvals(
+    rpc: &crate::cli::rpc::GatewayRpc,
     config: &autonoetic_types::config::GatewayConfig,
-    gateway_store: &autonoetic_gateway::scheduler::gateway_store::GatewayStore,
     approval_level: super::common::CliApprovalLevel,
 ) -> anyhow::Result<()> {
     use autonoetic_types::background::ApprovalRequest;
@@ -1094,8 +1154,7 @@ async fn run_interactive_approvals(
     };
     use std::io;
 
-    let approvals =
-        autonoetic_gateway::scheduler::load_approval_requests(config, Some(gateway_store))?;
+    let approvals: Vec<ApprovalRequest> = approvals_list(rpc)?;
 
     if approvals.is_empty() {
         println!("No pending approval requests.");
@@ -1629,7 +1688,8 @@ async fn run_interactive_approvals(
 
                 let selected_id = items[idx].request_id.clone();
                 if last_selected != Some(idx) {
-                    if let Ok(msgs) = gateway_store.get_gate_messages(&selected_id) {
+                    let msgs = load_gate_messages(rpc, &selected_id);
+                    if !msgs.is_empty() {
                         enrichment_cache.insert(selected_id.clone(), msgs);
                     }
                     last_selected = Some(idx);
@@ -1801,27 +1861,23 @@ async fn run_interactive_approvals(
                             if !q.is_empty() {
                                 if let Some(idx) = state.selected() {
                                     let selected_id = items[idx].request_id.clone();
-                                    let store_arc = std::sync::Arc::new(
-                                        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(
-                                            &autonoetic_gateway::execution::gateway_root_dir(config),
-                                        ).map_err(|e| anyhow::anyhow!("{}", e))?,
-                                    );
-                                    let service = autonoetic_gateway::execution::GatewayExecutionService::new(
-                                        config.clone(),
-                                        Some(store_arc),
-                                    );
-                                    ask_agent_status = match service
-                                        .spawn_clarification_for_approval(&selected_id, &q)
-                                        .await
-                                    {
-                                        Ok(outcome) => {
-                                            if let Ok(msgs) =
-                                                gateway_store.get_gate_messages(&selected_id)
-                                            {
-                                                enrichment_cache.insert(selected_id, msgs);
+                                    ask_agent_status = match rpc
+                                        .call(
+                                            "approvals.ask_agent",
+                                            serde_json::json!({
+                                                "request_id": selected_id,
+                                                "question": q,
+                                            }),
+                                        )
+                                        .and_then(|out| {
+                                            let msgs = load_gate_messages(rpc, &selected_id);
+                                            if !msgs.is_empty() {
+                                                enrichment_cache.insert(selected_id.clone(), msgs);
                                             }
-                                            outcome.answer
-                                        }
+                                            Ok(out["answer"].as_str().unwrap_or("").to_string())
+                                        })
+                                    {
+                                        Ok(answer) => answer,
                                         Err(e) => format!("\u{26a0} ask-agent failed: {e}"),
                                     };
                                 }
@@ -1856,17 +1912,19 @@ async fn run_interactive_approvals(
                                         autonoetic_gateway::log_redaction::redact_text_for_logs(
                                             &msg,
                                         );
-                                    match gateway_store.add_gate_message(
-                                        &selected_id,
-                                        "operator",
-                                        &redacted,
+                                    match rpc.call(
+                                        "gate.add_message",
+                                        serde_json::json!({
+                                            "gate_id": selected_id,
+                                            "sender": "operator",
+                                            "content": redacted,
+                                        }),
                                     ) {
                                         Ok(_) => {
                                             status_msg =
                                                 format!("\u{1F4AC} Note posted to {}", selected_id);
-                                            if let Ok(msgs) =
-                                                gateway_store.get_gate_messages(&selected_id)
-                                            {
+                                            let msgs = load_gate_messages(rpc, &selected_id);
+                                            if !msgs.is_empty() {
                                                 enrichment_cache.insert(selected_id, msgs);
                                             }
                                         }
@@ -2006,21 +2064,20 @@ async fn run_interactive_approvals(
                                     None
                                 };
 
-                            match autonoetic_gateway::scheduler::approve_request(
-                                config,
-                                Some(gateway_store),
-                                &req.request_id,
-                                "cli-interactive",
-                                None,
-                                secrets,
-                                Some(&approval_level.to_runtime()),
-                                None,
+                            match rpc.call(
+                                "approvals.approve",
+                                serde_json::json!({
+                                    "request_id": req.request_id,
+                                    "decided_by": "cli-interactive",
+                                    "secrets": secrets,
+                                    "approver_level": approval_level.to_runtime(),
+                                }),
                             ) {
                                 Ok(decision) => {
                                     status_msg = format!(
                                         "\u{2705} Approved {} ({})",
-                                        decision.request_id,
-                                        decision.action.kind()
+                                        decision["request_id"].as_str().unwrap_or("?"),
+                                        decision["action_kind"].as_str().unwrap_or("?")
                                     );
                                     items.remove(idx);
                                     if items.is_empty() {
@@ -2041,19 +2098,18 @@ async fn run_interactive_approvals(
                     KeyCode::Char('r') => {
                         if let Some(idx) = state.selected() {
                             let req = &items[idx];
-                            match autonoetic_gateway::scheduler::reject_request(
-                                config,
-                                Some(gateway_store),
-                                &req.request_id,
-                                "cli-interactive",
-                                None,
-                                None,
+                            match rpc.call(
+                                "approvals.reject",
+                                serde_json::json!({
+                                    "request_id": req.request_id,
+                                    "decided_by": "cli-interactive",
+                                }),
                             ) {
                                 Ok(decision) => {
                                     status_msg = format!(
                                         "\u{274c} Rejected {} ({})",
-                                        decision.request_id,
-                                        decision.action.kind()
+                                        decision["request_id"].as_str().unwrap_or("?"),
+                                        decision["action_kind"].as_str().unwrap_or("?")
                                     );
                                     items.remove(idx);
                                     if items.is_empty() {
@@ -2072,11 +2128,8 @@ async fn run_interactive_approvals(
                         }
                     }
                     KeyCode::Char('R') => {
-                        match autonoetic_gateway::scheduler::load_approval_requests(
-                            config,
-                            Some(gateway_store),
-                        ) {
-                            Ok(refreshed) => {
+                        match approvals_list(rpc) {
+                        Ok(refreshed) => {
                                 items = refreshed;
                                 enrichment_cache.clear();
                                 last_selected = None;
@@ -2917,16 +2970,12 @@ pub async fn handle_gateway_wiki(
     command: &super::common::GatewayWikiCommands,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
 
     match command {
         super::common::GatewayWikiCommands::Proposals { json } => {
-            let approvals = autonoetic_gateway::scheduler::load_approval_requests(
-                &config,
-                Some(&gateway_store),
-            )?;
+            let approvals: Vec<autonoetic_types::background::ApprovalRequest> =
+                approvals_list(&rpc)?;
             let wiki: Vec<_> = approvals
                 .into_iter()
                 .filter(|a| {
@@ -2959,48 +3008,33 @@ pub async fn handle_gateway_wiki(
             }
         }
         super::common::GatewayWikiCommands::Promote { request_id, reason } => {
-            let decision = autonoetic_gateway::scheduler::approve_request_with_options(
-                &config,
-                Some(&gateway_store),
-                request_id,
-                "cli",
-                reason.clone(),
-                None,
-                None,
-                None,
-                autonoetic_gateway::scheduler::ApproveOptions::default(),
+            let decision = rpc.call(
+                "approvals.approve",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "decided_by": "cli",
+                    "reason": reason,
+                }),
             )?;
             println!(
                 "Wiki proposal promoted: {} — {}",
-                decision.request_id,
-                if let autonoetic_types::background::ScheduledAction::WikiProposal { title, .. } =
-                    &decision.action
-                {
-                    title.as_str()
-                } else {
-                    "(unknown)"
-                }
+                decision["request_id"].as_str().unwrap_or(request_id),
+                decision["action_kind"].as_str().unwrap_or("(unknown)")
             );
         }
         super::common::GatewayWikiCommands::Reject { request_id, reason } => {
-            let decision = autonoetic_gateway::scheduler::reject_request(
-                &config,
-                Some(&gateway_store),
-                request_id,
-                "cli",
-                reason.clone(),
-                None,
+            let decision = rpc.call(
+                "approvals.reject",
+                serde_json::json!({
+                    "request_id": request_id,
+                    "decided_by": "cli",
+                    "reason": reason,
+                }),
             )?;
             println!(
                 "Wiki proposal rejected: {} — {}",
-                decision.request_id,
-                if let autonoetic_types::background::ScheduledAction::WikiProposal { title, .. } =
-                    &decision.action
-                {
-                    title.as_str()
-                } else {
-                    "(unknown)"
-                }
+                decision["request_id"].as_str().unwrap_or(request_id),
+                decision["action_kind"].as_str().unwrap_or("(unknown)")
             );
         }
     }
@@ -3253,15 +3287,15 @@ pub async fn handle_gateway_egress_audit(
     json: bool,
 ) -> anyhow::Result<()> {
     let config = autonoetic_gateway::config::load_config(config_path)?;
-    let gateway_dir = autonoetic_gateway::execution::gateway_root_dir(&config);
-    let gateway_store =
-        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)?;
+    let rpc = crate::cli::rpc::GatewayRpc::from_config(&config)?;
 
-    // Same code path as the `egress.audit` RPC (#973) — the report, the event
-    // scan and the truncation flag all come from `egress_audit`, so a local
-    // admin and a remote operator cannot see different audits of one session.
-    // Only the rendering below is CLI-specific.
-    let audit = autonoetic_gateway::egress_audit::load_egress_audit(&gateway_store, session_id, None)?;
+    // The `egress.audit` RPC is the same code path (#973) — report, event
+    // scan and truncation flag all come from `egress_audit`, so a CLI admin
+    // and a remote operator see the same audit of one session.
+    let audit: autonoetic_gateway::egress_audit::EgressAudit = serde_json::from_value(
+        rpc.call("egress.audit", serde_json::json!({ "session_id": session_id }))?,
+    )
+    .map_err(|e| anyhow::anyhow!("egress.audit decode failed: {}", e))?;
 
     if json {
         let body = if audit.truncated {
