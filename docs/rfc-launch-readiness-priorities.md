@@ -61,23 +61,31 @@ Ordered by urgency.
    Fixing both together removes an entire class of "new secret file forgotten in the list".
 3. **#988** — no write-side path taint: copying labeled content to a new path launders
    its egress label. Defeats the egress model at its core invariant.
-4. **#987** — OFP send and capsule export ignore artifact labels. Federation egress
-   bypasses the labeling the rest of the system enforces.
-5. **#808** — `create_from_intent` drops/mismatches `artifact_id`; integration test on
-   main asserts a field the response builder never writes. Verified live at
-   `agent_revision.rs` response construction. Either the test or the builder is wrong;
-   both cannot ship.
-6. **#649** — vestigial `AgentRevisionStatus::Rejected`: unconstructed, unhandled;
+4. **#987** — *(reframed 2026-08-24)* As filed, this targets OFP-send/capsule paths
+   that turn out not to exist yet: the outbound `MessageRouter` is dead code, the
+   listener defaults off, and there is no live federation egress (see #1154).
+   The durable residue is an **acceptance criterion on #1154**: when the outbound
+   wire goes live it must gate on artifact labels ∩ session taint ∩ workspace
+   label, not session taint alone — plus #988 below, which is real today without
+   any federation.
+5. **#649** — vestigial `AgentRevisionStatus::Rejected`: unconstructed, unhandled;
    one careless match arm away from reintroducing the create→promote loop already
-   killed once. Remove the variant.
+   killed once. Remove the variant. *(fix staged on branch tier0/security-fixes)*
+6. **#808** — `create_from_intent` drops/mismatches `artifact_id`. *(resolved
+   2026-08-24: fixed on origin/main by `be15f0b7`, #1144/#1147 — dropped from the
+   launch list.)*
 7. **#1078** — constitution/YieldReason drift: Ri-0.12 says 11 causes and ManualStop
    terminal; code has 12 and ManualStop is a resumable pause. Constitution-text/code
    divergence fails the repo's own mechanical-enforcement doctrine; fix code or text,
-   then re-run lock recompute if the constitution changes.
+   then re-run lock recompute if the constitution changes. **Blocked on the signing
+   key** (`AUTONOETIC_CONSTITUTION_SIGNING_SK_B64`) — cannot ride a normal PR.
 
 Conditional blocker: **#897 + #815** (federated messaging semantics, outbound OFP stub).
-If launch messaging claims federation capability, these are Tier 0; if federation stays
-explicitly experimental, demote to Tier 2 *and* say so in docs/config defaults.
+The 2026-08-24 OFP audit (#1153–#1156) confirmed these are stub-level: listener now
+defaults off (`ofp_port: 0`), outbound router dead, inbound assistant_reply ungated
+(#1153). If launch messaging claims federation capability, fix those first; otherwise
+federation stays explicitly experimental and out of Tier 0 by construction — say so in
+docs/config defaults (done for `ofp_port`).
 
 ## 4. Tier 1 — Launch quality
 
@@ -141,7 +149,7 @@ Committed main is healthy; the process allowed it not to be. Proposed guards:
 
 ```
 Week 1   #1145 + #1002 (sandbox secrets/host-fs), #808, #649, #1078 (+ lock recompute)
-Week 2   #988, #987 (egress write-side + federation labels), #1134/#956/#1034 (CI signal)
+Week 2   #988 (egress write-side taint), #1134/#956/#1034 (CI signal)
 Week 3   #855, #842, #775, #776, #779, #651, #916, #884, #378
 Then     federation go/no-go decision → #897/#815 in or out; freeze; launch candidate
 ```
