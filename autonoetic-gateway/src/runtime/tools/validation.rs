@@ -42,16 +42,14 @@ fn parse_class(s: &str) -> Option<ValidationClass> {
 }
 
 fn is_waivable(class: ValidationClass) -> bool {
-    // correctness_check (unit tests, lint, typecheck) requires operator
-    // approval because skipping a correctness gate is a high-trust decision.
-    // It stays "waivable" here so the more precise
-    // `correctness_waiver_requires_operator` denial fires with its actionable
-    // hint — rejecting it in this predicate would dead-code that branch and
-    // give agents the generic non_waivable_validation instead (#1144).
-    // Quality and packaging checks remain agent-waivable outright.
-    !matches!(
+    // Agent-waivable without further approval. CorrectnessCheck is NOT
+    // agent-waivable outright — it requires explicit operator approval —
+    // but it stays in the *waivable* set so the more precise
+    // `correctness_waiver_requires_operator` denial (with its actionable
+    // hint) fires instead of the generic non_waivable_validation (#1144).
+    matches!(
         class,
-        ValidationClass::MechanicalSafety | ValidationClass::SecurityReview
+        ValidationClass::QualityCheck | ValidationClass::PackagingCheck
     )
 }
 
@@ -144,22 +142,24 @@ impl NativeTool for ValidationWaiveTool {
         let validation_class = match parse_class(&args.validation_class) {
             Some(c) => c,
             None => {
-                return Ok(ToolError::validation(format!("Invalid validation_class '{}'. Waivable classes: correctness_check, quality_check, packaging_check", args.validation_class), Some("Use one of: correctness_check, quality_check, packaging_check")).with_code("invalid_validation_class").to_error_response());
+                return Ok(ToolError::validation(format!("Invalid validation_class '{}'. Waivable classes: quality_check, packaging_check; correctness_check requires operator approval.", args.validation_class), Some("Use one of: quality_check, packaging_check; correctness_check requires operator approval.")).with_code("invalid_validation_class").to_error_response());
             }
         };
 
-        if !is_waivable(validation_class) {
-            return Ok(ToolError::validation(format!("{} validations cannot be waived — they are mechanically enforced", args.validation_class), Some("Only waivable classes can be waived. Check the list of waivable classes.")).with_code("non_waivable_validation").to_error_response());
-        }
-
         // correctness_check waivers (e.g. unit tests) require explicit operator
         // approval because waiving a correctness gate is a high-trust decision.
-        // Agents cannot self-approve them.
+        // Agents cannot self-approve them. Checked BEFORE is_waivable so the
+        // precise operator-required denial fires, not the generic non-waivable
+        // rejection (#1144).
         if requires_operator_waiver_approval(validation_class) {
             return Ok(ToolError::validation(
                 format!("Waiving '{}' validation for '{}' requires operator approval. An operator must run `autonoetic gateway validation waive --artifact-id {} --validation-id {} --validation-class {} --reason '<rationale>'`.", args.validation_class, args.validation_id, args.artifact_id, args.validation_id, args.validation_class),
                 Some("Correctness checks (unit tests, lint, typecheck) cannot be waived by agents. Request the operator to waive this validation explicitly."),
             ).with_code("correctness_waiver_requires_operator").to_error_response());
+        }
+
+        if !is_waivable(validation_class) {
+            return Ok(ToolError::validation(format!("{} validations cannot be waived — they are mechanically enforced", args.validation_class), Some("Only waivable classes can be waived. Check the list of waivable classes.")).with_code("non_waivable_validation").to_error_response());
         }
 
         if args.reason.trim().is_empty() {
@@ -319,10 +319,8 @@ mod tests {
     }
 
     #[test]
-    fn mechanical_safety_and_security_review_are_not_agent_waivable() {
-        // CorrectnessCheck stays in the waivable set so the precise
-        // `correctness_waiver_requires_operator` denial (with its operator
-        // hint) fires instead of the generic non_waivable_validation (#1144).
+    fn correctness_safety_and_security_are_not_agent_waivable() {
+        assert!(!is_waivable(ValidationClass::CorrectnessCheck));
         assert!(!is_waivable(ValidationClass::MechanicalSafety));
         assert!(!is_waivable(ValidationClass::SecurityReview));
     }

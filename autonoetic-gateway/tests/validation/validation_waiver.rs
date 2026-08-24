@@ -544,10 +544,11 @@ fn promotion_query_returns_waived_validations() {
         session_id,
         "trace-waiver-promo-001",
     );
+    // pass is derived from the referenced execution trace — no explicit
+    // pass flag needed when execution evidence is attached.
     let record_args = json!({
         "artifact_id": artifact_id,
         "role": "unit_test_runner",
-        "pass": true,
         "findings": [],
         "summary": "tests waived",
         "execution_trace_id": "trace-waiver-promo-001"
