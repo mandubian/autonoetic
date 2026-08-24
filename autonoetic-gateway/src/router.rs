@@ -1284,6 +1284,9 @@ impl JsonRpcRouter {
                     ),
                 }
             }
+            "constitution.list_proposals" => handle_constitution_list_proposals(&self.execution, req),
+            "constitution.proposal_get" => handle_constitution_proposal_get(&self.execution, req),
+            "constitution.proposal_decide" => handle_constitution_proposal_decide(&self.execution, req),
             "anomaly.resolve" => {
                 // O-7 (future obligation, issue #770 part C.1): every
                 // anomaly flag is owed a recorded decision. Mirrors
@@ -1505,6 +1508,10 @@ impl JsonRpcRouter {
                     Err(e) => JsonRpcResponse::error(req.id, -32000, e.to_string()),
                 }
             }
+            // #1119 tranche 5: pending-interaction listing + cancel for the
+            // `autonoetic gateway interactions` CLI surface.
+            "interaction.list_pending" => handle_interaction_list_pending(&self.execution, req),
+            "interaction.cancel" => handle_interaction_cancel(&self.execution, req),
             "interaction.resolve_and_answer" => {
                 let params: crate::interaction_answer::InteractionResolveAndAnswerParams =
                     match serde_json::from_value(req.params) {
@@ -6759,6 +6766,149 @@ fn parse_triage_state_param(s: &str) -> anyhow::Result<autonoetic_types::securit
              benign, deferred",
             other
         ),
+    }
+}
+
+/// `interaction.list_pending` — pending user interactions for the
+/// `autonoetic gateway interactions` CLI (#1119 tranche 5).
+#[inline(never)]
+fn handle_interaction_list_pending(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        root_session_id: Option<String>,
+        #[serde(default)]
+        session_id: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "interaction.list_pending", e),
+    };
+    match execution.pending_user_interactions(
+        params.root_session_id.as_deref(),
+        params.session_id.as_deref(),
+    ) {
+        Ok(list) => match serde_json::to_value(list) {
+            Ok(v) => JsonRpcResponse::success(req.id, v),
+            Err(e) => JsonRpcResponse::error(req.id, -32000, format!("encode failure: {}", e)),
+        },
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `interaction.cancel` — operator abort of a pending interaction (#1119 tranche 5).
+#[inline(never)]
+fn handle_interaction_cancel(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        interaction_id: String,
+        #[serde(default = "default_interaction_cancel_reason")]
+        reason: String,
+    }
+    fn default_interaction_cancel_reason() -> String {
+        "Cancelled by operator".to_string()
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "interaction.cancel", e),
+    };
+    match execution.cancel_user_interaction(&params.interaction_id, &params.reason) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `constitution.list_proposals` — all proposals with status/proposer filters
+/// (#1119 tranche 5; `...list_pending_proposals` covers only pending).
+#[inline(never)]
+fn handle_constitution_list_proposals(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        proposer: Option<String>,
+        #[serde(default = "default_proposal_limit")]
+        limit: usize,
+    }
+    fn default_proposal_limit() -> usize {
+        50
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "constitution.list_proposals", e),
+    };
+    match execution.constitutional_proposals(
+        params.status.as_deref(),
+        params.proposer.as_deref(),
+        params.limit,
+    ) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `constitution.proposal_get` — single proposal for `show` (#1119 tranche 5).
+#[inline(never)]
+fn handle_constitution_proposal_get(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        proposal_id: String,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "constitution.proposal_get", e),
+    };
+    match execution.constitutional_proposal(&params.proposal_id) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
+    }
+}
+
+/// `constitution.proposal_decide` — resolve a proposal to a decision state
+/// (#1119 tranche 5; the operator channel for `gateway constitution decide`).
+#[inline(never)]
+fn handle_constitution_proposal_decide(
+    execution: &GatewayExecutionService,
+    req: JsonRpcRequest,
+) -> JsonRpcResponse {
+    #[derive(Deserialize)]
+    struct Params {
+        proposal_id: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        decision: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    }
+    let params: Params = match serde_json::from_value(req.params) {
+        Ok(p) => p,
+        Err(e) => return invalid_egress_params(req.id, "constitution.proposal_decide", e),
+    };
+    let status = params.status.as_deref().or(params.decision.as_deref());
+    let Some(status) = status else {
+        return JsonRpcResponse::error(
+            req.id,
+            -32602,
+            "Invalid params for constitution.proposal_decide: status (or decision) is required",
+        );
+    };
+    match execution.decide_constitutional_proposal(&params.proposal_id, status, params.reason.as_deref()) {
+        Ok(v) => JsonRpcResponse::success(req.id, v),
+        Err(e) => JsonRpcResponse::error(req.id, -32000, format!("{}", e)),
     }
 }
 

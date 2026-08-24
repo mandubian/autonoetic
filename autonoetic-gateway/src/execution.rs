@@ -1590,12 +1590,87 @@ impl GatewayExecutionService {
 
     /// Cancel a recording session and emit the operator-cancel causal event
     /// (#1119 tranche 3) — previously emitted CLI-side.
+    // ── Interactions / constitution / egress operators (#1119 tranche 5) ─
+
+    /// Pending user interactions, scoped to a root session or explicit
+    /// session (mirrors the old CLI lookups).
+    pub fn pending_user_interactions(
+        &self,
+        root_session_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<Vec<autonoetic_types::background::UserInteraction>> {
+        let store = self.require_store()?;
+        match (root_session_id, session_id) {
+            (Some(rsid), None) => Ok(store.get_pending_interactions_for_root_session(rsid)?),
+            (None, Some(sid)) => Ok(store.get_pending_interactions_for_session(sid)?),
+            _ => anyhow::bail!("specify exactly one of root_session_id or session_id"),
+        }
+    }
+
+    /// Cancel a pending user interaction (operator abort).
+    pub fn cancel_user_interaction(
+        &self,
+        interaction_id: &str,
+        reason: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.require_store()?
+            .cancel_user_interaction(interaction_id, reason)?;
+        Ok(serde_json::json!({ "ok": true, "interaction_id": interaction_id }))
+    }
+
+    /// Constitutional proposals with status/proposer filters (all states,
+    /// not just pending — the operator needs history too).
+    pub fn constitutional_proposals(
+        &self,
+        status: Option<&str>,
+        proposer: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let rows = store.list_constitutional_proposals(status, proposer, limit)?;
+        Ok(serde_json::to_value(&rows).unwrap_or_else(|_| {
+            serde_json::json!({"encode_error": true, "rows": rows.len()})
+        }))
+    }
+
+    /// A single constitutional proposal for `show`.
+    pub fn constitutional_proposal(
+        &self,
+        proposal_id: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        let proposal = store
+            .get_constitutional_proposal(proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("No proposal with id '{}'", proposal_id))?;
+        Ok(serde_json::to_value(&proposal)?)
+    }
+
+    /// Resolve a constitutional proposal to the given decision state.
+    pub fn decide_constitutional_proposal(
+        &self,
+        proposal_id: &str,
+        new_status: &str,
+        reason: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let updated = self.require_store()?.decide_constitutional_proposal(
+            proposal_id,
+            new_status,
+            "operator",
+            reason,
+        )?;
+        if !updated {
+            anyhow::bail!("No proposal with id '{}'", proposal_id);
+        }
+        Ok(serde_json::json!({ "ok": true, "proposal_id": proposal_id, "status": new_status }))
+    }
+
     pub fn recording_session_cancel(&self, session_id: &str) -> anyhow::Result<serde_json::Value> {
         let store = self.require_store()?;
         store.stop_recording_session(
             session_id,
             autonoetic_types::recording::RecordingStatus::Cancelled,
         )?;
+
         let causal_event = autonoetic_types::causal_chain::CausalEventRecord {
             event_id: uuid::Uuid::new_v4().to_string(),
             agent_id: String::new(),

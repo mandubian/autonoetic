@@ -43,6 +43,54 @@ fn run_autonoetic_with_env(
         .expect("autonoetic test process should complete")
 }
 
+/// Serve the gateway JSON-RPC from the given store on the given port (#1119:
+/// operator commands speak RPC to a running gateway, so tests invoking
+/// `gateway pending`/read paths need a live server). Shuts down on drop.
+struct GatewayServerGuard {
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for GatewayServerGuard {
+    fn drop(&mut self) {
+        // Detach: the serving thread runs until the test process exits
+        // (joining would deadlock — the accept loop never returns).
+        self.handle.take();
+    }
+}
+
+fn serve_gateway_for_test(
+    agents_dir: &Path,
+    port: u16,
+    store: Arc<autonoetic_gateway::scheduler::gateway_store::GatewayStore>,
+) -> GatewayServerGuard {
+    let config = autonoetic_types::config::GatewayConfig {
+        agents_dir: agents_dir.to_path_buf(),
+        port,
+        ..autonoetic_types::config::GatewayConfig::default()
+    };
+    let handle = std::thread::spawn(move || {
+        // Router construction requires a runtime context (execution service
+        // spawns scheduler tasks), so build it inside the server thread.
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let _guard = runtime.enter();
+        let router = autonoetic_gateway::router::JsonRpcRouter::new(config, Some(store));
+        drop(_guard);
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let _ = runtime.block_on(async move {
+            autonoetic_gateway::server::jsonrpc::start_jsonrpc_server(addr, router, None).await
+        });
+    });
+    // Wait until the listener is accepting (poll the port).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).is_ok() {
+            return GatewayServerGuard { handle: Some(handle) };
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    panic!("test gateway did not start listening on port {port}");
+}
+
 struct ChildGuard {
     child: Option<Child>,
 }
@@ -1169,6 +1217,10 @@ fn gateway_pending_lists_unified_queue() {
     };
     store.create_approval(&mut approval).expect("seed approval");
 
+    // `gateway pending` reads from a running gateway's JSON-RPC since #1119 —
+    // serve this store over the configured port for the CLI invocations.
+    let _server = serve_gateway_for_test(&agents_dir, 4013, Arc::new(store));
+
     // Owning root: JSON output should list the approval.
     let out = run_autonoetic(
         &[
@@ -1408,7 +1460,15 @@ fn test_egress_declassify_intake_file_then_approve() {
         .expect("filed output should name the request id")
         .to_string();
 
-    // The pending request shows up in the unified pending view.
+    // The pending request shows up in the unified pending view (served over
+    // JSON-RPC since #1119 — spawn a gateway on this port over the store the
+    // CLI just wrote).
+    let gateway_dir = agents_dir.join(".gateway");
+    let store = Arc::new(
+        autonoetic_gateway::scheduler::gateway_store::GatewayStore::open(&gateway_dir)
+            .expect("store opens"),
+    );
+    let _server = serve_gateway_for_test(&agents_dir, 4010, store);
     let pending = run_autonoetic(
         &[
             "--config", cfg.as_str(),
@@ -1467,7 +1527,12 @@ fn test_egress_declassify_intake_file_then_approve() {
         ],
         None,
     );
-    assert!(revoke.status.success());
+    assert!(
+        revoke.status.success(),
+        "grants revoke failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&revoke.stdout),
+        String::from_utf8_lossy(&revoke.stderr)
+    );
     let stdout = String::from_utf8_lossy(&revoke.stdout);
     assert!(
         stdout.contains("egress declassification"),
