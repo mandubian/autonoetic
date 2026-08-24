@@ -528,11 +528,7 @@ fn materialize_revision_dir(
     revision_id: &str,
     files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<PathBuf> {
-    let rev_dir = gateway_dir
-        .join("revisions")
-        .join("agents")
-        .join(agent_id)
-        .join(revision_id);
+    let rev_dir = crate::agent::agent_revision_dir(gateway_dir, agent_id, revision_id);
     if rev_dir.exists() {
         return Ok(rev_dir);
     }

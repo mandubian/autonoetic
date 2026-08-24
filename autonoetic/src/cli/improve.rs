@@ -543,10 +543,12 @@ fn propose_improvement(
     // Copy files from the PROMOTED revision's store directory to the new
     // candidate's directory.  This guarantees the on-disk files match the
     // hashes we just stored (identical content, same digest).
-    let src_dir = gateway_dir
-        .join("revisions").join("agents").join(agent_id).join(&promoted.revision_id);
-    let dst_dir = gateway_dir
-        .join("revisions").join("agents").join(agent_id).join(&revision_id);
+    let src_dir = autonoetic_gateway::agent::agent_revision_dir(
+        &gateway_dir,
+        agent_id,
+        &promoted.revision_id,
+    );
+    let dst_dir = autonoetic_gateway::agent::agent_revision_dir(&gateway_dir, agent_id, &revision_id);
 
     std::fs::create_dir_all(&dst_dir)
         .with_context(|| format!("Failed to create revision directory {:?}", dst_dir))?;

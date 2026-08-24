@@ -102,11 +102,7 @@ fn materialize_revision_directory(
     files: &BTreeMap<String, Vec<u8>>,
     script_entry: Option<&str>,
 ) -> anyhow::Result<std::path::PathBuf> {
-    let revision_dir = gateway_dir
-        .join("revisions")
-        .join("agents")
-        .join(agent_id)
-        .join(revision_id);
+    let revision_dir = crate::agent::agent_revision_dir(gateway_dir, agent_id, revision_id);
 
     if revision_dir.exists() {
         if let Some(entry) = script_entry {
@@ -120,10 +116,7 @@ fn materialize_revision_directory(
         return Ok(revision_dir);
     }
 
-    let tmp_dir = gateway_dir
-        .join("revisions")
-        .join("agents")
-        .join(agent_id)
+    let tmp_dir = crate::agent::agent_revisions_dir(gateway_dir, agent_id)
         .join(format!(".tmp-{}-{}", revision_id, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir)?;
 
@@ -3077,10 +3070,8 @@ do not re-issue."
                 })
             });
 
-        let revision_dir = gateway_dir
-            .join("revisions/agents")
-            .join(&args.agent_id)
-            .join(&args.revision_id);
+        let revision_dir =
+            crate::agent::agent_revision_dir(gateway_dir, &args.agent_id, &args.revision_id);
         let skill_path = revision_dir.join("SKILL.md");
         let skill_bytes = std::fs::read(&skill_path).map_err(|e| {
             anyhow::anyhow!(
@@ -3113,11 +3104,12 @@ do not re-issue."
             .resolve_alias(&args.agent_id)?
         {
             Some(alias) if alias.revision_id != args.revision_id => {
-                let outgoing_skill_path = gateway_dir
-                    .join("revisions/agents")
-                    .join(&args.agent_id)
-                    .join(&alias.revision_id)
-                    .join("SKILL.md");
+                let outgoing_skill_path = crate::agent::agent_revision_dir(
+                    gateway_dir,
+                    &args.agent_id,
+                    &alias.revision_id,
+                )
+                .join("SKILL.md");
                 std::fs::read_to_string(&outgoing_skill_path)
                     .ok()
                     .and_then(|text| {
@@ -5068,16 +5060,10 @@ impl NativeTool for AgentRevisionDiffTool {
             .into());
         }
 
-        let from_dir = gateway_dir
-            .join("revisions")
-            .join("agents")
-            .join(&from_ref.agent_id)
-            .join(&from_ref.revision_id);
-        let to_dir = gateway_dir
-            .join("revisions")
-            .join("agents")
-            .join(&to_ref.agent_id)
-            .join(&to_ref.revision_id);
+        let from_dir =
+            crate::agent::agent_revision_dir(gateway_dir, &from_ref.agent_id, &from_ref.revision_id);
+        let to_dir =
+            crate::agent::agent_revision_dir(gateway_dir, &to_ref.agent_id, &to_ref.revision_id);
         anyhow::ensure!(
             from_dir.exists(),
             "Revision directory not found for '{}'",
@@ -5517,10 +5503,8 @@ pub(crate) fn check_capability_delta(
             if alias.revision_id == revision_id {
                 return Ok(None); // already-active revision; nothing to compare
             }
-            let outgoing_revision_dir = gateway_dir
-                .join("revisions/agents")
-                .join(agent_id)
-                .join(&alias.revision_id);
+            let outgoing_revision_dir =
+                crate::agent::agent_revision_dir(gateway_dir, agent_id, &alias.revision_id);
             let outgoing_skill_path = outgoing_revision_dir.join("SKILL.md");
             let outgoing_skill_bytes = std::fs::read(&outgoing_skill_path).map_err(|e| {
                 anyhow::anyhow!(
@@ -5616,10 +5600,7 @@ pub(crate) fn load_revision_capabilities(
     agent_id: &str,
     revision_id: &str,
 ) -> anyhow::Result<Vec<Capability>> {
-    let revision_dir = gateway_dir
-        .join("revisions/agents")
-        .join(agent_id)
-        .join(revision_id);
+    let revision_dir = crate::agent::agent_revision_dir(gateway_dir, agent_id, revision_id);
     let skill_path = revision_dir.join("SKILL.md");
     let skill_bytes = std::fs::read(&skill_path).map_err(|e| {
         anyhow::anyhow!(

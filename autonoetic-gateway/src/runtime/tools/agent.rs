@@ -1373,12 +1373,12 @@ impl NativeTool for AgentListTool {
                             // does not — reintroducing the advertised-vs-executed
                             // divergence this change exists to close (#1136). The alias
                             // is the authoritative pointer, so read through it.
-                            let rev_path = gd
-                                .join("revisions")
-                                .join("agents")
-                                .join(&alias.agent_id)
-                                .join(&alias.revision_id)
-                                .join("SKILL.md");
+                            let rev_path = crate::agent::agent_revision_dir(
+                                gd,
+                                &alias.agent_id,
+                                &alias.revision_id,
+                            )
+                            .join("SKILL.md");
                             if let Ok(skill_text) = std::fs::read_to_string(&rev_path) {
                                 if let Ok((manifest, _)) = crate::runtime::parser::SkillParser::parse(&skill_text) {
                                     let cap_types: Vec<String> = manifest.capabilities.iter().map(|c| capability_type_name(c)).collect();
@@ -1804,12 +1804,7 @@ pub(crate) fn spawn_target_skill_path(
                 && !rev_id.contains('\\') =>
         {
             Some(
-                agents_dir
-                    .join(".gateway")
-                    .join("revisions")
-                    .join("agents")
-                    .join(agent_id)
-                    .join(rev_id)
+                crate::agent::agent_revision_dir(&agents_dir.join(".gateway"), agent_id, rev_id)
                     .join("SKILL.md"),
             )
         }

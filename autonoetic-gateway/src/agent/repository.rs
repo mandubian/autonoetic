@@ -261,11 +261,7 @@ impl AgentRepository {
         agent_id: &str,
         revision_id: &str,
     ) -> anyhow::Result<LoadedAgent> {
-        let rev_dir = gateway_dir
-            .join("revisions")
-            .join("agents")
-            .join(agent_id)
-            .join(revision_id);
+        let rev_dir = super::agent_revision_dir(gateway_dir, agent_id, revision_id);
         let skill_path = rev_dir.join("SKILL.md");
         let skill_content = std::fs::read_to_string(&skill_path)?;
         let (manifest, instructions) = SkillParser::parse(&skill_content)?;
