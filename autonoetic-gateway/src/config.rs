@@ -56,15 +56,21 @@ pub fn load_config(path: &Path) -> anyhow::Result<GatewayConfig> {
 /// directories, so the same config would name different gateway state
 /// depending on who loaded it.
 fn absolutize_against_config_dir(dir: &Path, config_path: &Path) -> std::path::PathBuf {
-    let anchored = if dir.is_absolute() {
-        dir.to_path_buf()
-    } else {
-        config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(dir)
-    };
-    anchored.canonicalize().unwrap_or(anchored)
+    if dir.is_absolute() {
+        return dir.to_path_buf();
+    }
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
+    // Canonicalize the *config directory*, never the joined result. The config
+    // file exists by construction here, so this is stable; `runtime_dir` itself
+    // usually does not exist on a first run, and canonicalizing it would then
+    // silently fall back to the non-canonical form. Two invocations — one before
+    // the directory exists, one after — would resolve the same config to two
+    // different absolute paths whenever any component is a symlink, and so open
+    // two different gateway stores.
+    let base = config_dir
+        .canonicalize()
+        .unwrap_or_else(|_| config_dir.to_path_buf());
+    base.join(dir)
 }
 
 /// Resolve `constitution.version` into `source_path`/`lock_path` (#1123).
