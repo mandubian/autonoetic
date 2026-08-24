@@ -79,6 +79,17 @@ fn test_manifest() -> AgentManifest {
 
 #[tokio::test]
 async fn live_digest_records_annotation_turns_and_summary() -> anyhow::Result<()> {
+    // The reply path reads the constitution version for the state-attestation
+    // tail (P-6.23). A config-mismatch error only means a neighbour test
+    // initialized first — that runtime satisfies the read.
+    if let Err(e) = autonoetic_gateway::constitution_digest::initialize_constitution(
+        &autonoetic_types::config::GatewayConfig::default(),
+    ) {
+        anyhow::ensure!(
+            autonoetic_gateway::constitution_digest::is_constitution_initialized(),
+            "constitution runtime failed to initialize and no neighbour initialized it either: {e}"
+        );
+    }
     let temp = tempdir()?;
     let agents_dir = temp.path().join("agents");
     let agent_dir = agents_dir.join("digest.tester");
