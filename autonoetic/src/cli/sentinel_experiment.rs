@@ -19,6 +19,13 @@
 //! - Layer 1's verdict for an archived session is "the highest
 //!   divergence level reached during the session", read from the
 //!   already-persisted `divergence.*` causal events.
+//!
+//! #1119 classification: **in-process executor embedding, by design.** The
+//! harness builds `AgentExecutor`s (watchdog runs) that write real
+//! side-effect rows through their own store handle, and snapshots
+//! undelivered-message / pending-interaction counts around each run to
+//! measure exactly those writes. RPC migration would break the measurement
+//! the harness exists to make — exempted in `tests/cli_store_boundary.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

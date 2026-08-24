@@ -1,3 +1,14 @@
+//! `autonoetic improve` — the L1 self-improvement loop driver.
+//!
+//! #1119 classification: **in-process tool embedding, by design.** This
+//! command orchestrates gateway native tools (`AgentRevisionPromoteTool`,
+//! `GithubIssueCreateTool`, `AbReplayTool`) which structurally require a
+//! live `Arc<GatewayStore>` handle (`NativeTool::execute`), forks revision
+//! directories on disk, and runs interactive operator approval. It is not a
+//! display/read path — exempted in `tests/cli_store_boundary.rs`. Moving it
+//! behind RPCs means redesigning the improve pipeline as server-side
+//! orchestration, which is out of #1119's scope.
+
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
