@@ -43,6 +43,7 @@
 
 use anyhow::Result;
 use autonoetic_types::causal_chain::CausalEventRecord;
+use serde::{Deserialize, Serialize};
 
 use crate::scheduler::gateway_store::GatewayStore;
 
@@ -69,7 +70,7 @@ pub const MAX_AUDIT_LIMIT: i64 = DEFAULT_AUDIT_LIMIT;
 /// A report plus the honesty flags about how it was gathered. Both callers
 /// surface `truncated`, so it belongs with the report rather than being
 /// re-derived per caller.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Deserialize, Debug, Clone, serde::Serialize)]
 pub struct EgressAudit {
     pub report: EgressAuditReport,
     /// The event scan hit `limit`; early turns may be missing and the totals
@@ -107,7 +108,7 @@ pub fn load_egress_audit(
 }
 
 /// One row in the per-turn audit report.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Deserialize, Debug, Clone, serde::Serialize)]
 pub struct EgressAuditRow {
     /// The egress action (`egress.envelope_labeled`, `egress.request_filtered`,
     /// `egress.envelope_withheld`, `egress.assertion_violation`, …).
@@ -118,7 +119,7 @@ pub struct EgressAuditRow {
 
 /// The display fields the audit extracts from an event payload. Content-free
 /// metadata only — ids, sink, counts, indication text (itself metadata).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Deserialize, Debug, Clone, serde::Serialize)]
 pub struct EgressAuditFields {
     pub tool_call_id: Option<String>,
     pub tool_name: Option<String>,
@@ -149,14 +150,14 @@ pub struct EgressAuditFields {
 }
 
 /// One turn's worth of egress events, in event-seq order.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Deserialize, Debug, Clone, serde::Serialize)]
 pub struct EgressAuditTurn {
     pub turn_id: Option<String>,
     pub rows: Vec<EgressAuditRow>,
 }
 
 /// The full audit report — session id + per-turn rows + totals.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Deserialize, Debug, Clone, serde::Serialize)]
 pub struct EgressAuditReport {
     pub session_id: String,
     pub turns: Vec<EgressAuditTurn>,

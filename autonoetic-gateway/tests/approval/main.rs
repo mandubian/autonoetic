@@ -3,6 +3,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+mod approvals_rpc_surface;
 mod approve_resume_detached;
 mod grant_revocation;
 mod host_constant_resolution;

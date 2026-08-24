@@ -1590,6 +1590,26 @@ impl GatewayExecutionService {
 
     /// Cancel a recording session and emit the operator-cancel causal event
     /// (#1119 tranche 3) — previously emitted CLI-side.
+    // ── Approvals operator surface (#1119 tranche 7) ─────────────────────
+
+    /// The global pending-approval list (all roots) — the RPC form of
+    /// `scheduler::load_approval_requests` for the CLI approvals surface.
+    pub fn pending_approvals(&self) -> anyhow::Result<Vec<autonoetic_types::background::ApprovalRequest>> {
+        let store = self.require_store()?;
+        Ok(store.get_pending_approvals()?)
+    }
+
+    /// Approval statistics for `gateway approvals stats`.
+    pub fn approval_stats(
+        &self,
+        agent_id: Option<&str>,
+        root_session_id: Option<&str>,
+        since: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let store = self.require_store()?;
+        Ok(store.get_approval_stats(agent_id, root_session_id, since)?)
+    }
+
     // ── Trace / observability operator surface (#1119 tranche 6) ────────
 
     /// Contract-health snapshot — the CLI's `trace contract-health` JSON body

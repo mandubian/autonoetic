@@ -20,10 +20,15 @@ use std::path::PathBuf;
 /// Files that still read/write gateway.db where an RPC should exist.
 /// Every entry must be removed in the PR that migrates it.
 const PENDING_MIGRATION: &[&str] = &[
-    // Interactive approval/gate loop + headless approvals + stats.
-    // The `gateway start` embedding stays regardless — when migrating,
-    // split the read paths out of the start path. Needs a global
-    // pending-approvals RPC (approvals.inspect is per-request).
+    // Residual gateway.rs surfaces after #1119 tranche 7 (approvals +
+    // egress-audit migrated). Remaining store uses:
+    // - escalations (admin.escalation_* RPCs exist — migrate next)
+    // - workflow commands (scheduler pieces; check RPC fit)
+    // - egress-declassify intake (writes approvals — approval machinery)
+    // - memory relabel/trace relabel (no RPC surface yet)
+    // - exec-cache revoke audit event (file cache + one audit write)
+    // - system-agent bootstrap + constitution release (scheduler machinery)
+    // The `gateway start` embedding stays regardless.
     "gateway.rs",
 ];
 
