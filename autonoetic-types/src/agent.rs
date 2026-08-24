@@ -19,6 +19,24 @@ fn is_default_remote_access_approval_mode(mode: &RemoteAccessApprovalMode) -> bo
     matches!(mode, RemoteAccessApprovalMode::Required)
 }
 
+/// A declared host-filesystem mount request (#1002): "this agent may see
+/// `~/mail` read-only". Requests are granted at exec time only against the
+/// operator's `sandbox.allowed_mount_roots` allowlist (config), the same way
+/// `NetworkAccess.hosts` reach is granted — a manifest alone never widens
+/// filesystem reach. Read-only unless `readonly: false` is explicit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeclaredMount {
+    /// Host path to expose inside the sandbox (same path inside). `~` expands
+    /// against the gateway user's home.
+    pub host_path: String,
+    #[serde(default = "default_mount_readonly")]
+    pub readonly: bool,
+}
+
+fn default_mount_readonly() -> bool {
+    true
+}
+
 /// Runtime declaration block from the SKILL.md frontmatter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeDeclaration {
@@ -29,6 +47,11 @@ pub struct RuntimeDeclaration {
     pub runtime_type: String, // "stateful" | "stateless"
     pub sandbox: String, // "bubblewrap" | "docker" | "microvm" | "wasm"
     pub runtime_lock: String,
+    /// Declared host mounts (#1002). Empty by default; `skip_serializing_if`
+    /// keeps canonicalized SKILL.md byte-identical for manifests that declare
+    /// none, so existing revision digests do not churn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<DeclaredMount>,
 }
 
 /// Core agent identity fields.
@@ -1387,5 +1410,42 @@ mod tests {
                 "{raw:?} must not release a workflow"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod declared_mount_serde_tests {
+    use super::DeclaredMount;
+
+    /// `readonly` defaults true in YAML (`~`-paths are read-only grants
+    /// unless the manifest explicitly widens).
+    #[test]
+    fn readonly_defaults_to_true() {
+        let m: DeclaredMount = serde_json::from_str(r#"{"host_path":"~/mail"}"#).unwrap();
+        assert_eq!(m.host_path, "~/mail");
+        assert!(m.readonly);
+    }
+
+    /// Explicit `readonly: false` round-trips — an rw grant is a visible,
+    /// deliberate act.
+    #[test]
+    fn readonly_false_is_explicit() {
+        let m: DeclaredMount =
+            serde_json::from_str(r#"{"host_path":"/var/data/work","readonly":false}"#).unwrap();
+        assert!(!m.readonly);
+    }
+
+    /// The runtime block with no `mounts` deserializes to empty AND
+    /// re-serializes byte-identically (skip_serializing_if) — canonicalized
+    /// SKILL.md digests for existing manifests must not churn.
+    #[test]
+    fn runtime_without_mounts_serializes_without_the_key() {
+        let runtime: super::RuntimeDeclaration = serde_json::from_str(
+            r#"{"engine":"autonoetic","gateway_version":"0.1.0","sdk_version":"0.1.0","type":"stateful","sandbox":"bubblewrap","runtime_lock":"runtime.lock"}"#,
+        )
+        .unwrap();
+        assert!(runtime.mounts.is_empty());
+        let out = serde_json::to_string(&runtime).unwrap();
+        assert!(!out.contains("mounts"), "empty mounts must not serialize: {out}");
     }
 }

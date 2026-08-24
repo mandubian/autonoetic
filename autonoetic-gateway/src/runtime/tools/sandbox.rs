@@ -2500,11 +2500,60 @@ file/disk operations (`rm`, `rmdir`, `unlink`, `find … -delete`, `mkfs`, `shre
             Some(&manifest.agent.id),
         )?;
 
+        // #1002 slices 2-3: declared host mounts. The tier check runs first
+        // (a wasm manifest declaring mounts is a manifest bug, loud), then
+        // each declaration is resolved against the operator's
+        // `sandbox.allowed_mount_roots`. Anything not granted fails the exec
+        // with a structured mount_denied envelope naming the missing grant —
+        // a request the allowlist doesn't cover is a decision, not a silent
+        // drop or a mysterious in-sandbox ENOENT.
+        let mut declared_granted_mounts: Vec<crate::sandbox::SandboxMount> = Vec::new();
+        if !manifest.runtime.mounts.is_empty() {
+            driver.driver()?.check_mount_support(&manifest.runtime.mounts)?;
+            let allowed_roots = config
+                .map(|c| c.sandbox.allowed_mount_roots.as_slice())
+                .unwrap_or(&[]);
+            let (granted, denied) =
+                crate::sandbox::resolve_declared_mounts(&manifest.runtime.mounts, allowed_roots);
+            if !denied.is_empty() {
+                let denials: Vec<serde_json::Value> = denied
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "host_path": d.host_path,
+                            "canonical_path": d.canonical_path,
+                            "reason": d.reason,
+                        })
+                    })
+                    .collect();
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error_type": "permission",
+                    "message": format!(
+                        "sandbox_exec: {} declared runtime.mounts entr{} not covered by \
+                         sandbox.allowed_mount_roots — ask the operator to extend the \
+                         allowlist (config) or remove the declaration(s).",
+                        denials.len(),
+                        if denials.len() == 1 { "y is" } else { "ies are" }
+                    ),
+                    "mount_denied": denials,
+                    "enforced_rules": ["P-1.5"],
+                })
+                .to_string());
+            }
+            declared_granted_mounts = granted;
+        }
+
         // Merge runtime.lock mounts into session content mounts
         let mut all_mounts = session_content_mounts;
         if !runtime_lock_mounts.is_empty() {
             all_mounts.extend(runtime_lock_mounts);
         }
+        // Declared mounts are additive in BOTH modes today (legacy still
+        // ro-binds `/`, so an allowed mount is already visible — binding it
+        // explicitly makes the grant visible in the mount set and keeps the
+        // same manifest working unchanged the day allow_set lands).
+        all_mounts.extend(declared_granted_mounts);
 
         // #1002 slice 1: record what this execution can see, as asserted here
         // (the SDK bridge socket mount is added later, inside spawn, and is
@@ -3452,5 +3501,154 @@ mod approval_ref_binding_tests {
         let decision = decision("coder.default", "root/coder.default-1", "root");
         validate_approval_ref_context(&decision, "coder.default", Some("root/coder.default-1"))
             .expect("same agent + same root should be accepted");
+    }
+}
+
+/// #1002 slices 2-3: declared-mount denial envelope — hermetic (the refusal
+/// precedes any sandbox spawn, so no host bwrap is needed).
+#[cfg(test)]
+mod declared_mount_gate_tests {
+    use super::SandboxExecTool;
+    use crate::policy::PolicyEngine;
+    use crate::runtime::tools::NativeTool;
+    use autonoetic_types::agent::AgentManifest;
+    use autonoetic_types::config::GatewayConfig;
+    use std::path::PathBuf;
+
+    fn manifest_with_mounts(
+        mounts: Vec<autonoetic_types::agent::DeclaredMount>,
+    ) -> AgentManifest {
+        use autonoetic_types::agent::{AgentIdentity, RuntimeDeclaration};
+        let mut m = AgentManifest {
+            remote_access: None,
+            version: "1.0".to_string(),
+            runtime: RuntimeDeclaration {
+                engine: "autonoetic".to_string(),
+                gateway_version: "0.1.0".to_string(),
+                sdk_version: "0.1.0".to_string(),
+                runtime_type: "stateful".to_string(),
+                sandbox: "bubblewrap".to_string(),
+                runtime_lock: "runtime.lock".to_string(),
+                mounts,
+            },
+            agent: AgentIdentity {
+                id: "mount.tester".to_string(),
+                name: "mount.tester".to_string(),
+                description: "declared-mount gate tests".to_string(),
+                singleton: false,
+                resident_idle_ttl_secs: None,
+            },
+            capabilities: vec![autonoetic_types::capability::Capability::CodeExecution {
+                patterns: vec!["*".to_string()],
+                commands: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        // execute() routes wasm manifests differently only via runtime.sandbox;
+        // ensure the default stays bwrap for the non-wasm test.
+        m.runtime.sandbox = "bubblewrap".to_string();
+        m
+    }
+
+    fn config_with_roots(roots: Vec<String>) -> GatewayConfig {
+        let mut c = GatewayConfig::default();
+        c.sandbox.allowed_mount_roots = roots;
+        c
+    }
+
+    fn run(
+        manifest: &AgentManifest,
+        config: &GatewayConfig,
+        agent_dir: &PathBuf,
+        store: std::sync::Arc<crate::scheduler::gateway_store::GatewayStore>,
+    ) -> serde_json::Value {
+        let policy = PolicyEngine::new(manifest.clone());
+        let out = SandboxExecTool
+            .execute(
+                manifest,
+                &policy,
+                agent_dir,
+                None,
+                r#"{"command":"echo hi","intent":"smoke"}"#,
+                Some("sess-mounts"),
+                None,
+                Some(config),
+                Some(store),
+                None,
+            )
+            .expect("tool returns a structured result, never errors here");
+        serde_json::from_str(&out).unwrap()
+    }
+
+    /// A declared mount the allowlist doesn't cover fails the exec with a
+    /// structured mount_denied envelope that names the grant — not a bare
+    /// ENOENT, and not a silent drop.
+    #[test]
+    fn uncovered_declared_mount_fails_with_denial_envelope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let secret = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&secret).unwrap();
+        let manifest = manifest_with_mounts(vec![autonoetic_types::agent::DeclaredMount {
+            host_path: secret.to_string_lossy().to_string(),
+            readonly: true,
+        }]);
+        let config = config_with_roots(vec![tmp.path().join("granted").to_string_lossy().to_string()]);
+
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&tmp.path().join(".gateway"))
+                .unwrap(),
+        );
+        let v = run(&manifest, &config, &tmp.path().join("agent"), store);
+        assert_eq!(v["ok"], serde_json::json!(false), "result: {v}");
+        assert_eq!(v["error_type"], "permission");
+        let denied = v["mount_denied"].as_array().expect("mount_denied array");
+        assert_eq!(denied.len(), 1);
+        assert!(
+            denied[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("allowed_mount_roots"),
+            "denial must name the grant: {denied:?}"
+        );
+    }
+
+    /// wasm tier + declared mounts = loud tier rejection before any allowlist
+    /// consideration (a wasm manifest has no host filesystem to mount into).
+    #[test]
+    fn wasm_manifest_with_mounts_is_rejected_loudly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut manifest =
+            manifest_with_mounts(vec![autonoetic_types::agent::DeclaredMount {
+                host_path: "/var/data/mail".to_string(),
+                readonly: true,
+            }]);
+        manifest.runtime.sandbox = "wasm".to_string();
+        let config = config_with_roots(vec!["/".to_string()]);
+
+        // check_mount_support errors surface as a tool error (Err), not a
+        // structured result — assert the error names the tier and the paths.
+        let policy = PolicyEngine::new(manifest.clone());
+        let store = std::sync::Arc::new(
+            crate::scheduler::gateway_store::GatewayStore::open(&tmp.path().join(".gateway"))
+                .unwrap(),
+        );
+        let err = SandboxExecTool
+            .execute(
+                &manifest,
+                &policy,
+                &tmp.path().join("agent"),
+                None,
+                r#"{"command":"echo hi","intent":"smoke"}"#,
+                Some("sess-wasm-mounts"),
+                None,
+                Some(&config),
+                Some(store),
+                None,
+            )
+            .expect_err("wasm + declared mounts must fail loudly");
+        assert!(
+            err.to_string().contains("wasm"),
+            "error must name the tier: {err}"
+        );
     }
 }

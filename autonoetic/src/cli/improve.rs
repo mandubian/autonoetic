@@ -609,6 +609,7 @@ async fn handle_propose_code_fix(
         remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
+            mounts: Vec::new(),
             engine: "autonoetic".to_string(),
             gateway_version: "0.1.0".to_string(),
             sdk_version: "0.1.0".to_string(),
@@ -786,6 +787,7 @@ fn run_ab_replay(
         remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
+            mounts: Vec::new(),
             engine: "autonoetic".to_string(),
             gateway_version: "0.1.0".to_string(),
             sdk_version: "0.1.0".to_string(),
@@ -901,6 +903,7 @@ fn promote_manifest() -> AgentManifest {
         remote_access: None,
         version: "1.0".to_string(),
         runtime: RuntimeDeclaration {
+            mounts: Vec::new(),
             engine: "autonoetic".to_string(),
             gateway_version: "0.1.0".to_string(),
             sdk_version: "0.1.0".to_string(),

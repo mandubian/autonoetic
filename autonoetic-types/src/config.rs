@@ -2519,6 +2519,14 @@ pub struct SandboxConfig {
     /// guard.
     #[serde(default)]
     pub allow_recording: bool,
+
+    /// Operator-granted host-filesystem reach for declared agent mounts
+    /// (#1002): canonical host roots. A manifest `runtime.mounts` entry is
+    /// granted at exec time iff its canonicalized path is equal to or under
+    /// one of these roots — the `allowed_hosts` of filesystem reach. Empty
+    /// (the default) denies every declared mount, loudly.
+    #[serde(default)]
+    pub allowed_mount_roots: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -2527,6 +2535,7 @@ impl Default for SandboxConfig {
             share_net: false,
             dev_mode: default_sandbox_dev_mode(),
             allow_recording: false,
+            allowed_mount_roots: Vec::new(),
         }
     }
 }

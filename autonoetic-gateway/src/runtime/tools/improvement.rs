@@ -813,6 +813,7 @@ mod surface_drift_tests {
             remote_access: None,
             version: "1.0".into(),
             runtime: RuntimeDeclaration {
+                mounts: Vec::new(),
                 engine: "autonoetic".into(),
                 gateway_version: "0.1.0".into(),
                 sdk_version: "0.1.0".into(),

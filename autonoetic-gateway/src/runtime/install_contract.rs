@@ -72,6 +72,7 @@ pub fn running_binary_sha256() -> anyhow::Result<String> {
 
 pub fn default_runtime_declaration() -> RuntimeDeclaration {
     RuntimeDeclaration {
+        mounts: Vec::new(),
         engine: DEFAULT_ENGINE.to_string(),
         gateway_version: gateway_version(),
         sdk_version: sdk_version(),

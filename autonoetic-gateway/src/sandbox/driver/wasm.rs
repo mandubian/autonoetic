@@ -31,6 +31,25 @@ impl SandboxDriver for WasmDriver {
         true
     }
 
+    /// No host filesystem beyond the preopened workspace dir — declared
+    /// `runtime.mounts` cannot be honoured and must not be silently ignored
+    /// (#1002 slice 3).
+    fn check_mount_support(
+        &self,
+        mounts: &[autonoetic_types::agent::DeclaredMount],
+    ) -> anyhow::Result<()> {
+        if mounts.is_empty() {
+            return Ok(());
+        }
+        let paths: Vec<&str> = mounts.iter().map(|m| m.host_path.as_str()).collect();
+        anyhow::bail!(
+            "wasm tier has no host filesystem: runtime.mounts are not supported \
+             (declared: [{}]). Remove the declarations or select a process sandbox \
+             driver (bubblewrap/docker).",
+            paths.join(", ")
+        );
+    }
+
     // No SDK socket bridge: the tier uses host-function imports (P4).
 
     fn run_in_process(&self, req: &InProcessRequest<'_>) -> anyhow::Result<ExecOutput> {
